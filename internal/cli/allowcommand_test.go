@@ -41,8 +41,9 @@ func writeRuntimeEnv(t *testing.T, runtime string) string {
 func TestAllowCommandIsRegisteredWhereItExecutes(t *testing.T) {
 	root := newRootCmd(&App{})
 	exempt := map[*cobra.Command]bool{
-		findCmd(t, root, "convert"):    true,
-		findCmd(t, root, "version"):    true,
+		findCmd(t, root, "convert"):       true,
+		findCmd(t, root, "examples"):      true,
+		findCmd(t, root, "version"):       true,
 		findCmd(t, root, "auto-complete"): true,
 	}
 	walkCommands(root, 0, func(c *cobra.Command, _ int) {
@@ -144,7 +145,7 @@ func TestAllowCommandRejectedWhereNothingExecutes(t *testing.T) {
 	cases := [][]string{
 		{"generate", "broker", "--allow-command", "lima", "--platform", "kubernetes"},
 		{"generate", "operator", "--allow-command", "lima", "--platform", "kubernetes"},
-		{"generate", "secrets", "--allow-command", "lima", "--platform", "docker"},
+		{"generate", "secrets", "broker", "--allow-command", "lima", "--platform", "docker"},
 		{"generate", "broker", "--allow-command", "lima", "--platform", "podman"},
 	}
 	for _, args := range cases {

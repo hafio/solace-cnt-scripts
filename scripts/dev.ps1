@@ -24,6 +24,9 @@ $LogDir    = Join-Path $ScriptDir 'logs'
 $DistDir   = Join-Path $RepoRoot  'dist'
 $CovDir    = Join-Path $RepoRoot  'coverage'
 $BinName   = 'solace-util'
+# ItestName is the dev-only live-probe harness, named distinctly from BinName so
+# nothing in dist/ is ambiguous about which binary is shippable.
+$ItestName = 'solace-itest'
 
 # Version stamp: on a tag push git describe is exactly the pushed tag, so
 # `solace-util version` matches the GitHub release. --always falls back to the
@@ -134,8 +137,12 @@ function Task-test { return (Cap go test @RaceFlag -count=1 ./...) }
 # Deliberately NOT in all/full: those gate, and a gate that silently rewrote the
 # thing it compares against could never fail. `test` is what reports a stale
 # golden; this is what you run once the new output is what you wanted.
+#
+# ./internal/examples goes FIRST: it rewrites env/sample.yaml, which is the
+# fixture ./internal/render and ./internal/k8s render their own goldens from, so
+# the reverse order would leave those two a pass behind.
 function Task-regen {
-  foreach ($pkg in @('./internal/cli', './internal/convert', './internal/render', './internal/k8s')) {
+  foreach ($pkg in @('./internal/examples', './internal/cli', './internal/convert', './internal/render', './internal/k8s')) {
     $code = Cap go test $pkg -update
     if ($code -ne 0) { return $code }
   }
@@ -173,6 +180,35 @@ function Task-dist {
     if ($c -ne 0) { return $c }
   }
   Ok "binaries in $DistDir"
+  return 0
+}
+
+# Task-itest builds the LIVE-environment probe harness (internal/tools/itest).
+# Build only: this script never runs it. The probes mutate real broker state, so
+# choosing to point one at a given environment is an operator's decision, and a
+# gate that made it automatically would be exactly the wrong tool.
+#
+# Deliberately NOT in all/full for the same reason, and absent from the release
+# workflow (it is not in BUILD_TARGETS), so nothing automated ever produces or
+# executes it.
+function Task-itest {
+  $os = $env:TARGET_OS;     if (-not $os)   { $os = (& go env GOOS) }
+  $arch = $env:TARGET_ARCH; if (-not $arch) { $arch = (& go env GOARCH) }
+  $out = Join-Path $DistDir "$ItestName-$os-$arch"
+  if ($os -eq 'windows') { $out = "$out.exe" }
+  if (-not (Test-Path $DistDir)) { New-Item -ItemType Directory -Path $DistDir | Out-Null }
+  Step "  $os/$arch"
+  $oldGoos = $env:GOOS; $oldGoarch = $env:GOARCH; $oldCgo = $env:CGO_ENABLED
+  $env:CGO_ENABLED = '0'; $env:GOOS = $os; $env:GOARCH = $arch
+  try {
+    $c = Cap go build -trimpath -ldflags "-s -w -X main.version=$Version" -o $out ./internal/tools/itest
+  } finally {
+    $env:GOOS = $oldGoos; $env:GOARCH = $oldGoarch; $env:CGO_ENABLED = $oldCgo
+  }
+  if ($c -ne 0) { return $c }
+  Ok "built $out"
+  Ok "copy it and your env file to the target host, then run it THERE: ./$ItestName-$os-$arch --list"
+  Ok "see docs/itest.md -- operator-run only; these scripts never execute it"
   return 0
 }
 
@@ -263,14 +299,19 @@ Tasks:
            pick the target, unset means host; stamps ``solace-util version``
            from git describe (falls back to "dev")
   test     go test $raceDesc -count=1 ./...
-  regen    rewrite the committed goldens (docs/commands.md and the render/k8s/
-           convert testdata) from the code that generates them. Run it when
+  regen    rewrite the committed goldens (docs/commands.md, docs/abbreviation.md,
+           env/sample.yaml and the render/k8s/convert testdata) from the code
+           that generates them. Run it when
            ``test`` reports one stale AND the new output is what you wanted.
            Deliberately not in all/full: a gate must not rewrite what it checks
   cov      coverage profile -> coverage/coverage.html + printed total
   scan     govulncheck (fatal on a fixable vulnerability this module calls;
            one with no released fix warns and passes)
   dist     cross-compile $targetsDesc
+  itest    compile the LIVE-environment probe harness -> dist\$ItestName-<os>-<arch>[.exe]
+           (TARGET_OS/TARGET_ARCH as for build). Build ONLY -- this script never
+           runs it: its probes mutate real broker state. Operator-run, see
+           docs/itest.md. Deliberately not in all/full and not released
   graphify refresh graphify-out/ (local only; skipped when CI is set)
   all      $($All -join ' ')   (what CI runs, as: all scan)
   full     $($Full -join ' ')   (pre-tag sweep)

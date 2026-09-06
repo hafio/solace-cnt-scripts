@@ -3,6 +3,8 @@ package k8s
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -46,16 +48,269 @@ func TestCreateNamespaceApplyFails(t *testing.T) {
 	}
 }
 
+// TestDeleteNamespace exercises the empty-namespace path: the bare recRunner
+// answers both enumeration reads with nothing (the Echo-runner shape getJSON
+// treats as "zero items"), so nothing is FOREIGN and the delete proceeds
+// exactly as it did before the B6 guard existed.
 func TestDeleteNamespace(t *testing.T) {
 	rr := &recRunner{}
 	c := newCluster(rr)
 	if err := c.DeleteNamespace(context.Background()); err != nil {
 		t.Fatalf("DeleteNamespace: %v", err)
 	}
-	got := rr.last()
+	calls := rr.afterPreflight(t, "delete", "namespaces")
+	if len(calls) != 3 {
+		t.Fatalf("DeleteNamespace made %d calls after the probe, want 2 enumeration gets + 1 delete", len(calls))
+	}
+	got := calls[2]
 	want := []string{"delete", "namespace", "solace", "--ignore-not-found"}
 	if got.method != "Run" || got.name != "kubectl" || !eqArgs(got.args, want) {
 		t.Errorf("DeleteNamespace argv = %+v, want Run kubectl %v", got, want)
+	}
+}
+
+// TestDeleteNamespaceProtected pins protectedNamespaces' floor: none of the four
+// Kubernetes system namespaces is ever deleted, and -- unlike every other guard
+// in DeleteNamespace -- the refusal happens before the cluster is asked
+// anything at all, RBAC probe included.
+func TestDeleteNamespaceProtected(t *testing.T) {
+	for _, ns := range []string{"default", "kube-system", "kube-public", "kube-node-lease"} {
+		t.Run(ns, func(t *testing.T) {
+			cfg := haCfg()
+			cfg.K8s.Namespace = ns
+			rr := &recRunner{}
+			c := NewCluster(rr, cfg, nil, nil)
+			err := c.DeleteNamespace(context.Background())
+			if err == nil {
+				t.Fatalf("DeleteNamespace(%s) should be refused", ns)
+			}
+			if !strings.Contains(err.Error(), ns) {
+				t.Errorf("error = %v, want it to name the namespace", err)
+			}
+			if len(rr.calls) != 0 {
+				t.Errorf("a protected namespace must not reach the cluster at all; got %d calls: %+v", len(rr.calls), rr.calls)
+			}
+		})
+	}
+}
+
+// nsCluster wires a Cluster to a captured Out buffer, the same shape
+// labelCluster gives LabelNodes, so a test can assert on the foreign-object
+// report DeleteNamespace prints ahead of its refusal.
+func nsCluster(rr *recRunner, cfg *config.Config) (*Cluster, *bytes.Buffer) {
+	buf := &bytes.Buffer{}
+	return &Cluster{R: rr, Cfg: cfg, Out: buf}, buf
+}
+
+// nsBuiltinJSON and nsBrokerJSON build the two enumeration replies
+// namespaceObjects reads, in the shape each of its two calls actually decodes:
+// nsRawList carries each item's own kind, nsCRList does not (see nsResourceKinds
+// and brokerCRKind for why).
+func nsBuiltinJSON(items string) []byte {
+	return []byte(`{"kind":"List","items":[` + items + `]}`)
+}
+func nsBrokerJSON(items string) []byte {
+	return []byte(`{"kind":"PubSubPlusEventBrokerList","items":[` + items + `]}`)
+}
+func nsItem(kind, name string) string {
+	return fmt.Sprintf(`{"kind":%q,"metadata":{"name":%q}}`, kind, name)
+}
+
+// TestDeleteNamespaceOnlyOurs covers every OURS rule at once: the brokerSuffix
+// name match (pod, PVC), the configured admin secret, and the two
+// Kubernetes-generated exceptions (kube-root-ca.crt, the default
+// ServiceAccount). None of it is FOREIGN, so the delete proceeds.
+func TestDeleteNamespaceOnlyOurs(t *testing.T) {
+	cfg := adminCfg() // dev-broker, admin secret "solace-admin-secret"
+	rr := &recRunner{outQueue: [][]byte{
+		nsBuiltinJSON(strings.Join([]string{
+			nsItem("Pod", "dev-broker-pubsubplus-p-0"),
+			nsItem("PersistentVolumeClaim", "data-dev-broker-pubsubplus-p-0"),
+			nsItem("Secret", "solace-admin-secret"),
+			nsItem("ConfigMap", "kube-root-ca.crt"),
+			nsItem("ServiceAccount", "default"),
+		}, ",")),
+		nsBrokerJSON(""),
+	}}
+	c := NewCluster(rr, cfg, nil, nil)
+	if err := c.DeleteNamespace(context.Background()); err != nil {
+		t.Fatalf("DeleteNamespace: %v", err)
+	}
+	calls := rr.afterPreflight(t, "delete", "namespaces")
+	if len(calls) != 3 {
+		t.Fatalf("DeleteNamespace made %d calls after the probe, want 2 enumeration gets + 1 delete", len(calls))
+	}
+	got := calls[2]
+	want := []string{"delete", "namespace", "solace", "--ignore-not-found"}
+	if got.method != "Run" || !eqArgs(got.args, want) {
+		t.Errorf("final call = %+v, want Run kubectl %v", got, want)
+	}
+}
+
+// TestDeleteNamespaceForeignRefuses covers the hard-refusal path: a Deployment
+// this tool did not create means the delete never runs, and the object is
+// named in the report on Out.
+func TestDeleteNamespaceForeignRefuses(t *testing.T) {
+	cfg := adminCfg()
+	rr := &recRunner{outQueue: [][]byte{
+		nsBuiltinJSON(nsItem("Deployment", "unrelated-app")),
+		nsBrokerJSON(""),
+	}}
+	c, buf := nsCluster(rr, cfg)
+	err := c.DeleteNamespace(context.Background())
+	if err == nil {
+		t.Fatal("DeleteNamespace should refuse when a foreign object is present")
+	}
+	if !strings.Contains(err.Error(), "1 resource") {
+		t.Errorf("error = %v, want it to say how many foreign resources were found", err)
+	}
+	if !strings.Contains(err.Error(), "remove broker") || !strings.Contains(err.Error(), "remove secrets") {
+		t.Errorf("error = %v, want it to point at remove broker / remove secrets", err)
+	}
+	if !strings.Contains(buf.String(), "Deployment") || !strings.Contains(buf.String(), "unrelated-app") {
+		t.Errorf("foreign object must be named in the report; got %q", buf.String())
+	}
+	for _, call := range rr.calls {
+		if len(call.args) > 1 && call.args[0] == "delete" && call.args[1] == "namespace" {
+			t.Error("no delete namespace call must be issued when foreign objects are present")
+		}
+	}
+}
+
+// TestDeleteNamespaceForeignCannotBeSilenced pins that the guard has no
+// override: DeleteNamespace takes no "skip the check" parameter, so calling it
+// exactly as the CLI's --no-prompt path does -- straight through, with no
+// question asked first -- still refuses. There is nothing upstream of this
+// method left to silence.
+func TestDeleteNamespaceForeignCannotBeSilenced(t *testing.T) {
+	cfg := adminCfg()
+	rr := &recRunner{outQueue: [][]byte{
+		nsBuiltinJSON(nsItem("Secret", "someone-elses-secret")),
+		nsBrokerJSON(""),
+	}}
+	c := NewCluster(rr, cfg, nil, nil)
+	if err := c.DeleteNamespace(context.Background()); err == nil {
+		t.Fatal("DeleteNamespace must refuse even called directly, with no prompt in front of it to skip")
+	}
+}
+
+// TestDeleteNamespaceForeignBrokerRefuses is the case the whole guard was asked
+// for: a SECOND Solace broker sharing this namespace. Its objects carry the
+// operator's "-pubsubplus" suffix exactly as ours do, so a rule matching the
+// bare suffix would call them ours and delete another team's broker with the
+// namespace. isOurs matches "<kubernetes.name>-pubsubplus" instead, which keeps
+// them foreign.
+func TestDeleteNamespaceForeignBrokerRefuses(t *testing.T) {
+	cfg := adminCfg() // kubernetes.name is "dev-broker"
+	rr := &recRunner{outQueue: [][]byte{
+		nsBuiltinJSON(strings.Join([]string{
+			nsItem("Pod", "dev-broker-pubsubplus-p-0"), // ours
+			nsItem("Pod", "other-team-pubsubplus-p-0"), // another broker entirely
+			nsItem("Service", "other-team-pubsubplus"), // and its LB service
+		}, ",")),
+		nsBrokerJSON(""),
+	}}
+	c, buf := nsCluster(rr, cfg)
+	err := c.DeleteNamespace(context.Background())
+	if err == nil {
+		t.Fatal("DeleteNamespace must refuse when another broker shares the namespace")
+	}
+	if !strings.Contains(buf.String(), "other-team-pubsubplus-p-0") {
+		t.Errorf("the other broker's pod must be reported as foreign; got %q", buf.String())
+	}
+	if strings.Contains(buf.String(), "dev-broker-pubsubplus-p-0") {
+		t.Errorf("this deployment's own pod must NOT be listed as foreign; got %q", buf.String())
+	}
+	for _, call := range rr.calls {
+		if len(call.args) > 1 && call.args[0] == "delete" && call.args[1] == "namespace" {
+			t.Error("no delete namespace call must be issued when another broker is present")
+		}
+	}
+}
+
+// TestDeleteNamespaceBrokerListingFailsStillProceeds covers the deliberate
+// asymmetry in namespaceObjects: the broker-CR listing failing is NOT treated
+// like the built-in listing failing. An absent CRD is a state this tool's own
+// documented order produces (remove the brokers, `remove operator
+// --delete-crd`, then `remove namespace`), and refusing there would make a
+// legitimate teardown impossible forever. It warns and judges the namespace by
+// what it could see.
+func TestDeleteNamespaceBrokerListingFailsStillProceeds(t *testing.T) {
+	cfg := adminCfg()
+	rr := &recRunner{
+		outQueue:    [][]byte{nsBuiltinJSON(nsItem("ConfigMap", "kube-root-ca.crt"))},
+		outErrQueue: []error{nil, errFake}, // the built-in listing answers; the CR listing does not
+	}
+	c := NewCluster(rr, cfg, nil, nil)
+	if err := c.DeleteNamespace(context.Background()); err != nil {
+		t.Fatalf("an unlistable broker CRD must not block a teardown of an otherwise-empty namespace: %v", err)
+	}
+	calls := rr.afterPreflight(t, "delete", "namespaces")
+	last := calls[len(calls)-1]
+	want := []string{"delete", "namespace", "solace", "--ignore-not-found"}
+	if last.method != "Run" || !eqArgs(last.args, want) {
+		t.Errorf("final call = %+v, want Run kubectl %v", last, want)
+	}
+}
+
+// TestDeleteNamespaceEnumerationFails proves a failed listing (RBAC denial, an
+// unreachable API server) refuses the delete too, wrapping the cause: this
+// guard exists to stop an unseen deletion, so being unable to see is not
+// permission to proceed.
+func TestDeleteNamespaceEnumerationFails(t *testing.T) {
+	rr := &recRunner{outErr: errFake}
+	c := newCluster(rr)
+	err := c.DeleteNamespace(context.Background())
+	if err == nil {
+		t.Fatal("DeleteNamespace should refuse when it cannot enumerate the namespace")
+	}
+	if !errors.Is(err, errFake) {
+		t.Errorf("error = %v, want it to wrap the underlying failure", err)
+	}
+	for _, call := range rr.calls {
+		if len(call.args) > 1 && call.args[0] == "delete" && call.args[1] == "namespace" {
+			t.Error("no delete namespace call must be issued when enumeration fails")
+		}
+	}
+}
+
+// TestDeleteNamespaceEmpty covers a namespace with nothing in it at all --
+// exactly what "remove all" leaves behind, since it deletes the broker and
+// secrets before reaching DeleteNamespace.
+func TestDeleteNamespaceEmpty(t *testing.T) {
+	rr := &recRunner{outQueue: [][]byte{
+		nsBuiltinJSON(""),
+		nsBrokerJSON(""),
+	}}
+	c := newCluster(rr)
+	if err := c.DeleteNamespace(context.Background()); err != nil {
+		t.Fatalf("DeleteNamespace: %v", err)
+	}
+	calls := rr.afterPreflight(t, "delete", "namespaces")
+	got := calls[len(calls)-1]
+	want := []string{"delete", "namespace", "solace", "--ignore-not-found"}
+	if got.method != "Run" || !eqArgs(got.args, want) {
+		t.Errorf("final call = %+v, want Run kubectl %v", got, want)
+	}
+}
+
+// TestDeleteNamespaceStopsOnPreflightFailure proves a refused permission stops
+// DeleteNamespace before any `kubectl delete` is issued -- the same shape as
+// TestCreateSecretsStopsOnPreflightFailure, but for the namespace teardown.
+func TestDeleteNamespaceStopsOnPreflightFailure(t *testing.T) {
+	rr := &recRunner{canI: "no"}
+	c := newCluster(rr)
+	err := c.DeleteNamespace(context.Background())
+	if err == nil {
+		t.Fatal("DeleteNamespace must fail when the permission probe answers no")
+	}
+	if !strings.Contains(err.Error(), "not allowed to delete namespaces") {
+		t.Errorf("error = %v, want it to name the refused permission", err)
+	}
+	for _, call := range rr.calls {
+		if len(call.args) > 0 && call.args[0] == "delete" {
+			t.Error("no delete namespace call must be issued after an RBAC denial")
+		}
 	}
 }
 
@@ -95,10 +350,10 @@ func TestCreateSecretsAllThree(t *testing.T) {
 	writeFile(t, key, "KEY\n")
 
 	cfg := adminCfg()
-	cfg.TLS.ServerSecret = "solace-tls-secret"
+	cfg.K8s.TLSServerSecret = "solace-tls-secret"
 	cfg.TLS.Cert = crt
 	cfg.TLS.CertKey = key
-	cfg.Image.PullSecret = "solace-image-pull"
+	cfg.K8s.ImagePullSecret = "solace-image-pull"
 	cfg.Image.User = "u"
 	cfg.Image.Pass = "SECRET-REG-PASS"
 	cfg.Image.Registry = "registry.example.com"
@@ -147,7 +402,7 @@ func TestCreateSecretsPreflight(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := adminCfg()
-			cfg.TLS.ServerSecret = "solace-tls-secret"
+			cfg.K8s.TLSServerSecret = "solace-tls-secret"
 			tc.mutate(cfg)
 			rr := &recRunner{}
 			c := NewCluster(rr, cfg, nil, nil)
@@ -198,13 +453,13 @@ func TestCreateSecretsStopsOnPreflightFailure(t *testing.T) {
 
 // TestGenSecretsTLSError covers GenSecrets' own guard on the render-only path
 // (`prep secrets --gen-secrets-only`), which calls GenSecrets directly and bypasses
-// Cluster.secretPreflight entirely: a configured tls.serverSecret with unreadable
+// Cluster.secretPreflight entirely: a configured kubernetes.tlsServerSecret with unreadable
 // cert files must fail the render rather than emit a broken manifest. Every other
 // exercise of GenSecrets goes through CreateSecrets, which pre-empts this via
 // preflight, so GenSecrets itself had zero direct tests.
 func TestGenSecretsTLSError(t *testing.T) {
 	cfg := adminCfg()
-	cfg.TLS.ServerSecret = "solace-tls-secret"
+	cfg.K8s.TLSServerSecret = "solace-tls-secret"
 	cfg.TLS.Cert = filepath.Join(t.TempDir(), "nope.crt")
 	cfg.TLS.CertKey = filepath.Join(t.TempDir(), "nope.key")
 	if _, err := GenSecrets(cfg); err == nil {
@@ -215,20 +470,21 @@ func TestGenSecretsTLSError(t *testing.T) {
 func TestDeleteSecrets(t *testing.T) {
 	t.Run("all three", func(t *testing.T) {
 		cfg := adminCfg()
-		cfg.TLS.ServerSecret = "solace-tls-secret"
-		cfg.Image.PullSecret = "solace-image-pull"
+		cfg.K8s.TLSServerSecret = "solace-tls-secret"
+		cfg.K8s.ImagePullSecret = "solace-image-pull"
 		rr := &recRunner{}
 		c := NewCluster(rr, cfg, nil, nil)
 		if err := c.DeleteSecrets(context.Background()); err != nil {
 			t.Fatalf("DeleteSecrets: %v", err)
 		}
 		wantNames := []string{"solace-admin-secret", "solace-tls-secret", "solace-image-pull"}
-		if len(rr.calls) != len(wantNames) {
-			t.Fatalf("DeleteSecrets made %d calls, want %d", len(rr.calls), len(wantNames))
+		calls := rr.afterPreflight(t, "delete", "secrets")
+		if len(calls) != len(wantNames) {
+			t.Fatalf("DeleteSecrets made %d calls after the probe, want %d", len(calls), len(wantNames))
 		}
 		for i, name := range wantNames {
 			want := []string{"delete", "secret", name, "-n", "solace", "--ignore-not-found"}
-			if got := rr.calls[i]; got.method != "Run" || !eqArgs(got.args, want) {
+			if got := calls[i]; got.method != "Run" || !eqArgs(got.args, want) {
 				t.Errorf("delete[%d] = %+v, want Run kubectl %v", i, got, want)
 			}
 		}
@@ -239,10 +495,28 @@ func TestDeleteSecrets(t *testing.T) {
 		if err := c.DeleteSecrets(context.Background()); err != nil {
 			t.Fatalf("DeleteSecrets: %v", err)
 		}
-		if len(rr.calls) != 1 {
-			t.Fatalf("DeleteSecrets (admin only) made %d calls, want 1", len(rr.calls))
+		if calls := rr.afterPreflight(t, "delete", "secrets"); len(calls) != 1 {
+			t.Fatalf("DeleteSecrets (admin only) made %d calls after the probe, want 1", len(calls))
 		}
 	})
+}
+
+// TestDeleteSecretsStopsOnPreflightFailure proves a refused permission stops
+// DeleteSecrets before any `kubectl delete secret` is issued -- the same shape as
+// TestCreateSecretsStopsOnPreflightFailure, but for the secret teardown.
+func TestDeleteSecretsStopsOnPreflightFailure(t *testing.T) {
+	rr := &recRunner{canI: "no"}
+	c := NewCluster(rr, adminCfg(), nil, nil)
+	err := c.DeleteSecrets(context.Background())
+	if err == nil {
+		t.Fatal("DeleteSecrets must fail when the permission probe answers no")
+	}
+	if !strings.Contains(err.Error(), "not allowed to delete secrets") {
+		t.Errorf("error = %v, want it to name the refused permission", err)
+	}
+	if len(rr.calls) != 1 {
+		t.Errorf("%d calls made after a failed probe, want only the probe itself: %+v", len(rr.calls), rr.calls)
+	}
 }
 
 // TestDeleteSecretsSkipsUnconfiguredAdminSecret proves names' unconditional first
@@ -256,8 +530,8 @@ func TestDeleteSecretsSkipsUnconfiguredAdminSecret(t *testing.T) {
 	if err := c.DeleteSecrets(context.Background()); err != nil {
 		t.Fatalf("DeleteSecrets: %v", err)
 	}
-	if len(rr.calls) != 0 {
-		t.Errorf("DeleteSecrets should skip the blank admin-secret entry; got %d calls", len(rr.calls))
+	if calls := rr.afterPreflight(t, "delete", "secrets"); len(calls) != 0 {
+		t.Errorf("DeleteSecrets should skip the blank admin-secret entry; got %d calls after the probe", len(calls))
 	}
 }
 
@@ -266,14 +540,14 @@ func TestDeleteSecretsSkipsUnconfiguredAdminSecret(t *testing.T) {
 // silently continuing to the remaining secrets. DeleteSecrets had no failure test.
 func TestDeleteSecretsStopsOnError(t *testing.T) {
 	cfg := adminCfg()
-	cfg.TLS.ServerSecret = "x"
+	cfg.K8s.TLSServerSecret = "x"
 	rr := &recRunner{runErr: errFake}
 	c := NewCluster(rr, cfg, nil, nil)
 	if err := c.DeleteSecrets(context.Background()); err == nil {
 		t.Error("DeleteSecrets should fail loud when a delete errors")
 	}
-	if len(rr.calls) != 1 {
-		t.Errorf("DeleteSecrets should stop before the TLS secret; got %d calls", len(rr.calls))
+	if calls := rr.afterPreflight(t, "delete", "secrets"); len(calls) != 1 {
+		t.Errorf("DeleteSecrets should stop before the TLS secret; got %d calls after the probe", len(calls))
 	}
 }
 
@@ -285,7 +559,7 @@ func TestUpdateServerCertSecret(t *testing.T) {
 		writeFile(t, crt, "CERT\n")
 		writeFile(t, key, "KEY\n")
 		cfg := haCfg()
-		cfg.TLS.ServerSecret = "solace-tls-secret"
+		cfg.K8s.TLSServerSecret = "solace-tls-secret"
 		cfg.TLS.Cert = crt
 		cfg.TLS.CertKey = key
 		rr := &recRunner{}
@@ -303,18 +577,18 @@ func TestUpdateServerCertSecret(t *testing.T) {
 	})
 	t.Run("errors without a secret name", func(t *testing.T) {
 		rr := &recRunner{}
-		c := NewCluster(rr, haCfg(), nil, nil) // no TLS.ServerSecret
+		c := NewCluster(rr, haCfg(), nil, nil) // no K8s.TLSServerSecret
 		if err := c.UpdateServerCertSecret(context.Background()); err == nil {
-			t.Error("UpdateServerCertSecret should fail when tls.serverSecret is unset")
+			t.Error("UpdateServerCertSecret should fail when kubernetes.tlsServerSecret is unset")
 		}
 	})
 	// TestUpdateServerCertSecret/configured secret name but cert files unset proves
 	// the more likely real case: UpdateServerCertSecret's own precondition only
-	// checks tls.serverSecret is set, not that Cert/CertKey are also configured, so a
+	// checks kubernetes.tlsServerSecret is set, not that Cert/CertKey are also configured, so a
 	// configured name with missing cert inputs must still fail before any apply.
 	t.Run("configured secret name but cert files unset", func(t *testing.T) {
 		cfg := haCfg()
-		cfg.TLS.ServerSecret = "solace-tls-secret" // Cert/CertKey left unset
+		cfg.K8s.TLSServerSecret = "solace-tls-secret" // Cert/CertKey left unset
 		rr := &recRunner{}
 		c := NewCluster(rr, cfg, nil, nil)
 		if err := c.UpdateServerCertSecret(context.Background()); err == nil {
@@ -332,9 +606,9 @@ func TestUpdateServerCertSecret(t *testing.T) {
 
 func TestSplitLabel(t *testing.T) {
 	cases := []struct {
-		in            string
-		key, val      string
-		ok            bool
+		in       string
+		key, val string
+		ok       bool
 	}{
 		{"topology.kubernetes.io/zone=z1", "topology.kubernetes.io/zone", "z1", true},
 		{"zone: z1", "zone", "z1", true},
@@ -372,9 +646,21 @@ func TestIsBuiltinLabel(t *testing.T) {
 
 // labelCluster builds a Cluster wired for interactive labelling: rr as runner, buf
 // as the report sink, and stdin as the selection source.
+// labelCluster wires all three narration channels -- the report sink, the prompt
+// sink and the progress line sink -- to ONE buffer, so a test that only cares
+// "was this said" need not know which stream said it.
+// TestPromptsGoToErrNotOut is the test that splits them apart on purpose.
 func labelCluster(rr *recRunner, cfg *config.Config, stdin string) (*Cluster, *bytes.Buffer) {
 	buf := &bytes.Buffer{}
-	return &Cluster{R: rr, Cfg: cfg, Out: buf, In: strings.NewReader(stdin)}, buf
+	c := &Cluster{
+		R:   rr,
+		Cfg: cfg,
+		Out: buf,
+		Err: buf,
+		In:  strings.NewReader(stdin),
+		Log: func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) },
+	}
+	return c, buf
 }
 
 func TestLabelNodesNoCustomLabels(t *testing.T) {
@@ -501,7 +787,7 @@ func TestLabelNodesEOFNoSelection(t *testing.T) {
 // could silently break (e.g. Backup reading LabelsPrimary by mistake) with nothing
 // to catch it.
 func TestLabelNodesHAOnlyPrimaryConfigured(t *testing.T) {
-	cfg := haCfg() // HARoles = [primary, backup, monitor]
+	cfg := haCfg()                                         // HARoles = [primary, backup, monitor]
 	cfg.K8s.Placement.LabelsPrimary = []string{"zone: z1"} // Backup/Monitor left empty
 	rr := &recRunner{outQueue: [][]byte{
 		[]byte("node-a\nnode-b\n"),
@@ -568,7 +854,32 @@ func TestLabelNodesLabelFailureIsNonFatal(t *testing.T) {
 	if err := c.LabelNodes(context.Background()); err != nil {
 		t.Fatalf("a single label failure must not abort LabelNodes, got %v", err)
 	}
-	if !strings.Contains(buf.String(), "[ERROR] failed to apply") {
+	if !strings.Contains(buf.String(), "[FAIL] failed to apply") {
 		t.Errorf("expected a reported label failure; got %q", buf.String())
+	}
+}
+
+// TestPromptsGoToErrNotOut pins the stream split the node picker used to get
+// wrong: it wrote its banner, list and "> " to Out, so `prepare labels > file`
+// captured the questions along with the results. The prompt belongs on Err with
+// every other prompt in this tool; the per-label outcome stays on Out, which is
+// what a script actually wants to read.
+func TestPromptsGoToErrNotOut(t *testing.T) {
+	cfg := saCfg()
+	cfg.K8s.Placement.LabelsPrimary = []string{"zone: z1"}
+	rr := &recRunner{outQueue: [][]byte{[]byte("node-a\n")}}
+	var out, errBuf bytes.Buffer
+	c := &Cluster{R: rr, Cfg: cfg, Out: &out, Err: &errBuf, In: strings.NewReader("1\n")}
+	if err := c.LabelNodes(context.Background()); err != nil {
+		t.Fatalf("LabelNodes: %v", err)
+	}
+	if !strings.Contains(errBuf.String(), "Select the node for the primary broker") {
+		t.Errorf("prompt must go to Err; Err = %q", errBuf.String())
+	}
+	if strings.Contains(out.String(), "Select the node") || strings.Contains(out.String(), "> ") {
+		t.Errorf("prompt must NOT reach Out; Out = %q", out.String())
+	}
+	if !strings.Contains(out.String(), "[ OK ] labelled node-a with zone=z1") {
+		t.Errorf("the per-label outcome belongs on Out; Out = %q", out.String())
 	}
 }

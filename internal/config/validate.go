@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Validate checks mandatory and enum fields for the given platform, mirroring
@@ -29,6 +31,16 @@ func (c *Config) Validate(p Platform) error {
 	// Scaling applies to every platform -- k8s through the CR, containers through
 	// the environment -- so it is checked once here (scaling.go).
 	if err := c.validateScaling(); err != nil {
+		return err
+	}
+
+	// These secrets are shared top-level fields (not platform-scoped), and each
+	// reaches a consumer that cannot tolerate a control character in the value:
+	// admin.pass and admin.monitorPass reach broker.sempCurl's curl config on
+	// stdin, nodes.psk and tls.certPassphrase travel the same way through the
+	// container config path. Checked once here rather than per platform, since
+	// the fields exist regardless of which platform ends up reading them.
+	if err := c.validateCredentialChars(); err != nil {
 		return err
 	}
 
@@ -87,6 +99,86 @@ var identRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 // would reject -- the default "0:0" contains a colon.
 var runUserRE = regexp.MustCompile(`^[A-Za-z0-9._-]+(:[A-Za-z0-9._-]+)?$`)
 
+// dnsLabelBodyRE is the Kubernetes DNS-1123 label charset and start/end rule
+// (RFC 1123): lowercase alphanumerics and '-', starting and ending with an
+// alphanumeric. It carries no length bound of its own because the two callers
+// below cap it differently -- validDNSLabel at 63 (a Kubernetes object name),
+// validPortName at 15 (a Service port name) -- so the length is checked beside
+// each cap instead of baked into one regex neither could reuse.
+//
+// This is deliberately NOT identRE just above: identRE is the container-side
+// rule ("^[A-Za-z0-9._-]+$"), which permits uppercase, '.' and '_' -- none of
+// which Kubernetes accepts in a label -- and has no length bound at all. Reusing
+// it here would let a value through that kubectl then rejects, or worse, one
+// that splices into the hand-built Secret/namespace YAML these fields reach by
+// string concatenation (k8s/secrets.go, k8s/prep.go) or the CR (render/render.go):
+// a newline plus "---" adds an extra document to the applied stream, and a bare
+// colon breaks the mapping. identRE stays exactly as it is for the container
+// fields that already rely on its looser rule.
+var dnsLabelBodyRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+// maxDNSLabelLen is the general Kubernetes object-name limit (a Secret,
+// namespace, or CR name).
+const maxDNSLabelLen = 63
+
+// maxDNSSubdomainLen is the Kubernetes limit for a DNS-1123 SUBDOMAIN -- the rule
+// the API applies to most object names, Secrets included.
+const maxDNSSubdomainLen = 253
+
+// dnsSubdomainRE is one or more DNS-1123 labels joined by single dots. It is the
+// rule Kubernetes really enforces on a Secret name, as opposed to the stricter
+// single-label rule a namespace or Service name must meet -- see the two callers
+// in validateK8s for which fields get which and why.
+var dnsSubdomainRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
+// validDNSSubdomain checks one Kubernetes DNS-1123 subdomain, ignoring an empty
+// value: every field that reaches it is optional, so an absent value stays legal
+// and only a non-empty malformed one is rejected.
+func validDNSSubdomain(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if len(value) > maxDNSSubdomainLen || !dnsSubdomainRE.MatchString(value) {
+		return fmt.Errorf("%s %q is invalid: must be a Kubernetes DNS-1123 subdomain -- lowercase "+
+			"alphanumerics, '-' and '.', each dot-separated part starting and ending with an "+
+			"alphanumeric, at most %d characters", field, value, maxDNSSubdomainLen)
+	}
+	return nil
+}
+
+// validDNSLabel checks one Kubernetes DNS-1123 label, ignoring an empty value:
+// kubernetes.namespace and kubernetes.name are mandatory and already reported by
+// requireAll, and the remaining fields (the three secret names, operator.namespace)
+// are optional -- an absent value must stay legal (§4a/rule 8), so only a
+// non-empty malformed one is rejected here.
+func validDNSLabel(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if len(value) > maxDNSLabelLen || !dnsLabelBodyRE.MatchString(value) {
+		return fmt.Errorf("%s %q is invalid: must be a Kubernetes DNS-1123 label -- lowercase "+
+			"alphanumerics and '-', starting and ending with an alphanumeric, at most %d characters",
+			field, value, maxDNSLabelLen)
+	}
+	return nil
+}
+
+// maxPortNameLen is the Kubernetes Service port name limit -- shorter than the
+// general 63-character object-name bound above, which is why it gets its own
+// cap rather than sharing validDNSLabel's.
+const maxPortNameLen = 15
+
+// validPortName checks a kubernetes.ports entry's name: the same DNS-1123
+// charset validDNSLabel checks, but capped at 15 characters instead of 63.
+func validPortName(field, value string) error {
+	if len(value) > maxPortNameLen || !dnsLabelBodyRE.MatchString(value) {
+		return fmt.Errorf("%s %q is invalid: a Kubernetes port name must be a DNS-1123 label (lowercase "+
+			"alphanumerics and '-', starting and ending with an alphanumeric) of at most %d characters",
+			field, value, maxPortNameLen)
+	}
+	return nil
+}
+
 // validIdent checks one identifier, ignoring an empty value: emptiness is
 // requireAll's job, and several of these fields are legitimately empty (the
 // backup/monitor rows in standalone).
@@ -136,6 +228,40 @@ func (c *Config) validateK8s() error {
 	if len(missing) > 0 {
 		return missingErr(missing)
 	}
+	// These reach a hand-built Secret/namespace manifest by string concatenation
+	// (k8s/secrets.go, k8s/prep.go) or the CR (render/render.go), so they are
+	// checked as Kubernetes DNS-1123 labels rather than merely non-empty. The
+	// three secret names and operator.namespace are optional and skip an empty
+	// value; namespace and name are already known non-empty at this point.
+	// Two rules, because Kubernetes has two. A namespace must be a single LABEL,
+	// and kubernetes.name must be one too -- it is suffixed into the StatefulSet,
+	// Service and pod names the operator derives (k8s/names.go), which are Service
+	// names and so cannot carry a dot.
+	for _, f := range []struct{ field, value string }{
+		{"kubernetes.namespace", c.K8s.Namespace},
+		{"kubernetes.name", c.K8s.Name},
+		{"kubernetes.operator.namespace", c.K8s.Operator.Namespace},
+	} {
+		if err := validDNSLabel(f.field, f.value); err != nil {
+			return err
+		}
+	}
+	// Secret names are the looser DNS-1123 SUBDOMAIN, which is what the Kubernetes
+	// API actually enforces for them: dots are legal, up to 253 characters. Holding
+	// them to the label rule would reject "prod.solace-admin-secret" -- a real
+	// naming convention, accepted by kubectl today -- for no benefit, since a dot
+	// is harmless in the hand-built YAML these reach. The injection risks that
+	// motivated this check are a newline plus "---" and a bare colon, and the
+	// subdomain rule excludes both just as firmly.
+	for _, f := range []struct{ field, value string }{
+		{"kubernetes.adminSecret", c.K8s.AdminSecret},
+		{"kubernetes.tlsServerSecret", c.K8s.TLSServerSecret},
+		{"kubernetes.imagePullSecret", c.K8s.ImagePullSecret},
+	} {
+		if err := validDNSSubdomain(f.field, f.value); err != nil {
+			return err
+		}
+	}
 	if c.K8s.MsgNode.CPU != "" {
 		// Removed rather than ignored: a stale cpu: in an env file is a sizing
 		// decision the operator believes is in effect, so it has to be seen.
@@ -160,10 +286,13 @@ func (c *Config) validateK8s() error {
 	default:
 		return fmt.Errorf("kubernetes.updateStrategy must be 'automatedRolling' or 'manualPodRestart' (got: %q)", c.K8s.UpdateStrategy)
 	}
-	switch c.Image.PullPolicy {
+	switch c.K8s.ImagePullPolicy {
 	case "", "Always", "IfNotPresent", "Never":
 	default:
-		return fmt.Errorf("image.pullPolicy must be 'Always', 'IfNotPresent' or 'Never' (got: %q)", c.Image.PullPolicy)
+		return fmt.Errorf("kubernetes.imagePullPolicy must be 'Always', 'IfNotPresent' or 'Never' (got: %q)", c.K8s.ImagePullPolicy)
+	}
+	if err := c.validateK8sPorts(); err != nil {
+		return err
 	}
 	pl := c.K8s.Placement
 	if err := requireKeyValue([]keyValueEntries{
@@ -178,6 +307,84 @@ func (c *Config) validateK8s() error {
 		return err
 	}
 	return validatePlacementAffinity(pl)
+}
+
+// validateK8sPorts checks kubernetes.ports ("name=port[/proto]"), which
+// render.parsePort turns into containerPort/servicePort/protocol/name fields
+// spliced UNQUOTED into the broker CR's service.ports list -- a "name:port"
+// typo (no '=') currently renders containerPort as YAML null and fails as an
+// opaque kubectl error against a manifest the operator never sees. This mirrors
+// parsePort's own parsing (render/render.go) rather than reimplementing it
+// independently, so every shape parsePort accepts is either accepted here too or
+// deliberately rejected below: the name must be a Kubernetes port name (a
+// DNS-1123 label, capped at 15 rather than 63 -- see validPortName); the
+// container port is mandatory, the service port defaults to it exactly as
+// parsePort's own container/service split does; the protocol defaults to TCP
+// and is otherwise accepted case-insensitively (parsePort never folds case
+// itself, so an operator's "tcp"/"udp" must still validate). A container or
+// service half that is present but non-numeric (parsePort would pass the raw
+// string straight through as an unquantified YAML value) is rejected here
+// rather than reaching the CR malformed. Port names and container ports must
+// each be unique, so two entries cannot silently overwrite the same service
+// port.
+func (c *Config) validateK8sPorts() error {
+	names := make(map[string]int, len(c.K8s.Ports))
+	containerPorts := make(map[int]int, len(c.K8s.Ports))
+	for i, entry := range c.K8s.Ports {
+		field := fmt.Sprintf("kubernetes.ports[%d]", i)
+		name, rest, ok := strings.Cut(entry, "=")
+		if !ok {
+			return fmt.Errorf("%s = %q must have the form name=port[/proto] (e.g. tcp-web=8008)", field, entry)
+		}
+		if err := validPortName(field+" name", name); err != nil {
+			return err
+		}
+		proto := "TCP"
+		if j := strings.LastIndex(rest, "/"); j >= 0 {
+			proto = rest[j+1:]
+			rest = rest[:j]
+		}
+		switch strings.ToUpper(proto) {
+		case "TCP", "UDP":
+		default:
+			return fmt.Errorf("%s protocol %q must be TCP or UDP", field, proto)
+		}
+		container := rest
+		service := rest
+		if j := strings.Index(rest, ":"); j >= 0 {
+			container = rest[:j]
+			service = rest[j+1:]
+		}
+		containerN, err := validPortNumber(field+" container port", container)
+		if err != nil {
+			return err
+		}
+		if _, err := validPortNumber(field+" service port", service); err != nil {
+			return err
+		}
+		if prev, dup := names[name]; dup {
+			return fmt.Errorf("%s: port name %q is also used by kubernetes.ports[%d]; names must be unique", field, name, prev)
+		}
+		names[name] = i
+		if prev, dup := containerPorts[containerN]; dup {
+			return fmt.Errorf("%s: container port %d is also used by kubernetes.ports[%d]; container ports must be unique", field, containerN, prev)
+		}
+		containerPorts[containerN] = i
+	}
+	return nil
+}
+
+// validPortNumber parses one port half (container or service) and bounds it to
+// the range a Kubernetes Service port actually accepts.
+func validPortNumber(field, value string) (int, error) {
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s %q must be numeric", field, value)
+	}
+	if n < 1 || n > 65535 {
+		return 0, fmt.Errorf("%s %d must be between 1 and 65535", field, n)
+	}
+	return n, nil
 }
 
 // accessLevels are the broker's global access levels, in increasing order of
@@ -216,6 +423,44 @@ func foldToEnvVar(name string) string {
 		b.WriteByte('_')
 	}
 	return b.String()
+}
+
+// checkCredentialChars rejects a control character (unicode.IsControl: this
+// covers Unicode's control category, not just the ASCII set isCtrl above
+// checks, since a secret can carry any encoding) in one secret value. An empty
+// value is left alone -- emptiness is requireAll's or the caller's own job, not
+// this check's. The message names the field and the byte offset of the
+// offending character but never the value itself, or even the character: these
+// are secrets, and this repo's rule is that reports say set/MISSING and never
+// echo one (§3).
+func checkCredentialChars(field, value string) error {
+	if i := strings.IndexFunc(value, unicode.IsControl); i >= 0 {
+		return fmt.Errorf("%s contains a control character at byte offset %d; remove it "+
+			"(the value is a secret and is not shown)", field, i)
+	}
+	return nil
+}
+
+// validateCredentialChars checks every top-level secret that reaches a curl
+// config fed on stdin (broker.sempCurl -> curlConfigLine, semp.go) or an
+// equivalent line-oriented consumer: curlConfigLine escapes a quote and a
+// backslash but not a newline, so a credential carrying one breaks out of its
+// line before the request is even sent. Rejecting it here -- rather than
+// escaping harder in curlConfigLine -- means the value never reaches that
+// shape at all. admin.additionalUsers passwords get the same check inline in
+// validateAdditionalUsers, where the per-user field name is already at hand.
+func (c *Config) validateCredentialChars() error {
+	for _, f := range []struct{ field, value string }{
+		{"admin.pass", c.Admin.Pass},
+		{"admin.monitorPass", c.Admin.MonitorPass},
+		{"nodes.psk", c.Nodes.PSK},
+		{"tls.certPassphrase", c.TLS.CertPassphrase},
+	} {
+		if err := checkCredentialChars(f.field, f.value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // validateAdditionalUsers checks the extra CLI users, which every platform carries
@@ -263,6 +508,9 @@ func (c *Config) validateAdditionalUsers(p Platform) error {
 		if u.Password == "" {
 			return fmt.Errorf("%s.password must not be empty; set it, or point %s.passwordEnv at an "+
 				"environment variable holding it", field, field)
+		}
+		if err := checkCredentialChars(field+".password", u.Password); err != nil {
+			return err
 		}
 		// k8s creates the user with `create username "<u>" password "<p>"`, and the
 		// broker CLI rejects these characters in the value. The message names the

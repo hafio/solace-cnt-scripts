@@ -82,6 +82,9 @@ func renderCommandDocs(root *cobra.Command) []byte {
 	})
 	b.WriteString("```\n\n")
 
+	writeIndex(&b, root)
+	writeReadingNotes(&b)
+
 	b.WriteString("## Global flags\n\n")
 	b.WriteString("Inherited by every command.\n\n")
 	writeFlagTable(&b, root.PersistentFlags())
@@ -91,6 +94,61 @@ func renderCommandDocs(root *cobra.Command) []byte {
 		writeCommand(&b, c, c == root)
 	})
 	return []byte(b.String())
+}
+
+// writeIndex links every command to the section writeCommand emits for it. The
+// tree above is the shape; this is the way in, because a fenced block cannot
+// carry links. The label is what you type, so the index doubles as a list of
+// every valid command line.
+func writeIndex(b *strings.Builder, root *cobra.Command) {
+	b.WriteString("## Index\n\n")
+	prefix := root.Name() + " "
+	walkCommands(root, 0, func(c *cobra.Command, depth int) {
+		if depth == 0 {
+			return
+		}
+		label := strings.TrimPrefix(c.CommandPath(), prefix)
+		fmt.Fprintf(b, "%s- [%s](#%s)\n", strings.Repeat("  ", depth-1), label, anchor(c.CommandPath()))
+	})
+	b.WriteString("\n")
+}
+
+// anchor mirrors the id a markdown renderer derives from the `### <path>`
+// heading writeCommand emits.
+func anchor(path string) string {
+	return strings.ReplaceAll(strings.ToLower(path), " ", "-")
+}
+
+// writeReadingNotes states once what would otherwise repeat on every command:
+// the rules the whole tree obeys, and the vocabulary its positionals share. A
+// per-command line cannot say these things, because they are facts about the CLI
+// rather than about any one command.
+func writeReadingNotes(b *strings.Builder) {
+	b.WriteString("## Reading this reference\n\n")
+	b.WriteString("- **Global flags are inherited by every command** and are listed once, under\n")
+	b.WriteString("  [Global flags](#global-flags), rather than repeated in each command's flag table.\n")
+	b.WriteString("- **`--allow-command` approves one extra binary** for the env file's platform command,\n")
+	b.WriteString("  for that run only; it is repeatable and takes a bare name, never a path. It is listed\n")
+	b.WriteString("  on every command that executes something, and refused with a named error by the ones\n")
+	b.WriteString("  that only render.\n")
+	b.WriteString("- **A verb that owns more than one kind of object never acts when run bare.** Its entry\n")
+	b.WriteString("  below says \"Runs nothing on its own\" and names the objects instead; you pick one to\n")
+	b.WriteString("  make it do anything. `remove` alone removes nothing.\n")
+	b.WriteString("- **`[role]` is `primary`, `backup` or `monitor`**, and the letters `p`, `b`, `m` work\n")
+	b.WriteString("  everywhere the long names do. On Kubernetes it picks which pod a command targets,\n")
+	b.WriteString("  defaulting to the primary. On docker and podman there is one container per host, so it\n")
+	b.WriteString("  instead names which host in the redundancy group this invocation runs on -- required\n")
+	b.WriteString("  where the artifact is per-host, and detected from the host name where it may be\n")
+	b.WriteString("  omitted. Passing one where it means nothing is refused with a named error.\n")
+	b.WriteString("- **Abbreviations mean the same thing at every depth.** A command's short form is on its\n")
+	b.WriteString("  \"Also available as:\" line, and it works under whichever verb the command sits below --\n")
+	b.WriteString("  `br` and `op` ride under every verb that takes `broker` and `operator`. Every short\n")
+	b.WriteString("  form the tool accepts, including the role letters and the `--platform` spellings, is\n")
+	b.WriteString("  in [abbreviation.md](abbreviation.md).\n")
+	b.WriteString("- **\"Applies to:\" is enforced, not advisory.** A command scoped to some platforms refuses\n")
+	b.WriteString("  on the others with a named error rather than silently doing nothing; a command with no\n")
+	b.WriteString("  \"Applies to:\" line works on all of them. The tree is the same shape everywhere, because\n")
+	b.WriteString("  help and completion render it without reading an env file.\n\n")
 }
 
 // walkCommands visits the tree depth-first. cobra sorts Commands() by name, so
@@ -117,8 +175,20 @@ func writeCommand(b *strings.Builder, c *cobra.Command, isRoot bool) {
 	}
 	fmt.Fprintf(b, "```\n%s\n```\n\n", c.UseLine())
 
+	if s := argumentLine(c); s != "" {
+		fmt.Fprintf(b, "%s\n\n", s)
+	}
+	// group() is the only thing that sets groupAnnotation, and it is also what gives a
+	// verb the RunE that refuses an unknown noun -- so the marker and the behaviour it
+	// describes come from the same constructor and cannot drift apart.
 	if subs := availableSubs(c); len(subs) > 0 {
-		fmt.Fprintf(b, "Subcommands: %s\n\n", strings.Join(subs, ", "))
+		if c.Annotations[groupAnnotation] == "true" {
+			fmt.Fprintf(b, "Runs nothing on its own. It names what `%s` can act on -- %s -- "+
+				"and given a word it does not know it fails rather than reporting success.\n\n",
+				c.CommandPath(), strings.Join(subs, ", "))
+		} else {
+			fmt.Fprintf(b, "Subcommands: %s\n\n", strings.Join(subs, ", "))
+		}
 	}
 	if len(c.Aliases) > 0 {
 		fmt.Fprintf(b, "Also available as: %s\n\n", strings.Join(c.Aliases, ", "))
@@ -130,9 +200,40 @@ func writeCommand(b *strings.Builder, c *cobra.Command, isRoot bool) {
 	if v, ok := c.Annotations[platformAnnotation]; ok && v != config.JoinPlatforms(config.Platforms()) {
 		fmt.Fprintf(b, "Applies to: %s. On any other platform this command fails rather than doing nothing.\n\n", v)
 	}
+	// The same annotation that refuses --allow-command here, so the reference cannot
+	// call a command harmless that would in fact run something.
+	if _, ok := c.Annotations[renderAnnotation]; ok {
+		b.WriteString("Renders to stdout and changes nothing: it runs no external command, so it needs " +
+			"no cluster or runtime, runs no preflight, and refuses `--allow-command` -- there is " +
+			"nothing here for it to approve.\n\n")
+	}
 	if !isRoot {
 		writeFlagTable(b, c.NonInheritedFlags())
 	}
+}
+
+// argumentLine describes a positional whose vocabulary the command already
+// carries as ValidArgs. Every spelling is round-tripped through config.ParseRole,
+// so the reference cannot offer one the parser would reject -- and a positional
+// the tree does not describe gets no line rather than an invented one.
+func argumentLine(c *cobra.Command) string {
+	if len(c.ValidArgs) == 0 {
+		return ""
+	}
+	forms := make([]string, 0, len(c.ValidArgs))
+	for _, v := range c.ValidArgs {
+		r, err := config.ParseRole(v)
+		if err != nil {
+			return ""
+		}
+		forms = append(forms, fmt.Sprintf("`%s` (`%s`)", v, r.Letter()))
+	}
+	name := "the argument"
+	if f := strings.Fields(c.Use); len(f) > 1 {
+		name = "`" + f[1] + "`"
+	}
+	return fmt.Sprintf("Arguments: %s is one of %s -- see [Reading this reference](#reading-this-reference).",
+		name, strings.Join(forms, ", "))
 }
 
 func availableSubs(c *cobra.Command) []string {

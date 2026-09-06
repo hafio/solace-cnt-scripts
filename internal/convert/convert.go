@@ -197,7 +197,6 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 		d.kv("repo", v.s("SOLBK_IMAGE"))
 		d.kv("tag", v.s("SOLBK_IMG_TAG"))
 		d.kv("registry", v.s("IMAGEREPO_HOST"))
-		d.kv("pullSecret", v.s("IMAGEREPO_SECRET"))
 		d.kv("user", v.s("IMAGEREPO_USER"))
 		d.kv("pass", v.s("IMAGEREPO_PASS"))
 	})
@@ -248,7 +247,6 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 		d.kv("cert", v.s("SOLBK_TLS_CERT"))
 		d.kv("certKey", v.s("SOLBK_TLS_CERTKEY"))
 		d.list("cas", v.l("SOLBK_TLS_CERTCAS"))
-		d.kv("serverSecret", v.s("SOLBK_SVR_SECRET"))
 	})
 
 	d.section("scaling", func(d *doc) {
@@ -318,8 +316,23 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 			d.kv("name", v.s("SOLBK_NAME"))
 			d.kv("namespace", v.s("SOLBK_NS"))
 			// SOLBK_USR_SECRET named the k8s Secret, so it lands in the kubernetes section
-			// rather than under admin (where the old schema kept it).
-			d.kv("adminSecret", v.s("SOLBK_USR_SECRET"))
+			// rather than under admin (where the old schema kept it). SOLBK_ADM_SECRET is
+			// accepted as an alias: the repo's own bootstraps never defined it, but
+			// hand-maintained env files do, and both names described the same Secret.
+			adminSecret := v.s("SOLBK_USR_SECRET")
+			if alias := v.s("SOLBK_ADM_SECRET"); alias != "" {
+				if adminSecret == "" {
+					adminSecret = alias
+				} else if alias != adminSecret {
+					warns = append(warns, fmt.Sprintf("SOLBK_ADM_SECRET=%q and SOLBK_USR_SECRET=%q disagree; "+
+						"kept SOLBK_USR_SECRET (the canonical name)", alias, adminSecret))
+				}
+			}
+			d.kv("adminSecret", adminSecret)
+			// Both name k8s Secret OBJECTS, so they live beside adminSecret rather than
+			// under tls/image the way the old schema kept them.
+			d.kv("tlsServerSecret", v.s("SOLBK_SVR_SECRET"))
+			d.kv("imagePullSecret", v.s("IMAGEREPO_SECRET"))
 			d.kv("updateStrategy", v.s("SOLBK_UPDATE_STRATEGY"))
 			d.kv("serviceAccount", v.s("SOLBK_SVC_ACCOUNT"))
 			d.block("storage", func(d *doc) {
@@ -369,6 +382,20 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 	}
 
 	if p.IsContainer() {
+		// IMAGEREPO_SECRET and SOLBK_SVR_SECRET named Kubernetes Secret objects,
+		// which have no container analog (registry login uses image.user/pass; TLS
+		// is delivered as files). Reading them here is what marks a leftover in a
+		// container env file as mapped, so it is dropped with the reason named
+		// instead of resurfacing in the generic unmapped list.
+		for _, sec := range []struct{ name, target string }{
+			{"IMAGEREPO_SECRET", "kubernetes.imagePullSecret"},
+			{"SOLBK_SVR_SECRET", "kubernetes.tlsServerSecret"},
+		} {
+			if v.s(sec.name) != "" {
+				warns = append(warns, sec.name+" names a Kubernetes Secret ("+sec.target+
+					"), which has no "+string(p)+" equivalent -- dropped")
+			}
+		}
 		d.sectionMarker(string(p), func(d *doc) {
 			d.kv("runtime", v.s("CONTAINER_RUNTIME"))
 			if p == config.Docker {

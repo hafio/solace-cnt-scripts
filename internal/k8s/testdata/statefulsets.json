@@ -1,0 +1,40 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "dev-broker-pubsubplus-b",
+        "creationTimestamp": "2026-08-21T09:24:04Z"
+      },
+      "spec": {
+        "replicas": 1
+      },
+      "status": {
+        "readyReplicas": 1
+      }
+    },
+    {
+      "metadata": {
+        "name": "dev-broker-pubsubplus-m",
+        "creationTimestamp": "2026-08-21T09:24:04Z"
+      },
+      "spec": {
+        "replicas": 1
+      },
+      "status": {
+        "readyReplicas": 1
+      }
+    },
+    {
+      "metadata": {
+        "name": "dev-broker-pubsubplus-p",
+        "creationTimestamp": "2026-08-21T09:24:04Z"
+      },
+      "spec": {
+        "replicas": 1
+      },
+      "status": {
+        "readyReplicas": 1
+      }
+    }
+  ]
+}

@@ -132,7 +132,7 @@ func parse(src string) (*vars, error) {
 
 		if !strings.HasPrefix(rhs, "(") {
 			v.record(name)
-			v.scalar[name] = v.expand(firstToken(rhs))
+			v.scalar[name] = v.expandSegments(firstTokenSegments(rhs))
 			continue
 		}
 
@@ -147,9 +147,10 @@ func parse(src string) (*vars, error) {
 		}
 		body = body[:closeIdx(body)]
 
-		toks := tokenize(body)
-		for j, t := range toks {
-			toks[j] = v.expand(t)
+		words := tokenizeSegments(body)
+		toks := make([]string, len(words))
+		for j, w := range words {
+			toks[j] = v.expandSegments(w)
 		}
 		v.record(name)
 		if isAssoc || allAssocEntries(toks) {
@@ -228,20 +229,49 @@ func closeIdx(s string) int {
 	return -1
 }
 
-// tokenize splits a bash word list into words, honoring single and double
-// quotes and dropping `#` comments. Adjacent quoted and bare chunks join into
-// one word, so `[CA-NAME]="cert.pem"` stays a single token.
-func tokenize(s string) []string {
+// segment is one contiguous run of a tokenized word that shares a quoting
+// style. Bash expands `$VAR` inside double quotes and in bare text, but never
+// inside single quotes, and a single word can mix both (`a'$b'"$c"`), so the
+// "does $ expand here" fact has to travel with a run of text shorter than the
+// whole word. literal marks a single-quoted run; expand() only substitutes
+// into the non-literal ones, which is what stops a single-quoted secret like
+// 'p$s3cret' from being corrupted by a $-reference it never asked for (B5).
+type segment struct {
+	text    string
+	literal bool
+}
+
+// tokenizeSegments splits a bash word list into words, honoring single and
+// double quotes and dropping `#` comments. Adjacent quoted and bare chunks
+// join into one word, so `[CA-NAME]="cert.pem"` stays a single token; unlike
+// the plain-string tokenizer this replaced, each word comes back as an
+// ordered list of segments so expand() can skip the single-quoted ones
+// instead of running over the whole (quote-stripped) word.
+func tokenizeSegments(s string) [][]segment {
 	var (
-		out    []string
-		cur    strings.Builder
-		inWord bool
-		q      rune
+		words   [][]segment
+		curWord []segment
+		cur     strings.Builder
+		curLit  bool
+		active  bool // cur holds a segment, possibly still empty
+		inWord  bool
+		q       rune
 	)
-	flush := func() {
-		if inWord {
-			out = append(out, cur.String())
+	flushSeg := func() {
+		if active {
+			curWord = append(curWord, segment{text: cur.String(), literal: curLit})
 			cur.Reset()
+			active = false
+		}
+	}
+	flushWord := func() {
+		flushSeg()
+		if inWord {
+			if curWord == nil {
+				curWord = []segment{}
+			}
+			words = append(words, curWord)
+			curWord = nil
 			inWord = false
 		}
 	}
@@ -254,43 +284,69 @@ func tokenize(s string) []string {
 				q = 0
 				continue
 			}
-			if q == '"' && r == '\\' && i+1 < len(rs) {
+			// Inside double quotes bash honours a backslash before exactly $, `,
+			// " and \, and leaves it LITERAL before anything else. Both halves of
+			// that matter here, and this used to strip it unconditionally:
+			//
+			//   - "C:\Users\me" lost its separators, silently corrupting any
+			//     Windows path a legacy env file happened to double-quote;
+			//   - "\$SECRET" produced a bare $SECRET in an expandable segment,
+			//     so expand() substituted it and truncated the value -- the same
+			//     silent secret loss the single-quote fix above exists to stop.
+			//     The escape is written precisely to prevent that expansion, so
+			//     the character it produces is emitted as its own LITERAL segment
+			//     and can never reach the $VAR substitution.
+			if q == '"' && r == '\\' && i+1 < len(rs) && strings.ContainsRune("$`\"\\", rs[i+1]) {
 				i++
-				r = rs[i]
+				flushSeg()
+				curWord = append(curWord, segment{text: string(rs[i]), literal: true})
+				curLit, active, inWord = false, true, true
+				continue
 			}
 			cur.WriteRune(r)
 			inWord = true
 		case r == '\'' || r == '"':
+			flushSeg() // the run before it may have had different literalness
 			q = r
-			inWord = true // an empty "" is still a word
+			curLit = r == '\''
+			active = true // an empty "" or '' is still a word
+			inWord = true
 		case r == '#':
-			flush()
+			flushWord()
 			for i < len(rs) && rs[i] != '\n' {
 				i++
 			}
 		case r == ' ' || r == '\t' || r == '\n' || r == '\r':
-			flush()
+			flushWord()
 		default:
+			if !active || curLit {
+				flushSeg()
+				curLit = false
+				active = true
+			}
 			cur.WriteRune(r)
 			inWord = true
 		}
 	}
-	flush()
-	return out
+	flushWord()
+	return words
 }
 
-// firstToken unquotes a scalar right-hand side, dropping any trailing comment.
-func firstToken(rhs string) string {
-	toks := tokenize(rhs)
-	if len(toks) == 0 {
-		return ""
+// firstTokenSegments returns the segments of a scalar right-hand side's first
+// word, dropping any trailing comment (tokenizeSegments already stops a word
+// at `#`). No words at all yields nil, which expandSegments renders as "".
+func firstTokenSegments(rhs string) []segment {
+	words := tokenizeSegments(rhs)
+	if len(words) == 0 {
+		return nil
 	}
-	return toks[0]
+	return words[0]
 }
 
 // expand substitutes `$VAR` / `${VAR}` with an earlier scalar assignment, which
 // is how the bash env files reference e.g. ${SOLBK_NS}. An unknown name expands
-// to empty, exactly as bash would.
+// to empty, exactly as bash would. It only ever sees expandable text --
+// expandSegments is what keeps single-quoted segments away from it.
 func (v *vars) expand(s string) string {
 	if !strings.ContainsRune(s, '$') {
 		return s
@@ -298,4 +354,22 @@ func (v *vars) expand(s string) string {
 	return refRE.ReplaceAllStringFunc(s, func(ref string) string {
 		return v.scalar[strings.Trim(ref, "${}")]
 	})
+}
+
+// expandSegments joins a word's segments into its final value, running expand
+// over everything except the single-quoted runs, which are copied verbatim.
+// That is the fix for B5: the old code discarded quoting before expand() ever
+// ran, so a single-quoted PSK or password containing `$` was silently
+// corrupted the moment it referenced (or merely resembled) a `$VAR` bash would
+// have left alone.
+func (v *vars) expandSegments(segs []segment) string {
+	var b strings.Builder
+	for _, seg := range segs {
+		if seg.literal {
+			b.WriteString(seg.text)
+		} else {
+			b.WriteString(v.expand(seg.text))
+		}
+	}
+	return b.String()
 }

@@ -35,6 +35,20 @@ func renderOnly(c *cobra.Command) *cobra.Command {
 	return c
 }
 
+// withLong attaches extended help to a command built by leaf/roleLeaf/dispatchLeaf,
+// which take a Short and nothing else. It returns the command so registration can
+// wrap inline the way onlyOn and renderOnly do -- onlyOn(withLong(leaf(...), x), ...)
+// -- rather than forcing a named variable and a separate assignment for every
+// command that has something more to say than its one-line Short.
+//
+// The generator skips a Long equal to the Short (commanddoc_test.go), so this is
+// for text that ADDS something: what actually runs, what must already be true, what
+// is left behind, the constraint the Short had no room for.
+func withLong(c *cobra.Command, long string) *cobra.Command {
+	c.Long = long
+	return c
+}
+
 // willExecute reports whether this invocation can reach an external command. Only
 // the render-only commands cannot: they build an artifact from the env file and
 // print it, touching nothing.
@@ -93,24 +107,6 @@ func leaf(app *App, use, short string, fn opFunc) *cobra.Command {
 		Args:              cobra.NoArgs,
 		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE:              func(*cobra.Command, []string) error { return fn(app) },
-	})
-}
-
-// roleLeaf builds a subcommand taking an optional [role] positional (p|b|m,
-// default primary), normalizing it via config.ParseRole before dispatching.
-func roleLeaf(app *App, use, short string, fn roleOpFunc) *cobra.Command {
-	return wireExec(app, &cobra.Command{
-		Use:       use + " [role]",
-		Short:     short,
-		ValidArgs: config.RoleNames(),
-		Args:      cobra.MaximumNArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			role, err := config.ParseRole(firstArg(args))
-			if err != nil {
-				return err
-			}
-			return fn(app, role)
-		},
 	})
 }
 
@@ -241,14 +237,25 @@ func promptYes(in io.Reader, out io.Writer, prompt string) bool {
 // --no-prompt declines loudly, because nothing should be destroyed unattended
 // without someone having said so on the command line.
 func confirmDelete(a *App, what string) bool {
+	return confirmAction(a, "Delete", "delete", what)
+}
+
+// confirmAction is confirmDelete's gate with the verb left to the caller, for the
+// destructive actions that are not deletions. A container restart drops in-flight
+// messaging the way a delete does and so earns the same gate -- but showing an
+// operator the word "Delete" before bouncing a broker invites exactly the wrong
+// conclusion about what is about to happen to their data, and a prompt that
+// misdescribes its own action is worse than no prompt. title leads the question;
+// lower is the same verb inside the refusal sentence.
+func confirmAction(a *App, title, lower, what string) bool {
 	if a.noPrompt {
 		return true
 	}
 	if !interactive(a) {
-		warn("refusing to delete %s without confirmation; pass --no-prompt to proceed", what)
+		warn("refusing to %s %s without confirmation; pass --no-prompt to proceed", lower, what)
 		return false
 	}
-	return promptYesNo(promptSource(a), os.Stderr, fmt.Sprintf("Delete %s? [y/N] ", what))
+	return promptYesNo(promptSource(a), os.Stderr, fmt.Sprintf("%s %s? [y/N] ", title, what))
 }
 
 // addRestartFlag wires --restart onto the deploy command. Deliberately separate
@@ -267,6 +274,21 @@ func addRestartFlag(c *cobra.Command, app *App) {
 // helpers; ops_container wires it to Manager.Confirm as a closure.
 func confirmRestart(a *App, question string) bool {
 	if !interactive(a) {
+		return false
+	}
+	return promptYesNo(promptSource(a), os.Stderr, question+" [y/N] ")
+}
+
+// confirmDowngrade gates installing an operator OLDER than the one the cluster
+// already runs. Unlike confirmDelete/confirmAction, there is no --no-prompt
+// escape here: `deploy operator` never registers that flag, because this
+// decision is made by a human at a terminal or not at all. A non-interactive run
+// therefore always declines, and the refusal says to re-run interactively rather
+// than naming a flag this command does not offer -- the two versions being
+// weighed were already shown by the warning printed just before this is asked.
+func confirmDowngrade(a *App, question string) bool {
+	if !interactive(a) {
+		warn("refusing to downgrade the operator without confirmation; re-run interactively to confirm the downgrade")
 		return false
 	}
 	return promptYesNo(promptSource(a), os.Stderr, question+" [y/N] ")

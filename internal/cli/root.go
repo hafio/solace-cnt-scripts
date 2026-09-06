@@ -36,6 +36,8 @@ func newRootCmd(app *App) *cobra.Command {
 			"or podman: it declares is the one driven. A file declaring more than one asks\n" +
 			"which to use, and --platform kubernetes|docker|podman (kube|dk|pm) answers that\n" +
 			"up front. A few commands apply to only one platform; their help says so.\n\n" +
+			"No env file yet? `examples <platform>` writes one to start from, and\n" +
+			"`examples full` prints the whole annotated schema.\n\n" +
 			"Coming from the bash scripts? 'solace-util convert <bash-env-file>' turns an old\n" +
 			"env file into the YAML this reads.",
 		SilenceUsage:  true,
@@ -64,6 +66,7 @@ func newRootCmd(app *App) *cobra.Command {
 	addCommands(root, app)
 	root.AddCommand(
 		newConvertCmd(app),
+		newExamplesCmd(),
 		newCompletionCmd(),
 		newVersionCmd(),
 	)

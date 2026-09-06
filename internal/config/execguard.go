@@ -20,7 +20,7 @@ import (
 // PATH (the host is compromised before this code runs -- no in-process check can
 // help), and config that is malicious but entirely legitimate in form, such as a
 // real kubectl aimed at the wrong cluster. Both are review problems, covered in
-// README's trust-model note rather than here.
+// docs/configuration.md's trust-model note rather than here.
 //
 // The whole check is one function, CheckCommand, called from BOTH Validate and
 // every executor immediately before argv is built (k8s.Cluster.clusterCmd,
@@ -33,6 +33,31 @@ import (
 // after `--kubeconfig` is accepted as that flag's value whatever it says. The hard
 // guarantee therefore covers argv[0] and every bare token -- what runs, and what
 // could act as a subcommand -- not the contents of a flag value.
+//
+// That limit is wider than it first reads, and the width is ACCEPTED rather than
+// closed. Because arity is unknowable, the check cannot tell a flag that takes a
+// value from a ZERO-arity boolean flag -- so a bare word after a boolean reaches
+// subcommand position, which is the one thing the paragraph above says is covered:
+//
+//	kubernetes.runtime: kubectl --insecure-skip-tls-verify delete
+//
+// passes (at i=1 the token starts with `-`; at i=2 `delete` is taken for its
+// value), and the real argv becomes `kubectl --insecure-skip-tls-verify delete
+// apply -f -`, where kubectl resolves its subcommand as `delete`. The container
+// equivalent is `docker-compose --verbose down`.
+//
+// Closing it would mean either requiring `--flag=value` everywhere -- which breaks
+// the ordinary `--context foo` form operators already have in working env files --
+// or carrying a per-binary table of which flags take values, which is a
+// compatibility burden that silently rots as those CLIs add flags. Neither is worth
+// it at this trust level: reaching this needs write access to the env file, and
+// anyone with that can also set kubernetes.runtime to any allowlisted binary and
+// aim it at any cluster, which the trust-model note in docs/configuration.md
+// already tells reviewers to read env files as executable content. So the rule to
+// carry away is the one stated above -- argv[0] and bare tokens are guaranteed,
+// flag values are not -- and this is what that costs in practice.
+// TestFlagValuePositionIsNotGuaranteed pins it so it stays a known limit rather
+// than becoming a surprise.
 
 // execBinaries is the per-platform allowlist: the CLIs this tool actually drives.
 // Nothing else may be argv[0] from config alone. `oc` is OpenShift's kubectl and
@@ -75,7 +100,7 @@ var neverAllowed = map[string]string{
 // unsafeTokenChars are the characters no command token may carry. Under argv exec
 // none of them is an injection -- exec never involves a shell, so ';' is an
 // ordinary filename character -- but a token holding one is inert here only as
-// long as it stays in an argv. These same tokens reach log lines, --dry-run output
+// long as it stays in an argv. These same tokens reach log lines, echoed output
 // pasted into tickets, and the rendered compose/quadlet artifacts, so they are
 // refused at the boundary instead of being escaped correctly by every consumer
 // forever (S3: validate at the boundary AND sanitize at the shell layer).
@@ -141,8 +166,16 @@ func (r commandRules) allowed(extra map[string]bool) map[string]bool {
 	// future edit that adds one to execBinaries, or a caller that populates
 	// extraAllowed some other way, still cannot put a privilege-escalation wrapper
 	// in front of the broker CLI.
-	for name := range neverAllowed {
-		delete(set, name)
+	//
+	// It sweeps the SET rather than iterating neverAllowed and deleting by name:
+	// the two are only the same while every key is already lowercase, so deleting
+	// by name left `Sudo` (or `SUDO.exe`) sitting in the set untouched -- the
+	// identical blind spot the other enforcement point had. Asking escalator about
+	// each key instead means both belts fold case the same way, by construction.
+	for name := range set {
+		if escalator(name) != "" {
+			delete(set, name)
+		}
 	}
 	return set
 }
@@ -274,6 +307,30 @@ func execBase(tok string) string {
 	return tok
 }
 
+// escalator reports the privilege-escalation wrapper tok names, or "" for anything
+// else. It is the ONE case-insensitive comparison in this file, and the asymmetry
+// is deliberate:
+//
+//   - The ALLOWLIST is matched exactly (execBase), because on a case-sensitive
+//     filesystem `KUBECTL` and `kubectl` are different files and folding case there
+//     would let an env file naming `KUBECTL` be approved by `kubectl`'s entry and
+//     then execute something else entirely. Loosening a positive match adds
+//     binaries nobody approved.
+//
+//   - This DENY list must fold, because the filesystems that decide whether the
+//     name resolves do. macOS is case-insensitive by default and Windows always
+//     is, so `Sudo` there resolves to exactly the binary `sudo` names -- and
+//     Windows has shipped sudo.exe since 2024. Matching it exactly meant
+//     `--allow-command Sudo` was accepted, stored, and passed both enforcement
+//     points, so a floor that "can be approved by nobody" was bypassed by a
+//     capital letter.
+//
+// Tightening a deny list can only refuse more, which is the safe direction to be
+// wrong in: the worst case is refusing a legitimately-named binary that happens to
+// case-fold onto a wrapper, and no such binary exists on any platform this tool
+// supports.
+func escalator(tok string) string { return neverAllowed[strings.ToLower(execBase(tok))] }
+
 // isSpace reports the whitespace a single argument may not contain, over the whole
 // Unicode White_Space property rather than just ASCII space. That matters because
 // the two YAML forms do not agree: the scalar form is split with strings.Fields,
@@ -289,7 +346,7 @@ func isSpace(r rune) bool { return unicode.IsSpace(r) }
 // whitespace and carry no argv-splitting risk under argv exec, so they get their
 // own check and their own message -- what makes them unacceptable is that they are
 // invisible. A token that renders identically to a legitimate one, in a review, a
-// log line, or a --dry-run transcript pasted into a ticket, defeats the reading
+// log line, or a an echoed transcript pasted into a ticket, defeats the reading
 // this whole file asks an operator to do. Nothing legitimate needs one.
 func isInvisible(r rune) bool { return unicode.Is(unicode.Cf, r) }
 
@@ -315,7 +372,7 @@ func (c *Config) AllowCommands(names []string) error {
 			return fmt.Errorf("invalid --allow-command value %q: it must be a bare binary name, not a path "+
 				"(found %q); approve it as %q and let PATH resolve it", name, string(name[j]), execBase(name))
 		}
-		if esc := neverAllowed[execBase(name)]; esc != "" {
+		if esc := escalator(name); esc != "" {
 			return fmt.Errorf("--allow-command %s is never permitted: %s would elevate every command this tool "+
 				"issues, for the whole life of an env file -- elevate the tool instead, at the moment you run it "+
 				"(%s solace ...), so the privilege belongs to one invocation you chose", name, esc, esc)

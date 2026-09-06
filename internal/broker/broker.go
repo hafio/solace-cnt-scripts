@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"solace/internal/config"
+	"solace/internal/output"
 )
 
 // Ops runs the shared config/verify operations against a broker through a
@@ -20,27 +21,31 @@ import (
 type Ops struct {
 	T   Transport
 	Cfg *config.Config
-	Log func(format string, args ...any) // progress -> stderr; nil discards
-	Out io.Writer                        // user-facing command output; nil -> os.Stdout
+	// Log is the RAW line sink for progress: one already-formatted line, emitted
+	// verbatim to stderr by the caller. The `==> ` and `[TAG ] ` prefixes come
+	// from the internal/output Sink built over it (progress below), never from a
+	// call site. nil discards.
+	Log func(format string, args ...any)
+	Out io.Writer // user-facing command output; nil -> os.Stdout
 
 	// Polling knobs for the HA state machines (leader, redundancy). New sets
 	// sensible defaults; tests set PollInterval to 0 to avoid sleeping.
 	PollInterval time.Duration
 	PollAttempts int
 
-	// ActiveDwell is the fixed wait the node-local backup redundancy handshake
-	// holds after becoming active before reverting ("after 10s of being active"),
-	// distinct from PollInterval. New defaults it to 10s; tests set it to 0.
-	ActiveDwell time.Duration
 	// Hostname resolves this host's name for node-local role detection
 	// (LocalRole). New defaults it to os.Hostname; tests inject a fixed value.
 	Hostname func() (string, error)
+	// Platform is the container platform this Ops runs against, read only by
+	// the SEMP mate channel (semp.go) to resolve a bridge network's SEMP port
+	// mapping. ctrOps sets it; the k8s wiring leaves it zero -- k8s never uses
+	// the SEMP channel, its transport addresses either pod directly.
+	Platform config.Platform
 }
 
 // New builds an Ops with default polling parameters (2s interval, 60 attempts --
-// a bounded ceiling replacing the bash scripts' unbounded busy-waits), a 10s
-// active-dwell for the backup redundancy handshake, and os.Hostname for role
-// detection.
+// a bounded ceiling replacing the bash scripts' unbounded busy-waits) and
+// os.Hostname for role detection.
 func New(t Transport, cfg *config.Config, log func(string, ...any)) *Ops {
 	return &Ops{
 		T:            t,
@@ -49,16 +54,20 @@ func New(t Transport, cfg *config.Config, log func(string, ...any)) *Ops {
 		Out:          os.Stdout,
 		PollInterval: 2 * time.Second,
 		PollAttempts: 60,
-		ActiveDwell:  10 * time.Second,
 		Hostname:     os.Hostname,
 	}
 }
 
-func (o *Ops) logf(format string, args ...any) {
-	if o.Log != nil {
-		o.Log(format, args...)
-	}
-}
+// progress is the stderr Sink for this package's narration: phases through Step,
+// leveled status through OK/Warn/Fail/Info. A nil Log discards.
+func (o *Ops) progress() *output.Sink { return output.NewFunc(o.Log) }
+
+// report is the stdout Sink for report bodies -- the outcome lines that belong
+// with the broker output this package shows, rather than with the narration.
+func (o *Ops) report() *output.Sink { return output.New(o.out()) }
+
+// logf announces one phase of work (`==> ...`) via the injected line sink.
+func (o *Ops) logf(format string, args ...any) { o.progress().Step(format, args...) }
 
 // out returns the user-facing output sink, defaulting to os.Stdout.
 func (o *Ops) out() io.Writer {
@@ -76,13 +85,6 @@ func (o *Ops) show(b []byte) { _, _ = o.out().Write(b) }
 // tests) returns immediately without allocating a timer.
 func (o *Ops) sleep(ctx context.Context) error {
 	return o.wait(ctx, o.PollInterval)
-}
-
-// dwell waits ActiveDwell, honoring context cancellation. It backs the node-local
-// backup handshake's fixed hold after becoming active; a zero duration (in tests)
-// returns immediately.
-func (o *Ops) dwell(ctx context.Context) error {
-	return o.wait(ctx, o.ActiveDwell)
 }
 
 // wait blocks for d, honoring context cancellation. A non-positive d returns
@@ -127,18 +129,21 @@ func (o *Ops) removeCLI(ctx context.Context, role config.Role, names ...string) 
 	}
 	args := append([]string{"rm", "-f"}, paths...)
 	if err := o.T.Run(ctx, role, args...); err != nil {
-		o.logf("[WARN] cleanup of cli script(s) %v failed: %v", names, err)
+		o.progress().Warn("cleanup of cli script(s) %v failed: %v", names, err)
 	}
 }
 
-// skipIfStandalone reports whether an HA-gated step should no-op. It logs a WARN
-// and returns true for standalone deployments, matching the "Standalone ...
-// detected" branches of 050/061.
+// skipIfStandalone reports whether an HA-gated step should no-op, returning true
+// for standalone deployments (the "Standalone ... detected" branches of 050/061).
+//
+// It reports [SKIP], not [WARN]: running standalone is a supported choice, not a
+// problem, and a warning the reader cannot act on is a warning that teaches them
+// to ignore warnings.
 func (o *Ops) skipIfStandalone(step string) bool {
 	if o.Cfg.RedundancyEnabled() {
 		return false
 	}
-	o.logf("[WARN] %s is HA-only; standalone deployment -- skipping.", step)
+	o.progress().Skip("%s is HA-only; standalone deployment.", step)
 	return true
 }
 

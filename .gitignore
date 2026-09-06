@@ -22,3 +22,9 @@ scripts/logs/
 /solace-util.exe
 bash/*
 solace-repl*
+env.yaml
+
+# TLS material the env file points at (private keys must never be committed)
+*.key
+*.crt
+*.pem

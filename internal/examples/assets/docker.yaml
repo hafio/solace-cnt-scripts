@@ -1,0 +1,27 @@
+# Minimal docker env file for the `solace-util` CLI -- only the keys the loader
+# cannot default. Run any command with `-e <file>`; `solace-util examples full`
+# prints every key the schema accepts, with the default each omitted one takes.
+#
+# Replace every CHANGE-ME before use. Each secret key has a sibling *Env key
+# holding the NAME of an environment variable to read the value from instead
+# (`passEnv: SOLACE_ADMIN_PASS`, never both); with that form this file carries no
+# secret and is safe to commit.
+
+redundancy: no                      # yes needs nodes.backup and nodes.monitor
+                                    # (name + ip) too, and this same file on
+                                    # each of the three hosts
+
+image:
+  repo: solace-pubsub-standard      # mandatory
+  tag: "10.26.0.8755"               # mandatory
+
+admin:
+  pass: CHANGE-ME-admin             # secret, mandatory
+
+nodes:
+  primary:
+    name: solace-primary            # mandatory: the broker's routername
+
+docker:
+  container:
+    dataDir: /opt/solace/data       # host bind mount holding the message spool

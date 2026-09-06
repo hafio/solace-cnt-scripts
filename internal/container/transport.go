@@ -3,9 +3,9 @@
 // deploys and operates one broker container per host (the analog of k8s.Cluster).
 // It ports the docker-podman/*.sh script family. Unlike k8s -- where one control
 // point drives every pod in a namespace -- a container host runs a single broker,
-// so the transport is node-local and ignores the role argument, and the HA
-// coordination (leader, redundancy) is a per-host handshake (see broker's
-// LeaderLocal/RedundancyLocal).
+// so the transport is node-local and ignores the role argument; the HA
+// coordination (leader, redundancy) runs from the primary host and reaches the
+// backup over SEMP instead (see broker's LeaderLocal/RedundancyCoordinated).
 package container
 
 import (
@@ -21,7 +21,7 @@ import (
 // against the single broker container on this host. Node-local: there is one
 // container per host, so the role argument is ignored (the k8s transport maps it
 // to a pod; here every call targets the same container). Every call routes through
-// the injected engine.Runner, so --dry-run echoes the command without running it
+// the injected engine.Runner, so the Echo runner records the command without running it
 // and tests capture the exact argv.
 type containerTransport struct {
 	r    engine.Runner
@@ -91,7 +91,7 @@ func (c *containerTransport) OutputInput(ctx context.Context, _ config.Role, in 
 
 // Upload writes data to destPath inside the container by piping it to `sh -c 'cat
 // > <dest>'` on stdin -- the secret-safe path: the body rides RunInput's stdin
-// (shown as a byte count under --dry-run), never an argv or a temp file. destPath
+// (shown as a byte count under the Echo runner), never an argv or a temp file. destPath
 // is tool-generated and validName-checked upstream, so shSingleQuote is defensive.
 func (c *containerTransport) Upload(ctx context.Context, _ config.Role, data []byte, destPath string) error {
 	rt, err := c.runtime()

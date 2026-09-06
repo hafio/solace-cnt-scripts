@@ -218,7 +218,7 @@ func TestChildEnvNamesAreNotSystemVariables(t *testing.T) {
 			}
 		}
 	}
-	// And the masking that keeps values out of --dry-run output still holds for them.
+	// And the masking that keeps values out of echoed output still holds for them.
 	masked := MaskEnv(passed)
 	for _, secret := range []string{"x", "y", "z", "w"} {
 		if strings.Contains(masked, "="+secret) {

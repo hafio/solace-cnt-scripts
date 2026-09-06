@@ -231,7 +231,12 @@ func TestLastLinesEqualCount(t *testing.T) {
 
 // --- ExecCLI branches ------------------------------------------------------
 
-func TestExecCLIWarnsOnErrorOutput(t *testing.T) {
+// TestExecCLIWarnsAndFailsOnErrorOutput closes the rejected-line branch: the
+// broker still gets the per-run warning for context, but the run itself now
+// fails once the script finished -- a CLI script is a sequence of independent
+// commands, so the whole thing still ran, but a caller checking the exit code
+// alone must be able to tell a clean run from a half-applied one.
+func TestExecCLIWarnsAndFailsOnErrorOutput(t *testing.T) {
 	local := filepath.Join(t.TempDir(), "script.cli")
 	ft := &fakeTransport{responder: func(_ config.Role, _ []string, _ []byte) ([]byte, error) {
 		return []byte("invalid command detected\n"), nil
@@ -244,12 +249,13 @@ func TestExecCLIWarnsOnErrorOutput(t *testing.T) {
 		PollInterval: 0,
 		Log:          func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) },
 	}
-	if err := o.ExecCLI(context.Background(), config.Primary, local); err != nil {
-		t.Fatalf("ExecCLI error: %v", err)
+	err := o.ExecCLI(context.Background(), config.Primary, local)
+	if err == nil {
+		t.Fatal("ExecCLI should fail once rejected-looking output was detected")
 	}
 	joined := strings.Join(logs, "\n")
 	if !strings.Contains(joined, "[WARN] errors detected") {
-		t.Errorf("ExecCLI should warn on error-looking output, got %v", logs)
+		t.Errorf("ExecCLI should still warn on error-looking output, got %v", logs)
 	}
 }
 
@@ -694,7 +700,7 @@ func TestRemoveDomainCertsRunCLIError(t *testing.T) {
 // TestLoginTransportError distinguishes a transport/network failure (curl
 // couldn't even run) from an HTTP-level auth failure, already covered by
 // TestLoginFailure/TestLoginNoResponse: Login must return the error rather
-// than reporting "Login failed" as if it got an HTTP response.
+// than reporting a "[FAIL] Login" outcome as if it got an HTTP response.
 func TestLoginTransportError(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, _ []string, _ []byte) ([]byte, error) {
 		return nil, errors.New("curl boom")
@@ -704,8 +710,8 @@ func TestLoginTransportError(t *testing.T) {
 	if ok || err == nil || !strings.Contains(err.Error(), "SEMP request failed") {
 		t.Errorf("Login transport error: ok=%v err=%v, want false/wrapped %q", ok, err, "SEMP request failed")
 	}
-	if strings.Contains(buf.String(), "Login failed") {
-		t.Errorf("Login must return before logging 'Login failed', got %q", buf.String())
+	if strings.Contains(buf.String(), "[FAIL] Login") {
+		t.Errorf("Login must return before writing a '[FAIL] Login' outcome, got %q", buf.String())
 	}
 }
 

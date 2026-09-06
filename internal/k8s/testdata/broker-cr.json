@@ -1,0 +1,55 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "dev-broker",
+        "namespace": "solace",
+        "creationTimestamp": "2026-08-21T09:24:04Z"
+      },
+      "status": {
+        "broker": {
+          "adminCredentialsSecret": "solace-admin-secret",
+          "brokerImage": "registry.example.com/solace/solace-pubsub-enterprise:10.26.0.8755",
+          "haDeployment": "true",
+          "serviceName": "dev-broker-pubsubplus",
+          "serviceType": "LoadBalancer",
+          "statefulSets": [
+            "dev-broker-pubsubplus-p",
+            "dev-broker-pubsubplus-b",
+            "dev-broker-pubsubplus-m"
+          ],
+          "tlsSecret": "solace-tls-secret",
+          "tlsSupport": "true"
+        },
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-08-21T09:25:09Z",
+            "message": "Found active broker pod and service exists",
+            "reason": "ActivePodAndServiceExists",
+            "status": "True",
+            "type": "ServiceReady"
+          },
+          {
+            "lastTransitionTime": "2026-08-21T09:25:44Z",
+            "message": "No issues to report",
+            "reason": "NoIssues",
+            "status": "True",
+            "type": "NoWarnings"
+          },
+          {
+            "lastTransitionTime": "2026-08-21T09:29:30Z",
+            "message": "All broker nodes in the redundancy group are HA ready",
+            "reason": "AllBrokersHAReadyInRedundancyGroup",
+            "status": "True",
+            "type": "HAReady"
+          }
+        ],
+        "podsList": [
+          "dev-broker-pubsubplus-p-0",
+          "dev-broker-pubsubplus-b-0",
+          "dev-broker-pubsubplus-m-0"
+        ]
+      }
+    }
+  ]
+}

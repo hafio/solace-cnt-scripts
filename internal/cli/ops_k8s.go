@@ -17,21 +17,28 @@ import (
 // The k8s handlers wire the cobra tree to the two Kubernetes entry types: k8s.Cluster
 // (operations that talk to the cluster/operator, over engine.Runner) and broker.Ops
 // (config/verify operations against a running broker, over the kubectl Transport).
-// Under --dry-run both run over engine.Echo (injected in load()), so every handler is
-// exercisable without a cluster. Progress goes to stderr via step; rendered artifacts
-// are the only stdout (emit).
+// A test installs engine.Echo through App.NewRunner, so every handler is exercisable
+// without a cluster. Progress goes to stderr via step; rendered artifacts are the only
+// stdout (emit).
 
 // k8sCluster builds a Cluster over the app's runner/config, wiring stdout as the report
 // sink and stdin as the prompt source (LabelNodes prompts per role).
 func k8sCluster(a *App) *k8s.Cluster {
-	c := k8s.NewCluster(a.Runner, a.Cfg, step, os.Stdout)
+	c := k8s.NewCluster(a.Runner, a.Cfg, lineSink(), os.Stdout)
 	c.In = os.Stdin
+	// Same seam container.Manager carries: the one question this side asks is
+	// whether to downgrade the cluster-scoped operator. It is the ONE question
+	// --no-prompt cannot answer -- `deploy operator` does not register the flag,
+	// and confirmDowngrade has no escape for it, so a non-interactive run always
+	// declines. Rolling every broker in a cluster back is a decision made by a
+	// human at a terminal or not at all.
+	c.Confirm = func(question string) bool { return confirmDowngrade(a, question) }
 	return c
 }
 
 // k8sOps builds a broker.Ops over the kubectl-exec transport for config/verify steps.
 func k8sOps(a *App) *broker.Ops {
-	return broker.New(k8s.NewTransport(a.Runner, a.Cfg), a.Cfg, step)
+	return broker.New(k8s.NewTransport(a.Runner, a.Cfg), a.Cfg, lineSink())
 }
 
 // bg is the context for CLI-invoked operations. A plain background context matches the
@@ -52,16 +59,10 @@ func nowStamp() string { return time.Now().Format("20060102-150405") }
 // probe only warns: `check deploy` is read-only and a missing operator is a thing
 // to be told about, not an error in the checking.
 func opK8sCheck(a *App) error {
-	c := k8sCluster(a)
-	ctx := bg()
-	if err := c.Check(ctx); err != nil {
-		return err
-	}
-	if !c.OperatorInstalled(ctx) {
-		warn("the EventBroker operator does not look installed in this cluster; " +
-			"`solace-util deploy operator` installs it, and `deploy broker` will fail without it")
-	}
-	return nil
+	// The operator probe moved INTO the report (operatorRows), where it is a row
+	// with a verdict rather than a warning tacked on after the fact -- and where
+	// it also reports the version actually running.
+	return k8sCluster(a).CheckDeploy(bg())
 }
 
 // opK8sPrepAll runs the prep steps a broker deployment needs every time: the
@@ -139,10 +140,11 @@ func opK8sPrepSecrets(a *App) error {
 func opK8sConfigLeader(a *App) error { return k8sOps(a).Leader(bg()) }
 
 // opK8sConfigServerCert loads/updates the TLS server certificate. On k8s the
-// secret-managed path (tls.serverSecret set) updates the Secret so the operator mounts
-// it (051 fast path); otherwise the CLI path uploads key+cert+CAs into each broker node.
+// secret-managed path (kubernetes.tlsServerSecret set) updates the Secret so the
+// operator mounts it (051 fast path); otherwise the CLI path uploads key+cert+CAs
+// into each broker node.
 func opK8sConfigServerCert(a *App) error {
-	if a.Cfg.TLS.ServerSecret != "" {
+	if a.Cfg.K8s.TLSServerSecret != "" {
 		return k8sCluster(a).UpdateServerCertSecret(bg())
 	}
 	return k8sOps(a).ServerCert(bg(), today(), k8s.HARoles(a.Cfg)...)
@@ -151,16 +153,21 @@ func opK8sConfigServerCert(a *App) error {
 func opK8sConfigDomainCerts(a *App) error {
 	return k8sOps(a).DomainCerts(bg(), config.Primary, a.Cfg.Broker.DomainCerts.Folder, a.Cfg.Broker.DomainCerts.Files)
 }
-func opK8sConfigDisableVPN(a *App) error   { return k8sOps(a).DisableDefaultVPN(bg(), config.Primary) }
-func opK8sConfigDisableUsers(a *App) error { return k8sOps(a).DisableDefaultUsers(bg(), config.Primary) }
+func opK8sConfigDisableVPN(a *App) error { return k8sOps(a).DisableDefaultVPN(bg(), config.Primary) }
+func opK8sConfigDisableUsers(a *App) error {
+	return k8sOps(a).DisableDefaultUsers(bg(), config.Primary)
+}
 func opK8sConfigProductKeys(a *App) error {
 	return k8sOps(a).ProductKeys(bg(), a.Cfg.Broker.ProductKeys, k8s.ProductKeyRoles(a.Cfg)...)
 }
 
 // opK8sConfigAdditionalUsers creates the extra CLI users. Primary only: management
 // users are router-level config that config-sync replicates to the mates.
-// ASSUMED, NOT VERIFIED -- if a failover ever surfaces a mate without these users,
-// this is the line to widen to k8s.HARoles(a.Cfg).
+//
+// VERIFIED 2026-08-21: config-sync replicates BOTH management `username` and
+// `client-username` to every node in the redundancy group, so applying them to the
+// primary alone is correct and widening this to k8s.HARoles would just re-create
+// users the mates already have.
 func opK8sConfigAdditionalUsers(a *App) error {
 	return k8sOps(a).AdditionalUsers(bg(), config.Primary, a.Cfg.Admin.AdditionalUsers)
 }
@@ -221,9 +228,9 @@ func opK8sStatusBroker(a *App, role config.Role) error {
 	c := k8sCluster(a)
 	ctx := bg()
 	if a.all {
-		return c.ShowAll(ctx, a.detail)
+		return c.ClusterReport(ctx, a.detail)
 	}
-	if err := c.Survey(ctx, a.detail); err != nil {
+	if err := c.BrokerReport(ctx, a.detail); err != nil {
 		return err
 	}
 	if !a.detail {
@@ -243,7 +250,7 @@ func opK8sStatusBroker(a *App, role config.Role) error {
 func opK8sStatusOperator(a *App) error {
 	c := k8sCluster(a)
 	ctx := bg()
-	if err := c.OperatorStatus(ctx); err != nil {
+	if err := c.OperatorReport(ctx); err != nil {
 		return err
 	}
 	if !a.detail {
@@ -252,9 +259,9 @@ func opK8sStatusOperator(a *App) error {
 	return c.OperatorDescribe(ctx)
 }
 
-func opK8sLogs(a *App, role config.Role) error           { return k8sCluster(a).Logs(bg(), role, nil) }
-func opK8sCLI(a *App, role config.Role) error            { return k8sCluster(a).CLI(bg(), role) }
-func opK8sShell(a *App, role config.Role) error          { return k8sCluster(a).Shell(bg(), role) }
+func opK8sLogs(a *App, role config.Role) error  { return k8sCluster(a).Logs(bg(), role, nil) }
+func opK8sCLI(a *App, role config.Role) error   { return k8sCluster(a).CLI(bg(), role) }
+func opK8sShell(a *App, role config.Role) error { return k8sCluster(a).Shell(bg(), role) }
 
 func opK8sCopyFrom(a *App, files []string) error {
 	role, err := podRole(a)
@@ -286,7 +293,8 @@ func opK8sStopBroker(a *App) error  { return k8sCluster(a).ReplicasStop(bg()) }
 func opK8sRestart(a *App, roleArg string) error {
 	c := k8sCluster(a)
 	if roleArg == "" {
-		if !confirmDelete(a, "every broker pod, one at a time (monitor, backup, primary)") {
+		if !confirmAction(a, "Restart", "restart",
+			k8sWhat(a, "every broker pod, one at a time (monitor, backup, primary),")) {
 			return nil
 		}
 		return c.RestartRolling(bg())
@@ -295,7 +303,7 @@ func opK8sRestart(a *App, roleArg string) error {
 	if err != nil {
 		return err
 	}
-	if !confirmDelete(a, "the "+roleWord(role)+" broker pod") {
+	if !confirmAction(a, "Restart", "restart", k8sWhat(a, "the "+roleWord(role)+" broker pod")) {
 		return nil
 	}
 	return c.RestartPod(bg(), role)
@@ -327,11 +335,41 @@ func opK8sOperatorDeploy(a *App) error {
 // every PubSubPlusEventBroker in the cluster, including ones this env file has never
 // heard of. confirmLayer decides, and OperatorDelete reports which way it went.
 func opK8sOperatorRemove(a *App) error {
-	if !confirmDelete(a, "the EventBroker operator") {
+	if !confirmDelete(a, "the EventBroker operator in namespace "+
+		k8s.OperatorNamespace(a.Cfg)+k8sContext(a)) {
 		return nil
 	}
-	deleteCRDs := confirmLayer(a, layerCRD)
-	return k8sCluster(a).OperatorDelete(bg(), deleteCRDs)
+	c := k8sCluster(a)
+	deleteCRDs := a.deleteLayer
+	if !deleteCRDs {
+		// The CRD question is only worth asking when its answer is not already
+		// fixed. A broker still on the cluster fixes it: OperatorDelete refuses
+		// the CRD deletion outright there, so prompting would invite a "yes"
+		// this tool will not honour -- the worst kind of prompt. Say what was
+		// found instead, and keep the CRDs without asking.
+		//
+		// An explicit --delete-crd deliberately skips this and goes straight
+		// through to that refusal: an operator who named the flag has earned a
+		// loud failure naming the brokers in the way, not a silent downgrade to
+		// "kept".
+		// A listing failure is deliberately NOT fatal here. This call runs ahead of
+		// OperatorDelete's own Preflight, so failing on it would replace the
+		// preflight's actionable "you cannot delete X" with a confusing error about
+		// a query the operator never asked for. Falling through to the question
+		// costs nothing: refuseCRDDeleteIfBrokersExist re-asks authoritatively,
+		// after the preflight, and is what actually stops the cascade.
+		refs, err := c.BrokerCRs(bg())
+		switch {
+		case err != nil:
+			deleteCRDs = confirmLayer(a, layerCRD)
+		case len(refs) > 0:
+			warn("%d broker resource(s) still exist, so the operator CRDs are kept without asking "+
+				"(deleting them would cascade-delete every one): %s", len(refs), strings.Join(refs, ", "))
+		default:
+			deleteCRDs = confirmLayer(a, layerCRD)
+		}
+	}
+	return c.OperatorDelete(bg(), deleteCRDs)
 }
 
 func opK8sOperatorRestart(a *App) error  { return k8sCluster(a).OperatorRestart(bg()) }
@@ -360,13 +398,25 @@ func opK8sGenSecrets(a *App) error {
 	return emit(b)
 }
 
+// opK8sGenOperatorSecrets prints the operator's image-pull secret. It is the
+// operator half of `generate secrets`: the bundle `generate operator` renders
+// references this secret by name but never carries it, so this is where the
+// credential is reviewed.
+func opK8sGenOperatorSecrets(a *App) error {
+	b, err := k8s.GenOperatorSecrets(a.Cfg)
+	if err != nil {
+		return err
+	}
+	return emit(b)
+}
+
 // remove
 
 // opK8sDelete deletes the broker CR, keeping its PVCs unless the layer question
 // says otherwise (confirmLayer). Guarded by confirmDelete first: nothing is removed
 // without a yes.
 func opK8sDelete(a *App) error {
-	if !confirmDelete(a, "broker "+a.Cfg.K8s.Name) {
+	if !confirmDelete(a, k8sWhat(a, "broker "+a.Cfg.K8s.Name)) {
 		return nil
 	}
 	return k8sCluster(a).DeleteBroker(bg(), confirmLayer(a, layerData))
@@ -377,14 +427,14 @@ func opK8sDelete(a *App) error {
 // deleting a namespace takes everything else that happens to live in it, which is
 // exactly the kind of thing worth being asked about once.
 func opK8sRemoveSecrets(a *App) error {
-	if !confirmDelete(a, "the secrets for broker "+a.Cfg.K8s.Name) {
+	if !confirmDelete(a, k8sWhat(a, "the secrets for broker "+a.Cfg.K8s.Name)) {
 		return nil
 	}
 	return k8sCluster(a).DeleteSecrets(bg())
 }
 
 func opK8sRemoveNamespace(a *App) error {
-	if !confirmDelete(a, "namespace "+a.Cfg.K8s.Namespace+" and everything in it") {
+	if !confirmDelete(a, "namespace "+a.Cfg.K8s.Namespace+" and everything in it"+k8sContext(a)) {
 		return nil
 	}
 	return k8sCluster(a).DeleteNamespace(bg())
@@ -432,7 +482,8 @@ func opK8sDeployAll(a *App) error {
 // so removing it is its own explicit command. Guarded by the same confirm helpers as
 // removing the broker alone.
 func opK8sRemoveAll(a *App) error {
-	if !confirmDelete(a, "broker "+a.Cfg.K8s.Name+" and its namespace") {
+	if !confirmDelete(a, "broker "+a.Cfg.K8s.Name+", its secrets and namespace "+
+		a.Cfg.K8s.Namespace+k8sContext(a)) {
 		return nil
 	}
 	deleteData := confirmLayer(a, layerData)
@@ -452,13 +503,41 @@ func opK8sRemoveAll(a *App) error {
 	return nil
 }
 
+// k8sWhat labels a destructive Kubernetes target the way containerWhat labels a
+// container one: the object, then WHERE it is. The container prompt already named
+// its platform and container; the Kubernetes prompts named the broker and left the
+// two facts that decide blast radius unsaid.
+//
+// Both matter, for different reasons. The namespace is in the env file but not in
+// the prompt, so an operator with several env files open had nothing to check the
+// question against. The context is not in the env file AT ALL -- the kubeconfig's
+// current context decides which cluster every call lands in, so a file that says
+// "dev" against a context that drifted to prod reads identically. It is appended
+// only when known (announceKubeContext resolved one), because a prompt that says
+// "context " with nothing after it is worse than one that does not mention it.
+func k8sWhat(a *App, object string) string {
+	return fmt.Sprintf("%s in namespace %s%s", object, a.Cfg.K8s.Namespace, k8sContext(a))
+}
+
+// k8sContext is the trailing "(context X)" clause on its own, for the prompts
+// that name their own namespace -- `remove namespace` and `remove all` say which
+// namespace goes as part of the sentence, and `remove operator` is in the
+// OPERATOR's namespace rather than the broker's. Appending k8sWhat's namespace to
+// any of those would state a second, wrong or duplicate location.
+func k8sContext(a *App) string {
+	if a.kubeContext == "" {
+		return ""
+	}
+	return fmt.Sprintf(" (context %s)", a.kubeContext)
+}
+
 // podRole resolves the --pod flag to a role, defaulting to the Primary when unset.
 func podRole(a *App) (config.Role, error) { return config.ParseRole(a.pod) }
 
 // tlsConfigured reports whether a server certificate is available by either route: a
 // managed TLS secret, or a cert+key file pair for the CLI path.
 func tlsConfigured(cfg *config.Config) bool {
-	return cfg.TLS.ServerSecret != "" || (cfg.TLS.Cert != "" && cfg.TLS.CertKey != "")
+	return cfg.K8s.TLSServerSecret != "" || (cfg.TLS.Cert != "" && cfg.TLS.CertKey != "")
 }
 
 // domainCANames returns the configured domain CA names (the keys of domainCerts.files),

@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"solace/internal/output"
 )
 
 // Runner runs external commands. Implementations: Exec (real), Echo (records what
@@ -75,15 +77,17 @@ type Exec struct {
 }
 
 // NewExec builds the runner the CLI uses. With verbose, every command is announced to
-// w as it runs, in the same `==> ` prefix the CLI's own progress lines use (the prefix
-// is duplicated here rather than shared, since cli imports engine and not the reverse).
-// Without it the runner says nothing: the preamble already reported what resolved.
+// w as it runs, through the same internal/output Sink the CLI's own progress lines use
+// -- output is a leaf package, so both sides share the one `==> ` definition instead of
+// each spelling it out. Without verbose the runner says nothing: the preamble already
+// reported what resolved.
 func NewExec(w io.Writer, verbose bool) Exec {
 	if !verbose {
 		return Exec{}
 	}
+	sink := output.New(w)
 	return Exec{Announce: func(path string, args []string) {
-		fmt.Fprintln(w, "==> exec: "+Quote(path, args...))
+		sink.Step("exec: %s", Quote(path, args...))
 	}}
 }
 

@@ -19,23 +19,24 @@ import (
 // There is deliberately no skip flag. A probe that can be turned off is a probe
 // that is off in exactly the scripted runs that most need it, and the only
 // legitimate reason to skip it -- previewing without a cluster -- is already
-// --dry-run, which reaches the branch below.
+// the Echo runner, which reaches the branch below.
 //
 // It never logs anyone in. Authentication is the operator's business and their
 // credential store's; a tool that offered to fix an auth failure would be teaching
 // people to hand it credentials it has no business holding.
 func (c *Cluster) Preflight(ctx context.Context, verb, resource string) error {
-	if c.isDryRun() {
+	args := c.canIArgs(verb, resource)
+	if c.isEcho() {
 		// Echo the probe so a preview still shows it, then skip the assertion --
 		// the Echo runner answers nothing, and there is no cluster to answer.
-		if err := c.kubectl(ctx, "auth", "can-i", verb, resource, "-n", c.ns()); err != nil {
+		if err := c.kubectl(ctx, args...); err != nil {
 			return err
 		}
-		fmt.Fprintln(c.out(), "  permission     : skipped (dry-run)")
+		c.report().KVRow(reportKeyWidth, "permission", "skipped (preview)")
 		return nil
 	}
 
-	out, err := c.output(ctx, "auth", "can-i", verb, resource, "-n", c.ns())
+	out, err := c.output(ctx, args...)
 	answer := canIAnswer(out)
 	switch {
 	case err == nil && answer == "yes":
@@ -81,3 +82,32 @@ func canIAnswer(out []byte) string {
 // deploy ultimately creates. Named in full (resource.group) so `auth can-i` cannot
 // match a same-named resource in another group.
 const brokerResource = "pubsubpluseventbrokers.pubsubplus.solace.com"
+
+// clusterScoped names the resources whose permission check must NOT carry a
+// namespace. Passing `-n` for one of these makes kubectl print
+//
+//	Warning: resource 'customresourcedefinitions' is not namespace scoped
+//
+// and, when the namespace does not exist yet, also fail with a NotFound that has
+// nothing to do with the permission being checked -- which is exactly what a
+// first `deploy operator` looked like: two scary lines about a namespace, in
+// front of a probe that was asking about a cluster-scoped resource.
+var clusterScoped = map[string]bool{
+	"customresourcedefinitions": true,
+	"namespaces":                true,
+	"nodes":                     true,
+	"clusterroles":              true,
+	"clusterrolebindings":       true,
+	"storageclasses":            true,
+	"persistentvolumes":         true,
+}
+
+// canIArgs builds the `auth can-i` argv, scoping it to the broker namespace only
+// for resources that live in one.
+func (c *Cluster) canIArgs(verb, resource string) []string {
+	args := []string{"auth", "can-i", verb, resource}
+	if clusterScoped[resource] {
+		return args
+	}
+	return append(args, "-n", c.ns())
+}

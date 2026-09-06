@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path"
-	"strings"
 
 	"solace/internal/config"
 )
@@ -17,7 +16,7 @@ const rolloutTimeout = "300s"
 
 // Status prints the broker's pods, services and StatefulSets in the broker namespace,
 // porting get-broker-status.sh:16-20. Each `get` streams straight through the runner,
-// so --dry-run echoes the three commands.
+// so the Echo runner records the three commands.
 func (c *Cluster) Status(ctx context.Context) error {
 	if err := c.kubectl(ctx, "get", "pods", "-n", c.ns(), "-o", "wide"); err != nil {
 		return err
@@ -26,111 +25,6 @@ func (c *Cluster) Status(ctx context.Context) error {
 		return err
 	}
 	return c.kubectl(ctx, "get", "statefulset", "-n", c.ns())
-}
-
-// showAllSections drives ShowAll. Broker pods and StatefulSets carry the -pubsubplus-
-// infix, which excludes the operator's own pod (pubsubplus-eventbroker-operator-*, no
-// leading dash); services match the looser "pubsubplus" so the LB service
-// <name>-pubsubplus (no trailing -role) is included too (show-all-brokers.sh:31,74,90).
-type surveySection struct {
-	title    string
-	resource string
-	wide     bool
-	filter   string
-}
-
-// showAllSections is the RUNNING picture: what is deployed and serving. The
-// operator leads because it is what everything else depends on, and it is matched
-// on its own name rather than the -pubsubplus- infix the broker resources carry.
-var showAllSections = []surveySection{
-	{"OPERATOR", "deployments", true, operatorDeployment},
-	{"BROKERS", "pubsubpluseventbrokers", false, ""},
-	{"PODS", "pods", true, "-pubsubplus-"},
-	{"SERVICES", "svc", false, "pubsubplus"},
-	{"STATEFULSETS", "statefulsets", false, "-pubsubplus-"},
-}
-
-// showDetailSections is what --detail adds: the STATIC artifacts a broker is built
-// from, which outlive any particular pod. They are listed separately because they
-// answer a different question -- not "is it running" but "what is it made of", and
-// a PVC left behind by a removed broker is exactly the kind of thing that only
-// shows up when you go looking.
-var showDetailSections = []surveySection{
-	{"SECRETS", "secrets", false, "pubsubplus"},
-	{"CONFIGMAPS", "configmaps", false, "pubsubplus"},
-	{"PERSISTENT VOLUME CLAIMS", "pvc", false, "pubsubplus"},
-}
-
-// ShowAll lists broker pods, services and StatefulSets across every namespace,
-// porting show-all-brokers.sh. It replaces the bash jq column-formatting with native
-// `kubectl get -A` output filtered client-side to broker resources -- the plain table
-// kubectl prints, minus the custom AGE/DISK math, which was flagged as a deliberate
-// simplification. Filtering needs the output captured, so under --dry-run (Echo) the
-// get is echoed and the filter finds nothing.
-func (c *Cluster) ShowAll(ctx context.Context, detail bool) error {
-	sections := showAllSections
-	if detail {
-		sections = append(append([]surveySection{}, sections...), showDetailSections...)
-	}
-	return c.survey(ctx, sections, true)
-}
-
-// Survey is ShowAll scoped to this env file's namespace: the same picture, of the
-// one broker the config describes. `--all` is what widens it to the cluster.
-func (c *Cluster) Survey(ctx context.Context, detail bool) error {
-	sections := showAllSections
-	if detail {
-		sections = append(append([]surveySection{}, sections...), showDetailSections...)
-	}
-	return c.survey(ctx, sections, false)
-}
-
-// survey lists each section, either cluster-wide or in the broker's namespace, and
-// filters the rows client-side to the ones belonging to a Solace deployment. A
-// section that fails is reported and skipped rather than aborting the rest: this is
-// a report, and one resource kind the context cannot list (RBAC, or a CRD that is
-// not installed) must not hide the kinds it can.
-func (c *Cluster) survey(ctx context.Context, sections []surveySection, allNamespaces bool) error {
-	w := c.out()
-	for _, s := range sections {
-		args := []string{"get", s.resource}
-		if allNamespaces {
-			args = append(args, "--all-namespaces")
-		} else {
-			args = append(args, "-n", c.ns())
-		}
-		if s.wide {
-			args = append(args, "-o", "wide")
-		}
-		fmt.Fprintf(w, "### %s ###\n", s.title)
-		raw, err := c.output(ctx, args...)
-		if err != nil {
-			fmt.Fprintf(w, "  (could not list %s: %v)\n", s.resource, err)
-			continue
-		}
-		fmt.Fprintln(w, filterLines(string(raw), s.filter))
-	}
-	return nil
-}
-
-// filterLines keeps the table header (first line) plus every data line containing
-// substr, so the client-side broker filter preserves column titles. An empty capture
-// (e.g. --dry-run, or no such resources) reports "(none)".
-func filterLines(raw, substr string) string {
-	lines := strings.Split(strings.TrimRight(raw, "\n"), "\n")
-	if len(lines) == 0 || lines[0] == "" {
-		return "  (none)"
-	}
-	kept := []string{lines[0]}
-	for _, ln := range lines[1:] {
-		if strings.Contains(ln, substr) {
-			kept = append(kept, ln)
-		}
-	}
-	if len(kept) == 1 {
-		return kept[0] + "\n  (none matched)"
-	}
-	return strings.Join(kept, "\n")
 }
 
 // DescribeBroker describes a role's broker pod, porting desc-broker.sh:18.
@@ -187,11 +81,11 @@ func (c *Cluster) CopyFrom(ctx context.Context, role config.Role, files []string
 		local := path.Base(f)
 		c.logf("copying %s from %s", f, roleName(role))
 		if err := t.Download(ctx, role, f, local); err != nil {
-			fmt.Fprintf(c.out(), "  [ERROR] %s: %v\n", f, err)
+			c.report().Fail("%s: %v", f, err)
 			failed++
 			continue
 		}
-		fmt.Fprintf(c.out(), "  [ OK ] %s -> %s\n", f, local)
+		c.report().OK("%s -> %s", f, local)
 	}
 	if failed > 0 {
 		return fmt.Errorf("%d of %d file(s) failed to copy from the broker", failed, len(files))
@@ -214,11 +108,11 @@ func (c *Cluster) CopyInto(ctx context.Context, role config.Role, files []string
 	for _, f := range files {
 		c.logf("copying %s into %s:%s", f, roleName(role), destDir)
 		if err := t.UploadFile(ctx, role, f, destDir); err != nil {
-			fmt.Fprintf(c.out(), "  [ERROR] %s: %v\n", f, err)
+			c.report().Fail("%s: %v", f, err)
 			failed++
 			continue
 		}
-		fmt.Fprintf(c.out(), "  [ OK ] %s -> %s:%s\n", f, roleName(role), destDir)
+		c.report().OK("%s -> %s:%s", f, roleName(role), destDir)
 	}
 	if failed > 0 {
 		return fmt.Errorf("%d of %d file(s) failed to copy into the broker", failed, len(files))

@@ -9,21 +9,26 @@ import (
 	"solace/internal/config"
 )
 
-// This file holds the node-local HA state machines used by the container
-// platform, where the transport talks only to the single broker on THIS host and
-// there is no cross-node control point. They are the node-local counterparts of
-// verify_ops.go's Leader/Redundancy, which drive both nodes from one control point
-// (showRDPair) and therefore only fit the k8s model. Each function here polls the
-// single local `show redundancy` output and performs its half of a two-host
-// handshake -- the operator runs the matching command on each host. They reuse the
-// package's unexported helpers (showRD, activity, field, rdEnabledUp,
-// primaryRedundancyUp, poll, RunCLI) and script builders unchanged.
+// This file holds the HA operations the container platforms drive from the
+// primary host, where the transport talks only to the single broker on THIS
+// host. What k8s does by addressing either pod from one kubectl context
+// (verify_ops.go's Leader/Redundancy, showRDPair), these do from one host: every
+// read is the local `show redundancy` -- whose Mate Active / ADB fields already
+// report the backup as this node sees it -- and the one command that must land
+// on the backup, `redundancy revert-activity`, rides the SEMP control channel
+// (semp.go). They reuse the package's unexported helpers (showRD, activity,
+// field, rdEnabledUp, primaryRedundancyUp, poll, RunCLI) and script builders
+// unchanged.
 
 // LocalRole resolves which redundancy role THIS host plays. An explicit roleArg
 // (primary|backup|monitor or p|b|m) wins; otherwise it detects the role by
 // matching the host's name against the configured node table (nodes.primary/
-// backup/monitor .name), tolerating an FQDN-vs-short-name mismatch. It fails loud
-// when detection is ambiguous so a mis-targeted HA operation never runs silently.
+// backup/monitor .name), tolerating both an FQDN-vs-short-name mismatch and a
+// case difference (DNS names are case-insensitive, so "Broker1-Primary" in the
+// env file matches a host reporting "broker1-primary"). It fails loud when
+// detection matches nothing, and fails loud -- naming the host and every role
+// it matched -- when detection matches more than one, so a mis-targeted HA
+// operation never runs silently against the wrong node.
 func (o *Ops) LocalRole(roleArg string) (config.Role, error) {
 	if roleArg != "" {
 		return config.ParseRole(roleArg)
@@ -32,6 +37,7 @@ func (o *Ops) LocalRole(roleArg string) (config.Role, error) {
 	if err != nil {
 		return "", fmt.Errorf("detect node role: read hostname: %w", err)
 	}
+	var matched []config.Role
 	for _, m := range []struct {
 		name string
 		role config.Role
@@ -41,10 +47,21 @@ func (o *Ops) LocalRole(roleArg string) (config.Role, error) {
 		{o.Cfg.Nodes.Monitor.Name, config.Monitor},
 	} {
 		if m.name != "" && hostMatches(host, m.name) {
-			return m.role, nil
+			matched = append(matched, m.role)
 		}
 	}
-	return "", fmt.Errorf("cannot determine node role from hostname %q; pass primary|backup|monitor explicitly", host)
+	switch len(matched) {
+	case 0:
+		return "", fmt.Errorf("cannot determine node role from hostname %q; pass primary|backup|monitor explicitly", host)
+	case 1:
+		return matched[0], nil
+	default:
+		names := make([]string, len(matched))
+		for i, r := range matched {
+			names[i] = roleName(r)
+		}
+		return "", fmt.Errorf("hostname %q matches more than one configured node role (%s); pass primary|backup|monitor explicitly to disambiguate", host, strings.Join(names, ", "))
+	}
 }
 
 // LeaderLocal asserts the config-sync leader from THIS host, which must be the
@@ -61,6 +78,17 @@ func (o *Ops) LeaderLocal(ctx context.Context, roleArg string) error {
 	}
 	if role != config.Primary {
 		return fmt.Errorf("config leader must run on the primary node; this host is the %s node", roleName(role))
+	}
+
+	// Parity with the k8s Leader: revert any released activity on the mate FIRST
+	// (050 lines 23-31), now possible over the SEMP channel. An unreachable mate
+	// downgrades to a warning -- the leader assertion itself is local, and a
+	// backup still holding activity surfaces in the poll below -- but a reachable
+	// mate refusing the RPC is a real error, not a skip.
+	if err := o.MateSEMPPreflight(ctx); err != nil {
+		o.progress().Warn("cannot reach the mate's SEMP service; skipping the revert-activity step: %v", err)
+	} else if err := o.MateRevertActivity(ctx); err != nil {
+		return err
 	}
 
 	o.logf("Waiting for redundancy state to be restored fully...")
@@ -85,13 +113,18 @@ func (o *Ops) LeaderLocal(ctx context.Context, roleArg string) error {
 	return nil
 }
 
-// RedundancyLocal exercises failover from THIS host, running the primary or backup
-// half of the handshake per the user's spec. HA-only; the monitor is rejected
-// loud. The primary releases (if active) then waits for the backup to fail back;
-// the backup becomes active, dwells, and reverts to standby. The operator runs it
-// on the primary and backup concurrently -- running only one side times out
-// (bounded by PollAttempts) rather than hanging.
-func (o *Ops) RedundancyLocal(ctx context.Context, roleArg string) error {
+// RedundancyCoordinated exercises a real failover and fail-back for the whole
+// redundancy group from ONE invocation on the primary host, mirroring the k8s
+// Redundancy op (verify_ops.go) step for step: confirm the primary healthy,
+// release activity so the backup takes over, un-release, then revert the backup
+// so activity returns. The backup is never exec'd -- the container transport is
+// node-local -- so its takeover and return to standby are observed through the
+// primary's own "Mate Active" report (a deliberate weakening of k8s's
+// independent backup reads, in all three confirm polls alike), and its one
+// mutation, revert-activity, goes over the SEMP channel (semp.go). HA-only;
+// backup and monitor hosts are rejected loud. roleArg (empty -> detect from
+// hostname) is self-identification only, as in LeaderLocal.
+func (o *Ops) RedundancyCoordinated(ctx context.Context, roleArg string) error {
 	if o.skipIfStandalone("verify redundancy") {
 		return nil
 	}
@@ -99,67 +132,51 @@ func (o *Ops) RedundancyLocal(ctx context.Context, roleArg string) error {
 	if err != nil {
 		return err
 	}
-	if role == config.Monitor {
-		return fmt.Errorf("verify redundancy cannot run on the monitor node; run it on the primary and backup nodes")
+	if role != config.Primary {
+		return fmt.Errorf("verify redundancy drives the whole redundancy group from the primary node; "+
+			"this host is the %s node -- run it on the primary host", roleName(role))
 	}
 
 	local, err := o.showRD(ctx, role)
 	if err != nil {
 		return err
 	}
-	if role == config.Primary {
-		return o.redundancyLocalPrimary(ctx, role, local)
+	if !primaryRedundancyUp(local) {
+		o.show([]byte(local))
+		return fmt.Errorf("redundancy configuration/status is not healthy on the Primary")
 	}
-	return o.redundancyLocalBackup(ctx, role, local)
-}
 
-// redundancyLocalPrimary is the primary half: if active, release activity to fall
-// over to the backup (release + un-release, matching releaseToBackup, so the
-// primary stays eligible to reclaim); then, active-start or standby-start alike,
-// wait for the backup to fail back to this primary. Spec: "primary: if currently
-// active, should release activity to fall over ... wait for backup to fail back
-// ...; if currently standby, just wait for backup to fail back".
-func (o *Ops) redundancyLocalPrimary(ctx context.Context, role config.Role, local string) error {
+	// Reach the mate BEFORE the first mutation: failing here leaves the group
+	// undisturbed, failing after a release would strand the Backup active.
+	if err := o.MateSEMPPreflight(ctx); err != nil {
+		return err
+	}
+
 	if activity(local, activityLocalActive) == 1 {
-		if !primaryRedundancyUp(local) {
-			o.show([]byte(local))
-			return fmt.Errorf("redundancy configuration/status is not healthy on the Primary")
-		}
-		o.logf("[Info] Primary node is active; releasing activity to fall over to the Backup.")
-		if _, err := o.RunCLI(ctx, role, "release", releaseActivityScript()); err != nil {
+		o.progress().Info("Detected Primary node is active.")
+		if err := o.releaseLocalActivity(ctx, role); err != nil {
 			return err
 		}
-		if err := o.poll(ctx, "Primary to be released to the Backup", func(ctx context.Context) (bool, error) {
-			out, err := o.showRD(ctx, role)
-			if err != nil {
-				return false, err
-			}
-			return field(out, labelConfigStatus) == "Enabled-Released" &&
-				field(out, labelRedundancyStatus) == "Down" &&
-				activity(out, activityMateActive) == 1, nil
-		}); err != nil {
-			return err
-		}
-		o.logf("[Info] Primary node is released. Backup node is active.")
-
-		if _, err := o.RunCLI(ctx, role, "no-release", noReleaseActivityScript()); err != nil {
-			return err
-		}
-		if err := o.poll(ctx, "Primary to be un-released", func(ctx context.Context) (bool, error) {
-			out, err := o.showRD(ctx, role)
-			if err != nil {
-				return false, err
-			}
-			return rdEnabledUp(out) && activity(out, activityMateActive) == 1, nil
-		}); err != nil {
-			return err
-		}
-		o.logf("[Info] Primary node is un-released. Waiting for the Backup to fail back...")
 	} else {
-		o.logf("[Info] Primary node is standby; waiting for the Backup to fail back...")
+		o.progress().Info("Primary node is standby.")
 	}
 
-	if err := o.poll(ctx, "Backup to fail back to the Primary", func(ctx context.Context) (bool, error) {
+	// k8s reads the Backup directly here; the primary's mate-activity line is
+	// the same fact as this node sees it.
+	local, err = o.showRD(ctx, role)
+	if err != nil {
+		return err
+	}
+	if activity(local, activityMateActive) != 1 {
+		o.show([]byte(local))
+		return fmt.Errorf("neither the Primary nor its mate appears to be active")
+	}
+	o.progress().Info("Detected Backup node is active (Mate Active on the Primary).")
+
+	if err := o.MateRevertActivity(ctx); err != nil {
+		return err
+	}
+	if err := o.poll(ctx, "Primary to become active", func(ctx context.Context) (bool, error) {
 		out, err := o.showRD(ctx, role)
 		if err != nil {
 			return false, err
@@ -170,49 +187,44 @@ func (o *Ops) redundancyLocalPrimary(ctx context.Context, role config.Role, loca
 	}); err != nil {
 		return err
 	}
-	o.logf("[Info] Backup failed back to the Primary successfully.")
+	o.progress().Info("Reverted back to Primary node successfully.")
 	return nil
 }
 
-// redundancyLocalBackup is the backup half: if already active, revert activity to
-// the primary and wait for standby; if inactive, wait to become active, hold for
-// ActiveDwell (the spec's "after 10s of being active"), then revert and wait for
-// standby. Spec: "backup: if currently inactive, wait to become active, and then
-// execute revert activity after 10s ...; if currently active, revert activity to
-// primary and declare success".
-func (o *Ops) redundancyLocalBackup(ctx context.Context, role config.Role, local string) error {
-	if activity(local, activityLocalActive) != 1 {
-		o.logf("[Info] Backup node is inactive; waiting to become active...")
-		if err := o.poll(ctx, "Backup to become active", func(ctx context.Context) (bool, error) {
-			out, err := o.showRD(ctx, role)
-			if err != nil {
-				return false, err
-			}
-			return activity(out, activityLocalActive) == 1, nil
-		}); err != nil {
-			return err
-		}
-		o.logf("[Info] Backup node is active; holding for %s before reverting activity.", o.ActiveDwell)
-		if err := o.dwell(ctx); err != nil {
-			return err
-		}
-	} else {
-		o.logf("[Info] Backup node is active; reverting activity to the Primary.")
-	}
-
-	if _, err := o.RunCLI(ctx, role, "revert-activity", revertActivityConfigureScript()); err != nil {
+// releaseLocalActivity walks the local primary through release -> un-release so
+// the Backup takes over and the Primary stays eligible to reclaim -- the local
+// form of k8s releaseToBackup, with the un-release confirm reading only this
+// node (its Mate Active line standing in for the Backup's own Local Active).
+func (o *Ops) releaseLocalActivity(ctx context.Context, role config.Role) error {
+	if _, err := o.RunCLI(ctx, role, "release", releaseActivityScript()); err != nil {
 		return err
 	}
-	if err := o.poll(ctx, "Backup to return to standby", func(ctx context.Context) (bool, error) {
+	if err := o.poll(ctx, "Primary to be released to the Backup", func(ctx context.Context) (bool, error) {
 		out, err := o.showRD(ctx, role)
 		if err != nil {
 			return false, err
 		}
-		return activity(out, activityLocalActive) == 0, nil
+		return field(out, labelConfigStatus) == "Enabled-Released" &&
+			field(out, labelRedundancyStatus) == "Down" &&
+			activity(out, activityMateActive) == 1, nil
 	}); err != nil {
 		return err
 	}
-	o.logf("[Info] Backup node returned to standby successfully.")
+	o.progress().Info("Primary node is released. Backup node is active.")
+
+	if _, err := o.RunCLI(ctx, role, "no-release", noReleaseActivityScript()); err != nil {
+		return err
+	}
+	if err := o.poll(ctx, "Primary to be un-released", func(ctx context.Context) (bool, error) {
+		out, err := o.showRD(ctx, role)
+		if err != nil {
+			return false, err
+		}
+		return rdEnabledUp(out) && activity(out, activityMateActive) == 1, nil
+	}); err != nil {
+		return err
+	}
+	o.progress().Info("Primary node is un-released. Backup node is active.")
 	return nil
 }
 
@@ -229,9 +241,13 @@ func (o *Ops) hostname() (string, error) {
 }
 
 // hostMatches reports whether host names the configured node, tolerating an FQDN
-// on either side (pri.example.com matches pri and vice versa).
+// on either side (pri.example.com matches pri and vice versa) and comparing
+// case-insensitively throughout -- DNS names are case-insensitive, so a
+// case-sensitive compare here would be a spurious failure rather than a
+// meaningful distinction. Both the full-string and short-name compares fold
+// case, since either side of either compare can carry an FQDN.
 func hostMatches(host, name string) bool {
-	return host == name || shortHost(host) == shortHost(name)
+	return strings.EqualFold(host, name) || strings.EqualFold(shortHost(host), shortHost(name))
 }
 
 // shortHost is the label before the first dot of an FQDN (the host itself if none).

@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"solace/internal/abbrev"
 )
 
 // Platforms lists every platform, in the order they are offered to a user and
@@ -13,16 +15,39 @@ import (
 // hand-written list is what silently goes stale when a platform is added.
 func Platforms() []Platform { return []Platform{K8s, Docker, Podman} }
 
-// platformAbbrev maps the short --platform spellings onto the canonical names.
-// They are abbreviations of a current name, not retired names kept alive: the
-// canonical word is still the only thing the env file, the error messages and
-// the completions use, so the short form saves typing without putting a second
+// platformShort names the short --platform spelling for each platform. They are
+// abbreviations of a current name, not retired names kept alive: the canonical
+// word is still the only thing the env file, the error messages and the
+// completions use, so the short form saves typing without putting a second
 // spelling of the schema into circulation.
-var platformAbbrev = map[string]Platform{
-	"kube": K8s,
-	"dk":   Docker,
-	"pm":   Podman,
+var platformShort = map[Platform]string{
+	K8s:    "kube",
+	Docker: "dk",
+	Podman: "pm",
 }
+
+var platformAbbrev = newPlatforms()
+
+// newPlatforms builds the platform set by walking Platforms(), so a platform
+// added there is in the set -- with no short form until one is declared --
+// rather than quietly missing from it.
+func newPlatforms() *abbrev.Set {
+	entries := make([]abbrev.Entry, 0, len(Platforms()))
+	for _, p := range Platforms() {
+		e := abbrev.Entry{Canonical: string(p)}
+		if s, ok := platformShort[p]; ok {
+			e.Short = []string{s}
+		}
+		if p == K8s {
+			e.Note = "`k8s` and `k8` are refused: the section key is the product's own word"
+		}
+		entries = append(entries, e)
+	}
+	return abbrev.New("platform", entries)
+}
+
+// PlatformAbbrev returns the approved --platform spellings, for the reference.
+func PlatformAbbrev() *abbrev.Set { return platformAbbrev }
 
 // ParsePlatform normalizes a --platform value. An empty string returns an empty
 // platform and no error -- it means "not specified", and what that implies is
@@ -31,20 +56,17 @@ var platformAbbrev = map[string]Platform{
 //
 // The error names the canonical spellings first, since those are what the env
 // file's own section keys are, with each abbreviation beside the word it stands
-// for rather than as a separate list to cross-reference.
+// for rather than as a separate list to cross-reference. It is rendered from the
+// set, so it cannot describe a spelling this function would reject.
 func ParsePlatform(s string) (Platform, error) {
 	if s == "" {
 		return "", nil
 	}
-	if p, ok := platformAbbrev[s]; ok {
-		return p, nil
+	name, ok := platformAbbrev.Expand(s)
+	if !ok {
+		return "", fmt.Errorf("invalid platform %q: expected %s", s, platformAbbrev.List())
 	}
-	for _, p := range Platforms() {
-		if Platform(s) == p {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf("invalid platform %q: expected kubernetes (kube), docker (dk) or podman (pm)", s)
+	return Platform(name), nil
 }
 
 // DetectPlatforms reports which platform sections the env file at path declares,

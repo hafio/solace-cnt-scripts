@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"solace/internal/config"
 )
@@ -15,7 +16,7 @@ import (
 // CLI, porting the CLI branch of 051 (the $SOLBK_SVR_SECRET k8s-secret fast path
 // is handled by the k8s platform, not here). It concatenates key + cert + CAs
 // into the tls-<dt>.crt.key file the broker loads. The private key rides Upload's
-// stdin, so it never appears in an argv or --dry-run echo (§3).
+// stdin, so it never appears in an argv or an echoed command (§3).
 func (o *Ops) ServerCert(ctx context.Context, dt string, roles ...config.Role) error {
 	if o.Cfg.TLS.Cert == "" || o.Cfg.TLS.CertKey == "" {
 		return fmt.Errorf("tls.cert and tls.certKey must both be set to load a server certificate")
@@ -99,7 +100,7 @@ func (o *Ops) DisableDefaultUsers(ctx context.Context, role config.Role) error {
 	}
 	vpns := parseVPNNames(string(list))
 	if len(vpns) == 0 {
-		o.logf("[WARN] no message-VPNs parsed from broker output -- nothing to disable.")
+		o.progress().Warn("no message-VPNs parsed from broker output -- nothing to disable.")
 		return nil
 	}
 	out, err := o.RunCLI(ctx, role, "disable-default-usernames", disableDefaultUsersScript(vpns))
@@ -188,14 +189,18 @@ func (o *Ops) AdditionalUsers(ctx context.Context, role config.Role, users []con
 			"withheld because it repeats the passwords. A user that already exists is the likeliest "+
 			"cause -- delete it on the broker, or drop it from admin.additionalUsers", role)
 	}
-	o.logf("[ OK ] created %d additional CLI user(s).", len(users))
+	o.progress().OK("created %d additional CLI user(s).", len(users))
 	return nil
 }
 
 // ExecCLI uploads a local Solace CLI script and runs it in the node, porting 059.
 // The remote name is the file's basename, validated to keep it out of shell/CLI
-// injection range. It warns (does not fail) when the output looks like an error,
-// matching the bash behavior.
+// injection range. A Solace CLI script is a sequence of independent commands, so a
+// line the broker rejects does not stop the rest from running -- the whole script
+// still executes and its output is still shown. But unlike the bash original, the
+// run is no longer reported as a success once it has: when the output shows any
+// line was rejected, ExecCLI fails at the end so a caller that only checks the exit
+// code can tell a clean run from a half-applied one.
 func (o *Ops) ExecCLI(ctx context.Context, role config.Role, localPath string) error {
 	name := filepath.Base(localPath)
 	if err := validName("cli script filename", name); err != nil {
@@ -210,10 +215,31 @@ func (o *Ops) ExecCLI(ctx context.Context, role config.Role, localPath string) e
 	if err != nil {
 		return fmt.Errorf("run cli script %q: %w", name, err)
 	}
-	if containsAnyFold(string(out), "invalid", "error", "busy") {
-		o.logf("[WARN] errors detected in CLI output.")
+	if n := countAnyFold(string(out), "invalid", "error", "busy"); n > 0 {
+		o.progress().Warn("errors detected in CLI output.")
+		// The line text itself is withheld -- like additionalUsersScript's output, a
+		// CLI transcript can carry passwords -- so the caller gets a count, not a quote.
+		return fmt.Errorf("cli script %q: the broker reported errors on %d line(s); the rest of the "+
+			"script still ran -- see the output above", name, n)
 	}
 	return nil
+}
+
+// countAnyFold counts output lines containing any needle, case-insensitively, the
+// per-line form of containsAnyFold's whole-output scan -- used here to size the
+// ExecCLI failure without echoing the offending lines themselves.
+func countAnyFold(output string, needles ...string) int {
+	n := 0
+	for _, raw := range strings.Split(output, "\n") {
+		line := strings.ToLower(strings.TrimRight(raw, "\r"))
+		for _, needle := range needles {
+			if strings.Contains(line, strings.ToLower(needle)) {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }
 
 // RemoveDomainCerts deletes each domain certificate authority from the node,

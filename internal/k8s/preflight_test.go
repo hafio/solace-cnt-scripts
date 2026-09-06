@@ -65,20 +65,20 @@ func TestPreflightRefusesAnUnreadableAnswer(t *testing.T) {
 	}
 }
 
-// TestPreflightIsPreviewableUnderDryRun: --dry-run echoes the probe and skips the
+// TestPreflightIsPreviewableUnderEcho: the Echo runner records the probe and skips the
 // assertion, so a preview needs no cluster. This is why there is no skip flag -- the
 // one legitimate reason to skip already has one.
-func TestPreflightIsPreviewableUnderDryRun(t *testing.T) {
+func TestPreflightIsPreviewableUnderEcho(t *testing.T) {
 	var out strings.Builder
 	c := NewCluster(engine.Echo{W: &out}, loadK8s(t), nil, &out)
 	if err := c.Preflight(context.Background(), "create", brokerResource); err != nil {
-		t.Fatalf("Preflight under --dry-run must not fail: %v", err)
+		t.Fatalf("Preflight under the Echo runner must not fail: %v", err)
 	}
 	got := out.String()
 	if !strings.Contains(got, "auth can-i create "+brokerResource) {
 		t.Errorf("dry-run should still show the probe it would run:\n%s", got)
 	}
-	if !strings.Contains(got, "skipped (dry-run)") {
+	if !strings.Contains(got, "skipped (preview)") {
 		t.Errorf("dry-run should say the assertion was skipped:\n%s", got)
 	}
 }

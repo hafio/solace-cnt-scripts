@@ -165,20 +165,20 @@ func TestPreflightHintIsPlatformShaped(t *testing.T) {
 	}
 }
 
-// TestPreflightIsPreviewableUnderDryRun: --dry-run must stay usable with no engine
+// TestPreflightIsPreviewableUnderDryRun: previewing must stay usable with no engine
 // installed at all, so the probe is echoed and its assertion skipped -- the same
 // arrangement checkDNS and checkPodmanEUID already use. This is why there is no
 // skip flag: the one legitimate reason to skip already has one.
 func TestPreflightIsPreviewableUnderDryRun(t *testing.T) {
 	m, buf := newEchoMgr(ctrCfg(config.Docker, "no"), config.Docker)
 	if err := m.Preflight(context.Background()); err != nil {
-		t.Fatalf("Preflight under --dry-run must not fail: %v", err)
+		t.Fatalf("Preflight under the Echo runner must not fail: %v", err)
 	}
 	out := buf.String()
 	if !strings.Contains(out, "+ docker info") {
 		t.Errorf("dry-run should still show the probe it would run:\n%s", out)
 	}
-	if !strings.Contains(out, "skipped (dry-run)") {
+	if !strings.Contains(out, "skipped (preview)") {
 		t.Errorf("dry-run should say the assertion was skipped:\n%s", out)
 	}
 }

@@ -15,7 +15,7 @@ import (
 // matching the shape of `kubectl create secret ... -o yaml`. Building the manifest
 // in Go and applying it on stdin (`apply -f -`) is behavior-equivalent to the bash
 // `create secret --from-literal=...` form (012) but keeps every secret value off
-// the argv and out of the --dry-run echo, which the bash form leaked (012:26,36,39,
+// the argv and out of an echoed command, which the bash form leaked (012:26,36,39,
 // 43). §3 hardening.
 type secretManifest struct {
 	name      string
@@ -80,13 +80,13 @@ func AdminSecret(cfg *config.Config) ([]byte, error) {
 // certificate, porting 012:39 / 051:32: tls.crt is the certificate followed by any
 // trusted CAs (the bash `--cert <(cat cert cas)`), tls.key is the private key. Both
 // files are read from disk here; the manifest is applied on stdin so the key never
-// reaches an argv or the --dry-run echo (§3).
+// reaches an argv or an echoed command (§3).
 func TLSSecret(cfg *config.Config) ([]byte, error) {
 	if cfg.TLS.Cert == "" || cfg.TLS.CertKey == "" {
 		return nil, fmt.Errorf("tls.cert and tls.certKey must both be set to build the TLS secret")
 	}
-	if cfg.TLS.ServerSecret == "" {
-		return nil, fmt.Errorf("tls.serverSecret (the secret name) must be set")
+	if cfg.K8s.TLSServerSecret == "" {
+		return nil, fmt.Errorf("kubernetes.tlsServerSecret (the secret name) must be set")
 	}
 	crt, err := os.ReadFile(cfg.TLS.Cert)
 	if err != nil {
@@ -104,7 +104,7 @@ func TLSSecret(cfg *config.Config) ([]byte, error) {
 		return nil, fmt.Errorf("read tls.certKey %q: %w", cfg.TLS.CertKey, err)
 	}
 	return secretManifest{
-		name:      cfg.TLS.ServerSecret,
+		name:      cfg.K8s.TLSServerSecret,
 		namespace: cfg.K8s.Namespace,
 		typ:       "kubernetes.io/tls",
 		data: map[string][]byte{
@@ -157,10 +157,10 @@ func dockerRegistrySecret(name, ns string, cfg *config.Config) ([]byte, error) {
 	}.render(), nil
 }
 
-// DockerRegistrySecret builds the broker image-pull secret (name = image.pullSecret)
-// in the broker namespace.
+// DockerRegistrySecret builds the broker image-pull secret (name =
+// kubernetes.imagePullSecret) in the broker namespace.
 func DockerRegistrySecret(cfg *config.Config) ([]byte, error) {
-	return dockerRegistrySecret(cfg.Image.PullSecret, cfg.K8s.Namespace, cfg)
+	return dockerRegistrySecret(cfg.K8s.ImagePullSecret, cfg.K8s.Namespace, cfg)
 }
 
 // operatorRegcred builds the operator's image-pull secret under the fixed name

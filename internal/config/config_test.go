@@ -116,9 +116,11 @@ func TestParseRole(t *testing.T) {
 	}
 }
 
-// TestRoleNames pins the completion suggestion list to the parser: RoleNames is a
-// hand-written slice sitting beside a hand-written switch, so a role added to one
-// and not the other has to fail here rather than at a user's TAB press.
+// TestRoleNames pins the completion suggestion list to the parser. Both now read
+// the same abbrev set, so they cannot disagree about spelling -- what is left to
+// check is coverage: a Role constant that never made it into roleTable would be
+// unreachable through the CLI, and this is where that fails rather than at a
+// user's TAB press.
 func TestRoleNames(t *testing.T) {
 	names := RoleNames()
 	got := map[Role]bool{}
@@ -136,6 +138,44 @@ func TestRoleNames(t *testing.T) {
 	for _, want := range []Role{Primary, Backup, Monitor} {
 		if !got[want] {
 			t.Errorf("RoleNames() = %v, missing a name for role %q", names, want)
+		}
+	}
+}
+
+// TestRoleAbbrevIsTheRoleValue pins the reason roles need no reverse table: the
+// approved short form IS the Role constant, so `p` cannot come to mean anything
+// other than Primary. A role whose entry carried some other letter would give the
+// CLI a spelling the pod-name suffixes do not use.
+func TestRoleAbbrevIsTheRoleValue(t *testing.T) {
+	set := RoleAbbrev()
+	for _, name := range set.Names() {
+		short := set.Short(name)
+		if len(short) != 1 {
+			t.Errorf("role %q has short forms %v, want exactly one", name, short)
+			continue
+		}
+		r, err := ParseRole(name)
+		if err != nil {
+			t.Errorf("ParseRole(%q) from the set's own name: %v", name, err)
+			continue
+		}
+		if short[0] != r.Letter() {
+			t.Errorf("role %q abbreviates to %q, but its Role value is %q", name, short[0], r.Letter())
+		}
+	}
+}
+
+// TestRoleErrorTeachesBothSpellings pins that the rejection is rendered from the
+// set rather than typed beside it. The old message was a hand-written list, which
+// is the thing that outlives the table it describes.
+func TestRoleErrorTeachesBothSpellings(t *testing.T) {
+	_, err := ParseRole("bogus")
+	if err == nil {
+		t.Fatal("ParseRole(\"bogus\") should fail")
+	}
+	for _, want := range append(RoleAbbrev().Names(), RoleAbbrev().Shorts()...) {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should name %q", err, want)
 		}
 	}
 }
@@ -308,15 +348,15 @@ func TestApplyDefaultsK8sTLS(t *testing.T) {
 	c := &Config{}
 	c.ApplyDefaults(K8s)
 	if c.TLS.Cert != "" || c.TLS.CertKey != "" {
-		t.Errorf("TLS defaulted without ServerSecret: cert=%q key=%q", c.TLS.Cert, c.TLS.CertKey)
+		t.Errorf("TLS defaulted without TLSServerSecret: cert=%q key=%q", c.TLS.Cert, c.TLS.CertKey)
 	}
 
 	// With a server secret, cert/key default.
 	c2 := &Config{}
-	c2.TLS.ServerSecret = "solace-tls"
+	c2.K8s.TLSServerSecret = "solace-tls"
 	c2.ApplyDefaults(K8s)
 	if c2.TLS.Cert != "certs/tls.crt" || c2.TLS.CertKey != "certs/tls.key" {
-		t.Errorf("TLS defaults with ServerSecret: cert=%q key=%q", c2.TLS.Cert, c2.TLS.CertKey)
+		t.Errorf("TLS defaults with TLSServerSecret: cert=%q key=%q", c2.TLS.Cert, c2.TLS.CertKey)
 	}
 }
 
@@ -860,15 +900,111 @@ func TestValidateK8sKeyValueEntries(t *testing.T) {
 func TestValidatePullPolicy(t *testing.T) {
 	for _, ok := range []string{"", "Always", "IfNotPresent", "Never"} {
 		c := validK8sConfig()
-		c.Image.PullPolicy = ok
+		c.K8s.ImagePullPolicy = ok
 		if err := c.Validate(K8s); err != nil {
 			t.Errorf("pullPolicy %q must be accepted: %v", ok, err)
 		}
 	}
 	c := validK8sConfig()
-	c.Image.PullPolicy = "always" // k8s is case-sensitive here
-	if err := c.Validate(K8s); err == nil || !strings.Contains(err.Error(), "image.pullPolicy must be") {
+	c.K8s.ImagePullPolicy = "always" // k8s is case-sensitive here
+	if err := c.Validate(K8s); err == nil || !strings.Contains(err.Error(), "kubernetes.imagePullPolicy must be") {
 		t.Errorf("expected a pullPolicy enum error, got: %v", err)
+	}
+}
+
+// TestValidateK8sDNSLabels covers H4: kubernetes.namespace, kubernetes.name, the
+// three secret names, and operator.namespace reach a hand-built Secret/namespace
+// manifest by string concatenation (k8s/secrets.go, k8s/prep.go) or the CR
+// (render/render.go), so a malformed value must be rejected as a Kubernetes
+// DNS-1123 label -- naming the field -- rather than splicing an extra document
+// or a broken mapping into the applied YAML.
+func TestValidateK8sDNSLabels(t *testing.T) {
+	type field struct {
+		field string
+		set   func(*Config, string)
+	}
+	// A namespace must be a single LABEL, and so must kubernetes.name: it is
+	// suffixed into the StatefulSet/Service/pod names the operator derives, and a
+	// Service name cannot carry a dot.
+	labelFields := []field{
+		{"kubernetes.namespace", func(c *Config, v string) { c.K8s.Namespace = v }},
+		{"kubernetes.name", func(c *Config, v string) { c.K8s.Name = v }},
+		{"kubernetes.operator.namespace", func(c *Config, v string) { c.K8s.Operator.Namespace = v }},
+	}
+	// Secret names are the looser SUBDOMAIN rule, which is what Kubernetes really
+	// enforces on them. Holding these to the label rule would reject
+	// "prod.solace-admin-secret" -- accepted by kubectl today -- for no benefit.
+	subdomainFields := []field{
+		{"kubernetes.adminSecret", func(c *Config, v string) { c.K8s.AdminSecret = v }},
+		{"kubernetes.tlsServerSecret", func(c *Config, v string) { c.K8s.TLSServerSecret = v }},
+		{"kubernetes.imagePullSecret", func(c *Config, v string) { c.K8s.ImagePullSecret = v }},
+	}
+	type badCase struct{ name, value string }
+	// Rejected by BOTH rules -- these are the shapes that would splice an extra
+	// document or a broken mapping into the hand-built YAML.
+	shared := []badCase{
+		{"uppercase", "Solace-NS"},
+		{"leading hyphen", "-solace"},
+		{"newline plus doc separator", "solace\n---"},
+		{"colon", "sol:ace"},
+		{"space", "sol ace"},
+	}
+
+	check := func(t *testing.T, f field, good string, bad []badCase) {
+		t.Helper()
+		t.Run(f.field+"/valid", func(t *testing.T) {
+			c := validK8sConfig()
+			f.set(c, good)
+			if err := c.Validate(K8s); err != nil {
+				t.Errorf("%q must be accepted for %s: %v", good, f.field, err)
+			}
+		})
+		for _, bc := range bad {
+			t.Run(f.field+"/"+bc.name, func(t *testing.T) {
+				c := validK8sConfig()
+				f.set(c, bc.value)
+				err := c.Validate(K8s)
+				if err == nil || !strings.Contains(err.Error(), f.field) {
+					t.Errorf("expected a %s error naming the field for %q, got: %v", f.field, bc.value, err)
+				}
+			})
+		}
+	}
+
+	for _, f := range labelFields {
+		check(t, f, "good-value", append(append([]badCase{}, shared...),
+			badCase{"dot", "sol.ace"},
+			badCase{"64 characters", strings.Repeat("a", 64)},
+		))
+	}
+	for _, f := range subdomainFields {
+		// The dot moves to the VALID side here: that is the whole difference
+		// between the two rules, so it is pinned rather than left implied.
+		check(t, f, "prod.solace-admin-secret", append(append([]badCase{}, shared...),
+			badCase{"leading dot", ".solace"},
+			badCase{"double dot", "sol..ace"},
+			badCase{"254 characters", strings.Repeat("a", 254)},
+		))
+		t.Run(f.field+"/63-plus characters are fine for a subdomain", func(t *testing.T) {
+			c := validK8sConfig()
+			f.set(c, strings.Repeat("a", 64))
+			if err := c.Validate(K8s); err != nil {
+				t.Errorf("a 64-character secret name is legal as a subdomain: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateK8sOptionalSecretNamesStayOptional pins the rule-8 regression the
+// H4 hardening could have introduced: the three secret names and
+// operator.namespace were never mandatory, and adding the DNS-1123 shape check
+// must not start requiring them -- every existing env file that leaves one
+// blank must keep loading.
+func TestValidateK8sOptionalSecretNamesStayOptional(t *testing.T) {
+	c := validK8sConfig()
+	c.K8s.AdminSecret, c.K8s.TLSServerSecret, c.K8s.ImagePullSecret, c.K8s.Operator.Namespace = "", "", "", ""
+	if err := c.Validate(K8s); err != nil {
+		t.Errorf("empty optional secret-name fields must still validate: %v", err)
 	}
 }
 
@@ -943,6 +1079,62 @@ func TestDefaultK8sPortsMatchesOperator(t *testing.T) {
 			t.Errorf("duplicate port name %q in defaultK8sPorts", name)
 		}
 		seen[name] = true
+	}
+}
+
+// TestValidateK8sPorts covers M11: kubernetes.ports entries reach
+// render.parsePort, which turns "name=container[:service][/proto]" into the
+// CR's unquoted containerPort/servicePort/protocol/name fields. Every shape
+// parsePort accepts must validate here too; the shapes it silently mishandles
+// (no '=', a non-numeric or out-of-range port, a bad protocol, a duplicate name
+// or container port) must be rejected naming the offending entry instead of
+// reaching the CR malformed.
+func TestValidateK8sPorts(t *testing.T) {
+	// Every shape parsePort accepts (render.go's parsePort / cut): name=container
+	// (service defaults to container, proto defaults TCP), name=container/proto,
+	// name=container:service, and name=container:service/proto -- proto matched
+	// case-insensitively, since parsePort never folds case itself.
+	valid := []string{
+		"tcp-web=8008",
+		"tls-web=1443/UDP",
+		"tcp-web=8008:9008",
+		"tcp-web=8008:9008/tcp",
+	}
+	for _, entry := range valid {
+		t.Run("valid/"+entry, func(t *testing.T) {
+			c := validK8sConfig()
+			c.K8s.Ports = []string{entry}
+			if err := c.Validate(K8s); err != nil {
+				t.Errorf("a shape parsePort accepts must validate (%q): %v", entry, err)
+			}
+		})
+	}
+
+	// In order: the "name:port" typo (M11's motivating case, no '='), port 0,
+	// port 65536, a non-numeric port, a bad protocol, a port name over the
+	// 15-character cap, a duplicate port name, and a duplicate container port.
+	bad := []struct {
+		entries []string
+		want    string
+	}{
+		{[]string{"tcp-web:8008"}, "must have the form name=port"},
+		{[]string{"tcp-web=0"}, "kubernetes.ports[0]"},
+		{[]string{"tcp-web=65536"}, "kubernetes.ports[0]"},
+		{[]string{"tcp-web=abc"}, "must be numeric"},
+		{[]string{"tcp-web=8008/xyz"}, "must be TCP or UDP"},
+		{[]string{"this-name-is-too-long=8008"}, "at most 15 characters"},
+		{[]string{"tcp-web=8008", "tcp-web=9008"}, "names must be unique"},
+		{[]string{"tcp-web=8008", "tls-web=8008"}, "ports must be unique"},
+	}
+	for _, tc := range bad {
+		t.Run(strings.Join(tc.entries, ","), func(t *testing.T) {
+			c := validK8sConfig()
+			c.K8s.Ports = tc.entries
+			err := c.Validate(K8s)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("entries %v: error = %v, want it to mention %q", tc.entries, err, tc.want)
+			}
+		})
 	}
 }
 
@@ -1463,5 +1655,66 @@ func TestValidateAdditionalUserClashesWithAdminUser(t *testing.T) {
 	err := c.Validate(Docker)
 	if err == nil || !strings.Contains(err.Error(), "built-in user") {
 		t.Errorf("error = %v, want the admin-user clash to be refused", err)
+	}
+}
+
+// controlCharCases are the control characters M12 rejects: a newline and a tab
+// (both plausible mistakes -- a value pasted with trailing whitespace, or a
+// multi-line paste) plus a NUL (the character isCtrl/IsControl exists to catch
+// at all). curlConfigLine (broker/semp.go) escapes a quote and a backslash but
+// not these, so any of them breaks a credential out of its curl-config line.
+var controlCharCases = []struct{ name, value string }{
+	{"newline", "sec\nret"},
+	{"tab", "sec\tret"},
+	{"nul", "sec\x00ret"},
+}
+
+// TestValidateCredentialControlChars covers M12: admin.pass, admin.monitorPass,
+// nodes.psk (the redundancy PSK) and tls.certPassphrase are rejected outright
+// on a control character rather than escaped harder, and the error must never
+// echo the secret value.
+func TestValidateCredentialControlChars(t *testing.T) {
+	fields := []struct {
+		field string
+		set   func(*Config, string)
+	}{
+		{"admin.pass", func(c *Config, v string) { c.Admin.Pass = v }},
+		{"admin.monitorPass", func(c *Config, v string) { c.Admin.MonitorPass = v }},
+		{"nodes.psk", func(c *Config, v string) { c.Nodes.PSK = v }},
+		{"tls.certPassphrase", func(c *Config, v string) { c.TLS.CertPassphrase = v }},
+	}
+	for _, f := range fields {
+		for _, bc := range controlCharCases {
+			t.Run(f.field+"/"+bc.name, func(t *testing.T) {
+				c := validK8sConfig()
+				f.set(c, bc.value)
+				err := c.Validate(K8s)
+				if err == nil || !strings.Contains(err.Error(), f.field) {
+					t.Errorf("expected a %s control-character error, got: %v", f.field, err)
+				}
+				if err != nil && strings.Contains(err.Error(), bc.value) {
+					t.Errorf("the error must not echo the secret value: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// TestValidateAdditionalUserControlChars covers the same M12 rule for
+// admin.additionalUsers[].password, which the k8s path also puts on a broker
+// CLI line (broker/scripts.go's `create username ... password ...`).
+func TestValidateAdditionalUserControlChars(t *testing.T) {
+	for _, bc := range controlCharCases {
+		t.Run(bc.name, func(t *testing.T) {
+			c := validK8sConfig()
+			c.Admin.AdditionalUsers = []AdditionalUser{{Username: "appuser", AccessLevel: "read-only", Password: bc.value}}
+			err := c.Validate(K8s)
+			if err == nil || !strings.Contains(err.Error(), "admin.additionalUsers[0].password") {
+				t.Errorf("expected an additionalUsers[0].password control-character error, got: %v", err)
+			}
+			if err != nil && strings.Contains(err.Error(), bc.value) {
+				t.Errorf("the error must not echo the secret value: %v", err)
+			}
+		})
 	}
 }

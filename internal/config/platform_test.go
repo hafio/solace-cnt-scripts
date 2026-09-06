@@ -75,6 +75,28 @@ func TestParsePlatformErrorTeachesCanonical(t *testing.T) {
 			t.Errorf("error %q should name %q", err, want)
 		}
 	}
+	// The sentence is the set's own rendering, so it cannot describe a spelling
+	// ParsePlatform would reject -- the failure mode of the hand-written list it
+	// replaced, which sat directly beside the map and outlived it.
+	if want := PlatformAbbrev().List(); !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q should be rendered from the set (%q)", err, want)
+	}
+}
+
+// TestEveryPlatformHasExactlyOneShortForm pins the set against Platforms(). The
+// set is built by walking that list, so a platform added there arrives here with
+// no short form rather than silently missing from --platform's vocabulary, and
+// this is what says the entry is still incomplete.
+func TestEveryPlatformHasExactlyOneShortForm(t *testing.T) {
+	set := PlatformAbbrev()
+	if got, want := len(set.Names()), len(Platforms()); got != want {
+		t.Errorf("platform set has %d entries, want %d -- one per platform", got, want)
+	}
+	for _, p := range Platforms() {
+		if got := set.Short(string(p)); len(got) != 1 {
+			t.Errorf("platform %q has short forms %v, want exactly one", p, got)
+		}
+	}
 }
 
 // writeEnv writes body to a temp file and returns its path.

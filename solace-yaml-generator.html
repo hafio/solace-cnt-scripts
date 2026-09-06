@@ -950,7 +950,7 @@ function genEnv(){
   y+='\n';
 
   y+='image:\n'+kv('repo',V('i-bkimg'),'  ')+kv('tag',V('i-bktag'),'  ')+kv('registry',V('i-repo'),'  ')
-    +(psOn?kv('pullSecret',V('i-pullsecret'),'  ')+kv('user',V('i-imguser'),'  ')+kv('pass',V('i-imgpass'),'  '):'');
+    +(psOn?kv('user',V('i-imguser'),'  ')+kv('pass',V('i-imgpass'),'  '):'');
 
   const users=adminUsers();
   // additionalUsers is a list of mappings, so it is built here rather than through
@@ -965,8 +965,10 @@ function genEnv(){
   if(skipped)y+=`  # ${skipped} user entr${skipped===1?'y':'ies'} skipped: write user=password[=accessLevel], where the\n`
     +`  # name matches [A-Za-z0-9._-]+ (not admin/monitor) and the level is one of ${accessLevels.join('|')}\n`;
 
+  // The Secret NAMES (tlsServerSecret, imagePullSecret) are Kubernetes-only and
+  // land in the kubernetes: section below; tls: carries only the cert material.
   const cas=L('i-tlscas'),tlsSec=tlsOn?V('i-tlssecret'):'';
-  const tlsBody=kv('cert',V('i-tlscert'),'  ')+kv('certKey',V('i-tlskey'),'  ')+klist('cas',cas,'  ')+kv('serverSecret',tlsSec,'  ');
+  const tlsBody=kv('cert',V('i-tlscert'),'  ')+kv('certKey',V('i-tlskey'),'  ')+klist('cas',cas,'  ');
   if(tlsBody)y+='\n'+blk('tls',tlsBody,'');
 
   y+='\nscaling:\n'
@@ -996,6 +998,8 @@ function genEnv(){
   // ── kubernetes ──
   y+='\nkubernetes:\n'+kv('runtime',V('i-kubectl'),'  ')+kv('name',V('i-bkname'),'  ')+kv('namespace',V('i-bkns'),'  ')
     +kv('adminSecret',V('i-admsecret'),'  ')
+    +kv('tlsServerSecret',tlsSec,'  ')
+    +(psOn?kv('imagePullSecret',V('i-pullsecret'),'  '):'')
     +kv('updateStrategy',V('i-updatestrategy'),'  ')+kv('serviceAccount',V('i-svcaccount'),'  ');
   y+=blk('storage',kv('class',V('i-sc'),'    ')+kv('msgNode',V('i-stmsg'),'    ')+kv('monNode',V('i-stmon'),'    '),'  ');
   // No cpu key: it is fixed by the scaling tier, and the loader rejects one.

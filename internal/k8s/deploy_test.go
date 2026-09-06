@@ -3,6 +3,7 @@ package k8s
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -192,18 +193,76 @@ func TestDeleteBrokerPurgeStandalone(t *testing.T) {
 	}
 }
 
-// TestDeleteBrokerPurgeSwallowsPVCError: a failing PVC delete is best-effort -- it is
-// logged as a WARN but must not abort teardown (deploy.go). runErr hits the Run-backed
-// PVC deletes; the CR delete rides RunInput and still succeeds.
+// TestDeleteBrokerPurgeSwallowsPVCError: a failing PVC delete is real (an RBAC
+// denial or a stuck finalizer survives --ignore-not-found) and must not be reported
+// as a clean teardown (deploy.go). runErr hits the Run-backed PVC deletes; the CR
+// delete rides RunInput and still succeeds. Every role is still attempted -- one
+// role's failure must not stop the others from being deleted -- and the error
+// names every PVC that survived.
 func TestDeleteBrokerPurgeSwallowsPVCError(t *testing.T) {
 	cfg := loadK8s(t) // redundancy: yes
 	rr := &recRunner{runErr: errFake}
-	c := NewCluster(rr, cfg, nil, nil)
-	if err := c.DeleteBroker(context.Background(), true); err != nil {
-		t.Fatalf("DeleteBroker must swallow PVC-delete failures, got: %v", err)
+	log, buf := logBuf()
+	c := NewCluster(rr, cfg, log, nil)
+	err := c.DeleteBroker(context.Background(), true)
+	if err == nil {
+		t.Fatal("DeleteBroker must fail when a PVC delete fails, not report success")
+	}
+	for _, want := range []string{
+		"data-dev-broker-pubsubplus-p-0",
+		"data-dev-broker-pubsubplus-b-0",
+		"data-dev-broker-pubsubplus-m-0",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("DeleteBroker error = %v, want it to name %s", err, want)
+		}
+	}
+	if !errors.Is(err, errFake) {
+		t.Errorf("DeleteBroker error = %v, want it to wrap the underlying cause", err)
 	}
 	if calls := rr.afterPreflight(t, "delete", brokerResource); len(calls) != 4 {
 		t.Fatalf("all PVC deletes should still be attempted; got %d calls after the probe, want 4", len(calls))
+	}
+	if strings.Contains(buf.String(), "PVCs deleted") {
+		t.Errorf("a failed PVC delete must not log the success line:\n%s", buf.String())
+	}
+}
+
+// TestDeleteBrokerPurgeAllSucceed: when every PVC delete succeeds, DeleteBroker
+// issues one delete per HA role and returns nil with the success line logged.
+func TestDeleteBrokerPurgeAllSucceed(t *testing.T) {
+	cfg := loadK8s(t) // redundancy: yes -> 3 HA roles
+	rr := &recRunner{}
+	log, buf := logBuf()
+	c := NewCluster(rr, cfg, log, nil)
+	if err := c.DeleteBroker(context.Background(), true); err != nil {
+		t.Fatalf("DeleteBroker: %v", err)
+	}
+	calls := rr.afterPreflight(t, "delete", brokerResource)
+	if len(calls) != 4 {
+		t.Fatalf("DeleteBroker(purge, all succeed) made %d calls after the probe, want 4 (CR + 3 PVCs)", len(calls))
+	}
+	if !strings.Contains(buf.String(), "PVCs deleted") {
+		t.Errorf("all PVC deletes succeeding should log the success line:\n%s", buf.String())
+	}
+}
+
+// TestDeleteBrokerNoPurgeIssuesNoPVCDeletes: purge=false must not touch PVCs at
+// all -- only the CR delete runs, and the kept-PVCs line is logged.
+func TestDeleteBrokerNoPurgeIssuesNoPVCDeletes(t *testing.T) {
+	cfg := loadK8s(t)
+	rr := &recRunner{}
+	log, buf := logBuf()
+	c := NewCluster(rr, cfg, log, nil)
+	if err := c.DeleteBroker(context.Background(), false); err != nil {
+		t.Fatalf("DeleteBroker: %v", err)
+	}
+	calls := rr.afterPreflight(t, "delete", brokerResource)
+	if len(calls) != 1 {
+		t.Fatalf("DeleteBroker(purge=false) made %d calls after the probe, want 1 (CR delete only, no PVC deletes)", len(calls))
+	}
+	if !strings.Contains(buf.String(), "PVCs kept") {
+		t.Errorf("DeleteBroker(purge=false) should log that PVCs were kept:\n%s", buf.String())
 	}
 }
 

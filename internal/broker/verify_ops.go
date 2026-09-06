@@ -31,7 +31,7 @@ const (
 
 // Login tests a SEMP login against the node, porting 060. The credentials ride a
 // curl config on stdin (curl -K -), so the password never appears in an argv or
-// a --dry-run echo (§3). It reports success and writes an outcome line to Out.
+// an echoed command (§3). It reports success and writes an outcome line to Out.
 func (o *Ops) Login(ctx context.Context, role config.Role, user, pass string) (bool, error) {
 	cfg := fmt.Sprintf("user = %q\n", user+":"+pass)
 	out, err := o.T.OutputInput(ctx, role, []byte(cfg),
@@ -42,7 +42,7 @@ func (o *Ops) Login(ctx context.Context, role config.Role, user, pass string) (b
 	lines := httpStatusLines(string(out))
 	for _, l := range lines {
 		if isHTTP2xx(l) {
-			fmt.Fprintln(o.out(), "Login OK")
+			o.report().OK("Login")
 			return true, nil
 		}
 	}
@@ -50,7 +50,7 @@ func (o *Ops) Login(ctx context.Context, role config.Role, user, pass string) (b
 	if len(lines) > 0 {
 		status = lines[len(lines)-1]
 	}
-	fmt.Fprintf(o.out(), "Login failed. Reason: %s\n", status)
+	o.report().Fail("Login: %s", status)
 	return false, nil
 }
 
@@ -109,7 +109,7 @@ func (o *Ops) Redundancy(ctx context.Context) error {
 	// If the Primary is active, walk it through release -> un-release so the
 	// Backup takes over and hands back cleanly.
 	if activity(pri, activityLocalActive) == 1 {
-		o.logf("[Info] Detected Primary node is active.")
+		o.progress().Info("Detected Primary node is active.")
 		if err := o.releaseToBackup(ctx); err != nil {
 			return err
 		}
@@ -124,11 +124,11 @@ func (o *Ops) Redundancy(ctx context.Context) error {
 		o.show([]byte(bk))
 		return fmt.Errorf("neither Primary nor Backup appears to be active")
 	}
-	o.logf("[Info] Detected Backup node is active.")
+	o.progress().Info("Detected Backup node is active.")
 	if err := o.revertToPrimary(ctx); err != nil {
 		return err
 	}
-	o.logf("[Info] Reverted back to Primary node successfully.")
+	o.progress().Info("Reverted back to Primary node successfully.")
 	return nil
 }
 
@@ -149,7 +149,7 @@ func (o *Ops) releaseToBackup(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	o.logf("[Info] Primary node is released. Backup node is active.")
+	o.progress().Info("Primary node is released. Backup node is active.")
 
 	if _, err := o.RunCLI(ctx, config.Primary, "no-release", noReleaseActivityScript()); err != nil {
 		return err
@@ -165,7 +165,7 @@ func (o *Ops) releaseToBackup(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	o.logf("[Info] Primary node is un-released. Backup node is active.")
+	o.progress().Info("Primary node is un-released. Backup node is active.")
 	return nil
 }
 
@@ -191,6 +191,23 @@ func (o *Ops) revertToPrimary(ctx context.Context) error {
 func (o *Ops) showRD(ctx context.Context, role config.Role) (string, error) {
 	out, err := o.RunCLI(ctx, role, cliShowRD, showRedundancyScript())
 	return string(out), err
+}
+
+// ShowRedundancy is showRD exported for internal/tools/itest: a read-only
+// `show redundancy` on one role. A live probe needs it to establish which node
+// currently holds activity BEFORE deciding whether a mutation is safe to send,
+// and MateActivityState parses the answer.
+func (o *Ops) ShowRedundancy(ctx context.Context, role config.Role) (string, error) {
+	return o.showRD(ctx, role)
+}
+
+// MateActivityState reports whether `show redundancy` output from the PRIMARY
+// describes a mate that currently holds activity. It is the same reading the
+// coordinated failover flows do (activity + activityMateActive), exported so a
+// live probe decides "is it safe to send revert-activity to the mate?" with the
+// tool's own parser rather than a second, drifting copy of it.
+func MateActivityState(showRedundancyOutput string) bool {
+	return activity(showRedundancyOutput, activityMateActive) == 1
 }
 
 // showRDPair fetches `show redundancy` from both the Primary and Backup, used by
@@ -258,10 +275,10 @@ func (o *Ops) gatherNode(ctx context.Context, role config.Role, destDir, ts stri
 	if diag := field(string(out), "Diagnostics saved"); diag != "" {
 		local := strings.TrimPrefix(diag, "logs/")
 		if err := o.T.Download(ctx, role, JailRoot+"/"+diag, filepath.Join(destDir, local)); err != nil {
-			o.logf("[WARN] failed to download diagnostics bundle %q: %v", diag, err)
+			o.progress().Warn("failed to download diagnostics bundle %q: %v", diag, err)
 		}
 		if err := o.T.Run(ctx, role, "rm", "-rf", JailRoot+"/"+diag, cliScriptPath(cliGatherConfigs), zipPath); err != nil {
-			o.logf("[WARN] failed to clean up diagnostics artifacts on %q: %v", role, err)
+			o.progress().Warn("failed to clean up diagnostics artifacts on %q: %v", role, err)
 		}
 	}
 	return nil

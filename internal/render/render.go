@@ -66,14 +66,14 @@ func BrokerCR(c *config.Config) []byte {
 	fmt.Fprintf(&b, "    tag: %s\n", c.Image.Tag)
 	// A closed, already-validated enum, so it is emitted bare like updateStrategy.
 	// Unset keeps the value this renderer has always written.
-	pullPolicy := c.Image.PullPolicy
+	pullPolicy := c.K8s.ImagePullPolicy
 	if pullPolicy == "" {
 		pullPolicy = "IfNotPresent"
 	}
 	fmt.Fprintf(&b, "    pullPolicy: %s\n", pullPolicy)
-	if c.Image.PullSecret != "" {
+	if c.K8s.ImagePullSecret != "" {
 		fmt.Fprint(&b, "    pullSecrets:\n")
-		fmt.Fprintf(&b, "    - name: %s\n", c.Image.PullSecret)
+		fmt.Fprintf(&b, "    - name: %s\n", c.K8s.ImagePullSecret)
 	}
 	if c.K8s.ServiceAccount != "" {
 		fmt.Fprint(&b, "  serviceAccount:\n")
@@ -116,9 +116,9 @@ func BrokerCR(c *config.Config) []byte {
 		fmt.Fprintf(&b, "  timezone: %q\n", c.Timezone)
 	}
 
-	if c.TLS.ServerSecret != "" {
+	if c.K8s.TLSServerSecret != "" {
 		fmt.Fprint(&b, "  tls:\n")
-		fmt.Fprintf(&b, "    serverTlsConfigSecret: %s\n", c.TLS.ServerSecret)
+		fmt.Fprintf(&b, "    serverTlsConfigSecret: %s\n", c.K8s.TLSServerSecret)
 		fmt.Fprint(&b, "    enabled: true\n")
 		fmt.Fprint(&b, "    certFilename: tls.crt\n")
 		fmt.Fprint(&b, "    certKeyFilename: tls.key\n")
@@ -382,10 +382,10 @@ func writeLBAnnotations(b *strings.Builder, lb config.LoadBalancer) {
 
 // writeKeyValueEntry emits a user-supplied "key: value" fragment as a quoted YAML
 // mapping entry. These configured forms (loadBalancer.annotations,
-// placement.labels*) are free text that used to be pasted into the manifest
-// verbatim, so a value carrying a colon, a quote or a leading '@' silently
-// corrupted the document; quoting both halves keeps the structure intact whatever
-// the value is (§4a: escape anything landing in a structured format). Validate has
+// placement.labels*) are free text, so pasting them in verbatim would let a value
+// carrying a colon, a quote or a leading '@' silently corrupt the document;
+// quoting both halves keeps the structure intact whatever the value is (§4a:
+// escape anything landing in a structured format). Validate has
 // already rejected an entry with no key at all.
 func writeKeyValueEntry(b *strings.Builder, indent, entry string) {
 	key, value := cut(entry, ":")

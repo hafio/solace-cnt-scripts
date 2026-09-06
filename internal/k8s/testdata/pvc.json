@@ -1,0 +1,55 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "data-dev-broker-pubsubplus-b-0",
+        "creationTimestamp": "2026-08-21T09:24:04Z"
+      },
+      "spec": {
+        "storageClassName": "sol-standard",
+        "resources": {
+          "requests": {
+            "storage": "30Gi"
+          }
+        }
+      },
+      "status": {
+        "phase": "Bound"
+      }
+    },
+    {
+      "metadata": {
+        "name": "data-dev-broker-pubsubplus-m-0",
+        "creationTimestamp": "2026-08-21T09:24:04Z"
+      },
+      "spec": {
+        "storageClassName": "sol-standard",
+        "resources": {
+          "requests": {
+            "storage": "5Gi"
+          }
+        }
+      },
+      "status": {
+        "phase": "Bound"
+      }
+    },
+    {
+      "metadata": {
+        "name": "data-dev-broker-pubsubplus-p-0",
+        "creationTimestamp": "2026-08-21T09:24:04Z"
+      },
+      "spec": {
+        "storageClassName": "sol-standard",
+        "resources": {
+          "requests": {
+            "storage": "30Gi"
+          }
+        }
+      },
+      "status": {
+        "phase": "Bound"
+      }
+    }
+  ]
+}

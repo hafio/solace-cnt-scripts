@@ -163,6 +163,16 @@ func TestContainsAnyFold(t *testing.T) {
 	}
 }
 
+func TestCountAnyFold(t *testing.T) {
+	out := "line one OK\r\nInvalid command\r\nline three OK\r\nBUSY, try again\r\n"
+	if got := countAnyFold(out, "invalid", "error", "busy"); got != 2 {
+		t.Errorf("countAnyFold = %d, want 2", got)
+	}
+	if got := countAnyFold("all clean\r\n", "invalid", "error", "busy"); got != 0 {
+		t.Errorf("countAnyFold clean output = %d, want 0", got)
+	}
+}
+
 func TestValidName(t *testing.T) {
 	for _, ok := range []string{"foo", "foo-bar", "foo.cli", "a_b.c-1"} {
 		if err := validName("x", ok); err != nil {
@@ -645,6 +655,37 @@ func TestExecCLIRejectsBadName(t *testing.T) {
 	}
 }
 
+// TestExecCLIReportsRejectedLines closes the half-applied-script branch: a
+// Solace CLI script is a sequence of independent commands, so the whole thing
+// still runs and its output is still shown even when a line is rejected -- but
+// unlike the ported bash, the run is no longer reported as a success. The
+// error must not quote the rejected line itself, since a CLI transcript can
+// carry passwords (the same reason AdditionalUsers withholds its own).
+func TestExecCLIReportsRejectedLines(t *testing.T) {
+	local := filepath.Join(t.TempDir(), "myscript.cli")
+	const out = "line one OK\nInvalid command at line 2\nline three OK\n"
+	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
+		if matchCLI(argv, "myscript.cli") {
+			return []byte(out), nil
+		}
+		return nil, nil
+	}}
+	o, buf := newTestOps(t, &config.Config{}, ft)
+	err := o.ExecCLI(context.Background(), config.Primary, local)
+	if err == nil {
+		t.Fatal("ExecCLI should fail when the broker rejected a line")
+	}
+	if strings.Contains(err.Error(), "Invalid command at line 2") {
+		t.Errorf("ExecCLI error must not quote the rejected line, got %v", err)
+	}
+	if !ft.removed(cliScriptPath("myscript.cli")) {
+		t.Error("ExecCLI must still clean up the uploaded script when the run was partly rejected")
+	}
+	if !strings.Contains(buf.String(), out) {
+		t.Error("ExecCLI must still show the full output when the run was partly rejected")
+	}
+}
+
 // --- verify ops ------------------------------------------------------------
 
 func TestLogin(t *testing.T) {
@@ -656,8 +697,8 @@ func TestLogin(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Login ok=%v err=%v", ok, err)
 	}
-	if !strings.Contains(buf.String(), "Login OK") {
-		t.Errorf("Login output = %q", buf.String())
+	if !strings.Contains(buf.String(), "[ OK ] Login") {
+		t.Errorf("Login output = %q, want the house [ OK ] outcome line", buf.String())
 	}
 	// The password must ride stdin, never the argv.
 	if ft.outputs[0].stdin != "user = \"admin:s3cret\"\n" {

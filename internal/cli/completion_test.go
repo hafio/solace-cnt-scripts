@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"solace/internal/examples"
 )
 
 // runComplete drives cobra's hidden __complete endpoint -- the same request a
@@ -174,20 +176,22 @@ func TestEnvFlagWithPathDefersToShell(t *testing.T) {
 	}
 }
 
-// TestRoleArgsComplete: every command taking a [role] positional offers the three
-// role names -- the ones built through roleOnK8sLeaf/roleOnContainerLeaf/roleLeaf
-// and the ones assembled inline (cli, deploy broker/all). The tree is flat, so one
-// case per verb covers every platform it applies to; completion never reads the
-// env file, so it cannot tell here whether a given run will land on Kubernetes
-// (which rejects the role) or a container host (which uses it) -- see
-// TestUnusableRoleFailsLoud (platform_test.go) for that refusal.
+// TestRoleArgsComplete: every command that still takes a genuine [role]
+// positional offers the three role names -- deploy broker/all (the role is which
+// identity THIS container host deploys as), generate broker (which host's
+// artifact to render), and config leader / smoke redundancy (roleOnContainerLeaf:
+// the role is again this host's own identity, not a pod selector). The tree is
+// flat, so one case per verb covers every platform it applies to; completion
+// never reads the env file, so it cannot tell here whether a given run will land
+// on Kubernetes (which rejects the role) or a container host (which uses it) --
+// see TestUnusableRoleFailsLoud (platform_test.go) for that refusal.
+//
+// The six commands where [role] used to pick a Kubernetes POD (cli, shell, logs
+// broker, check semp-login, status broker, restart broker) lost that positional
+// in favor of --pod (H2: one way to pick a pod) -- see
+// TestPodFlagCompletesRoles for their half of this convention.
 func TestRoleArgsComplete(t *testing.T) {
 	for _, path := range [][]string{
-		{"logs", "broker"},
-		{"cli"},
-		{"shell"},
-		{"check", "semp-login"},
-		{"restart", "broker"},
 		{"deploy", "broker"},
 		{"deploy", "all"},
 		{"config", "leader"},
@@ -207,16 +211,55 @@ func TestRoleArgsComplete(t *testing.T) {
 	}
 }
 
-// TestPodFlagCompletesRoles: --pod names the same roles as the positionals, so it
-// completes to the same set rather than to filenames.
-func TestPodFlagCompletesRoles(t *testing.T) {
-	got, directive := runComplete(t, "copy", "into", "--pod", "")
-	want := []string{"primary", "backup", "monitor"}
+// TestExampleArgsComplete: `examples` takes a template name, not a path, so it
+// completes to the names it knows. It offers only the canonical spellings even
+// though the command also accepts the platform abbreviations -- a completion is
+// already the thing that saves the typing, so it teaches the full word.
+func TestExampleArgsComplete(t *testing.T) {
+	got, directive := runComplete(t, "examples", "")
+	want := examples.Names()
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("--pod completions = %v, want %v", got, want)
+		t.Errorf("completions = %v, want %v", got, want)
 	}
 	if directive != wantDirective(cobra.ShellCompDirectiveNoFileComp) {
-		t.Errorf("--pod directive = %s, want no-file-completion", directive)
+		t.Errorf("directive = %s, want no-file-completion", directive)
+	}
+	for _, short := range []string{"kube", "dk", "pm"} {
+		for _, c := range got {
+			if c == short {
+				t.Errorf("completion offered the abbreviation %q; completion teaches the canonical name", short)
+			}
+		}
+	}
+}
+
+// TestPodFlagCompletesRoles: --pod names the same roles as the positionals, so it
+// completes to the same set rather than to filenames. copy from/into always named
+// a pod this way; cli, shell, logs broker, check semp-login, status broker and
+// restart broker are the six that used to take a [role] positional instead (H2)
+// and now offer the same set through --pod -- see TestRoleArgsComplete's doc
+// comment for the commands that kept a real positional.
+func TestPodFlagCompletesRoles(t *testing.T) {
+	for _, path := range [][]string{
+		{"copy", "into"},
+		{"copy", "from"},
+		{"cli"},
+		{"shell"},
+		{"logs", "broker"},
+		{"check", "semp-login"},
+		{"status", "broker"},
+		{"restart", "broker"},
+	} {
+		t.Run(strings.Join(path, " "), func(t *testing.T) {
+			got, directive := runComplete(t, append(append([]string{}, path...), "--pod", "")...)
+			want := []string{"primary", "backup", "monitor"}
+			if strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Errorf("--pod completions = %v, want %v", got, want)
+			}
+			if directive != wantDirective(cobra.ShellCompDirectiveNoFileComp) {
+				t.Errorf("--pod directive = %s, want no-file-completion", directive)
+			}
+		})
 	}
 }
 

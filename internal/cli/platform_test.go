@@ -291,10 +291,21 @@ func TestScopedFlagFailsLoud(t *testing.T) {
 	}
 }
 
-// TestUnusableRoleFailsLoud: the [role] positional means opposite things on the
-// two platform families, and on the family that ignores it a role that was typed
-// must not be silently dropped -- `logs backup` reading the local broker's logs
-// on a container host is the exact mistake this prevents.
+// TestUnusableRoleFailsLoud: a role that was TYPED must never be silently
+// dropped, whichever way it is unusable. Two different refusals meet here.
+//
+// The first six cases lost their positional entirely when the pod selector became
+// --pod: `logs broker backup` is now a migration error (noRolePositional), because
+// that spelling was the documented one until the change and cobra's own "unknown
+// command" would hide the fact that it merely moved. On a container host the same
+// message also says why no role applies there at all -- one broker per machine.
+//
+// The last four KEEP their positional, where the role is this host's node identity
+// in a container deployment rather than a pod selector; on Kubernetes that is
+// meaningless and is refused (rejectRole) rather than accepted and ignored.
+//
+// Both halves must name the role, which is all this asserts: `logs backup` quietly
+// reading the local broker's logs is the exact mistake either refusal prevents.
 func TestUnusableRoleFailsLoud(t *testing.T) {
 	for _, tc := range []struct {
 		platform config.Platform
@@ -324,6 +335,54 @@ func TestUnusableRoleFailsLoud(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRolePositionalTeachesPodFlag is the other half of the migration, and the
+// likelier one: an operator on KUBERNETES typing the spelling that worked until
+// this change. `shell backup` was documented, so cobra's bare `unknown command
+// "backup"` would be true and actively unhelpful -- it hides that the role merely
+// moved to a flag. The error has to name the flag AND the role that was typed, so
+// the corrected command can be read straight out of it.
+//
+// A word that is NOT a role keeps cobra's own wording: a typo is not a migration.
+func TestRolePositionalTeachesPodFlag(t *testing.T) {
+	for _, args := range [][]string{
+		{"shell", "backup"},
+		{"logs", "broker", "monitor"},
+		{"cli", "primary"},
+		{"status", "broker", "backup"},
+		{"restart", "broker", "backup"},
+		{"check", "semp-login", "backup"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			path := writePlatformEnv(t, config.K8s, config.Docker, config.Podman)
+			full := append(append([]string{}, args...), "--platform", "kubernetes", "--env", path)
+			_, err := runRootWith(t, full, func(a *App) {
+				a.Interactive = func() bool { return false }
+				echoRunner(a)
+			})
+			if err == nil {
+				t.Fatalf("%v should be refused: the role positional is gone", args)
+			}
+			role := args[len(args)-1]
+			for _, want := range []string{"--pod", role} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q should name %q so the corrected command is readable from it", err, want)
+				}
+			}
+		})
+	}
+	t.Run("a non-role word is still just unknown", func(t *testing.T) {
+		path := writePlatformEnv(t, config.K8s, config.Docker, config.Podman)
+		_, err := runRootWith(t, []string{"shell", "typo", "--platform", "kubernetes", "--env", path},
+			func(a *App) { a.Interactive = func() bool { return false }; echoRunner(a) })
+		if err == nil {
+			t.Fatal("an unknown positional should still be refused")
+		}
+		if strings.Contains(err.Error(), "--pod") {
+			t.Errorf("error %q should not offer the migration hint for a word that is not a role", err)
+		}
+	})
 }
 
 // TestPlatformIsAnnouncedInThePreamble: which system a command is about to talk

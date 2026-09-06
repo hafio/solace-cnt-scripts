@@ -3,46 +3,72 @@ package k8s
 import (
 	"context"
 	"io"
-	"strings"
+	"time"
 
 	"solace/internal/config"
 	"solace/internal/engine"
+	"solace/internal/output"
 )
 
-// defaultOperatorNS is where the operator lands when no namespace is configured and
-// none is discovered running on the cluster (000-env.sh:83).
+// defaultOperatorNS is where the operator lands when kubernetes.operator.namespace
+// is not configured (000-env.sh:83). It is what both `deploy operator` installs to
+// and what every other operator command then addresses, so the two cannot disagree.
 const defaultOperatorNS = "pubsubplus-operator-system"
 
 // operatorDeployment is the fixed name of the operator's controller Deployment and
-// ServiceAccount (assets/operator-1.4.0.yaml.tmpl:1971). Its substring is also what
-// the namespace-discovery grep matches (000-env.sh:76).
+// ServiceAccount (assets/operator-1.4.0.yaml.tmpl:1971).
 const operatorDeployment = "pubsubplus-eventbroker-operator"
 
 // Cluster performs Kubernetes operations that talk to the cluster or the operator --
 // as opposed to a running broker, which goes through internal/broker over the
-// transport. Every command routes through R, so --dry-run echoes it and tests capture
+// transport. Every command routes through R, so the Echo runner records it and tests capture
 // the exact argv. Out is the report sink; In is the prompt source for the few
 // interactive operations (node labelling).
 type Cluster struct {
 	R   engine.Runner
 	Cfg *config.Config
+	// Log is the RAW line sink for progress: it receives one already-formatted
+	// line and emits it verbatim. The `==> ` and `[TAG ] ` prefixes are added by
+	// the internal/output Sink built over it (progress below), so a call site
+	// cannot hand-type a prefix that drifts from the rest of the tool. nil
+	// discards.
 	Log func(string, ...any)
 	Out io.Writer
 	In  io.Reader
+	// Now is the clock, a seam so the AGE column the status commands render is
+	// testable against a fixed instant. nil means time.Now.
+	Now func() time.Time
+
+	// Confirm asks the operator a yes/no question, the same seam
+	// container.Manager carries. nil DECLINES, which is what an unattended run
+	// must do when the question is "may I downgrade a cluster-scoped operator".
+	Confirm func(question string) bool
+
+	// Err is where interactive prompts are written (the node picker's banner,
+	// list and "> "). It is separate from Out because a prompt is not report
+	// content: piping stdout to a file must capture the report, not the
+	// questions asked along the way. nil -> os.Stderr, which is where every
+	// other prompt in this tool already goes.
+	Err io.Writer
 }
 
-// NewCluster builds a Cluster over the given runner, config, step logger and output
+// NewCluster builds a Cluster over the given runner, config, line sink and output
 // sink. In is left nil; callers that prompt (LabelNodes) set it explicitly.
 func NewCluster(r engine.Runner, cfg *config.Config, log func(string, ...any), out io.Writer) *Cluster {
 	return &Cluster{R: r, Cfg: cfg, Log: log, Out: out}
 }
 
-// logf emits a progress line via the injected step logger, if any.
-func (c *Cluster) logf(format string, a ...any) {
-	if c.Log != nil {
-		c.Log(format, a...)
-	}
-}
+// progress is the stderr Sink for this package's narration: phases through Step,
+// leveled status through OK/Warn/Fail/Info. A nil Log discards.
+func (c *Cluster) progress() *output.Sink { return output.NewFunc(c.Log) }
+
+// report is the stdout Sink for report bodies -- sections, key/value blocks,
+// tables and the per-item outcome lines that belong to a report rather than to
+// the progress narration.
+func (c *Cluster) report() *output.Sink { return output.New(c.out()) }
+
+// logf announces one phase of work (`==> ...`) via the injected line sink.
+func (c *Cluster) logf(format string, a ...any) { c.progress().Step(format, a...) }
 
 // ns is the broker namespace.
 func (c *Cluster) ns() string { return c.Cfg.K8s.Namespace }
@@ -100,48 +126,45 @@ func (c *Cluster) output(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 // operatorNS resolves the namespace the operator runs in: the configured
-// Operator.Namespace if set; otherwise the namespace of an operator Deployment
-// discovered on the cluster; otherwise the fixed default. Mirrors 000-env.sh:73-83.
-// Under --dry-run the discovery output is empty, so it falls through to the default --
-// safe, because the rendered manifests already carry the namespace.
+// Operator.Namespace if set, otherwise the fixed default it is installed to.
+// Mirrors 000-env.sh:73-83.
 func (c *Cluster) operatorNS(ctx context.Context) string {
 	ns, _ := c.operatorNSOrigin(ctx)
 	return ns
 }
 
-// operatorNSOrigin is the one definition of that three-branch rule, and also names where
-// the value came from. Every operation goes through operatorNS; only the `check` report
-// needs the origin, because CheckEnv can print no more than "(derived at runtime)" (it
-// takes no ctx and runs before Reachable). The not-found wording says "visible to this
-// context" rather than "not installed": discoverOperatorNS swallows its error by design,
-// so an absent operator and an RBAC denial arrive here identically.
-func (c *Cluster) operatorNSOrigin(ctx context.Context) (ns, origin string) {
+// operatorNSOrigin is the one definition of that two-branch rule, and also names
+// where the value came from; only the `check` report needs the origin.
+//
+// It used to have a third branch between them, which searched the cluster: it
+// listed Deployments in EVERY namespace and took the namespace of the first line
+// CONTAINING the operator's deployment name -- an unanchored substring match,
+// with no label, owner or uniqueness check, and its errors swallowed so an RBAC
+// denial and an absent operator arrived here identically. On a cluster running
+// two operator installs it could resolve to another team's, and `remove operator`
+// would then delete the one the operator answering the prompt never saw named.
+// So the search is gone. deploy and remove now resolve the SAME namespace from
+// the SAME two local rules, and this tool never looks at a namespace the env file
+// did not name or the default did not imply.
+//
+// ctx is retained only to keep this and operatorNS interchangeable with the
+// ~13 call sites that already hold one; nothing here reaches the cluster any more,
+// which is the point.
+func (c *Cluster) operatorNSOrigin(_ context.Context) (ns, origin string) {
 	if ns := c.Cfg.K8s.Operator.Namespace; ns != "" {
 		return ns, "kubernetes.operator.namespace"
 	}
-	if ns := c.discoverOperatorNS(ctx); ns != "" {
-		return ns, "discovered on the cluster"
-	}
-	return defaultOperatorNS, "default -- no operator Deployment visible to this context"
+	return defaultOperatorNS, "default -- kubernetes.operator.namespace is unset"
 }
 
-// discoverOperatorNS greps `get deployment --all-namespaces` for the operator's
-// deployment and returns its namespace (the first custom-column). Returns "" if the
-// lookup fails or the operator is not found -- both mean "not installed", which the
-// caller's default covers, so the error is deliberately swallowed (000-env.sh:76).
-func (c *Cluster) discoverOperatorNS(ctx context.Context) string {
-	out, err := c.output(ctx, "get", "deployment", "--all-namespaces",
-		"-o", "custom-columns=NS:.metadata.namespace,NAME:.metadata.name")
-	if err != nil {
-		return ""
+// OperatorNamespace is that same rule for a caller holding only a config: the CLI
+// names the operator's namespace in its removal prompt, which happens before there
+// is a Cluster to ask. Exporting it is only honest now that the answer is two
+// local rules -- while it still searched the cluster, no config-only caller could
+// have produced the same answer.
+func OperatorNamespace(cfg *config.Config) string {
+	if ns := cfg.K8s.Operator.Namespace; ns != "" {
+		return ns
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if !strings.Contains(line, operatorDeployment) {
-			continue
-		}
-		if f := strings.Fields(line); len(f) > 0 {
-			return f[0]
-		}
-	}
-	return ""
+	return defaultOperatorNS
 }

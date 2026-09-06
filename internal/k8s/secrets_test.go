@@ -197,9 +197,9 @@ func TestTLSSecretErrors(t *testing.T) {
 	})
 	t.Run("empty secret name", func(t *testing.T) {
 		cfg := loadK8s(t)
-		cfg.TLS.ServerSecret = ""
+		cfg.K8s.TLSServerSecret = ""
 		if _, err := TLSSecret(cfg); err == nil {
-			t.Error("TLSSecret should fail when tls.serverSecret is unset")
+			t.Error("TLSSecret should fail when kubernetes.tlsServerSecret is unset")
 		}
 	})
 	t.Run("cert file missing", func(t *testing.T) {
@@ -239,7 +239,7 @@ func TestTLSSecretErrors(t *testing.T) {
 
 func TestDockerRegistrySecretEmptyName(t *testing.T) {
 	cfg := loadK8s(t)
-	cfg.Image.PullSecret = ""
+	cfg.K8s.ImagePullSecret = ""
 	if _, err := DockerRegistrySecret(cfg); err == nil {
 		t.Error("DockerRegistrySecret should fail with an empty pull-secret name")
 	}

@@ -112,7 +112,7 @@ func TestGolden(t *testing.T) {
 			file: "k8s_broker_cr_podmeta.golden",
 			gen: func(t *testing.T) []byte {
 				c := load(t, config.K8s)
-				c.Image.PullPolicy = "Always"
+				c.K8s.ImagePullPolicy = "Always"
 				c.K8s.PodAnnotations = map[string]string{
 					"prometheus.io/scrape": "true",
 					"example.com/note":     `a: "quoted" value`,

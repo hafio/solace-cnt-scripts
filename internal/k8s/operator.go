@@ -35,6 +35,19 @@ type operatorTmplVars struct {
 // Image.Registry/ when set (010:2019); WATCH_NAMESPACE is Operator.WatchNamespaces with
 // the broker namespace appended when broker-ns watching is enabled (000-env.sh:85-89);
 // the imagePullSecrets block is emitted only when an image-pull secret is configured.
+//
+// The bundle carries NO secret value. The imagePullSecrets block it emits is a
+// reference by name; the regcred Secret itself is a separate artifact, rendered by
+// GenOperatorSecrets and applied by OperatorApply between the namespace and the
+// rest of the bundle. That split is what makes `generate operator` output safe to
+// review, diff and share, and it is the same division the broker lifecycle already
+// draws between `generate broker` and `generate secrets broker`.
+//
+// The one ordering constraint it must respect: the regcred is namespaced, and the
+// namespace only exists inside this bundle -- applying the secret before the
+// namespace is what once failed a first install with `namespaces "solace-operator"
+// not found`. OperatorApply therefore applies the bundle's own Namespace document
+// first (splitAfterNamespace), never a separately-invented one.
 func RenderOperator(cfg *config.Config, opNS string) ([]byte, error) {
 	op := cfg.K8s.Operator
 	vars := operatorTmplVars{
@@ -43,7 +56,7 @@ func RenderOperator(cfg *config.Config, opNS string) ([]byte, error) {
 		Image:          operatorImage(cfg),
 		CPU:            op.CPU,
 		Mem:            op.Mem,
-		PullSecret:     cfg.Image.PullSecret != "",
+		PullSecret:     cfg.K8s.ImagePullSecret != "",
 	}
 	t, err := template.New("operator").Parse(operatorBundle)
 	if err != nil {
@@ -56,17 +69,69 @@ func RenderOperator(cfg *config.Config, opNS string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// GenOperator renders the operator bundle for `gen operator` / `operator deploy --gen`
-// without contacting the cluster: it uses the configured Operator.Namespace, falling
-// back to the fixed default when unset (the running-deployment discovery of operatorNS
-// needs a live cluster, so render-only cannot use it). It is the artifact-only
-// counterpart to OperatorApply.
-func GenOperator(cfg *config.Config) ([]byte, error) {
-	opNS := cfg.K8s.Operator.Namespace
-	if opNS == "" {
-		opNS = defaultOperatorNS
+// splitAfterNamespace cuts the bundle in two immediately after its Namespace
+// document, so a caller can apply the namespace, then something namespaced, then
+// the rest. If no Namespace document is found ns is nil and the whole bundle is
+// returned as rest -- the caller decides what to do about that rather than having
+// an invented namespace applied on its behalf.
+func splitAfterNamespace(bundle []byte) (ns, rest []byte) {
+	docs := yamlDocSepRE.Split(string(bundle), -1)
+	at := 0
+	for i, d := range docs {
+		if namespaceKindRE.MatchString(d) {
+			at = i + 1
+			break
+		}
 	}
-	return RenderOperator(cfg, opNS)
+	return joinYAMLDocs(nonEmpty(docs[:at])), joinYAMLDocs(nonEmpty(docs[at:]))
+}
+
+// nonEmpty drops whitespace-only documents, which the separator split produces at
+// the ends of a manifest.
+func nonEmpty(docs []string) []string {
+	out := make([]string, 0, len(docs))
+	for _, d := range docs {
+		if strings.TrimSpace(d) != "" {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// namespaceKindRE matches a document whose own `kind:` is Namespace, anchored to
+// column 0 for the same reason crdKindRE is: nested mapping keys are indented.
+var namespaceKindRE = regexp.MustCompile(`(?m)^kind:[ \t]*Namespace[ \t]*$`)
+
+// GenOperator renders the operator bundle for `generate operator` without contacting
+// the cluster. It is the artifact-only counterpart to OperatorApply -- together with
+// GenOperatorSecrets it is everything that install applies.
+func GenOperator(cfg *config.Config) ([]byte, error) {
+	return RenderOperator(cfg, renderOperatorNS(cfg))
+}
+
+// GenOperatorSecrets renders the operator's image-pull secret on its own, for
+// `generate secrets operator`. It is the one operator artifact that carries a
+// credential, which is why it has a target of its own rather than riding inside the
+// bundle: the sensitive half can be inspected deliberately, and the bundle stays
+// shareable.
+func GenOperatorSecrets(cfg *config.Config) ([]byte, error) {
+	if cfg.K8s.ImagePullSecret == "" {
+		return nil, fmt.Errorf("kubernetes.imagePullSecret is not set, so the operator install " +
+			"has no image-pull secret to render -- set it (with image.registry, image.user and " +
+			"image.pass) if the operator image needs credentials to pull")
+	}
+	return operatorRegcred(cfg, renderOperatorNS(cfg))
+}
+
+// renderOperatorNS resolves the operator namespace for a render: the configured
+// Operator.Namespace, falling back to the fixed default when unset. The
+// running-deployment discovery of operatorNS needs a live cluster, so render-only
+// cannot use it.
+func renderOperatorNS(cfg *config.Config) string {
+	if ns := cfg.K8s.Operator.Namespace; ns != "" {
+		return ns
+	}
+	return defaultOperatorNS
 }
 
 // operatorImage is the operator image reference a deploy will actually pull:
@@ -109,9 +174,17 @@ func watchNamespace(cfg *config.Config) string {
 	return strings.Join(out, ",")
 }
 
-// OperatorApply installs the operator: it resolves the operator namespace, applies the
-// image-pull secret (regcred) into that namespace first when pull creds are configured
-// (010:29), then applies the rendered bundle on stdin (010:2063).
+// OperatorApply installs the operator in three applies, in dependency order: the
+// bundle's own Namespace document, the image-pull secret (regcred) into that
+// namespace when pull creds are configured (010:29), then the rest of the bundle
+// -- CRDs, RBAC and the controller Deployment (010:2063).
+//
+// Three applies rather than one multi-document stream because the secret is not in
+// the bundle: everything this installs is byte-for-byte what `generate operator` and
+// `generate secrets operator` print, which is the property that makes a rendered
+// artifact worth reviewing. The namespace still goes first, and the secret still
+// lands before the Deployment that pulls with it, so neither the first-install
+// ordering nor the pull is affected.
 func (c *Cluster) OperatorApply(ctx context.Context) error {
 	// The bundle is cluster-scoped (CRDs, ClusterRoles), so the permission that
 	// matters is the one an under-privileged context most often lacks -- and
@@ -120,22 +193,38 @@ func (c *Cluster) OperatorApply(ctx context.Context) error {
 		return err
 	}
 	opNS := c.operatorNS(ctx)
-	if c.Cfg.Image.PullSecret != "" {
-		c.logf("applying operator image-pull secret regcred in %s", opNS)
-		regcred, err := operatorRegcred(c.Cfg, opNS)
-		if err != nil {
-			return fmt.Errorf("build operator regcred: %w", err)
-		}
-		if err := c.apply(ctx, regcred); err != nil {
-			return fmt.Errorf("apply operator regcred: %w", err)
-		}
+	// Before anything is applied: the operator is cluster-scoped, and `apply`
+	// downgrades an image without comment, so a downgrade is asked about rather
+	// than merely narrated. Declining aborts before the first write.
+	if err := c.confirmNoDowngrade(ctx, opNS); err != nil {
+		return err
 	}
 	c.logf("deploying operator to namespace %s", opNS)
 	manifest, err := RenderOperator(c.Cfg, opNS)
 	if err != nil {
 		return err
 	}
-	if err := c.apply(ctx, manifest); err != nil {
+	ns, rest := splitAfterNamespace(manifest)
+	if len(ns) == 0 {
+		// The bundle has always carried its own Namespace document; a build that
+		// lost it would otherwise apply the regcred into a namespace that does not
+		// exist yet, which is the exact first-install failure this ordering exists
+		// to prevent.
+		return fmt.Errorf("operator bundle has no Namespace document to apply first")
+	}
+	if err := c.apply(ctx, ns); err != nil {
+		return fmt.Errorf("apply operator namespace: %w", err)
+	}
+	if c.Cfg.K8s.ImagePullSecret != "" {
+		regcred, err := operatorRegcred(c.Cfg, opNS)
+		if err != nil {
+			return fmt.Errorf("build operator regcred: %w", err)
+		}
+		if err := c.apply(ctx, regcred); err != nil {
+			return fmt.Errorf("apply operator image-pull secret: %w", err)
+		}
+	}
+	if err := c.apply(ctx, rest); err != nil {
 		return fmt.Errorf("apply operator bundle: %w", err)
 	}
 	return nil
@@ -158,10 +247,7 @@ var yamlDocSepRE = regexp.MustCompile(`(?m)^---[ \t]*$`)
 // including brokers this env file has never heard of.
 func splitOperatorBundle(manifest []byte) (crds, rest []byte) {
 	var crdDocs, restDocs []string
-	for _, doc := range yamlDocSepRE.Split(string(manifest), -1) {
-		if strings.TrimSpace(doc) == "" {
-			continue
-		}
+	for _, doc := range nonEmpty(yamlDocSepRE.Split(string(manifest), -1)) {
 		if crdKindRE.MatchString(doc) {
 			crdDocs = append(crdDocs, doc)
 			continue
@@ -189,6 +275,60 @@ func joinYAMLDocs(docs []string) []byte {
 	return []byte(b.String())
 }
 
+// BrokerCRs lists every PubSubPlusEventBroker custom resource across ALL
+// namespaces, as "<namespace>/<name>" refs. This is the same all-namespaces query
+// ClusterReport (statusreport.go) already runs for `status broker --all`; it is
+// duplicated here rather than factored into one shared helper because
+// statusreport.go is out of scope for this change. Converging the two into a
+// single shared helper is a follow-up.
+//
+// It is exported because the CLI needs the same answer BEFORE it asks its
+// CRD-layer question: a question whose answer is already fixed should not be
+// asked. That is a better prompt, not a safety mechanism -- the refusal in
+// refuseCRDDeleteIfBrokersExist stays the thing that actually stops the cascade.
+func (c *Cluster) BrokerCRs(ctx context.Context) ([]string, error) {
+	var list brokerList
+	if err := c.getJSON(ctx, &list, "pubsubpluseventbrokers", "--all-namespaces"); err != nil {
+		return nil, fmt.Errorf("listing broker custom resources across the cluster: %w", err)
+	}
+	refs := make([]string, 0, len(list.Items))
+	for _, it := range list.Items {
+		refs = append(refs, it.Metadata.Namespace+"/"+it.Metadata.Name)
+	}
+	return refs, nil
+}
+
+// refuseCRDDeleteIfBrokersExist is the guard OperatorDelete runs immediately
+// before it touches the CRD documents. Deleting the CRDs cascade-deletes EVERY
+// PubSubPlusEventBroker custom resource in EVERY namespace in the cluster -- not
+// just the one this env file describes -- and nothing else warns about that with
+// anything more than static prose. So this asks the cluster what actually exists
+// first: if anything does, each is named on stderr and the deletion is refused
+// outright. There is deliberately no question to ask here (the interactive layer
+// question --delete-crd/--no-prompt normally decides is answered already, by the
+// caller passing deleteCRDs=true) -- the answer to "delete anyway?" is fixed at
+// "no" once a broker this tool does not own would be destroyed, so it is refused
+// rather than confirmed.
+//
+// A listing failure (RBAC, an unreachable API server) refuses too, with the cause
+// preserved: being unable to see what would be destroyed is not permission to
+// destroy it.
+func (c *Cluster) refuseCRDDeleteIfBrokersExist(ctx context.Context) error {
+	refs, err := c.BrokerCRs(ctx)
+	if err != nil {
+		return fmt.Errorf("refusing to delete the operator CRDs: %w", err)
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	for _, ref := range refs {
+		c.progress().Warn("broker custom resource %s still exists and would be cascade-deleted with the CRDs", ref)
+	}
+	return fmt.Errorf("refusing to delete the operator CRDs: %d PubSubPlusEventBroker custom resource(s) still "+
+		"exist in the cluster (%s) and deleting the CRDs would cascade-delete them; remove each one first "+
+		"(`remove broker` per deployment), then retry --delete-crd", len(refs), strings.Join(refs, ", "))
+}
+
 // OperatorDelete removes the operator by deleting the rendered bundle on stdin with
 // --ignore-not-found (110:2057) -- one mirrored path with OperatorApply, replacing the
 // separately-maintained delete manifest the legacy 110 shipped.
@@ -197,6 +337,15 @@ func joinYAMLDocs(docs []string) []byte {
 // the expensive-to-recreate, easy-to-regret part is kept unless it is asked for by
 // name. Here that is the CRDs, whose removal takes every broker in the cluster with
 // them. Either outcome is stated rather than left to be inferred.
+//
+// The regcred needs no delete of its own even though OperatorApply applies it
+// separately: it lives in the operator namespace, which is one of the documents
+// deleted here, and deleting a namespace takes its contents with it.
+//
+// The operator Deployment/RBAC removal (rest) always runs before the CRD layer is
+// even considered, and its own error return is unaffected by whatever the CRD
+// layer decides -- a refused CRD deletion must never look like the whole removal
+// was skipped, and must never undo work the bundle delete already did.
 func (c *Cluster) OperatorDelete(ctx context.Context, deleteCRDs bool) error {
 	if err := c.Preflight(ctx, "delete", "customresourcedefinitions"); err != nil {
 		return err
@@ -221,6 +370,9 @@ func (c *Cluster) OperatorDelete(ctx context.Context, deleteCRDs bool) error {
 	if len(crds) == 0 {
 		c.logf("operator CRDs: none in the bundle, nothing to delete")
 		return nil
+	}
+	if err := c.refuseCRDDeleteIfBrokersExist(ctx); err != nil {
+		return err
 	}
 	if err := c.deleteStdin(ctx, crds); err != nil {
 		return fmt.Errorf("delete operator CRDs: %w", err)

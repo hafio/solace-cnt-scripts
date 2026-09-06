@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"solace/internal/render"
 )
@@ -37,9 +38,13 @@ func (c *Cluster) DeployBroker(ctx context.Context, keepYAML bool) error {
 
 // DeleteBroker removes the broker CR (120:55) via `delete -f - --ignore-not-found`
 // of the rendered manifest, so a repeat teardown is a no-op. When purge is set it
-// then best-effort deletes the per-role data PVCs (data-<name>-pubsubplus-<role>-0;
-// 120:65-69) -- their errors are swallowed because the CR delete already released
-// the pods, and a missing/renamed PVC must not fail the teardown.
+// then deletes the per-role data PVCs (data-<name>-pubsubplus-<role>-0; 120:65-69),
+// one delete per role rather than aborting on the first failure -- an RBAC gap on
+// one PVC must not leave the others behind. `--ignore-not-found` already absorbs
+// the benign "already gone" case, so anything that still errors is real (an RBAC
+// denial, a stuck finalizer): those are collected and reported, never swallowed,
+// because a caller gating on this function's return must be able to trust a nil
+// error to mean the data is actually gone.
 //
 // purge defaults to false at the call site (keep data by default), the deliberately
 // safer inverse of legacy 120's purge-by-default. The confirm/flag logic lives in
@@ -58,13 +63,22 @@ func (c *Cluster) DeleteBroker(ctx context.Context, purge bool) error {
 		c.logf("PVCs kept -- the broker's persistent data survives (pass --delete-data to remove it)")
 		return nil
 	}
+	var failed []string
+	var lastErr error
 	for _, role := range HARoles(c.Cfg) {
 		pvc := pvcName(c.Cfg, role)
 		c.logf("deleting PVC %s", pvc)
 		if err := c.kubectl(ctx, "delete", "pvc", pvc, "-n", c.ns(), "--ignore-not-found"); err != nil {
-			// Best-effort: a released or already-absent PVC must not abort teardown.
-			c.logf("  [WARN] could not delete PVC %s: %v", pvc, err)
+			// Logged per PVC as it happens, so the operator sees each failure even
+			// though the loop keeps going to give every role a chance to delete.
+			c.progress().Warn("could not delete PVC %s: %v", pvc, err)
+			failed = append(failed, pvc)
+			lastErr = err
 		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("PVCs not deleted: %s (persistent data survives; check RBAC or a stuck finalizer): %w",
+			strings.Join(failed, ", "), lastErr)
 	}
 	c.logf("PVCs deleted -- the broker's persistent data is gone")
 	return nil

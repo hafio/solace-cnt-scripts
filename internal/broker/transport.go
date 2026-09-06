@@ -31,7 +31,7 @@ const (
 // The k8s transport maps a role to the pod <name>-pubsubplus-<role>-0 in the
 // broker namespace; container transports are node-local -- one container per
 // host -- and ignore the role. All methods must respect the injected engine
-// Runner so --dry-run echoes commands and never runs them, and so secrets fed
+// Runner so the Echo runner records commands and never runs them, and so secrets fed
 // on stdin (Upload data, OutputInput) are never echoed verbatim.
 type Transport interface {
 	// Run executes argv in the node's broker container, streaming stdout+stderr.

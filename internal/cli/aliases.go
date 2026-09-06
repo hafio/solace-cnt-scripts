@@ -4,49 +4,56 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"solace/internal/abbrev"
 )
 
-// commandAliases maps a command's NAME to its approved short forms.
+// commandAbbrev is the approved short form of every command NAME.
 //
 // Keyed by name, not by path, and applied by a tree walk: a word means the same
 // thing wherever it appears, so `broker` is `br` under every verb that takes it and
 // `operator` is `op` under every verb that takes it. That is the property being
-// bought -- one abbreviation per concept, not one per command path.
+// bought -- one abbreviation per concept, not one per command path. The charset,
+// the shorter-than rule and the one-claim-per-word rule are abbrev's, shared with
+// the role and --platform sets so a short form means the same kind of thing
+// whichever of the four the reader has met before.
 //
-// Three deliberate absences:
+// `rollout`/`rollback` were considered as names and rejected; the verbs that
+// replaced them (`deploy all`, `remove all`) inherit `dp`/`rm` from their verb, so
+// `dp all` and `rm all` already work. `delete` is deliberately NOT a short form of
+// `remove`: one removal word, everywhere.
 //
-//   - `start` and `stop` have none. Any two-letter form is ambiguous between them
-//     and `status`, and the one place a slip costs an outage is not where to save a
-//     keystroke.
-//   - `rollout`/`rollback` were considered as names and rejected; the verbs that
-//     replaced them (`deploy all`, `remove all`) inherit `dp`/`rm` from their verb,
-//     so `dp all` and `rm all` already work.
-//   - `remove` is `rm` even though it is the most destructive verb. It takes a noun
-//     before it does anything, so `rm` on its own prints help rather than removing a
-//     broker -- which is exactly what makes the short form safe to hand out.
-//
-// `delete` is deliberately NOT an alias for `remove`: one removal word, everywhere.
-var commandAliases = map[string][]string{
+// `start` and `stop` are declared with no short form rather than left out, so the
+// absence is data -- it prints in docs/abbreviation.md and TestStartStopHaveNoAlias
+// pins it -- instead of something a reader has to notice is missing.
+var commandAbbrev = abbrev.New("command", []abbrev.Entry{
 	// verbs
-	"check":       {"ck"},
-	"config":      {"cfg"},
-	"convert":     {"cv"},
-	"copy":        {"cp"},
-	"deploy":      {"dp"},
-	"diagnostics": {"diag"},
-	"generate":    {"gen"},
-	"logs":        {"lg"},
-	"prepare":     {"pre"},
-	"remove":      {"rm"},
-	"restart":     {"rs"},
-	"shell":       {"sh"},
-	"status":      {"sts"},
-	"version":     {"ver"},
+	{Canonical: "check", Short: []string{"ck"}},
+	{Canonical: "config", Short: []string{"cfg"}},
+	{Canonical: "convert", Short: []string{"cv"}},
+	{Canonical: "copy", Short: []string{"cp"}},
+	{Canonical: "deploy", Short: []string{"dp"}},
+	{Canonical: "diagnostics", Short: []string{"diag"}},
+	{Canonical: "examples", Short: []string{"eg"},
+		Note: "the one noun at the top level: it emits an env file rather than acting on a deployment"},
+	{Canonical: "generate", Short: []string{"gen"}},
+	{Canonical: "logs", Short: []string{"lg"}},
+	{Canonical: "prepare", Short: []string{"pre"}},
+	{Canonical: "remove", Short: []string{"rm"},
+		Note: "safe to hand out because `remove` takes a noun before it does anything: `rm` alone prints help"},
+	{Canonical: "restart", Short: []string{"rs"}},
+	{Canonical: "shell", Short: []string{"sh"}},
+	{Canonical: "start",
+		Note: "no short form: any two-letter form is ambiguous with `stop` and `status`, and that is the one slip that costs an outage"},
+	{Canonical: "status", Short: []string{"sts"}},
+	{Canonical: "stop",
+		Note: "no short form, for the same reason as `start`"},
+	{Canonical: "version", Short: []string{"ver"}},
 
 	// nouns -- these ride along under every verb that takes them
-	"broker":   {"br"},
-	"operator": {"op"},
-}
+	{Canonical: "broker", Short: []string{"br"}, Note: "works under every verb that takes a broker"},
+	{Canonical: "operator", Short: []string{"op"}, Note: "works under every verb that takes the operator"},
+})
 
 // applyAliases attaches every approved short form to the tree, and panics if one
 // would collide with a sibling's name or with another sibling's alias.
@@ -76,7 +83,7 @@ func applyAliases(root *cobra.Command) {
 			}
 		}
 		for _, c := range parent.Commands() {
-			for _, a := range commandAliases[c.Name()] {
+			for _, a := range commandAbbrev.Short(c.Name()) {
 				claim(c, a)
 				// Append rather than replace: a command may already carry an alias of
 				// its own for a reason this table knows nothing about.

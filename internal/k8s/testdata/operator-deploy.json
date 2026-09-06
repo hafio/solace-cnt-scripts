@@ -1,0 +1,27 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "pubsubplus-eventbroker-operator",
+        "namespace": "solace-operator",
+        "creationTimestamp": "2026-08-21T08:50:25Z"
+      },
+      "spec": {
+        "replicas": 1,
+        "template": {
+          "spec": {
+            "containers": [
+              {
+                "image": "registry.example.com/solace/pubsubplus-eventbroker-operator:1.4.2"
+              }
+            ]
+          }
+        }
+      },
+      "status": {
+        "readyReplicas": 1,
+        "replicas": 1
+      }
+    }
+  ]
+}

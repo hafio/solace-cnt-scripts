@@ -104,6 +104,7 @@ func (r *recRunner) RunInput(_ context.Context, in []byte, name string, args ...
 	r.calls = append(r.calls, rrCall{"RunInput", name, args, string(in)})
 	return r.runInputErr
 }
+
 // RunEnv exists to satisfy engine.Runner: nothing in the k8s package passes
 // secrets through a child environment (every secret rides stdin), so it records
 // the call like Run and the extra environment is deliberately not modelled.
@@ -138,7 +139,14 @@ func (r *recRunner) afterPreflight(t *testing.T, verb, resource string) []rrCall
 		t.Fatalf("no calls recorded: the read-only `auth can-i %s %s` probe must run before anything else", verb, resource)
 	}
 	first := r.calls[0]
-	want := []string{"auth", "can-i", verb, resource, "-n", "solace"}
+	// A cluster-scoped resource is probed WITHOUT -n. Passing one made kubectl
+	// print "resource X is not namespace scoped" and, when the namespace did not
+	// exist yet, fail with an unrelated NotFound -- so the absence of -n here is
+	// the assertion, not an omission.
+	want := []string{"auth", "can-i", verb, resource}
+	if !clusterScoped[resource] {
+		want = append(want, "-n", "solace")
+	}
 	if first.method != "Output" || !eqArgs(first.args, want) {
 		t.Fatalf("first call = %+v, want the preflight probe Output %v", first, want)
 	}

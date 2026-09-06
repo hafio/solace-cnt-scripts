@@ -13,12 +13,22 @@ import (
 	"solace/internal/config"
 )
 
-// out returns the report/prompt sink, defaulting to stdout when unset.
+// out returns the report sink, defaulting to stdout when unset.
 func (c *Cluster) out() io.Writer {
 	if c.Out != nil {
 		return c.Out
 	}
 	return os.Stdout
+}
+
+// errOut returns the prompt sink, defaulting to stderr when unset. Prompts are
+// deliberately not on Out: a script capturing this tool's stdout wants the
+// report, not the questions.
+func (c *Cluster) errOut() io.Writer {
+	if c.Err != nil {
+		return c.Err
+	}
+	return os.Stderr
 }
 
 // in returns the prompt source, defaulting to stdin when unset. Only the
@@ -46,11 +56,221 @@ func (c *Cluster) CreateNamespace(ctx context.Context) error {
 	return c.apply(ctx, namespaceManifest(c.ns()))
 }
 
+// protectedNamespaces are the Kubernetes system namespaces DeleteNamespace
+// refuses outright, with no override: deleting any of them breaks the
+// cluster, and no Solace deployment ever needs it done. An env file naming one
+// of these in kubernetes.namespace (default included -- the easiest namespace
+// to point at by accident) is a configuration mistake DeleteNamespace must
+// catch before it does anything else, cluster round-trip included.
+var protectedNamespaces = map[string]bool{
+	"default":         true,
+	"kube-system":     true,
+	"kube-public":     true,
+	"kube-node-lease": true,
+}
+
 // DeleteNamespace removes the broker namespace (111). --ignore-not-found makes a
 // repeat teardown a no-op rather than an error.
+//
+// Two guards run before the delete, and neither can be silenced by --no-prompt:
+// that flag only decides whether the CLI's own confirmDelete asks a question
+// before calling here, so this method is exactly what a fully unattended
+// removal reaches, with nothing left upstream to skip its checks.
+//
+//  1. protectedNamespaces, checked first and without even asking the cluster:
+//     there is no interpretation of "delete kube-system" that this tool should
+//     ever carry out.
+//  2. Everything else the namespace holds is enumerated and classified OURS vs
+//     FOREIGN (namespaceObjects/isOurs). A namespace an env file points at by
+//     mistake -- "kubernetes.namespace: default" would already be caught above,
+//     but nothing stops "kubernetes.namespace: shared-team-ns" -- must not take
+//     someone else's pods, services and secrets down with it. Any FOREIGN
+//     object refuses the whole delete; only an all-ours or empty namespace
+//     proceeds to the same behaviour as before this guard existed.
 func (c *Cluster) DeleteNamespace(ctx context.Context) error {
+	if protectedNamespaces[c.ns()] {
+		return fmt.Errorf("refusing to delete namespace %q: this tool will never delete it; "+
+			"use \"remove broker\" / \"remove secrets\" to remove just this deployment's own objects", c.ns())
+	}
+	if err := c.Preflight(ctx, "delete", "namespaces"); err != nil {
+		return err
+	}
+	objs, err := c.namespaceObjects(ctx)
+	if err != nil {
+		// Being unable to see what the namespace holds is not permission to
+		// proceed -- that is the one thing this guard exists to prevent.
+		return err
+	}
+	if foreign := foreignObjects(c.Cfg, objs); len(foreign) > 0 {
+		r := c.report()
+		r.Section("Foreign resources in namespace " + c.ns())
+		rows := make([][]string, len(foreign))
+		for i, o := range foreign {
+			rows[i] = []string{o.Kind, o.Name}
+		}
+		r.Table([]string{"KIND", "NAME"}, rows)
+		return fmt.Errorf("namespace %q holds %d resource(s) this tool did not create; refusing to delete it. "+
+			"\"remove broker\" and \"remove secrets\" remove just this deployment's own objects; deleting the "+
+			"namespace itself is then your own `kubectl delete namespace %s` call to make", c.ns(), len(foreign), c.ns())
+	}
 	c.logf("deleting namespace %s", c.ns())
 	return c.kubectl(ctx, "delete", "namespace", c.ns(), "--ignore-not-found")
+}
+
+// nsResourceKinds is every built-in kind DeleteNamespace enumerates in ONE
+// `kubectl get` call, joined as kubectl's own comma-separated resource-type
+// list. The broker CR rides its own separate call in namespaceObjects rather
+// than joining this one: kubectl resolves a multi-kind get's resource types
+// before it asks the API server anything, and aborts the WHOLE call if even
+// one of them is unrecognised -- which the broker CRD, unlike any of these
+// built-ins, may genuinely be (an operator never installed on this cluster).
+// Splitting them means an absent CRD only fails the one probe that was asking
+// about it, instead of also blinding this guard to every ordinary object below.
+const nsResourceKinds = "pods,services,statefulsets,deployments,daemonsets,jobs,cronjobs," +
+	"persistentvolumeclaims,secrets,configmaps,serviceaccounts,ingresses"
+
+// brokerCRKind is stamped onto every broker CR namespaceObjects decodes. A
+// single-kind `kubectl get <kind> -o json` reply does not carry a per-item
+// "kind"/"apiVersion" the way a heterogeneous multi-kind reply does (that is
+// the whole reason nsResourceKinds' items decode their own Kind field below),
+// so the broker CR's items arrive with no kind of their own and this constant
+// fills it in by hand instead.
+const brokerCRKind = "PubSubPlusEventBroker"
+
+// nsObject is one object found while enumerating a namespace's contents ahead
+// of a delete: only the kind and name are needed to classify ownership.
+type nsObject struct {
+	Kind string
+	Name string
+}
+
+// nsRawList decodes nsResourceKinds' heterogeneous reply: each item carries
+// its own kind, which is what lets one JSON blob describe objects of several
+// different built-in types.
+type nsRawList struct {
+	Items []struct {
+		Kind     string     `json:"kind"`
+		Metadata objectMeta `json:"metadata"`
+	} `json:"items"`
+}
+
+// nsCRList decodes the broker-CR-only reply: a homogeneous list, so only the
+// name is read -- brokerCRKind supplies the kind nsRawList would otherwise
+// have carried per item.
+type nsCRList struct {
+	Items []struct {
+		Metadata objectMeta `json:"metadata"`
+	} `json:"items"`
+}
+
+// namespaceObjects lists everything DeleteNamespace must classify before it
+// tears a namespace down, across the two calls nsResourceKinds' comment
+// explains. The two failures are NOT equivalent, and are deliberately not
+// treated alike:
+//
+//   - The built-in listing failing (RBAC denial, an unreachable API server)
+//     blinds the guard completely, and being unable to see is not the same as
+//     seeing it is safe. It is wrapped and returned, and refuses the delete.
+//
+//   - The broker-CR listing failing usually means the CRD is not installed on
+//     this cluster, which is a state this tool's own documented order produces:
+//     remove the brokers, `remove operator --delete-crd`, then `remove
+//     namespace`. Refusing there would make a legitimate teardown impossible
+//     forever, so it warns and carries on judging the namespace by what it CAN
+//     see. That is safe because the built-in listing is what actually catches a
+//     foreign broker: the operator gives every one of its objects a
+//     "<name>-pubsubplus" name (isOurs), so another team's broker shows up as
+//     foreign pods, a foreign StatefulSet, PVCs and a Service even when its CR
+//     is invisible here. Only a CR with no workload at all -- freshly created,
+//     or wholly failed -- escapes, and it is named in the warning either way.
+//
+// kubectl's own message cannot be used to tell the two apart: engine.Exec wires
+// the child's stderr straight to this process's (runner.go), so the error
+// carries an exit status and nothing else.
+func (c *Cluster) namespaceObjects(ctx context.Context) ([]nsObject, error) {
+	var built nsRawList
+	if err := c.getJSON(ctx, &built, nsResourceKinds, "-n", c.ns()); err != nil {
+		return nil, fmt.Errorf("listing namespace %q contents before delete: %w", c.ns(), err)
+	}
+	objs := make([]nsObject, 0, len(built.Items)+1)
+	for _, it := range built.Items {
+		objs = append(objs, nsObject{Kind: it.Kind, Name: it.Metadata.Name})
+	}
+
+	var brokers nsCRList
+	if err := c.getJSON(ctx, &brokers, brokerResource, "-n", c.ns()); err != nil {
+		c.progress().Warn("could not list broker resources in namespace %s (the operator's CRD may not be "+
+			"installed, or access was denied): %v", c.ns(), err)
+		c.progress().Warn("judging namespace %s by its other contents only; a broker custom resource with no "+
+			"running workload would not be seen.", c.ns())
+		return objs, nil
+	}
+	for _, it := range brokers.Items {
+		objs = append(objs, nsObject{Kind: brokerCRKind, Name: it.Metadata.Name})
+	}
+	return objs, nil
+}
+
+// namespaceOursSecrets is the configured secret names this deployment owns,
+// skipping the ones left unset -- TLSServerSecret and ImagePullSecret are both
+// optional, and an unset field must not be compared against a Secret's name.
+func namespaceOursSecrets(cfg *config.Config) map[string]bool {
+	ours := map[string]bool{}
+	for _, n := range []string{cfg.K8s.AdminSecret, cfg.K8s.TLSServerSecret, cfg.K8s.ImagePullSecret} {
+		if n != "" {
+			ours[n] = true
+		}
+	}
+	return ours
+}
+
+// isOurs classifies one namespace object as belonging to this deployment.
+// Everything it does not recognise is FOREIGN -- work DeleteNamespace must
+// never take down with the namespace.
+func isOurs(cfg *config.Config, ourSecrets map[string]bool, obj nsObject) bool {
+	switch {
+	case strings.Contains(obj.Name, cfg.K8s.Name+brokerSuffix):
+		// The operator names every resource it creates off the broker
+		// "<kubernetes.name>-pubsubplus...": pods, StatefulSets, PVCs and the LB
+		// service all do (names.go), and by the same rule so would a
+		// PodDisruptionBudget or an auto-created ServiceAccount, for which this
+		// repo derives no name helper at all.
+		//
+		// The broker NAME is part of the test, not just the suffix. Matching the
+		// bare suffix would call ANY Solace broker's objects ours, so a second
+		// team's broker sharing this namespace -- the exact case this guard
+		// exists for -- would be classified as ours and deleted with it. The
+		// prefix keeps that broker's objects foreign, which refuses the delete.
+		return true
+	case obj.Kind == brokerCRKind:
+		return obj.Name == cfg.K8s.Name
+	case obj.Kind == "Secret":
+		return ourSecrets[obj.Name]
+	case obj.Kind == "ConfigMap":
+		// Kubernetes stamps "kube-root-ca.crt" into EVERY namespace it creates,
+		// regardless of who created the namespace -- general Kubernetes
+		// behaviour, not recorded anywhere else in this repo. Treating it as
+		// foreign would refuse every single teardown.
+		return obj.Name == "kube-root-ca.crt"
+	case obj.Kind == "ServiceAccount":
+		// Same Kubernetes-generated exception, for the "default" ServiceAccount
+		// every namespace gets automatically.
+		return obj.Name == "default"
+	default:
+		return false
+	}
+}
+
+// foreignObjects filters objs down to what isOurs does not recognise.
+func foreignObjects(cfg *config.Config, objs []nsObject) []nsObject {
+	ours := namespaceOursSecrets(cfg)
+	var foreign []nsObject
+	for _, o := range objs {
+		if !isOurs(cfg, ours, o) {
+			foreign = append(foreign, o)
+		}
+	}
+	return foreign
 }
 
 // secretPreflight fails loud before any manifest is built when the TLS server
@@ -58,11 +278,11 @@ func (c *Cluster) DeleteNamespace(ctx context.Context) error {
 // 012:19-24 so the operator does not later fail to mount a half-built secret. The
 // admin secret's own guards live in AdminSecret.
 func (c *Cluster) secretPreflight() error {
-	if c.Cfg.TLS.ServerSecret == "" {
+	if c.Cfg.K8s.TLSServerSecret == "" {
 		return nil
 	}
 	if c.Cfg.TLS.Cert == "" || c.Cfg.TLS.CertKey == "" {
-		return fmt.Errorf("tls.serverSecret %q is set but tls.cert and tls.certKey are not both configured", c.Cfg.TLS.ServerSecret)
+		return fmt.Errorf("kubernetes.tlsServerSecret %q is set but tls.cert and tls.certKey are not both configured", c.Cfg.K8s.TLSServerSecret)
 	}
 	for _, f := range []string{c.Cfg.TLS.Cert, c.Cfg.TLS.CertKey} {
 		if _, err := os.Stat(f); err != nil {
@@ -73,7 +293,8 @@ func (c *Cluster) secretPreflight() error {
 }
 
 // GenSecrets builds every applicable secret (admin always; TLS when
-// tls.serverSecret is set; the image-pull secret when image.pullSecret is set) and
+// kubernetes.tlsServerSecret is set; the image-pull secret when
+// kubernetes.imagePullSecret is set) and
 // joins them into one multi-doc manifest -- porting 012's secret set. It is the
 // rendering behind both CreateSecrets and `--gen-secrets-only`, so what a user
 // reviews is exactly what gets applied. The manifests carry the base64-encoded
@@ -87,7 +308,7 @@ func GenSecrets(cfg *config.Config) ([]byte, error) {
 	}
 	docs = append(docs, admin)
 
-	if cfg.TLS.ServerSecret != "" {
+	if cfg.K8s.TLSServerSecret != "" {
 		tls, err := TLSSecret(cfg)
 		if err != nil {
 			return nil, err
@@ -95,7 +316,7 @@ func GenSecrets(cfg *config.Config) ([]byte, error) {
 		docs = append(docs, tls)
 	}
 
-	if cfg.Image.PullSecret != "" {
+	if cfg.K8s.ImagePullSecret != "" {
 		pull, err := DockerRegistrySecret(cfg)
 		if err != nil {
 			return nil, err
@@ -106,7 +327,7 @@ func GenSecrets(cfg *config.Config) ([]byte, error) {
 }
 
 // CreateSecrets applies the GenSecrets manifest on stdin, keeping every secret
-// value off the argv and out of the --dry-run echo (§3). The whole manifest is
+// value off the argv and out of an echoed command (§3). The whole manifest is
 // built before the first apply, so a builder error aborts cleanly without leaving
 // a partially-applied secret set.
 func (c *Cluster) CreateSecrets(ctx context.Context) error {
@@ -130,12 +351,15 @@ func (c *Cluster) CreateSecrets(ctx context.Context) error {
 // always, the TLS and image-pull secrets only when their names are configured. All
 // use --ignore-not-found so a partial or repeat teardown is not an error.
 func (c *Cluster) DeleteSecrets(ctx context.Context) error {
-	names := []string{c.Cfg.K8s.AdminSecret}
-	if c.Cfg.TLS.ServerSecret != "" {
-		names = append(names, c.Cfg.TLS.ServerSecret)
+	if err := c.Preflight(ctx, "delete", "secrets"); err != nil {
+		return err
 	}
-	if c.Cfg.Image.PullSecret != "" {
-		names = append(names, c.Cfg.Image.PullSecret)
+	names := []string{c.Cfg.K8s.AdminSecret}
+	if c.Cfg.K8s.TLSServerSecret != "" {
+		names = append(names, c.Cfg.K8s.TLSServerSecret)
+	}
+	if c.Cfg.K8s.ImagePullSecret != "" {
+		names = append(names, c.Cfg.K8s.ImagePullSecret)
 	}
 	for _, name := range names {
 		if name == "" {
@@ -153,10 +377,10 @@ func (c *Cluster) DeleteSecrets(ctx context.Context) error {
 // certificate files and applies it on stdin, porting the secret-managed path of
 // 051-load-server-cert.sh (051:28-38). Applying on stdin replaces the bash
 // `create secret tls --dry-run|apply`, so the private key never reaches an argv or
-// the --dry-run echo (§3). The broker re-reads the secret; no pod restart here.
+// an echoed command (§3). The broker re-reads the secret; no pod restart here.
 func (c *Cluster) UpdateServerCertSecret(ctx context.Context) error {
-	if c.Cfg.TLS.ServerSecret == "" {
-		return fmt.Errorf("tls.serverSecret must be set to update the server-certificate secret")
+	if c.Cfg.K8s.TLSServerSecret == "" {
+		return fmt.Errorf("kubernetes.tlsServerSecret must be set to update the server-certificate secret")
 	}
 	if err := c.Preflight(ctx, "update", "secrets"); err != nil {
 		return err
@@ -165,7 +389,7 @@ func (c *Cluster) UpdateServerCertSecret(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	c.logf("updating server-certificate secret %s", c.Cfg.TLS.ServerSecret)
+	c.logf("updating server-certificate secret %s", c.Cfg.K8s.TLSServerSecret)
 	return c.apply(ctx, manifest)
 }
 
@@ -266,14 +490,14 @@ func (c *Cluster) customLabels() map[config.Role][]labelKV {
 		for _, entry := range rolePlacementLabels(c.Cfg, role) {
 			key, val, ok := splitLabel(entry)
 			if !ok {
-				fmt.Fprintf(c.out(), "  [WARN] skipping malformed node label %q for %s\n", entry, roleName(role))
+				c.progress().Warn("skipping malformed node label %q for %s", entry, roleName(role))
 				continue
 			}
 			if isBuiltinLabel(key) {
 				continue // managed by Kubernetes; not user-applied
 			}
 			if !validLabelToken(key) || !validLabelToken(val) {
-				fmt.Fprintf(c.out(), "  [WARN] skipping node label with unsupported characters %q for %s\n", entry, roleName(role))
+				c.progress().Warn("skipping node label with unsupported characters %q for %s", entry, roleName(role))
 				continue
 			}
 			out[role] = append(out[role], labelKV{key, val})
@@ -335,10 +559,10 @@ func (c *Cluster) LabelNodes(ctx context.Context) error {
 		for _, kv := range labels {
 			arg := kv.key + "=" + kv.val
 			if err := c.kubectl(ctx, "label", "node", node, arg, "--overwrite"); err != nil {
-				fmt.Fprintf(c.out(), "  [ERROR] failed to apply %s to %s: %v\n", arg, node, err)
+				c.report().Fail("failed to apply %s to %s: %v", arg, node, err)
 				continue
 			}
-			fmt.Fprintf(c.out(), "  [ OK ] labelled %s with %s\n", node, arg)
+			c.report().OK("labelled %s with %s", node, arg)
 		}
 	}
 	return nil
@@ -348,12 +572,13 @@ func (c *Cluster) LabelNodes(ctx context.Context) error {
 // on invalid input. EOF with no valid selection is a hard error rather than a
 // silent default, so a mis-piped `up` cannot label the wrong node.
 func (c *Cluster) promptNode(r *bufio.Reader, role config.Role, nodes []string) (string, error) {
+	w := c.errOut()
 	for {
-		fmt.Fprintf(c.out(), "Select the node for the %s broker:\n", roleName(role))
+		fmt.Fprintf(w, "Select the node for the %s broker:\n", roleName(role))
 		for i, n := range nodes {
-			fmt.Fprintf(c.out(), "  %d) %s\n", i+1, n)
+			fmt.Fprintf(w, "  %d) %s\n", i+1, n)
 		}
-		fmt.Fprint(c.out(), "> ")
+		fmt.Fprint(w, "> ")
 
 		line, rerr := r.ReadString('\n')
 		choice, cerr := strconv.Atoi(strings.TrimSpace(line))
@@ -363,6 +588,6 @@ func (c *Cluster) promptNode(r *bufio.Reader, role config.Role, nodes []string) 
 		if rerr != nil {
 			return "", fmt.Errorf("no valid node selection for the %s role", roleName(role))
 		}
-		fmt.Fprintln(c.out(), "Invalid selection; enter the number of a listed node.")
+		fmt.Fprintln(w, "Invalid selection; enter the number of a listed node.")
 	}
 }

@@ -1,0 +1,26 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "broken-broker",
+        "namespace": "solace",
+        "creationTimestamp": "2026-08-21T09:24:04Z"
+      },
+      "status": {
+        "broker": {
+          "haDeployment": "true"
+        },
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-08-21T09:25:09Z",
+            "message": "No active broker pod found",
+            "reason": "NoActivePod",
+            "status": "False",
+            "type": "ServiceReady"
+          }
+        ],
+        "podsList": []
+      }
+    }
+  ]
+}

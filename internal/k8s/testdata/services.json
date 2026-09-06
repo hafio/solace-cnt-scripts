@@ -1,0 +1,30 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "dev-broker-pubsubplus",
+        "creationTimestamp": "2026-08-21T09:24:04Z"
+      },
+      "spec": {
+        "type": "LoadBalancer",
+        "clusterIP": "10.102.188.58"
+      },
+      "status": {
+        "loadBalancer": {}
+      }
+    },
+    {
+      "metadata": {
+        "name": "dev-broker-pubsubplus-discovery",
+        "creationTimestamp": "2026-08-21T09:24:04Z"
+      },
+      "spec": {
+        "type": "ClusterIP",
+        "clusterIP": "None"
+      },
+      "status": {
+        "loadBalancer": {}
+      }
+    }
+  ]
+}

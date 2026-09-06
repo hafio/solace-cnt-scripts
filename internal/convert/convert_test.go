@@ -159,8 +159,11 @@ func TestConvertLegacyK8sEnv(t *testing.T) {
 	if c.Image.Repo != "solace-pubsub-standard" || c.Image.Tag != "latest" || c.Image.Registry != "localhost" {
 		t.Errorf("image = %+v", c.Image)
 	}
-	if c.Image.PullSecret != "registry-pull-secret" || c.Image.User != "docker-user" || c.Image.Pass != "docker-pass" {
-		t.Errorf("image credentials = %+v", c.Image)
+	if c.K8s.ImagePullSecret != "registry-pull-secret" || c.Image.User != "docker-user" || c.Image.Pass != "docker-pass" {
+		t.Errorf("image credentials = %+v pullSecret=%q", c.Image, c.K8s.ImagePullSecret)
+	}
+	if c.K8s.TLSServerSecret != "solace-tls-secret" {
+		t.Errorf("kubernetes.tlsServerSecret = %q, want solace-tls-secret", c.K8s.TLSServerSecret)
 	}
 	if c.K8s.Name != "solace-broker" || c.K8s.Namespace != "solace-namespace" {
 		t.Errorf("k8s identity = %q/%q", c.K8s.Name, c.K8s.Namespace)
@@ -203,9 +206,10 @@ func TestConvertLegacyK8sEnv(t *testing.T) {
 	if len(c.Replication.ConnSSL) != 3 || c.Replication.ConnSSL[0] != "host:port" {
 		t.Errorf("replication.connSsl = %v", c.Replication.ConnSSL)
 	}
-	// REPL_PSK="" is empty, so it must not appear at all.
-	if strings.Contains(string(res.YAML), "psk:") {
-		t.Errorf("an empty PSK should be omitted:\n%s", res.YAML)
+	// REPL_PSK='r$plPSK' is single-quoted, so the $ is literal and must survive
+	// verbatim instead of being read as a (nonexistent) ${plPSK} reference (B5).
+	if c.Replication.PSK != "r$plPSK" {
+		t.Errorf("replication.psk = %q, want the literal r$plPSK", c.Replication.PSK)
 	}
 	// KUBE was expanded unquoted by the bash scripts, so a whole kubectl profile
 	// has to survive the conversion as kubernetes.runtime, split into argv.
@@ -724,6 +728,84 @@ func TestParseEscapedQuote(t *testing.T) {
 	}
 }
 
+// TestParseSingleQuotedDollarSurvives is the regression for B5: single quotes
+// are bash's idiom for keeping `$` literal, and the old tokenizer stripped
+// quoting before expand() ever ran, so a single-quoted PSK containing `$`
+// silently truncated to whatever preceded the reference. "s3cret" is not
+// assigned anywhere in this fixture, which is exactly the case that used to
+// vanish into "" instead of surviving.
+func TestParseSingleQuotedDollarSurvives(t *testing.T) {
+	v, err := parse(`SOLBK_REDUNDANCY_PSK='p$s3cret'` + "\n")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got, want := v.scalar["SOLBK_REDUNDANCY_PSK"], "p$s3cret"; got != want {
+		t.Errorf("SOLBK_REDUNDANCY_PSK = %q, want %q (single quotes must keep $ literal)", got, want)
+	}
+}
+
+// TestParseMixedQuotingExpandsOnlyTheExpandableHalf covers a word that
+// switches quoting mid-token (`a'$b'"$B"`): the single-quoted half must stay
+// literal even though B itself is a known variable, and the double-quoted
+// half must still expand, so the fix has to track literalness per segment
+// rather than per word.
+func TestParseMixedQuotingExpandsOnlyTheExpandableHalf(t *testing.T) {
+	src := "B=\"known\"\n" + `MIXED=a'$b'"$B"` + "\n"
+	v, err := parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got, want := v.scalar["MIXED"], "a$bknown"; got != want {
+		t.Errorf("MIXED = %q, want %q (literal '$b' untouched, \"$B\" expanded)", got, want)
+	}
+}
+
+// TestParseArrayElementsPreserveQuoting covers the array body path (tokenize
+// -> per-token expand in parse()), which is a second, separate call site from
+// the scalar path above and must apply the same per-segment rule.
+func TestParseArrayElementsPreserveQuoting(t *testing.T) {
+	src := "KNOWN=\"value\"\n" + `ARR=('p$q' "$KNOWN")` + "\n"
+	v, err := parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := v.array["ARR"]
+	if len(got) != 2 || got[0] != "p$q" || got[1] != "value" {
+		t.Errorf("ARR = %v, want [p$q value]", got)
+	}
+}
+
+// TestParseDoubleQuotedBackslashEscapes covers the second way the same secret
+// loss could happen, which the single-quote fix alone did not close: inside
+// double quotes bash honours a backslash before exactly $, `, " and \, and
+// leaves it LITERAL before anything else.
+//
+// Stripping it unconditionally, as the tokenizer used to, broke both halves --
+// "\$SECRET" became an expandable $SECRET and truncated the same way B5 did,
+// and "C:\Users\me" quietly lost its separators. An escaped character is
+// emitted as its own literal segment, so it can never reach the substitution.
+func TestParseDoubleQuotedBackslashEscapes(t *testing.T) {
+	for _, tc := range []struct{ name, src, key, want string }{
+		{"escaped dollar stays literal", `S="\$s3cret"` + "\n", "S", "$s3cret"},
+		{"escaped dollar survives even when the name IS assigned",
+			"s3cret=\"leaked\"\n" + `S="\$s3cret"` + "\n", "S", "$s3cret"},
+		{"a backslash before anything else is kept", `P="C:\Users\me"` + "\n", "P", `C:\Users\me`},
+		{"an escaped quote still closes nothing", `Q="a\"b"` + "\n", "Q", `a"b`},
+		{"an escaped backslash collapses to one", `B="a\\b"` + "\n", "B", `a\b`},
+		{"an unescaped reference still expands", "N=\"v\"\n" + `E="$N"` + "\n", "E", "v"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := parse(tc.src)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if got := v.scalar[tc.key]; got != tc.want {
+				t.Errorf("%s = %q, want %q", tc.key, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestUnmappedTracksFileOrder(t *testing.T) {
 	v, err := parse("ZED=\"1\"\nALPHA=\"2\"\nSOLBK_IMAGE=\"i\"\n")
 	if err != nil {
@@ -783,6 +865,64 @@ func TestGeneratedHeader(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(res.YAML), "# Generated by `solace-util convert` from bash/env/prod.") {
 		t.Errorf("missing provenance header:\n%s", res.YAML)
+	}
+}
+
+// TestConvertAdminSecretAlias covers the SOLBK_ADM_SECRET alias: the repo's own
+// bootstraps only ever defined SOLBK_USR_SECRET, but hand-maintained env files
+// exist that named the same Secret SOLBK_ADM_SECRET, so both convert to
+// kubernetes.adminSecret. When the two disagree the canonical name wins and the
+// choice is reported rather than made in silence.
+func TestConvertAdminSecretAlias(t *testing.T) {
+	t.Run("alias alone maps", func(t *testing.T) {
+		res := convertOK(t, k8sEnv+"SOLBK_ADM_SECRET=\"alias-secret\"\n", config.K8s)
+		if got := strictDecode(t, res.YAML).K8s.AdminSecret; got != "alias-secret" {
+			t.Errorf("kubernetes.adminSecret = %q, want the alias value", got)
+		}
+		if hasWarning(res.Warnings, "SOLBK_ADM_SECRET") {
+			t.Errorf("a clean alias mapping should not warn; warnings = %v", res.Warnings)
+		}
+	})
+	t.Run("canonical wins on disagreement", func(t *testing.T) {
+		res := convertOK(t, k8sEnv+"SOLBK_USR_SECRET=\"canonical\"\nSOLBK_ADM_SECRET=\"alias-secret\"\n", config.K8s)
+		if got := strictDecode(t, res.YAML).K8s.AdminSecret; got != "canonical" {
+			t.Errorf("kubernetes.adminSecret = %q, want the canonical SOLBK_USR_SECRET value", got)
+		}
+		if !hasWarning(res.Warnings, "disagree") {
+			t.Errorf("a conflicting alias must be reported; warnings = %v", res.Warnings)
+		}
+	})
+	t.Run("agreeing alias is silent", func(t *testing.T) {
+		res := convertOK(t, k8sEnv+"SOLBK_USR_SECRET=\"same\"\nSOLBK_ADM_SECRET=\"same\"\n", config.K8s)
+		if got := strictDecode(t, res.YAML).K8s.AdminSecret; got != "same" {
+			t.Errorf("kubernetes.adminSecret = %q, want %q", got, "same")
+		}
+		if hasWarning(res.Warnings, "SOLBK_ADM_SECRET") {
+			t.Errorf("an agreeing alias should not warn; warnings = %v", res.Warnings)
+		}
+	})
+}
+
+// TestConvertK8sSecretNamesAreK8sOnly covers the container-platform treatment of
+// the two variables that name Kubernetes Secret objects: they cannot land
+// anywhere in a docker/podman file, so each is dropped with the reason and its
+// kubernetes.* home named -- not resurfaced in the generic unmapped list.
+func TestConvertK8sSecretNamesAreK8sOnly(t *testing.T) {
+	src := ctrEnv + "IMAGEREPO_SECRET=\"registry-pull-secret\"\nSOLBK_SVR_SECRET=\"solace-tls-secret\"\n"
+	res := convertOK(t, src, config.Docker)
+	for _, want := range []string{"kubernetes.imagePullSecret", "kubernetes.tlsServerSecret"} {
+		if !hasWarning(res.Warnings, want) {
+			t.Errorf("warnings %v should name %s", res.Warnings, want)
+		}
+	}
+	if hasWarning(res.Warnings, "no YAML equivalent") {
+		t.Errorf("the two secrets must not resurface in the unmapped list; warnings = %v", res.Warnings)
+	}
+	out := string(res.YAML)
+	for _, forbidden := range []string{"pullSecret", "tlsServerSecret", "serverSecret"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("container YAML must not carry %s:\n%s", forbidden, out)
+		}
 	}
 }
 

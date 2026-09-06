@@ -12,7 +12,7 @@ import (
 // kubectlTransport implements broker.Transport by wrapping `kubectl exec/cp -n <ns>
 // <pod> --` against the broker pod for a role. Broker pods are single-container, so
 // no `-c` flag is used (050:30, 053:56, enter-solace-cli.sh:18). Every call routes
-// through the injected engine.Runner, so --dry-run echoes the command without running
+// through the injected engine.Runner, so the Echo runner records the command without running
 // it and tests capture the exact argv.
 type kubectlTransport struct {
 	r   engine.Runner
@@ -71,7 +71,7 @@ func (k *kubectlTransport) OutputInput(ctx context.Context, role config.Role, in
 
 // Upload writes data to destPath inside the pod by piping it to `sh -c 'cat >
 // <dest>'` on stdin -- the secret-safe path: the body rides RunInput's stdin (shown
-// as a byte count under --dry-run), never an argv or a temp file. destPath is
+// as a byte count under the Echo runner), never an argv or a temp file. destPath is
 // tool-generated and validName-checked upstream, so shSingleQuote is defensive.
 func (k *kubectlTransport) Upload(ctx context.Context, role config.Role, data []byte, destPath string) error {
 	shcmd := "cat > " + shSingleQuote(destPath)
@@ -104,7 +104,7 @@ func (k *kubectlTransport) Download(ctx context.Context, role config.Role, remot
 }
 
 // shSingleQuote wraps s in single quotes for safe use inside `sh -c`, escaping any
-// embedded single quote (' -> '\''). Defensive: the only value passed to it is a
+// embedded single quote (' -> '\”). Defensive: the only value passed to it is a
 // tool-generated, validName-checked destPath, but this guarantees no shell
 // metacharacter in a path can break out of the `cat >` redirect (§3).
 func shSingleQuote(s string) string {

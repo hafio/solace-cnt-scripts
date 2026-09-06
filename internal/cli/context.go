@@ -1,14 +1,15 @@
 package cli
 
 import (
-	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"solace/internal/config"
 	"solace/internal/engine"
+	"solace/internal/output"
 )
 
 // App is the shared context threaded through every command: the parsed global
@@ -64,6 +65,19 @@ type App struct {
 	inputFile   string // cli --input/-i: run this CLI script instead of an interactive session
 	days        int    // diagnostics --days
 	restart     bool   // deploy broker --restart (bounce a running broker)
+
+	// Hostname resolves this host's name for the container node-role detection
+	// containerRole does (broker.Ops.LocalRole). Unset -- the production case --
+	// it stays broker.New's os.Hostname; a test injects a fixed name, which is
+	// the only way to exercise a deploy that decides its own role. Same shape as
+	// NewRunner/Interactive/PromptIn.
+	Hostname func() (string, error)
+
+	// kubeContext is the kubeconfig context announceKubeContext resolved at load,
+	// repeated by every destructive Kubernetes prompt (k8sWhat). Empty when it
+	// could not be resolved, when the platform is not Kubernetes, or under a
+	// test-supplied runner -- the prompts drop the clause rather than guess.
+	kubeContext string
 }
 
 // load resolves the env file for the app's platform and builds the config +
@@ -98,8 +112,45 @@ func (a *App) load(cmd *cobra.Command) error {
 	a.Runner = engine.NewExec(os.Stderr, a.Verbose)
 	if a.willExecute(cmd) {
 		a.announceCommands()
+		a.announceKubeContext()
 	}
 	return nil
+}
+
+// announceKubeContext resolves and reports the kubeconfig context every kubectl
+// call in this run will land in, beside the `using kubectl:` line.
+//
+// It is the one fact the preamble was missing that an operator cannot recover
+// from anywhere else. The env file names a namespace, never a cluster: which
+// cluster is decided entirely by the kubeconfig's current context, so an env
+// file that says "dev" and a context that drifted to prod look identical right
+// up until the work lands. Naming it here puts the answer in front of the
+// operator BEFORE any prompt, which is also why a.kubeContext is kept for the
+// destructive prompts to repeat (k8sWhat) rather than looked up again there.
+//
+// `config current-context` reads the kubeconfig file and contacts nothing, so
+// this costs no round trip and works against an unreachable cluster.
+//
+// Like announceCommands it never fails: a kubeconfig with no current context is
+// a real state (a fresh install, or --kubeconfig pointing somewhere bare) and
+// the first real call reports it far better than a preamble could. kubectl's own
+// stderr still reaches the operator when that happens -- engine.Exec wires the
+// child's stderr straight through -- which is left alone deliberately: this tool
+// has no --context of its own, so a kubeconfig with no current context is about
+// to fail every call, and saying so once here is a head start, not noise.
+func (a *App) announceKubeContext() {
+	if a.Platform != config.K8s {
+		return
+	}
+	kc, err := a.Cfg.ClusterCommand()
+	if err != nil {
+		return
+	}
+	out, err := a.Runner.Output(bg(), kc.Name(), kc.Args("config", "current-context")...)
+	if ctx := strings.TrimSpace(string(out)); err == nil && ctx != "" {
+		a.kubeContext = ctx
+		step("kube-context: %s", ctx)
+	}
 }
 
 // announceCommands names the binaries this env file chose, resolved, before any of them
@@ -145,12 +196,21 @@ func (a *App) announceCommands() {
 	}
 }
 
+// progress is the stderr sink every line this package narrates goes through, so
+// the `==> ` and `[TAG ] ` shapes are defined once, in internal/output, rather
+// than at each call site. It is a function rather than a package variable
+// because a Sink holds nothing worth caching (§4a: no global state), and the
+// helpers below need one from call sites that have no *App in scope.
+func progress() *output.Sink { return output.New(os.Stderr) }
+
+// lineSink is what the k8s/container/broker entry types are handed as their Log:
+// a RAW line emitter. They build their own output.Sink over it and add the
+// prefixes there, which is why this deliberately is not `step` -- passing a
+// prefixing function would prefix twice, once here and once in the callee.
+func lineSink() func(string, ...any) { return progress().Line }
+
 // warn prints a non-fatal warning to stderr in the house [WARN] style.
-func warn(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "[WARN] "+format+"\n", args...)
-}
+func warn(format string, args ...any) { progress().Warn(format, args...) }
 
 // step prints a progress line to stderr so it never pollutes rendered stdout.
-func step(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "==> "+format+"\n", args...)
-}
+func step(format string, args ...any) { progress().Step(format, args...) }

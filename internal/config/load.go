@@ -183,7 +183,7 @@ func (c *Config) applyK8sDefaults() {
 	}
 
 	// TLS cert/key only default when a server secret is requested.
-	if c.TLS.ServerSecret != "" {
+	if c.K8s.TLSServerSecret != "" {
 		setDefault(&c.TLS.Cert, "certs/tls.crt")
 		setDefault(&c.TLS.CertKey, "certs/tls.key")
 	}

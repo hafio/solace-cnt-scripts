@@ -124,13 +124,12 @@ func TestManagerCheckDryRun(t *testing.T) {
 	cases := []struct {
 		p          config.Platform
 		redundancy string
-		title      string
 		mode       string
 	}{
-		{config.Docker, "yes", "Docker", "HA redundancy group"},
-		{config.Docker, "no", "Docker", "standalone (single broker)"},
-		{config.Podman, "yes", "Podman", "HA redundancy group"},
-		{config.Podman, "no", "Podman", "standalone (single broker)"},
+		{config.Docker, "yes", "HA redundancy group"},
+		{config.Docker, "no", "standalone (single broker)"},
+		{config.Podman, "yes", "HA redundancy group"},
+		{config.Podman, "no", "standalone (single broker)"},
 	}
 	for _, tc := range cases {
 		cfg := ctrCfg(tc.p, tc.redundancy)
@@ -143,10 +142,10 @@ func TestManagerCheckDryRun(t *testing.T) {
 		}
 		out := buf.String()
 		for _, want := range []string{
-			"Solace broker deployment (" + tc.title + ")",
+			"=== Broker deployment (" + string(tc.p) + ")",
 			tc.mode,
 			"+ " + cfg.ContainerRuntime(tc.p).String() + " version",
-			"skipped (--dry-run)",
+			"skipped (preview)",
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("%s/%s Check missing %q:\n%s", tc.p, tc.redundancy, want, out)
@@ -185,12 +184,12 @@ func TestManagerPrepHostDryRunDoesNotWritePSK(t *testing.T) {
 	}
 	m, buf := newEchoMgr(ctrCfg(config.Docker, "yes"), config.Docker)
 	m.EnvPath = envFile
-	m.GenPSK = func() (string, error) { t.Fatal("GenPSK must not run under --dry-run"); return "", nil }
+	m.GenPSK = func() (string, error) { t.Fatal("GenPSK must not run under the Echo runner"); return "", nil }
 	if err := m.PrepHost(context.Background()); err != nil {
 		t.Fatalf("PrepHost: %v", err)
 	}
 	if got, _ := os.ReadFile(envFile); string(got) != original {
-		t.Errorf("env file must be unchanged under --dry-run:\n%s", got)
+		t.Errorf("env file must be unchanged under the Echo runner:\n%s", got)
 	}
 	out := buf.String()
 	for _, want := range []string{"+ mkdir -p /opt/solace/data", "+ chown 0:0 /opt/solace/data"} {
@@ -232,6 +231,7 @@ func TestManagerPrepHostRootlessUsesUnshareChown(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "no") // standalone -> PSK step is skipped
 	cfg.Podman.Rootless = true
 	m, rr, _ := newCapMgr(cfg, config.Podman)
+	m.Geteuid = func() int { return 1000 } // rootless as non-root: euid guard passes
 	if err := m.PrepHost(context.Background()); err != nil {
 		t.Fatalf("PrepHost: %v", err)
 	}
@@ -259,6 +259,7 @@ func rootlessNoFileMgr(want, hardLimit string) (*Manager, *capRunner, *bytes.Buf
 	cfg.Podman.Rootless = true
 	setNoFile(cfg, config.Podman, want)
 	m, rr, buf := newCapMgr(cfg, config.Podman)
+	m.Geteuid = func() int { return 1000 } // rootless as non-root: euid guard passes
 	rr.out = []byte(hardLimit)
 	return m, rr, buf
 }
@@ -331,6 +332,9 @@ func TestPrepHostRootfulSkipsNoFile(t *testing.T) {
 		cfg.Podman.Rootless = false
 		setNoFile(cfg, p, "2448:1048576")
 		m, rr, _ := newCapMgr(cfg, p)
+		if p == config.Podman {
+			m.Geteuid = func() int { return 0 } // rootful podman requires root
+		}
 		rr.out = []byte("1024\n") // far below, and deliberately not consulted
 		if err := m.PrepHost(context.Background()); err != nil {
 			t.Fatalf("%s: PrepHost: %v", p, err)
@@ -355,7 +359,7 @@ func TestPrepHostRootlessNoFileDryRun(t *testing.T) {
 	if !strings.Contains(out, "ulimit -Hn") {
 		t.Errorf("dry-run should echo the probe:\n%s", out)
 	}
-	if !strings.Contains(out, "nofile         : skipped (--dry-run)") {
+	if !strings.Contains(out, "nofile          : skipped (preview)") {
 		t.Errorf("dry-run should say the assertion was skipped:\n%s", out)
 	}
 }
@@ -523,7 +527,7 @@ func TestManagerCopy(t *testing.T) {
 		if err := m.CopyFrom(context.Background(), []string{"a.log", "b.log"}); err == nil {
 			t.Error("CopyFrom should fail when a file could not be copied")
 		}
-		if !strings.Contains(buf.String(), "[ERROR]") {
+		if !strings.Contains(buf.String(), "[FAIL]") {
 			t.Errorf("CopyFrom should report the failing file:\n%s", buf.String())
 		}
 	})
@@ -558,6 +562,7 @@ func TestManagerPrepHostRegistryLogin(t *testing.T) {
 
 func TestManagerPrepHostNoLoginWithoutCreds(t *testing.T) {
 	m, rr, _ := newCapMgr(ctrCfg(config.Podman, "no"), config.Podman)
+	m.Geteuid = func() int { return 0 } // rootful (the ctrCfg default) requires root
 	if err := m.PrepHost(context.Background()); err != nil {
 		t.Fatalf("PrepHost: %v", err)
 	}
@@ -947,7 +952,7 @@ func TestManagerDeployPodmanDryRunSkipsWrite(t *testing.T) {
 		t.Fatalf("Deploy: %v", err)
 	}
 	if fileExists(filepath.Join(dir, "sol-pod.container")) {
-		t.Error("Deploy must not write the quadlet unit under --dry-run")
+		t.Error("Deploy must not write the quadlet unit under the Echo runner")
 	}
 	out := buf.String()
 	for _, want := range []string{"+ systemctl daemon-reload", "+ systemctl start sol-pod.service"} {
@@ -961,7 +966,7 @@ func TestManagerPodmanEUIDGuardSkippedOnDryRun(t *testing.T) {
 	m, _ := newEchoMgr(ctrCfg(config.Podman, "no"), config.Podman)
 	m.Cfg.Podman.Rootless = false // rootful would require root if the guard ran
 	if err := m.checkPodmanEUID(); err != nil {
-		t.Errorf("euid guard must be skipped under --dry-run, got %v", err)
+		t.Errorf("euid guard must be skipped under the Echo runner, got %v", err)
 	}
 }
 
@@ -987,6 +992,125 @@ func TestManagerDeletePodmanRemovesUnit(t *testing.T) {
 	}
 	if !hasCall(rr, "systemctl", []string{"daemon-reload"}) {
 		t.Errorf("Delete should daemon-reload:\n%+v", rr.calls)
+	}
+}
+
+// TestManagerDeletePodmanStopFailsServiceActiveBlocksRemoval covers B2: a
+// stop failure alone proves nothing -- "podman info" (Preflight) only shows the
+// engine is reachable -- so a unit that serviceActive still reports active must
+// block the unit removal, the daemon-reload, and (via Delete's purge gate) the
+// data-directory rm, rather than reporting success over a broker that is still
+// serving traffic.
+func TestManagerDeletePodmanStopFailsServiceActiveBlocksRemoval(t *testing.T) {
+	dir := t.TempDir()
+	cfg := ctrCfg(config.Podman, "no")
+	cfg.Podman.QuadletDir = dir
+	unit := filepath.Join(dir, "sol-pod.container")
+	if err := os.WriteFile(unit, []byte("[Unit]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, rr, _ := newCapMgr(cfg, config.Podman)
+	rr.fail = failOn("stop")
+	rr.out = []byte("active\n") // serviceActive's `is-active` probe
+	err := m.Delete(context.Background(), true)
+	if err == nil {
+		t.Fatal("Delete must fail when stop fails and the unit is still active")
+	}
+	if !strings.Contains(err.Error(), "sol-pod.service") {
+		t.Errorf("error should name the unit, got: %v", err)
+	}
+	if !fileExists(unit) {
+		t.Error("a still-active unit must not have its quadlet unit removed")
+	}
+	if hasCall(rr, "systemctl", []string{"daemon-reload"}) {
+		t.Errorf("daemon-reload must not run when removal was blocked:\n%+v", rr.calls)
+	}
+	if hasCall(rr, "rm", []string{"-rf", "/opt/solace/data"}) {
+		t.Errorf("the data-dir purge must never be reached when removal was blocked:\n%+v", rr.calls)
+	}
+}
+
+// TestManagerDeletePodmanStopFailsServiceInactiveProceeds is the same failed
+// stop, but serviceActive confirms the unit is already down -- the benign
+// "already stopped" case, which still proceeds exactly as before.
+func TestManagerDeletePodmanStopFailsServiceInactiveProceeds(t *testing.T) {
+	dir := t.TempDir()
+	cfg := ctrCfg(config.Podman, "no")
+	cfg.Podman.QuadletDir = dir
+	unit := filepath.Join(dir, "sol-pod.container")
+	if err := os.WriteFile(unit, []byte("[Unit]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, rr, buf := newCapMgr(cfg, config.Podman)
+	rr.fail = failOn("stop")
+	rr.out = []byte("inactive\n")
+	if err := m.Delete(context.Background(), false); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if fileExists(unit) {
+		t.Error("an inactive unit's quadlet file should still be removed")
+	}
+	if !hasCall(rr, "systemctl", []string{"daemon-reload"}) {
+		t.Errorf("Delete should still daemon-reload:\n%+v", rr.calls)
+	}
+	if !strings.Contains(buf.String(), "inactive") {
+		t.Errorf("Delete should warn about the failed stop and name the confirmed state:\n%s", buf.String())
+	}
+}
+
+// TestManagerDeletePodmanStopFailsStateUnknownBlocksRemoval is the case the
+// whole guard exists for: `systemctl stop` failed AND `systemctl is-active`
+// could not answer either -- which is what an unreachable rootless user session
+// looks like, while `podman info` (Preflight) succeeds on the engine socket.
+// Reading that silence as "already stopped" is what would delete a live broker's
+// message spool, so it must refuse exactly as a confirmed-active unit does.
+func TestManagerDeletePodmanStopFailsStateUnknownBlocksRemoval(t *testing.T) {
+	dir := t.TempDir()
+	cfg := ctrCfg(config.Podman, "no")
+	cfg.Podman.QuadletDir = dir
+	unit := filepath.Join(dir, "sol-pod.container")
+	if err := os.WriteFile(unit, []byte("[Unit]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, rr, _ := newCapMgr(cfg, config.Podman)
+	rr.fail = failOn("stop")
+	// rr.out deliberately unset: the is-active probe answers nothing at all.
+	err := m.Delete(context.Background(), true)
+	if err == nil {
+		t.Fatal("Delete must fail when the stop failed and the state probe answered nothing")
+	}
+	if !strings.Contains(err.Error(), "NOT confirmed stopped") {
+		t.Errorf("error should say the unit is not confirmed stopped, got: %v", err)
+	}
+	if !fileExists(unit) {
+		t.Error("an unconfirmed unit must not have its quadlet unit removed")
+	}
+	if hasCall(rr, "rm", []string{"-rf", "/opt/solace/data"}) {
+		t.Errorf("the data-dir purge must never be reached on an unconfirmed stop:\n%+v", rr.calls)
+	}
+}
+
+// TestManagerDeletePodmanRemovesSecrets covers M5: nothing ever removed the
+// secrets CreatePodmanSecrets loaded into podman's own store, so they outlived
+// `remove all --delete-data`. deletePodman must remove every one of them (by
+// the same render.ContainerSecrets list CreatePodmanSecrets uses), and a
+// failing removal must warn rather than fail a teardown that otherwise
+// succeeded.
+func TestManagerDeletePodmanRemovesSecrets(t *testing.T) {
+	cfg := ctrCfg(config.Podman, "no")
+	cfg.Podman.QuadletDir = t.TempDir()
+	m, rr, buf := newCapMgr(cfg, config.Podman)
+	rr.fail = failOn("secret")
+	if err := m.Delete(context.Background(), false); err != nil {
+		t.Fatalf("Delete should tolerate a failing secret rm: %v", err)
+	}
+	for _, s := range render.ContainerSecrets(cfg, config.Podman) {
+		if !hasCall(rr, "podman", []string{"secret", "rm", s.Name}) {
+			t.Errorf("Delete should remove podman secret %s:\n%+v", s.Name, rr.calls)
+		}
+	}
+	if !strings.Contains(buf.String(), "already removed?") {
+		t.Errorf("a failing secret rm should warn, not fail the removal:\n%s", buf.String())
 	}
 }
 
@@ -1043,11 +1167,83 @@ func TestManagerDeleteDockerComposeNoFileFallsBackToStopRm(t *testing.T) {
 	cfg := ctrCfg(config.Docker, "no")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "absent.yml") // does not exist
 	m, rr, _ := newCapMgr(cfg, config.Docker)
+	rr.out = []byte("solace\n") // `ps -a` lists this container -> containerExists is true
 	if err := m.Delete(context.Background(), false); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	if !hasCall(rr, "docker", []string{"stop", "solace"}) || !hasCall(rr, "docker", []string{"rm", "solace"}) {
 		t.Errorf("compose Delete with no file should fall back to stop+rm:\n%+v", rr.calls)
+	}
+}
+
+// TestManagerStopAndRemoveContainerAbsentNoOp covers M10: `docker rm` on a name
+// that was never deployed exits non-zero, which used to turn "reset after a
+// failed deploy" into an error -- every other removal path in the tool
+// (--ignore-not-found) no-ops instead, and containerExists is what makes this
+// fallback match them.
+func TestManagerStopAndRemoveContainerAbsentNoOp(t *testing.T) {
+	dir := t.TempDir()
+	cfg := ctrCfg(config.Docker, "no")
+	cfg.Docker.ComposeFile = filepath.Join(dir, "absent.yml") // no compose file -> stopAndRemove fallback
+	m, rr, buf := newCapMgr(cfg, config.Docker)
+	rr.out = []byte("nginx\n") // `ps -a` lists an unrelated container, not this one
+	if err := m.Delete(context.Background(), false); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if hasCall(rr, "docker", []string{"stop", "solace"}) || hasCall(rr, "docker", []string{"rm", "solace"}) {
+		t.Errorf("an absent container must not be stopped or removed:\n%+v", rr.calls)
+	}
+	if !strings.Contains(buf.String(), "nothing to remove") {
+		t.Errorf("Delete should say there is nothing to remove:\n%s", buf.String())
+	}
+}
+
+// TestManagerStopAndRemoveStopFailsContainerRunningBlocks covers B2's docker
+// half: "docker info" (Preflight) proves the engine is reachable, not that the
+// container actually stopped, so a failed stop must not fall through to `rm`
+// while the broker is still up.
+func TestManagerStopAndRemoveStopFailsContainerRunningBlocks(t *testing.T) {
+	dir := t.TempDir()
+	cfg := ctrCfg(config.Docker, "no")
+	cfg.Docker.ComposeFile = filepath.Join(dir, "absent.yml")
+	m, rr, _ := newCapMgr(cfg, config.Docker)
+	rr.fail = failOn("stop")
+	rr.out = []byte("solace\n") // seen by both containerExists (ps -a) and containerRunning (ps --filter running)
+	err := m.Delete(context.Background(), false)
+	if err == nil {
+		t.Fatal("Delete must fail when stop fails and the container is still running")
+	}
+	if !strings.Contains(err.Error(), "solace") {
+		t.Errorf("error should name the container, got: %v", err)
+	}
+	if hasCall(rr, "docker", []string{"rm", "solace"}) {
+		t.Errorf("rm must not run when stop failed and the container is still running:\n%+v", rr.calls)
+	}
+}
+
+// TestManagerStopAndRemoveStopFailsProbeUnansweredBlocks is the docker twin of
+// TestManagerDeletePodmanStopFailsStateUnknownBlocksRemoval: the stop failed and
+// the running-probe could not answer either. Silence is not confirmation, so
+// this must refuse rather than fall through to `rm` -- containerRunning alone
+// answers "false" here, which is the deferred M4 hazard and the reason
+// stopAndRemove reads containerRunningKnown's second value instead.
+func TestManagerStopAndRemoveStopFailsProbeUnansweredBlocks(t *testing.T) {
+	dir := t.TempDir()
+	cfg := ctrCfg(config.Docker, "no")
+	cfg.Docker.ComposeFile = filepath.Join(dir, "absent.yml")
+	m, rr, _ := newCapMgr(cfg, config.Docker)
+	rr.fail = failOn("stop")
+	rr.out = []byte("solace\n")           // `ps -a` still sees it, so the no-op branch is skipped
+	rr.outFail = failOn("status=running") // ...but the running-probe itself fails
+	err := m.Delete(context.Background(), false)
+	if err == nil {
+		t.Fatal("Delete must fail when stop fails and the running-probe cannot answer")
+	}
+	if !strings.Contains(err.Error(), "could not be confirmed stopped") {
+		t.Errorf("error should say the container could not be confirmed stopped, got: %v", err)
+	}
+	if hasCall(rr, "docker", []string{"rm", "solace"}) {
+		t.Errorf("rm must not run on an unconfirmed stop:\n%+v", rr.calls)
 	}
 }
 
@@ -1237,7 +1433,7 @@ func TestManagerLifecycleDockerNoComposeFile(t *testing.T) {
 	}
 }
 
-// TestManagerLifecycleDockerDryRunUsesCompose: under --dry-run there is no file
+// TestManagerLifecycleDockerDryRunUsesCompose: under the Echo runner there is no file
 // on disk to probe (the Echo runner never wrote one), so the preview always takes
 // the compose branch rather than guessing from a real deploy's artifact.
 func TestManagerLifecycleDockerDryRunUsesCompose(t *testing.T) {
@@ -1610,11 +1806,13 @@ func TestManagerRedeployPodmanUnchangedRestartsForRotation(t *testing.T) {
 	}
 }
 
-// TestContainerRunningMatchesNameExactly guards the branch selector: `ps --filter
-// name=` is an unanchored regex on both engines, so a sibling deployment on the same
-// host would otherwise be mistaken for this one. Getting it wrong in either
-// direction is expensive -- a false positive skips the deploy, a false negative
-// force-recreates a live broker without asking.
+// TestContainerRunningMatchesNameExactly guards the name-matching logic shared by
+// containerRunning and containerRunningKnown: `ps --filter name=` is an unanchored
+// regex on both engines, so a sibling deployment on the same host would otherwise
+// be mistaken for this one. Getting it wrong in either direction is expensive -- a
+// false positive skips the deploy, a false negative used to force-recreate a live
+// broker without asking (deployDocker no longer reads this lossy form for that
+// decision -- see TestManagerDeployDockerProbeUnansweredErrors).
 func TestContainerRunningMatchesNameExactly(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -1639,9 +1837,9 @@ func TestContainerRunningMatchesNameExactly(t *testing.T) {
 		})
 	}
 
-	// A probe that cannot run reads as "not running": the deploy then creates or
-	// recreates, and if the engine is really unreachable the compose call that
-	// follows fails loudly anyway -- so this never silently skips a deploy.
+	// containerRunning itself still collapses a failed probe into "not running" --
+	// that lossy shape is exactly why deployDocker (M4) no longer calls it and
+	// reads containerRunningKnown's answered flag directly instead.
 	t.Run("probe fails", func(t *testing.T) {
 		m, rr, _ := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
 		rr.out = []byte("solace\n")
@@ -1650,6 +1848,36 @@ func TestContainerRunningMatchesNameExactly(t *testing.T) {
 			t.Error("a failed probe must not report the container as running")
 		}
 	})
+}
+
+// TestManagerDeployDockerProbeUnansweredErrors is M4: a `ps` probe that fails
+// answers neither "running" nor "not running", so deployDocker must not guess.
+// Guessing "not running" would force-recreate a live broker on a transient
+// engine hiccup with none of the consent the artifact-changed branch requires
+// for the identical action; guessing "running" would silently skip a create
+// that should have run. Erroring out is the only safe answer, and neither
+// create nor recreate may reach the runner.
+func TestManagerDeployDockerProbeUnansweredErrors(t *testing.T) {
+	dir := t.TempDir()
+	cfg := ctrCfg(config.Docker, "no")
+	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
+	m, rr, _ := newCapMgr(cfg, config.Docker)
+	rr.outFail = failOn("status=running")
+	err := m.Deploy(context.Background(), config.Primary)
+	if err == nil {
+		t.Fatal("Deploy must fail when the running-probe cannot answer")
+	}
+	if !strings.Contains(err.Error(), "solace") {
+		t.Errorf("error should name the container, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "cannot tell whether") {
+		t.Errorf("error should say the probe could not answer, got: %v", err)
+	}
+	for _, c := range rr.calls {
+		if containsStr(c.args, "up") {
+			t.Errorf("an unanswered probe must not create or recreate the container:\n%+v", rr.calls)
+		}
+	}
 }
 
 // TestManagerRedeployStoppedContainerRecreates covers the arm no consent prompt
@@ -1702,18 +1930,11 @@ func TestManagerRedeployUnchangedHintsRotation(t *testing.T) {
 	}
 }
 
-func TestManagerDeletePodmanStopTolerated(t *testing.T) {
-	cfg := ctrCfg(config.Podman, "no")
-	cfg.Podman.QuadletDir = t.TempDir()
-	m, rr, buf := newCapMgr(cfg, config.Podman)
-	rr.fail = failOn("stop")
-	if err := m.Delete(context.Background(), false); err != nil {
-		t.Fatalf("Delete should tolerate a failed stop: %v", err)
-	}
-	if !strings.Contains(buf.String(), "stopping") {
-		t.Errorf("Delete should warn about the failed stop:\n%s", buf.String())
-	}
-}
+// The podman "a failed stop is tolerated" case is now
+// TestManagerDeletePodmanStopFailsServiceInactiveProceeds, which says the same
+// thing with the fact B2 added: tolerated only once systemd has CONFIRMED the
+// unit down. The unconditional version this replaced could not tell "already
+// stopped" from "could not ask", which is the whole hazard.
 
 func TestManagerDeletePodmanDaemonReloadError(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "no")
@@ -1756,17 +1977,34 @@ func TestManagerDeleteDockerComposeDownError(t *testing.T) {
 	}
 }
 
+// TestManagerDeleteDockerStopTolerated is the docker tolerate branch B2 kept: a
+// failed `stop` that the engine then CONFIRMS is not running (the benign
+// "already stopped" case) still warns and goes on to `rm`. The confirmation is
+// what earns the tolerance -- an unanswered probe does not, which is
+// TestManagerStopAndRemoveStopFailsProbeUnansweredBlocks. The two probes have to
+// answer differently here, hence outFor: `ps --all` still lists the container so
+// stop is attempted at all, `ps --filter status=running` does not so it counts
+// as confirmed down.
 func TestManagerDeleteDockerStopTolerated(t *testing.T) {
 	dir := t.TempDir()
 	cfg := ctrCfg(config.Docker, "no")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "absent.yml") // no file -> stop/rm fallback
 	m, rr, buf := newCapMgr(cfg, config.Docker)
 	rr.fail = failOn("stop")
+	rr.outFor = func(_ string, args []string) []byte {
+		if containsStr(args, "status=running") {
+			return []byte("nginx\n") // answered, and this container is NOT in it
+		}
+		return []byte("solace\n") // `ps --all`: it exists, so stop is attempted
+	}
 	if err := m.Delete(context.Background(), false); err != nil {
-		t.Fatalf("Delete should tolerate a failed stop: %v", err)
+		t.Fatalf("Delete should tolerate a stop failure once the container is confirmed down: %v", err)
 	}
 	if !strings.Contains(buf.String(), "stopping container") {
 		t.Errorf("Delete should warn about the failed stop:\n%s", buf.String())
+	}
+	if !hasCall(rr, "docker", []string{"rm", "solace"}) {
+		t.Errorf("a confirmed-down container should still be removed:\n%+v", rr.calls)
 	}
 }
 
@@ -1870,16 +2108,28 @@ func TestManagerCheckPodmanEUID(t *testing.T) {
 	}
 }
 
-func TestManagerPrepHostRootlessAsRootWarns(t *testing.T) {
+// TestManagerPrepHostRootlessAsRootFailsHard covers B6/M6: PrepHost used to only
+// WARN when podman.rootless=true but the process is root, then went on to
+// mkdir/chown under root's namespace mapping -- leaving a data directory the
+// later rootless deploy cannot use. It now shares Deploy's checkPodmanEUID and
+// must stop before either, so the invariant has one definition and one message.
+func TestManagerPrepHostRootlessAsRootFailsHard(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "no")
 	cfg.Podman.Rootless = true
-	m, _, buf := newCapMgr(cfg, config.Podman)
+	m, rr, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 0 }
-	if err := m.PrepHost(context.Background()); err != nil {
-		t.Fatalf("PrepHost: %v", err)
+	err := m.PrepHost(context.Background())
+	if err == nil {
+		t.Fatal("PrepHost must fail when podman.rootless=true but running as root")
 	}
-	if !strings.Contains(buf.String(), "running as root") {
-		t.Errorf("PrepHost should warn when rootless runs as root:\n%s", buf.String())
+	if !strings.Contains(err.Error(), "running as root") {
+		t.Errorf("error should name the invariant, got: %v", err)
+	}
+	if hasCall(rr, "mkdir", []string{"-p", "/opt/solace/data"}) {
+		t.Errorf("PrepHost must not mkdir before the euid guard, got:\n%+v", rr.calls)
+	}
+	if hasCall(rr, "podman", []string{"unshare", "chown", "1000:1000", "/opt/solace/data"}) {
+		t.Errorf("PrepHost must not chown before the euid guard, got:\n%+v", rr.calls)
 	}
 }
 

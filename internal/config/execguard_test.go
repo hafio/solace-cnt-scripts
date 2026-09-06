@@ -240,11 +240,72 @@ func TestCheckCommandRejects(t *testing.T) {
 // field rather than trusting the parser. If a future change narrows this -- an
 // arity table, or refusing any token after a flag -- this test should fail and be
 // rewritten as a rejection.
+// TestEscalationFloorFoldsCaseBothWays covers B4 and the asymmetry it forced.
+//
+// neverAllowed's keys are lowercase and both enforcement points used to match them
+// exactly, so `--allow-command Sudo` was accepted, stored as extraAllowed["Sudo"],
+// and survived the purge in allowed() -- which deleted only the lowercase key. Both
+// belts had the identical hole, and it matters precisely where filesystems are
+// case-insensitive: Windows (which has shipped sudo.exe since 2024) and macOS by
+// default, where `Sudo` resolves to exactly the binary `sudo` names.
+//
+// The fix folds case on the DENY list only. The allowlist must stay exact, which
+// the last subtest pins: folding it too would let an env file naming `KUBECTL` be
+// approved by `kubectl`'s entry and then execute a different file on any
+// case-sensitive filesystem.
+func TestEscalationFloorFoldsCaseBothWays(t *testing.T) {
+	t.Run("AllowCommands refuses any casing", func(t *testing.T) {
+		for _, name := range []string{"Sudo", "SUDO", "sUdO", "Sudo.exe", "RunAs", "PkExec"} {
+			cfg := &Config{}
+			if err := cfg.AllowCommands([]string{name}); err == nil {
+				t.Errorf("AllowCommands(%q) was accepted; the escalation floor must refuse every casing", name)
+			}
+		}
+	})
+	t.Run("the allowed() purge is the second belt", func(t *testing.T) {
+		// Straight past AllowCommands, as a future caller populating extraAllowed
+		// some other way would arrive: the purge alone must still strip it.
+		set := runtimeRules(Docker).allowed(map[string]bool{"Sudo": true, "SUDO": true, "docker": true})
+		for _, gone := range []string{"Sudo", "SUDO"} {
+			if set[gone] {
+				t.Errorf("allowed() kept %q; the purge must strip an escalation wrapper whatever its casing", gone)
+			}
+		}
+		if !set["docker"] {
+			t.Error("allowed() dropped a legitimate binary")
+		}
+	})
+	t.Run("the allowlist itself stays case-sensitive", func(t *testing.T) {
+		// The deliberate asymmetry: a deny list may only ever refuse more, but
+		// loosening a positive match adds binaries nobody approved. On a
+		// case-sensitive filesystem KUBECTL is simply a different file.
+		cmd := Command{"KUBECTL"}
+		if err := CheckCommand(clusterRules(), cmd, nil); err == nil {
+			t.Error("CheckCommand accepted KUBECTL: the allowlist must match exactly, unlike neverAllowed")
+		}
+	})
+}
+
 func TestFlagValuePositionIsNotGuaranteed(t *testing.T) {
-	cmd := Command{"docker", "--tls", "rm"}
-	if err := CheckCommand(runtimeRules(Docker), cmd, nil); err != nil {
-		t.Fatalf("the flag-value limit changed: CheckCommand(%q) now returns %v -- "+
-			"if that is deliberate, replace this test with a rejection case", cmd, err)
+	// Note what these actually are: `--tls` and `--insecure-skip-tls-verify` take
+	// NO value, so the word after each is not a flag value at all -- it reaches
+	// subcommand position, and the real argv becomes `docker --tls rm <what this
+	// tool appends>` / `kubectl --insecure-skip-tls-verify delete apply -f -`.
+	// Arity is what the guard cannot know, so it cannot tell this from a genuine
+	// value; the file header explains why closing it is not worth the cost, and
+	// this is the pin that keeps it a KNOWN limit. If either of these ever starts
+	// being refused, that is an improvement -- replace the case, do not restore it.
+	for _, tc := range []struct {
+		rules commandRules
+		cmd   Command
+	}{
+		{runtimeRules(Docker), Command{"docker", "--tls", "rm"}},
+		{clusterRules(), Command{"kubectl", "--insecure-skip-tls-verify", "delete"}},
+	} {
+		if err := CheckCommand(tc.rules, tc.cmd, nil); err != nil {
+			t.Fatalf("the flag-value limit changed: CheckCommand(%q) now returns %v -- "+
+				"if that is deliberate, replace this test with a rejection case", tc.cmd, err)
+		}
 	}
 	// What the guard DOES still hold onto in that position: the whole charset --
 	// metacharacters, and the invisible characters that would otherwise make a flag

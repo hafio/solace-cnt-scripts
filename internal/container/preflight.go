@@ -19,7 +19,7 @@ import (
 // "nothing happened" true.
 //
 // There is deliberately no skip flag -- the only legitimate reason to skip it is
-// previewing without an engine, which is --dry-run and takes the branch below.
+// previewing without an engine, which is the Echo runner and takes the branch below.
 // It never starts the daemon or logs anyone in: both are the operator's decisions,
 // made with privileges this tool should not be exercising on their behalf.
 func (m *Manager) Preflight(ctx context.Context) error {
@@ -27,13 +27,13 @@ func (m *Manager) Preflight(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if m.isDryRun() {
+	if m.isEcho() {
 		// Echo the probe so the preview shows it, then skip the assertion: the
 		// Echo runner answers nothing, and there is no engine to answer.
 		if _, err := m.R.Output(ctx, rt.Name(), rt.Args("info")...); err != nil {
 			return err
 		}
-		fmt.Fprintln(m.out(), "  engine         : skipped (dry-run)")
+		m.report().KVRow(reportKeyWidth, "engine", "skipped (preview)")
 		return nil
 	}
 	if _, err := m.R.Output(ctx, rt.Name(), rt.Args("info")...); err != nil {

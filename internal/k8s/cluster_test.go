@@ -23,38 +23,40 @@ func TestOperatorNSExplicit(t *testing.T) {
 	}
 }
 
-func TestOperatorNSDerived(t *testing.T) {
-	rr := &recRunner{out: []byte(
+// TestOperatorNSNeverProbesTheCluster is what replaced the three
+// discovery tests (derived / default-when-absent / default-on-error). Resolving
+// the operator namespace used to list Deployments in EVERY namespace and take the
+// first line CONTAINING the operator's name -- an unanchored substring match with
+// no uniqueness check, which on a cluster running two operator installs could
+// resolve to another team's and have `remove operator` delete it.
+//
+// Now there are two local rules and no cluster call at all, which is the property
+// worth pinning: whatever the cluster looks like, and whatever a scripted reply
+// says, resolution cannot be steered by anything outside the env file.
+func TestOperatorNSNeverProbesTheCluster(t *testing.T) {
+	operatorRow := []byte(
 		"NS            NAME\n" +
 			"kube-system   coredns\n" +
-			"my-op-ns      pubsubplus-eventbroker-operator\n" +
-			"solace        dev-broker-pubsubplus-p\n")}
-	c := newCluster(rr) // haCfg has no Operator.Namespace -> discovery
-	if got := c.operatorNS(context.Background()); got != "my-op-ns" {
-		t.Errorf("operatorNS = %q, want my-op-ns (first column of the operator row)", got)
-	}
-	got := rr.last()
-	if got.method != "Output" || got.name != "kubectl" {
-		t.Fatalf("discovery should use kubectl Output; got %+v", got)
-	}
-	if got.args[0] != "get" || got.args[1] != "deployment" || got.args[2] != "--all-namespaces" {
-		t.Errorf("discovery argv = %v", got.args)
-	}
-}
-
-func TestOperatorNSDefaultWhenAbsent(t *testing.T) {
-	rr := &recRunner{out: []byte("NS   NAME\nkube-system   coredns\n")} // no operator row
-	c := newCluster(rr)
-	if got := c.operatorNS(context.Background()); got != defaultOperatorNS {
-		t.Errorf("operatorNS = %q, want default %q", got, defaultOperatorNS)
-	}
-}
-
-func TestOperatorNSDefaultOnError(t *testing.T) {
-	rr := &recRunner{outErr: errors.New("connection refused")} // fresh/unreachable cluster
-	c := newCluster(rr)
-	if got := c.operatorNS(context.Background()); got != defaultOperatorNS {
-		t.Errorf("operatorNS on lookup error = %q, want default %q", got, defaultOperatorNS)
+			"my-op-ns      pubsubplus-eventbroker-operator\n")
+	for _, tc := range []struct {
+		name string
+		rr   *recRunner
+		want string
+	}{
+		{"an operator running elsewhere is ignored", &recRunner{out: operatorRow}, defaultOperatorNS},
+		{"so is an empty cluster", &recRunner{out: []byte("NS   NAME\n")}, defaultOperatorNS},
+		{"so is an unreachable one", &recRunner{outErr: errors.New("connection refused")}, defaultOperatorNS},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCluster(tc.rr) // haCfg leaves Operator.Namespace unset
+			if got := c.operatorNS(context.Background()); got != tc.want {
+				t.Errorf("operatorNS = %q, want %q", got, tc.want)
+			}
+			if len(tc.rr.calls) != 0 {
+				t.Errorf("resolving the operator namespace must not talk to the cluster; got %d calls: %+v",
+					len(tc.rr.calls), tc.rr.calls)
+			}
+		})
 	}
 }
 

@@ -9,7 +9,6 @@ image:
   repo: solace-pubsub-standard
   tag: latest
   registry: localhost
-  pullSecret: registry-pull-secret
   user: docker-user
   pass: docker-pass
 
@@ -39,6 +38,7 @@ replication:
     - "host:port"
     - "host1:port1"
     - "host2:port2"
+  psk: "r$plPSK"
 
 broker:
   cliScriptsFolder: cliscripts
@@ -53,6 +53,8 @@ kubernetes:
   name: solace-broker
   namespace: solace-namespace
   adminSecret: solace-cli-secret
+  tlsServerSecret: solace-tls-secret
+  imagePullSecret: registry-pull-secret
   updateStrategy: automatedRolling
   storage:
     class: solace-storage-class

@@ -1,0 +1,64 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "dev-broker-pubsubplus-b-0",
+        "namespace": "solace",
+        "creationTimestamp": "2026-08-21T09:24:04Z"
+      },
+      "spec": {
+        "nodeName": "mk"
+      },
+      "status": {
+        "phase": "Running",
+        "podIP": "10.244.0.10",
+        "containerStatuses": [
+          {
+            "ready": true,
+            "restartCount": 0
+          }
+        ]
+      }
+    },
+    {
+      "metadata": {
+        "name": "dev-broker-pubsubplus-m-0",
+        "namespace": "solace",
+        "creationTimestamp": "2026-08-21T09:24:04Z"
+      },
+      "spec": {
+        "nodeName": "mk-m02"
+      },
+      "status": {
+        "phase": "Running",
+        "podIP": "10.244.1.12",
+        "containerStatuses": [
+          {
+            "ready": true,
+            "restartCount": 0
+          }
+        ]
+      }
+    },
+    {
+      "metadata": {
+        "name": "dev-broker-pubsubplus-p-0",
+        "namespace": "solace",
+        "creationTimestamp": "2026-08-21T09:24:04Z"
+      },
+      "spec": {
+        "nodeName": "mk-m03"
+      },
+      "status": {
+        "phase": "Running",
+        "podIP": "10.244.2.13",
+        "containerStatuses": [
+          {
+            "ready": true,
+            "restartCount": 0
+          }
+        ]
+      }
+    }
+  ]
+}

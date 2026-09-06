@@ -16,6 +16,9 @@ LOG_DIR="${SCRIPT_DIR}/logs"
 DIST_DIR="${REPO_ROOT}/dist"
 COV_DIR="${REPO_ROOT}/coverage"
 BIN_NAME="solace-util"
+# ITEST_NAME is the dev-only live-probe harness, named distinctly from BIN_NAME so
+# nothing in dist/ is ambiguous about which binary is shippable.
+ITEST_NAME="solace-itest"
 
 # Version stamp: on a tag push git describe is exactly the pushed tag, so
 # `solace-util version` matches the GitHub release. --always falls back to the
@@ -93,8 +96,13 @@ task_test() { cap go test "${RACE_FLAG[@]}" -count=1 ./...; }
 # rewrote the thing it is comparing against could never fail. `test` is what
 # reports a stale golden; this is what you run once you have decided the new
 # output is correct.
+#
+# ./internal/examples goes FIRST: it rewrites env/sample.yaml, which is the
+# fixture ./internal/render and ./internal/k8s render their own goldens from, so
+# the reverse order would leave those two a pass behind.
 task_regen() {
-  cap go test ./internal/cli -update &&
+  cap go test ./internal/examples -update &&
+    cap go test ./internal/cli -update &&
     cap go test ./internal/convert -update &&
     cap go test ./internal/render -update &&
     cap go test ./internal/k8s -update
@@ -124,6 +132,27 @@ task_dist() {
     build_one "${t%/*}" "${t#*/}" || return 1
   done
   ok "binaries in ${DIST_DIR}"
+}
+
+# task_itest builds the LIVE-environment probe harness (internal/tools/itest).
+# Build only: this script never runs it. The probes mutate real broker state, so
+# choosing to point one at a given environment is an operator's decision, and a
+# gate that made it automatically would be exactly the wrong tool.
+#
+# Deliberately NOT in all/full for the same reason, and absent from the release
+# workflow (it is not in BUILD_TARGETS), so nothing automated ever produces or
+# executes it.
+task_itest() {
+  local os="${TARGET_OS:-$(go env GOOS)}" arch="${TARGET_ARCH:-$(go env GOARCH)}"
+  local out="${DIST_DIR}/${ITEST_NAME}-${os}-${arch}"
+  [[ "${os}" == "windows" ]] && out="${out}.exe"
+  mkdir -p "${DIST_DIR}"
+  step "  ${os}/${arch}"
+  CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" \
+    cap go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "${out}" ./internal/tools/itest || return 1
+  ok "built ${out}"
+  ok "copy it and your env file to the target host, then run it THERE: ./${ITEST_NAME}-${os}-${arch} --list"
+  ok "see docs/itest.md -- operator-run only; these scripts never execute it"
 }
 
 task_cov() {
@@ -190,14 +219,19 @@ Tasks:
            pick the target, unset means host; stamps \`solace-util version\`
            from git describe (falls back to "dev")
   test     go test ${RACE_FLAG[*]:-} -count=1 ./...
-  regen    rewrite the committed goldens (docs/commands.md and the render/k8s/
-           convert testdata) from the code that generates them. Run it when
+  regen    rewrite the committed goldens (docs/commands.md, docs/abbreviation.md,
+           env/sample.yaml and the render/k8s/convert testdata) from the code
+           that generates them. Run it when
            \`test\` reports one stale AND the new output is what you wanted.
            Deliberately not in all/full: a gate must not rewrite what it checks
   cov      coverage profile -> coverage/coverage.html + printed total
   scan     govulncheck (fatal on a fixable vulnerability this module calls;
            one with no released fix warns and passes)
   dist     cross-compile ${DIST_TARGETS[*]}
+  itest    compile the LIVE-environment probe harness -> dist/${ITEST_NAME}-<os>-<arch>[.exe]
+           (TARGET_OS/TARGET_ARCH as for build). Build ONLY -- this script never
+           runs it: its probes mutate real broker state. Operator-run, see
+           docs/itest.md. Deliberately not in all/full and not released
   graphify refresh graphify-out/ (local only; skipped when CI is set)
   all      ${ALL}   (what CI runs, as: all scan)
   full     ${FULL}   (pre-tag sweep)

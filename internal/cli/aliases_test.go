@@ -94,9 +94,9 @@ func TestEveryAliasEntryIsLive(t *testing.T) {
 		}
 	}
 	walk(root)
-	for name := range commandAliases {
+	for _, name := range commandAbbrev.Names() {
 		if !live[name] {
-			t.Errorf("commandAliases has an entry for %q, which is not a command in the tree", name)
+			t.Errorf("commandAbbrev has an entry for %q, which is not a command in the tree", name)
 		}
 	}
 }
@@ -144,10 +144,27 @@ func TestGroupsRejectAnUnknownNoun(t *testing.T) {
 // TestStartStopHaveNoAlias pins the one deliberate omission. `st` could mean start,
 // stop or status, and the cost of guessing wrong between the first two is an
 // outage, so none of them gets a two-letter form that could be confused.
+//
+// Both are declared in the set with no short form rather than left out of it, so
+// the absence is checkable here and printed in docs/abbreviation.md instead of
+// being an omission a reader has to spot. The recorded note is what a later reader
+// finds when they wonder why -- an entry that lost it would read as an oversight.
 func TestStartStopHaveNoAlias(t *testing.T) {
+	notes := map[string]string{}
+	for _, e := range commandAbbrev.Entries() {
+		notes[e.Canonical] = e.Note
+	}
 	for _, name := range []string{"start", "stop"} {
-		if got, ok := commandAliases[name]; ok {
-			t.Errorf("commandAliases[%q] = %v, want no alias: it would be ambiguous with the other", name, got)
+		note, declared := notes[name]
+		if !declared {
+			t.Errorf("commandAbbrev has no entry for %q: declare it with no short form so the absence is deliberate", name)
+			continue
+		}
+		if got := commandAbbrev.Short(name); len(got) > 0 {
+			t.Errorf("commandAbbrev short forms for %q = %v, want none: it would be ambiguous with the other", name, got)
+		}
+		if note == "" {
+			t.Errorf("commandAbbrev entry for %q has no note saying why it has no short form", name)
 		}
 	}
 	root := newRootCmd(&App{})

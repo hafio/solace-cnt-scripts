@@ -35,6 +35,22 @@ type capRunner struct {
 	// fails every captured command, which cannot single out one of two probes in
 	// the same call (the engine version probe vs the compose one).
 	outFail func(name string, args []string) error
+	// outFor is that idea again for the Output family's RESULT rather than its
+	// error: one probe has to answer differently from another, which a single
+	// static out cannot express. stopAndRemove is why -- it asks `ps --all`
+	// whether the container exists and then `ps --filter status=running` whether
+	// it is still up, and the confirmed-stopped case needs the container present
+	// in the first listing and absent from the second. nil falls back to out, so
+	// every existing test is unchanged.
+	outFor func(name string, args []string) []byte
+}
+
+// outputFor prefers the targeted outFor hook, falling back to the static out.
+func (r *capRunner) outputFor(name string, args []string) []byte {
+	if r.outFor != nil {
+		return r.outFor(name, args)
+	}
+	return r.out
 }
 
 func (r *capRunner) Run(_ context.Context, name string, args ...string) error {
@@ -61,11 +77,11 @@ func (r *capRunner) failFor(name string, args []string) error {
 }
 func (r *capRunner) Output(_ context.Context, name string, args ...string) ([]byte, error) {
 	r.calls = append(r.calls, capCall{method: "Output", name: name, args: args})
-	return r.out, r.outFailFor(name, args)
+	return r.outputFor(name, args), r.outFailFor(name, args)
 }
 func (r *capRunner) OutputInput(_ context.Context, in []byte, name string, args ...string) ([]byte, error) {
 	r.calls = append(r.calls, capCall{method: "OutputInput", name: name, args: args, stdin: string(in)})
-	return r.out, r.outFailFor(name, args)
+	return r.outputFor(name, args), r.outFailFor(name, args)
 }
 
 // outFailFor prefers the targeted outFail hook, falling back to the blanket
@@ -265,5 +281,34 @@ func TestTransportEchoHidesUploadBody(t *testing.T) {
 	// The CLI exec is echoed as a normal command against the container (no `--`).
 	if !strings.Contains(out, "sol-pod "+broker.CLIBinary+" -Apes .probe.cli") {
 		t.Errorf("Echo missing the cli exec line:\n%s", out)
+	}
+}
+
+// TestTransportEchoHidesSEMPConfig mirrors TestTransportEchoHidesUploadBody for
+// the mate SEMP channel: the curl config carrying the admin credentials rides
+// OutputInput's stdin, so an echoed command must show a byte count, never the
+// password. LeaderLocal is the exported path that reaches the channel; its
+// error (Echo's empty output satisfies neither the preflight nor the health
+// poll) is expected -- by then the request has been echoed, which is the point.
+func TestTransportEchoHidesSEMPConfig(t *testing.T) {
+	buf := &bytes.Buffer{}
+	cfg := podmanCfg()
+	cfg.Redundancy = "yes"
+	cfg.Admin = config.Admin{User: "admin", Pass: "SECRET-ADMIN-PW"}
+	cfg.Nodes.Backup.IP = "10.0.0.12"
+	tr := NewTransport(engine.Echo{W: buf}, cfg, config.Podman)
+	o := broker.New(tr, cfg, nil)
+	o.PollAttempts = 1
+	o.PollInterval = 0
+
+	if err := o.LeaderLocal(context.Background(), "primary"); err == nil {
+		t.Fatal("LeaderLocal over Echo should fail (empty output is never healthy)")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "curl") || !strings.Contains(out, "bytes on stdin") {
+		t.Errorf("Echo should show the SEMP curl with its stdin as a byte count:\n%s", out)
+	}
+	if strings.Contains(out, "SECRET-ADMIN-PW") {
+		t.Errorf("Echo leaked the admin password:\n%s", out)
 	}
 }

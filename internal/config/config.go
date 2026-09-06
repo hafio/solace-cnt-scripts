@@ -122,19 +122,17 @@ func (c Command) Args(extra ...string) []string {
 // String renders the command for reports and error messages.
 func (c Command) String() string { return strings.Join(c, " ") }
 
-// Image is the broker image reference and (k8s) pull-secret material.
+// Image is the broker image reference and registry credentials, shared by every
+// platform (k8s builds the regcred Secret from user/pass; docker and podman feed
+// them to `<runtime> login`). The k8s-only pull knobs -- the pull-secret NAME and
+// the pull policy -- live under kubernetes.* instead.
 type Image struct {
-	Repo       string `yaml:"repo"`       // SOLBK_IMAGE
-	Tag        string `yaml:"tag"`        // SOLBK_IMG_TAG
-	Registry   string `yaml:"registry"`   // IMAGEREPO_HOST (optional prefix)
-	PullSecret string `yaml:"pullSecret"` // IMAGEREPO_SECRET (k8s; enables imagePullSecrets)
-	User       string `yaml:"user"`       // IMAGEREPO_USER
-	Pass       string `yaml:"pass"`       // IMAGEREPO_PASS (secret)
-	PassEnv    string `yaml:"passEnv"`    // env var holding pass instead
-	// PullPolicy is the k8s image pull policy: Always for a moving tag, Never for
-	// an air-gapped cluster with the image preloaded. Empty keeps the CR's own
-	// IfNotPresent, so an unset value renders exactly as before.
-	PullPolicy string `yaml:"pullPolicy"`
+	Repo     string `yaml:"repo"`     // SOLBK_IMAGE
+	Tag      string `yaml:"tag"`      // SOLBK_IMG_TAG
+	Registry string `yaml:"registry"` // IMAGEREPO_HOST (optional prefix)
+	User     string `yaml:"user"`     // IMAGEREPO_USER
+	Pass     string `yaml:"pass"`     // IMAGEREPO_PASS (secret)
+	PassEnv  string `yaml:"passEnv"`  // env var holding pass instead
 }
 
 // Ref is the fully-qualified image reference, with the optional registry prefix.
@@ -219,7 +217,8 @@ type AdditionalUser struct {
 	PasswordEnv string `yaml:"passwordEnv"` // env var holding password instead
 }
 
-// TLS is the broker server certificate + trusted CAs.
+// TLS is the broker server certificate + trusted CAs, shared by every platform.
+// The name of the k8s Secret built from these files is kubernetes.tlsServerSecret.
 type TLS struct {
 	Cert    string   `yaml:"cert"`    // SOLBK_TLS_CERT
 	CertKey string   `yaml:"certKey"` // SOLBK_TLS_CERTKEY
@@ -229,7 +228,6 @@ type TLS struct {
 	// written into the deploy artifact. Empty means the key is not encrypted.
 	CertPassphrase    string `yaml:"certPassphrase"`
 	CertPassphraseEnv string `yaml:"certPassphraseEnv"` // env var holding certPassphrase instead
-	ServerSecret      string `yaml:"serverSecret"`      // SOLBK_SVR_SECRET (k8s; enables the TLS secret)
 }
 
 // Scaling is the broker's sizing, and every knob applies to every platform. They
@@ -287,6 +285,12 @@ type K8sConfig struct {
 	Name              string            `yaml:"name"`              // SOLBK_NAME
 	Namespace         string            `yaml:"namespace"`         // SOLBK_NS
 	AdminSecret       string            `yaml:"adminSecret"`       // SOLBK_USR_SECRET: Secret holding the admin/monitor creds
+	TLSServerSecret   string            `yaml:"tlsServerSecret"`   // SOLBK_SVR_SECRET: TLS Secret built from tls.cert/certKey; enables the CR's TLS block
+	ImagePullSecret   string            `yaml:"imagePullSecret"`   // IMAGEREPO_SECRET: dockerconfigjson Secret; enables imagePullSecrets
+	// ImagePullPolicy is the k8s image pull policy: Always for a moving tag, Never
+	// for an air-gapped cluster with the image preloaded. Empty keeps the CR's own
+	// IfNotPresent, so an unset value renders exactly as before.
+	ImagePullPolicy   string            `yaml:"imagePullPolicy"`
 	UpdateStrategy    string            `yaml:"updateStrategy"`    // automatedRolling|manualPodRestart
 	ServiceAccount    string            `yaml:"serviceAccount"`    // SOLBK_SVC_ACCOUNT (optional)
 	Storage           Storage           `yaml:"storage"`
@@ -321,7 +325,7 @@ type Resources struct {
 // Operator is the cluster-scoped EventBroker Operator configuration.
 type Operator struct {
 	Image           string `yaml:"image"`           // SOLOP_IMAGE
-	Namespace       string `yaml:"namespace"`       // SOLOP_NS (blank -> derive at runtime)
+	Namespace       string `yaml:"namespace"`       // SOLOP_NS (blank -> defaultOperatorNS)
 	WatchNamespaces string `yaml:"watchNamespaces"` // SOLOP_WATCH_NS
 	WatchBrokerNS   *bool  `yaml:"watchBrokerNs"`   // SOLOP_WATCH_SOLBK_NS (nil -> default true)
 	CPU             string `yaml:"cpu"`             // SOLOP_CPU
