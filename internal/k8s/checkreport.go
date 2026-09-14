@@ -270,10 +270,13 @@ func (c *Cluster) configRows(rep *checkReport) {
 		info("namespace", "%s", cfg.K8s.Namespace),
 		info("name", "%s", cfg.K8s.Name),
 		info("image", "%s", cfg.Image.Ref()),
+		// The NAME shown is the derived default when kubernetes.imagePullSecret is unset
+		// and credentials are present, so this reports the Secret that will actually
+		// exist, not merely what the env file spelled out.
 		info("image pull", "secret=%s creds=%s",
-			orNone(cfg.K8s.ImagePullSecret), setOrNone(cfg.Image.User != "" && cfg.Image.Pass != "")),
+			orNone(cfg.ImagePullSecretName()), setOrNone(cfg.ManagesImagePullSecret())),
 		info("redundancy", "%s", mode),
-		info("cluster cmd", "%s", cfg.K8s.Runtime.String()),
+		info("cluster cmd", "%s", cfg.K8s.Command.String()),
 	)
 
 	rep.operator = append(rep.operator,

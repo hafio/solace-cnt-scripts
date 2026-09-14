@@ -73,7 +73,7 @@ func ParsePlatform(s string) (Platform, error) {
 // in Platforms() order. It reads the RAW document rather than a decoded Config
 // because a decoded one cannot answer the question: the platform sections are
 // value structs, so an omitted section and an empty one are the same zero value,
-// and ApplyDefaults writes into kubernetes.runtime whatever the platform is.
+// and ApplyDefaults writes into kubernetes.command whatever the platform is.
 //
 // A key that is present but empty still counts as declared. That is deliberate:
 // `docker: {}` is how an env file says "this is a docker file" when every docker

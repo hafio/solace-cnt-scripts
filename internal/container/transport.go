@@ -44,8 +44,8 @@ func NewTransport(r engine.Runner, cfg *config.Config, p config.Platform) broker
 	}
 }
 
-// runtime is the guarded container runtime command (docker.runtime /
-// podman.runtime). It re-runs config.CheckCommand on every call rather than
+// runtime is the guarded container runtime command (docker.command /
+// podman.command). It re-runs config.CheckCommand on every call rather than
 // caching the value at construction: the transport can be built from a Config that
 // never went through config.Load, so this is the executor half of the guard's two
 // enforcement points and must not trust what it was handed.

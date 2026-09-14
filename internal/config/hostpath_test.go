@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -56,7 +57,10 @@ func TestHostPathCharsetIsDerivedFromTheTokenCharset(t *testing.T) {
 }
 
 // TestCheckHostPathAccepts covers the shapes an operator legitimately writes,
-// including the two Windows forms that a command token may not carry.
+// including the two Windows forms that a command token may not carry, and every
+// leading-tilde shape -- CheckHostPath no longer refuses one: expandHomePaths is
+// what interprets it (and what refuses the unsupported `~user/...` form), so at
+// the as-written charset gate a tilde is just another admitted character.
 func TestCheckHostPathAccepts(t *testing.T) {
 	for _, p := range []string{
 		"",                        // empty is a per-field question, not this one
@@ -68,6 +72,10 @@ func TestCheckHostPathAccepts(t *testing.T) {
 		"../shared/certs/tls.crt", // above the env file
 		"diag-configs",            // a bare directory name
 		"a.b_c-d/e.pem",           // punctuation a name grammar would refuse
+		"~",                       // expands to the home directory, alone
+		"~/certs/tls.crt",         // expands to the home directory, forward slash
+		`~\certs\tls.crt`,         // expands to the home directory, backslash
+		"~bob/certs",              // the unsupported ~user form -- refused later, at expand time, not here
 	} {
 		if err := CheckHostPath("tls.cert", p); err != nil {
 			t.Errorf("CheckHostPath(%q) = %v, want accepted", p, err)
@@ -98,8 +106,6 @@ func TestCheckHostPathRejects(t *testing.T) {
 		// isCtrl is r < 0x20. Pinned so the branch order is deliberate.
 		{"certs/tls\t.crt", "control character"},
 		{"certs/tls\n.crt", "control character"},
-		{"~/certs/tls.crt", "does not expand"},
-		{"~", "does not expand"},
 	}
 	for _, tc := range cases {
 		err := CheckHostPath("tls.cert", tc.path)
@@ -117,18 +123,63 @@ func TestCheckHostPathRejects(t *testing.T) {
 	}
 }
 
-// TestLeadingTildeIsRefusedButAnEmbeddedOneIsNot pins the carve-out on its own,
-// because the two cases differ only by the tilde's position and the reasons are
-// unrelated: nothing in this tool expands a home directory, while an 8.3 short name
-// is a real path a Windows runner hands us for its own temp directory.
-func TestLeadingTildeIsRefusedButAnEmbeddedOneIsNot(t *testing.T) {
-	if err := CheckHostPath("podman.baseDir", "~/solace"); err == nil {
-		t.Error("a leading '~' must be refused: it would be joined onto the env file's directory and " +
-			"produce a literal '~' segment, reported later as a missing file")
+// TestExpandTilde covers expandTilde directly: a home-directory seam so no case
+// depends on the environment the test happens to run in.
+func TestExpandTilde(t *testing.T) {
+	home := func() (string, error) { return "/home/op", nil }
+
+	accept := []struct{ in, want string }{
+		{"", ""},
+		{"certs/tls.crt", "certs/tls.crt"}, // no leading tilde: untouched
+		{"~", "/home/op"},                  // bare tilde
+		{"~/certs/tls.crt", "/home/op/certs/tls.crt"},
+		{`~\certs\tls.crt`, "/home/op/certs/tls.crt"}, // backslash form, ToSlash'd
+		// An embedded tilde -- an 8.3 short name -- is not a LEADING one and must
+		// survive completely untouched, backslashes included.
+		{`C:\Users\RUNNER~1\AppData\Local\Temp`, `C:\Users\RUNNER~1\AppData\Local\Temp`},
 	}
-	if err := CheckHostPath("podman.baseDir", `C:\Users\RUNNER~1\AppData\Local\Temp`); err != nil {
-		t.Errorf("an 8.3 short name must be accepted, got %v", err)
+	for _, tc := range accept {
+		got, err := expandTilde(tc.in, home)
+		if err != nil {
+			t.Errorf("expandTilde(%q) = %v, want accepted", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("expandTilde(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
+
+	t.Run("another user's home is refused, not guessed at", func(t *testing.T) {
+		_, err := expandTilde("~bob/certs", home)
+		if err == nil {
+			t.Fatal("~bob/certs must be refused: this tool has no notion of another account's home")
+		}
+		if !strings.Contains(err.Error(), "another user's home") {
+			t.Errorf("error %q must say why, not just that it failed", err)
+		}
+	})
+
+	t.Run("an unresolvable home directory is an error", func(t *testing.T) {
+		broken := func() (string, error) { return "", fmt.Errorf("no HOME set") }
+		if _, err := expandTilde("~/certs", broken); err == nil {
+			t.Error("an unresolvable home directory must fail rather than silently keep the literal ~")
+		}
+	})
+
+	t.Run("a home directory containing whitespace is refused", func(t *testing.T) {
+		// The real-world case: a Windows home like C:\Users\John Smith. The
+		// charset gate already ran on the literal "~/certs" (which has no
+		// space), so the expanded value has to be re-checked here or the space
+		// would reach a compose/quadlet mount line this tool cannot delimit.
+		spaced := func() (string, error) { return `C:\Users\John Smith`, nil }
+		_, err := expandTilde("~/certs", spaced)
+		if err == nil {
+			t.Fatal("an expanded value containing whitespace must be refused")
+		}
+		if !strings.Contains(err.Error(), "whitespace") {
+			t.Errorf("error %q must say why", err)
+		}
+	})
 }
 
 // TestIsAbsHostPath asks the question for both operating systems at once, which is
@@ -183,8 +234,9 @@ func TestBaseNameSplitsOnBothSeparators(t *testing.T) {
 	}
 }
 
-// TestHasPathSeparator pins the name-or-path question that `cli --input` and the
-// domain-certificate filenames both rest on.
+// TestHasPathSeparator pins the name-or-path question a bare CLI/shell script
+// argument rests on (opK8sExecCLI/opCtrExecCLI and their shell-script siblings):
+// a bare name resolves under broker.cliScriptsDir, a path is used as given.
 func TestHasPathSeparator(t *testing.T) {
 	for _, p := range []string{"a/b", `a\b`, "/abs", `C:\x`, "./x"} {
 		if !HasPathSeparator(p) {
@@ -207,12 +259,13 @@ func TestValidateHostPathsChecksEveryPlatformsFields(t *testing.T) {
 	// field name -> the setter that puts a bad value on that field.
 	perPlatform := map[Platform]map[string]func(*Config){
 		K8s: {
-			"tls.cert":                 func(c *Config) { c.TLS.Cert = "certs/$bad.crt" },
-			"tls.certKey":              func(c *Config) { c.TLS.CertKey = "certs/$bad.key" },
-			"tls.cas[0]":               func(c *Config) { c.TLS.CAs = []string{"certs/$bad.pem"} },
-			"broker.cliScriptsFolder":  func(c *Config) { c.Broker.CLIScriptsFolder = "cli$x" },
-			"broker.diagDir":           func(c *Config) { c.Broker.DiagDir = "diag$x" },
-			"broker.domainCerts.folder": func(c *Config) { c.Broker.DomainCerts.Folder = "certs$x" },
+			"tls.cert":                     func(c *Config) { c.TLS.Cert = "certs/$bad.crt" },
+			"tls.certKey":                  func(c *Config) { c.TLS.CertKey = "certs/$bad.key" },
+			"tls.cas[0]":                   func(c *Config) { c.TLS.CAs = []string{"certs/$bad.pem"} },
+			"broker.cliScriptsDir":         func(c *Config) { c.Broker.CLIScriptsDir = "cli$x" },
+			"broker.hostDiagnosticDir":     func(c *Config) { c.Broker.HostDiagnosticDir = "diag$x" },
+			"broker.domainCerts.dirs[0]":   func(c *Config) { c.Broker.DomainCerts.Dirs = []CertDir{{Path: "certs$x"}} },
+			"broker.domainCerts.files[ca]": func(c *Config) { c.Broker.DomainCerts.Files = map[string]string{"ca": "certs$x.pem"} },
 		},
 		Docker: {
 			"docker.composeFile":       func(c *Config) { c.Docker.ComposeFile = "com$pose.yml" },
@@ -252,12 +305,13 @@ func TestValidateHostPathsMatchesTheRebaseList(t *testing.T) {
 		c := guardConfig(p)
 		c.baseDir = "" // isolate: this test is about the gate, not the join
 		rebased := map[string]func(*Config){
-			"tls.cert":                  func(c *Config) { c.TLS.Cert = "a/$b" },
-			"tls.certKey":               func(c *Config) { c.TLS.CertKey = "a/$b" },
-			"tls.cas[0]":                func(c *Config) { c.TLS.CAs = []string{"a/$b"} },
-			"broker.cliScriptsFolder":   func(c *Config) { c.Broker.CLIScriptsFolder = "a/$b" },
-			"broker.diagDir":            func(c *Config) { c.Broker.DiagDir = "a/$b" },
-			"broker.domainCerts.folder": func(c *Config) { c.Broker.DomainCerts.Folder = "a/$b" },
+			"tls.cert":                     func(c *Config) { c.TLS.Cert = "a/$b" },
+			"tls.certKey":                  func(c *Config) { c.TLS.CertKey = "a/$b" },
+			"tls.cas[0]":                   func(c *Config) { c.TLS.CAs = []string{"a/$b"} },
+			"broker.cliScriptsDir":         func(c *Config) { c.Broker.CLIScriptsDir = "a/$b" },
+			"broker.hostDiagnosticDir":     func(c *Config) { c.Broker.HostDiagnosticDir = "a/$b" },
+			"broker.domainCerts.dirs[0]":   func(c *Config) { c.Broker.DomainCerts.Dirs = []CertDir{{Path: "a/$b"}} },
+			"broker.domainCerts.files[ca]": func(c *Config) { c.Broker.DomainCerts.Files = map[string]string{"ca": "a/$b"} },
 		}
 		if p == Docker {
 			rebased["docker.composeFile"] = func(c *Config) { c.Docker.ComposeFile = "a/$b" }
@@ -282,36 +336,39 @@ func TestRebaseResolvesAgainstTheEnvFileDirectory(t *testing.T) {
 	c.TLS.Cert = "certs/tls.crt"
 	c.TLS.CertKey = filepath.FromSlash("/abs/tls.key") // already absolute
 	c.TLS.CAs = []string{"certs/ca.pem", filepath.FromSlash("/abs/ca2.pem")}
-	c.Broker.DiagDir = "diag-configs"
-	c.Broker.DomainCerts.Folder = "" // unset stays unset
+	c.Broker.HostDiagnosticDir = "diag-configs"
+	c.Broker.DomainCerts.Dirs = []CertDir{{Path: "prod-cas"}, {Path: filepath.FromSlash("/abs/partner-cas")}}
+	c.Broker.DomainCerts.Files = map[string]string{"my-ca": "certs/my-ca.pem"}
 	c.Docker.ComposeFile = "docker-compose.yml"
 
 	c.rebaseHostPaths()
 
 	want := map[string]string{
-		"tls.cert":            filepath.Join("/srv/solace/env", "certs/tls.crt"),
-		"tls.certKey":         filepath.FromSlash("/abs/tls.key"),
-		"tls.cas[0]":          filepath.Join("/srv/solace/env", "certs/ca.pem"),
-		"tls.cas[1]":          filepath.FromSlash("/abs/ca2.pem"),
-		"broker.diagDir":      filepath.Join("/srv/solace/env", "diag-configs"),
-		"docker.composeFile":  filepath.Join("/srv/solace/env", "docker-compose.yml"),
+		"tls.cert":                   filepath.Join("/srv/solace/env", "certs/tls.crt"),
+		"tls.certKey":                filepath.FromSlash("/abs/tls.key"),
+		"tls.cas[0]":                 filepath.Join("/srv/solace/env", "certs/ca.pem"),
+		"tls.cas[1]":                 filepath.FromSlash("/abs/ca2.pem"),
+		"broker.hostDiagnosticDir":   filepath.Join("/srv/solace/env", "diag-configs"),
+		"docker.composeFile":         filepath.Join("/srv/solace/env", "docker-compose.yml"),
+		"broker.domainCerts.dirs[0]": filepath.Join("/srv/solace/env", "prod-cas"),
+		"broker.domainCerts.dirs[1]": filepath.FromSlash("/abs/partner-cas"),
+		"broker.domainCerts.files":   filepath.Join("/srv/solace/env", "certs/my-ca.pem"),
 	}
 	got := map[string]string{
-		"tls.cert":           c.TLS.Cert,
-		"tls.certKey":        c.TLS.CertKey,
-		"tls.cas[0]":         c.TLS.CAs[0],
-		"tls.cas[1]":         c.TLS.CAs[1],
-		"broker.diagDir":     c.Broker.DiagDir,
-		"docker.composeFile": c.Docker.ComposeFile,
+		"tls.cert":                   c.TLS.Cert,
+		"tls.certKey":                c.TLS.CertKey,
+		"tls.cas[0]":                 c.TLS.CAs[0],
+		"tls.cas[1]":                 c.TLS.CAs[1],
+		"broker.hostDiagnosticDir":   c.Broker.HostDiagnosticDir,
+		"docker.composeFile":         c.Docker.ComposeFile,
+		"broker.domainCerts.dirs[0]": c.Broker.DomainCerts.Dirs[0].Path,
+		"broker.domainCerts.dirs[1]": c.Broker.DomainCerts.Dirs[1].Path,
+		"broker.domainCerts.files":   c.Broker.DomainCerts.Files["my-ca"],
 	}
 	for k, w := range want {
 		if got[k] != w {
 			t.Errorf("after rebase %s = %q, want %q", k, got[k], w)
 		}
-	}
-	if c.Broker.DomainCerts.Folder != "" {
-		t.Errorf("an unset path must stay unset, got %q -- otherwise every omitted field silently becomes "+
-			"the env file's own directory", c.Broker.DomainCerts.Folder)
 	}
 }
 
@@ -322,11 +379,11 @@ func TestRebaseIsANoOpWithoutABaseDir(t *testing.T) {
 	c := guardConfig(Docker)
 	c.baseDir = ""
 	c.TLS.Cert = "certs/tls.crt"
-	c.Broker.DiagDir = "diag-configs"
+	c.Broker.HostDiagnosticDir = "diag-configs"
 	c.rebaseHostPaths()
-	if c.TLS.Cert != "certs/tls.crt" || c.Broker.DiagDir != "diag-configs" {
-		t.Errorf("with no base dir the paths must be untouched, got tls.cert=%q diagDir=%q",
-			c.TLS.Cert, c.Broker.DiagDir)
+	if c.TLS.Cert != "certs/tls.crt" || c.Broker.HostDiagnosticDir != "diag-configs" {
+		t.Errorf("with no base dir the paths must be untouched, got tls.cert=%q hostDiagnosticDir=%q",
+			c.TLS.Cert, c.Broker.HostDiagnosticDir)
 	}
 	if c.BaseDir() != "" {
 		t.Errorf("BaseDir() = %q, want empty", c.BaseDir())
@@ -443,26 +500,147 @@ func TestDataDirMustBeAbsolute(t *testing.T) {
 	}
 }
 
-// TestDomainCertsFolderIsDefaulted covers a promise the sample env file had been
-// making without the code keeping it: the file shows `folder: certs` under a header
-// saying a commented-out key shows the default that applies when omitted, but nothing
-// set it -- so an omitted folder made filepath.Join("", file) collapse to a bare
-// filename resolved against whatever directory the command ran from.
-func TestDomainCertsFolderIsDefaulted(t *testing.T) {
+// TestContainerHostPathsRefuseATilde pins the fix for the gap that opened when
+// CheckHostPath stopped refusing a leading '~' everywhere (expandHomePaths now
+// handles it, for every field IT reaches): podman.quadletDir, podman.baseDir
+// and <platform>.container.dataDir are deliberately NOT in that expansion list,
+// because each names a path on the machine that runs the CONTAINER rather than
+// the machine running this tool, and os.UserHomeDir() cannot answer for the
+// former. Without a check here, a literal '~' -- an operator's typo, or the
+// rootless quadletDir default's own xdgConfigHome fallback -- would silently
+// reach the generated quadlet unit as a literal segment.
+func TestContainerHostPathsRefuseATilde(t *testing.T) {
+	cases := []struct {
+		name  string
+		p     Platform
+		setup func(*Config)
+		field string
+	}{
+		{"podman.quadletDir", Podman, func(c *Config) { c.Podman.QuadletDir = "~/quadlets" }, "podman.quadletDir"},
+		{"podman.baseDir", Podman, func(c *Config) { c.Podman.BaseDir = "~/solace" }, "podman.baseDir"},
+		{"podman.container.dataDir", Podman, func(c *Config) { c.Podman.Container.DataDir = "~/data" },
+			"podman.container.dataDir"},
+		{"docker.container.dataDir", Docker, func(c *Config) { c.Docker.Container.DataDir = "~/data" },
+			"docker.container.dataDir"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := guardConfig(tc.p)
+			tc.setup(c)
+			err := c.validateHostPaths(tc.p)
+			if err == nil {
+				t.Fatalf("%s: a leading '~' must be refused, not silently left as a literal", tc.field)
+			}
+			if !strings.Contains(err.Error(), tc.field) {
+				t.Errorf("%s: error %q must name the field", tc.field, err)
+			}
+			if !strings.Contains(err.Error(), "not expanded for this field") {
+				t.Errorf("%s: error %q must explain why (this field is on the container's host, not this "+
+					"tool's), not just refuse", tc.field, err)
+			}
+		})
+	}
+	// docker.composeFile is expanded and rebased -- it IS read by this tool --
+	// so it must NOT be refused here; it goes through the ordinary gate.
+	dc := guardConfig(Docker)
+	dc.Docker.ComposeFile = "~/compose.yml"
+	if err := dc.validateHostPaths(Docker); err != nil {
+		t.Errorf("docker.composeFile with a leading '~' must be accepted at validate time (expanded at "+
+			"Load, not refused): %v", err)
+	}
+}
+
+// TestDomainCertsDirsAreNotDefaulted replaces TestDomainCertsFolderIsDefaulted: the
+// `folder` key it pinned defaulted to "certs", but its replacement, `dirs`,
+// deliberately does NOT inherit that default. broker.configure domain-certs' own
+// no-op ("no domain certificate authorities configured -- skipping") depends on
+// dirs and files both being empty for a file that configures neither; defaulting
+// dirs would turn that no-op into a hard failure (rule F: an unreadable configured
+// dir is an error) for every deployment that has no ./certs directory beside its
+// env file.
+func TestDomainCertsDirsAreNotDefaulted(t *testing.T) {
 	for _, p := range Platforms() {
 		c := &Config{}
 		c.ApplyDefaults(p)
-		if got := c.Broker.DomainCerts.Folder; got != "certs" {
-			t.Errorf("%s: broker.domainCerts.folder = %q, want %q -- env/sample.yaml documents that default",
-				p, got, "certs")
+		if len(c.Broker.DomainCerts.Dirs) != 0 {
+			t.Errorf("%s: broker.domainCerts.dirs = %+v, want empty -- an unconfigured file must stay a no-op",
+				p, c.Broker.DomainCerts.Dirs)
+		}
+		if len(c.Broker.DomainCerts.Files) != 0 {
+			t.Errorf("%s: broker.domainCerts.files = %+v, want empty", p, c.Broker.DomainCerts.Files)
 		}
 	}
-	// An explicit value still wins.
+	// An explicit value still survives ApplyDefaults untouched.
 	c := &Config{}
-	c.Broker.DomainCerts.Folder = "my-cas"
+	c.Broker.DomainCerts.Dirs = []CertDir{{Path: "my-cas"}}
 	c.ApplyDefaults(Docker)
-	if c.Broker.DomainCerts.Folder != "my-cas" {
-		t.Errorf("an explicit folder must not be overwritten, got %q", c.Broker.DomainCerts.Folder)
+	if len(c.Broker.DomainCerts.Dirs) != 1 || c.Broker.DomainCerts.Dirs[0].Path != "my-cas" {
+		t.Errorf("an explicit dirs entry must not be overwritten, got %+v", c.Broker.DomainCerts.Dirs)
+	}
+}
+
+// TestRenamedBrokerKeysFailLoud pins the remaining three retained-legacy-field
+// migrations (the three .runtime keys have their own pin,
+// TestRenamedRuntimeKeysFailLoud, in command_test.go): the old key decodes, is
+// never defaulted, and Validate's error names the replacement.
+func TestRenamedBrokerKeysFailLoud(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  string
+		want string
+	}{
+		{"cliScriptsFolder", "broker:\n  cliScriptsFolder: cli\n", "broker.cliScriptsFolder was renamed to broker.cliScriptsDir"},
+		{"diagDir", "broker:\n  diagDir: diag-configs\n", "broker.diagDir was renamed to broker.hostDiagnosticDir"},
+		{"domainCerts.folder", "broker:\n  domainCerts:\n    folder: certs\n",
+			"broker.domainCerts.folder was renamed to broker.domainCerts.dirs"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var c Config
+			if err := decodeStrict(tc.doc, &c); err != nil {
+				t.Fatalf("the old key must still decode (that is the point): %v", err)
+			}
+			c.ApplyDefaults(K8s)
+			err := c.Validate(K8s)
+			if err == nil {
+				t.Fatal("the old key must fail validation")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestExpandHomePathsRunsBeforeRebaseAndDoesNotDependOnBaseDir is the regression
+// pin for the whole feature: expandHomePaths must run so that a `~` value is
+// already absolute by the time rebaseHostPaths sees it, and it must run even
+// with baseDir == "" (the internal/convert / hand-built Config case), or the
+// old bug -- a literal '~' segment joined onto the env file's directory --
+// comes back.
+func TestExpandHomePathsRunsBeforeRebaseAndDoesNotDependOnBaseDir(t *testing.T) {
+	home := "/home/operator"
+	for _, baseDir := range []string{"", filepath.FromSlash("/srv/solace/env")} {
+		c := &Config{homeDir: func() (string, error) { return home, nil }}
+		c.TLS.Cert = "~/certs/tls.crt"
+		c.baseDir = baseDir
+
+		if err := c.expandHomePaths(); err != nil {
+			t.Fatalf("baseDir=%q: expandHomePaths: %v", baseDir, err)
+		}
+		c.rebaseHostPaths()
+
+		want := "/home/operator/certs/tls.crt"
+		if c.TLS.Cert != want {
+			t.Errorf("baseDir=%q: tls.cert = %q, want %q", baseDir, c.TLS.Cert, want)
+		}
+		if strings.Contains(c.TLS.Cert, "~") {
+			t.Errorf("baseDir=%q: tls.cert = %q still carries a literal '~'", baseDir, c.TLS.Cert)
+		}
+		if baseDir != "" && strings.Contains(c.TLS.Cert, baseDir) {
+			t.Errorf("baseDir=%q: tls.cert = %q was joined onto baseDir; an expanded (absolute) "+
+				"value must not be rebased", baseDir, c.TLS.Cert)
+		}
 	}
 }
 
@@ -621,4 +799,173 @@ func setContainerName(c *Config, p Platform, name string) {
 		return
 	}
 	c.Docker.Container.Name = name
+}
+
+// TestLoadExpandsATildeThroughTheWholePipeline is the WIRING test, and it is the one that
+// was missing: every other tilde test calls expandTilde or expandHomePaths directly, so
+// deleting the single call from Load left the whole suite green.
+//
+// That is a real gap rather than a stylistic one. The behaviour this feature replaced --
+// CheckHostPath's outright refusal of a leading '~' -- was reached through Validate, whose
+// wiring into Load is itself pinned. Swapping a refusal for an expansion without pinning
+// the new path would have traded a tested behaviour for an untested one.
+//
+// It drives the REAL os.UserHomeDir rather than the injectable seam, because the seam is
+// unexported and Load builds its own Config -- and because the seam is exactly what this
+// test must not use: the thing under test is that Load calls the expansion at all.
+// os.UserHomeDir reads HOME on unix and USERPROFILE on Windows, so both are set.
+func TestLoadExpandsATildeThroughTheWholePipeline(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	path := writeTempYAML(t, `redundancy:
+  enabled: "false"
+image:
+  repo: solace/broker
+  tag: latest
+semp:
+  adminPass: s3cret
+broker:
+  cliScriptsDir: ~/scripts
+kubernetes:
+  name: mybroker
+  namespace: sol-ns
+  storage:
+    msgNodeSize: 30Gi
+`)
+
+	c, err := Load(path, K8s)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if strings.Contains(c.Broker.CLIScriptsDir, "~") {
+		t.Fatalf("broker.cliScriptsDir = %q: the tilde survived Load, so nothing expanded it",
+			c.Broker.CLIScriptsDir)
+	}
+	// And it expanded to the HOME above rather than being rebased onto the env file's
+	// own directory -- which is precisely what the refusal this replaced existed to
+	// prevent, and what would happen again if expansion ran after the rebase.
+	if !strings.HasPrefix(filepath.ToSlash(c.Broker.CLIScriptsDir), filepath.ToSlash(home)) {
+		t.Errorf("broker.cliScriptsDir = %q, want it under the home directory %q -- a value "+
+			"rebased onto the env file's directory instead is the original bug",
+			c.Broker.CLIScriptsDir, home)
+	}
+	if !strings.HasSuffix(filepath.ToSlash(c.Broker.CLIScriptsDir), "/scripts") {
+		t.Errorf("broker.cliScriptsDir = %q, want it to keep the path after the tilde",
+			c.Broker.CLIScriptsDir)
+	}
+}
+
+// TestExpandHomePathsCoversEveryFieldItClaims walks EVERY field expandHomePaths lists,
+// which is the only way to catch the failure this pass is most likely to have.
+//
+// The risk is not a wrong expansion; it is a MISSING one. The function is a hand-written
+// list of fields, so a field added to the schema later -- or one dropped from this list in
+// a refactor -- simply never expands, and the value reaches the filesystem with a literal
+// '~' in it. That surfaces as a missing file somewhere far from the env file, which is
+// precisely the failure the refusal this feature replaced existed to prevent.
+//
+// Setting every field at once also pins the loops: the CA list, the certificate directory
+// list and the files map are each iterated separately, and a loop that expanded only its
+// first element would pass any test that set one value per field.
+func TestExpandHomePathsCoversEveryFieldItClaims(t *testing.T) {
+	const home = "/home/op"
+	c := &Config{homeDir: func() (string, error) { return home, nil }}
+	c.TLS.Cert = "~/tls/cert.pem"
+	c.TLS.CertKey = "~/tls/key.pem"
+	c.TLS.CAs = []string{"~/tls/ca1.pem", "~/tls/ca2.pem"}
+	c.Broker.CLIScriptsDir = "~/scripts"
+	c.Broker.HostDiagnosticDir = "~/diag"
+	c.Docker.ComposeFile = "~/compose.yaml"
+	c.Broker.DomainCerts.Dirs = []CertDir{{Path: "~/cas/a"}, {Path: "~/cas/b"}}
+	c.Broker.DomainCerts.Files = map[string]string{
+		"first":  "~/cas/one.pem",
+		"second": "~/cas/two.pem",
+	}
+
+	if err := c.expandHomePaths(); err != nil {
+		t.Fatalf("expandHomePaths: %v", err)
+	}
+
+	got := map[string]string{
+		"tls.cert":                    c.TLS.Cert,
+		"tls.certKey":                 c.TLS.CertKey,
+		"tls.cas[0]":                  c.TLS.CAs[0],
+		"tls.cas[1]":                  c.TLS.CAs[1],
+		"broker.cliScriptsDir":        c.Broker.CLIScriptsDir,
+		"broker.hostDiagnosticDir":    c.Broker.HostDiagnosticDir,
+		"docker.composeFile":          c.Docker.ComposeFile,
+		"broker.domainCerts.dirs[0]":  c.Broker.DomainCerts.Dirs[0].Path,
+		"broker.domainCerts.dirs[1]":  c.Broker.DomainCerts.Dirs[1].Path,
+		"broker.domainCerts.files[1]": c.Broker.DomainCerts.Files["first"],
+		"broker.domainCerts.files[2]": c.Broker.DomainCerts.Files["second"],
+	}
+	for field, v := range got {
+		if strings.Contains(v, "~") {
+			t.Errorf("%s = %q: the tilde survived, so this field is not in expandHomePaths' list",
+				field, v)
+		}
+		if !strings.HasPrefix(filepath.ToSlash(v), home) {
+			t.Errorf("%s = %q, want it under %q", field, v, home)
+		}
+	}
+}
+
+// TestExpandHomePathsReportsWhichFieldFailed pins that a failure names the field, for each
+// SHAPE of field the pass holds -- a plain one, a list element, and a map entry.
+//
+// The field name is the whole value of the error here. An operator sees the message, not
+// the struct, and "starts with '~'" on its own would leave them searching an env file for
+// which of a dozen path keys caused it.
+func TestExpandHomePathsReportsWhichFieldFailed(t *testing.T) {
+	// "~other" is the unsupported another-user's-home form, which is refused by name
+	// rather than guessed at -- so it is the shape that drives the error path.
+	for _, tc := range []struct {
+		name, wantField string
+		set             func(c *Config)
+	}{
+		{"a plain field", "broker.cliScriptsDir", func(c *Config) { c.Broker.CLIScriptsDir = "~other/x" }},
+		{"a list element", "tls.cas[1]", func(c *Config) {
+			c.TLS.CAs = []string{"/fine/ca.pem", "~other/ca.pem"}
+		}},
+		{"a certificate dir", "broker.domainCerts.dirs[0]", func(c *Config) {
+			c.Broker.DomainCerts.Dirs = []CertDir{{Path: "~other/cas"}}
+		}},
+		{"a map entry, named by its CA name", "broker.domainCerts.files[my-ca]", func(c *Config) {
+			c.Broker.DomainCerts.Files = map[string]string{"my-ca": "~other/ca.pem"}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{homeDir: func() (string, error) { return "/home/op", nil }}
+			tc.set(c)
+			err := c.expandHomePaths()
+			if err == nil {
+				t.Fatal("an unsupported ~user form must be refused rather than guessed at")
+			}
+			if !strings.Contains(err.Error(), tc.wantField) {
+				t.Errorf("err = %v, want it to name the field %q -- an operator reads the message, "+
+					"not the struct", err, tc.wantField)
+			}
+		})
+	}
+}
+
+// TestExpandHomePathsSurfacesAnUnresolvableHome pins the remaining branch: when the home
+// directory itself cannot be determined, that is an error naming the field rather than a
+// silent fallthrough leaving the tilde in place.
+func TestExpandHomePathsSurfacesAnUnresolvableHome(t *testing.T) {
+	c := &Config{homeDir: func() (string, error) { return "", fmt.Errorf("no home for this user") }}
+	c.Broker.CLIScriptsDir = "~/scripts"
+
+	err := c.expandHomePaths()
+	if err == nil {
+		t.Fatal("an unresolvable home must fail rather than leave the tilde in the value")
+	}
+	if !strings.Contains(err.Error(), "broker.cliScriptsDir") {
+		t.Errorf("err = %v, want it to name the field", err)
+	}
+	if strings.Contains(c.Broker.CLIScriptsDir, "~") && err == nil {
+		t.Error("the value must not be left half-expanded on failure")
+	}
 }

@@ -166,6 +166,14 @@ func opK8sConfigServerCerts(a *App) error {
 // --remove is implemented here, unlike its siblings, because
 // `no ssl domain-certificate-authority` is a documented CLI form -- and, like every
 // other removal in this tree, it asks before it acts.
+//
+// The directory walk (config.ResolveDomainCerts) runs here, at the op, rather
+// than at Load: it is the first point where "the configured dirs must be
+// readable" is actually true, so a deploy, generate or convert that never
+// touches domain certificates does not fail on a machine that lacks the
+// certificate directory. It runs for BOTH directions -- apply and --remove --
+// so a directory-derived CA is not silently left on the broker by a removal
+// that used to see only broker.domainCerts.files' explicit names.
 func opK8sConfigDomainCerts(a *App) error {
 	remove, err := wantRemove(a)
 	if err != nil {
@@ -175,15 +183,18 @@ func opK8sConfigDomainCerts(a *App) error {
 	if err != nil {
 		return err
 	}
+	certs, err := config.ResolveDomainCerts(a.Cfg.Broker.DomainCerts, nil)
+	if err != nil {
+		return err
+	}
 	if remove {
 		if !confirmAction(a, "Remove", "remove",
 			k8sWhat(a, "the configured domain CA certificates from broker "+a.Cfg.K8s.Name)) {
 			return nil
 		}
-		return k8sOps(a).RemoveDomainCerts(bg(), role, domainCANames(a.Cfg))
+		return k8sOps(a).RemoveDomainCerts(bg(), role, domainCANames(certs))
 	}
-	return k8sOps(a).DomainCerts(bg(), role,
-		a.Cfg.Broker.DomainCerts.Folder, a.Cfg.Broker.DomainCerts.Files)
+	return k8sOps(a).DomainCerts(bg(), role, certs)
 }
 
 // opK8sConfigProductKeys applies or revokes the configured product keys. The roles
@@ -281,7 +292,7 @@ func opK8sExportConfig(a *App, role config.Role) error {
 // opK8sImportConfig applies a captured configuration to the target pod.
 //
 // Unlike opK8sExecCLI the path is used exactly as given, with no
-// broker.cliScriptsFolder resolution. cliScriptsFolder holds scripts an operator
+// broker.cliScriptsDir resolution. cliScriptsDir holds scripts an operator
 // maintains; this file is an artifact export-config just wrote, so resolving it
 // somewhere else would look for it where it is not.
 func opK8sImportConfig(a *App, file string) error {
@@ -303,7 +314,7 @@ func opK8sExecCLI(a *App, file string) error {
 // opK8sExecShell uploads and runs a local shell script inside the target pod.
 //
 // It resolves its filename exactly like opK8sExecCLI -- a bare name under
-// broker.cliScriptsFolder, a path as given -- so an operator who keeps both kinds of
+// broker.cliScriptsDir, a path as given -- so an operator who keeps both kinds of
 // script in one place does not have to remember which command treats the folder
 // differently. What it runs is arbitrary code inside the broker container; the command's
 // help says so, and says that the output is shown in full.
@@ -329,7 +340,7 @@ func resolveScript(a *App, file, kind string) (config.Role, string, error) {
 	}
 	localPath := file
 	if !config.HasPathSeparator(file) {
-		localPath = filepath.Join(a.Cfg.Broker.CLIScriptsFolder, file)
+		localPath = filepath.Join(a.Cfg.Broker.CLIScriptsDir, file)
 	}
 	return role, localPath, nil
 }
@@ -341,7 +352,7 @@ func opK8sVerifyRedundancy(a *App) error { return k8sOps(a).Redundancy(bg()) }
 // opK8sVerifyDiagnostics gathers show-command output and a diagnostics bundle from every
 // broker node into the configured diagnostics dir.
 func opK8sVerifyDiagnostics(a *App) error {
-	return k8sOps(a).Diagnostics(bg(), a.Cfg.Broker.DiagDir, nowStamp(), a.days, k8s.HARoles(a.Cfg)...)
+	return k8sOps(a).Diagnostics(bg(), a.Cfg.Broker.HostDiagnosticDir, nowStamp(), a.days, k8s.HARoles(a.Cfg)...)
 }
 
 func opK8sVerifyLogin(a *App, role config.Role) error {
@@ -682,12 +693,14 @@ func k8sContext(a *App) string {
 	return fmt.Sprintf(" (context %s)", a.kubeContext)
 }
 
-// domainCANames returns the configured domain CA names (the keys of domainCerts.files),
-// unsorted; RemoveDomainCerts sorts and validates them.
-func domainCANames(cfg *config.Config) []string {
-	names := make([]string, 0, len(cfg.Broker.DomainCerts.Files))
-	for ca := range cfg.Broker.DomainCerts.Files {
-		names = append(names, ca)
+// domainCANames returns the CA names from an already-resolved certificate set
+// (config.ResolveDomainCerts, shared by the apply and --remove directions so
+// neither sees a different set of names than the other); RemoveDomainCerts
+// sorts and validates them.
+func domainCANames(certs []config.DomainCert) []string {
+	names := make([]string, 0, len(certs))
+	for _, c := range certs {
+		names = append(names, c.Name)
 	}
 	return names
 }

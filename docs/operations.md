@@ -166,7 +166,7 @@ run-everything command that would stop partway through a second run. On a fresh 
 1. `broker perform assert-leader` (HA only; on containers, run it on the primary -- it also reverts the
    backup over SEMP first, so `redundancy.backup.addr` should be reachable)
 2. `broker configure server-certs` (when TLS is configured)
-3. `broker configure domain-certs` (when any are listed)
+3. `broker configure domain-certs` (when any `broker.domainCerts.dirs` or `.files` are listed)
 4. `broker configure default-vpn`
 5. `broker configure default-users`
 6. `broker configure product-keys` (when any are listed)
@@ -175,18 +175,28 @@ run-everything command that would stop partway through a second run. On a fresh 
 half of a DR pair, and it is run at both sites -- see
 [Data replication](#data-replication).
 
-Steps 3, 4 and 5 can be undone from here: `broker configure domain-certs --remove`, and
-`--enable` on either hardening step. There is no way to withdraw a server certificate or a
-product key through this tool -- `--remove` on those two is registered but refuses, because
-no broker CLI form for it has been confirmed.
+Steps 3, 4 and 5 can be undone from here: `broker configure domain-certs --remove`,
+`broker configure server-certs --remove`, `broker configure product-keys --remove`, and
+`--enable` on either hardening step -- `no ssl server-certificate` and `no product-key
+<key>` are confirmed CLI forms, so both removals now run for real instead of refusing.
 
 Each step's own scope and failure mode is worth knowing. `server-certs` applies to every
 node in the redundancy group on Kubernetes, or this host's container on docker/podman; if
 the env file names a Secret it supplies no certificate files for, that Secret is assumed
 managed elsewhere (kubectl, cert-manager) and the command refuses rather than guessing, and
 with `kubernetes.tlsServerSecret` set, `--remove` refuses too -- the operator would put the
-certificate straight back -- so clear the key instead. `domain-certs` with none configured
-is a logged no-op, not an error. `product-keys` is never applied to the monitor node, which
+certificate straight back -- so clear the key instead. `domain-certs` with neither `dirs` nor
+`files` configured is a logged no-op, not an error; a configured `dirs` entry that cannot be
+read (missing, or unreadable) IS an error, before anything is uploaded -- it is not skipped.
+Every directory is walked one level deep (no subdirectories) for its matching files
+(`.cer`/`.crt`/`.pem` by default, or the entry's own `fileExt`), each named
+`<last-directory-element>_<filename>`; two certificates that would resolve to the same name
+-- across directories, or against an explicit `files` key -- fail the command naming both
+source paths. Override a name you do not want by listing that certificate explicitly under
+`files` instead. `--remove` walks the same `dirs`/`files` to learn the CA names to withdraw,
+so it needs the same directories to still be readable; if a directory has been removed since
+`domain-certs` last ran, point `dirs` at wherever the certificates live now (or list the
+remaining ones under `files`) before removing. `product-keys` is never applied to the monitor node, which
 carries no message spool -- `--pod` narrows it to one node and warns, since a partly-licensed
 redundancy group is usually a mistake -- and the broker's CLI output is scanned for errors so
 a rejected or nonexistent key is reported as a failure rather than silently accepted.
@@ -480,7 +490,7 @@ names that as the way to apply one.
 
 **Config source.** The container platform has no separate config namespace: its post-deploy
 `config` steps read the platform-neutral `broker.*` fields -- `broker.domainCerts`,
-`broker.productKeys`, `broker.diagDir`, `broker.cliScriptsFolder` -- shared verbatim with
+`broker.productKeys`, `broker.hostDiagnosticDir`, `broker.cliScriptsDir` -- shared verbatim with
 Kubernetes, plus `tls.cert`/`tls.certKey` (server certificate) and `semp.adminPass`
 (SEMP login); the `redundancy.*` names drive role detection for `broker perform assert-leader` /
 `broker perform redundancy-test`, and `redundancy.backup.addr` is also read at verify time -- it is where those
@@ -543,11 +553,13 @@ secret-free variant to reach for -- the `generate secrets` sub-tree was removed 
 because splitting the stream in two made the ordering the operator's problem. Treat that
 output exactly like the env file it came from.
 
-`operator deploy` issues three applies rather than one: the operator namespace, then the
-image-pull secret into it, then the rest of the bundle. Everything it applies is
-byte-for-byte what `operator generate` prints, and the ordering is what
-makes a first install work -- the secret is namespaced, and the namespace only exists in
-the bundle.
+`operator deploy` issues three applies when registry credentials are configured
+(`image.user`/`image.pass`, or their `*Env` equivalents) -- the operator namespace, then the
+fixed-name `regcred` image-pull secret into it, then the rest of the bundle -- and two
+otherwise (namespace, then bundle; there is no `regcred` to apply without credentials to
+build it from). Everything it applies is byte-for-byte what `operator generate` prints, and
+the ordering is what makes a first install work -- the secret is namespaced, and the
+namespace only exists in the bundle.
 
 The broker's own settings -- routername, redundancy, the scaling knobs -- are inlined into
 whatever `broker generate` renders: `Environment=` lines in a quadlet unit, an
@@ -823,10 +835,15 @@ the artifact asks for.
 Chunks run in this order, and a failure stops the run there:
 
 1. every existing VPN's teardown;
-2. `Create logging`, alone, because it ends the CLI session;
-3. `Create Usernames`, alone, because it rewrites the CLI admin password;
-4. the remaining broker-level sections;
-5. one chunk per message-VPN, **`default` first** -- it is the VPN that is edited
+2. removing any target-only objects the artifact does not recreate (today, stale
+   virtual hostnames), when there are any;
+3. creating every message-VPN the artifact defines, existing or new -- this runs
+   before any broker-level section because a broker-level line naming a
+   message-VPN is rejected if that VPN does not exist yet;
+4. `Create logging`, alone, because it ends the CLI session;
+5. `Create Usernames`, alone, because it rewrites the CLI admin password;
+6. the remaining broker-level sections;
+7. one chunk per message-VPN, **`default` first** -- it is the VPN that is edited
    rather than recreated, and it carries the port changes most likely to be refused.
 
 **A failed apply stops there and the verification diff does not run.** The report
@@ -1154,7 +1171,7 @@ block; `configure` needs none. The key that is present is the mechanism
 
 | `via:` | What it does |
 | --- | --- |
-| `kubernetes` | Runs that site's own cluster CLI (`kubectl --context dr ...`) and drives the broker CLI in its primary pod, exactly as this tool drives a local one. The command goes through the same allowlist as `kubernetes.runtime` |
+| `kubernetes` | Runs that site's own cluster CLI (`kubectl --context dr ...`) and drives the broker CLI in its primary pod, exactly as this tool drives a local one. The command goes through the same allowlist as `kubernetes.command` |
 | `semp` | Posts SEMP v1 requests, with `curl` exec'd inside THIS broker's own container -- so it needs no second kubeconfig and no new binary on your machine. The password is the MATE's admin password, never this deployment's |
 
 The SEMP leg has one advantage worth knowing when a run is being debugged: a SEMP reply
@@ -1272,7 +1289,7 @@ command runs.
 `import-config` always re-exports the target and diffs it against the artifact after
 applying, and that diff -- never the applied script's own output -- is what decides
 the exit code (see
-[Verification is the only error detection](#verification-is-the-only-error-detection)).
+[Two detectors, in order](#two-detectors-in-order)).
 A non-zero exit means the printed report named at least one block that differs from
 the artifact or is missing from the target entirely; it does not mean a particular CLI
 line was rejected, since `cli -Apes` exits 0 either way. Read the report for which
@@ -1297,7 +1314,7 @@ any of these cases. See [Data replication](#data-replication).
 
 ### A wrapper runtime is refused
 
-`kubernetes.runtime`, `docker.runtime`, `podman.runtime` and `docker.compose` accept only an
+`kubernetes.command`, `docker.command`, `podman.command` and `docker.compose` accept only an
 allowlisted bare binary name. A wrapper such as `microk8s kubectl` or `lima nerdctl` needs
 `--allow-command <name>` on the invocation -- see
 [The command fields are executable content](configuration.md#the-command-fields-are-executable-content).

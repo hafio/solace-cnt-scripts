@@ -291,6 +291,11 @@ func TestDeleteSecrets(t *testing.T) {
 		// the delete set -- see the bring-your-own subtest below.
 		cfg.TLS.Cert, cfg.TLS.CertKey = "certs/tls.crt", "certs/tls.key"
 		cfg.K8s.ImagePullSecret = "solace-image-pull"
+		// Same rule for the pull secret as the comment above states for TLS: a NAME
+		// alone no longer makes it ours to delete (ManagesImagePullSecret). The
+		// credentials are what put it in the delete set -- see the bring-your-own
+		// subtest below.
+		cfg.Image.User, cfg.Image.Pass = "u", "SECRET-REG-PASS"
 		rr := &recRunner{}
 		c := NewCluster(rr, cfg, nil, nil)
 		if err := c.DeleteSecrets(context.Background()); err != nil {
@@ -336,6 +341,48 @@ func TestDeleteSecrets(t *testing.T) {
 					t.Fatalf("a Secret this tool did not build must not be deleted: %+v", call)
 				}
 			}
+		}
+	})
+	// The pull-secret analogue of the TLS subtest just above: a Secret this env
+	// file only NAMES, with no credentials behind it, is the operator's own --
+	// nothing here built it, so nothing here removes it.
+	t.Run("an image-pull secret we did not create survives", func(t *testing.T) {
+		cfg := adminCfg()
+		cfg.K8s.ImagePullSecret = "byo-image-pull"
+		rr := &recRunner{}
+		c := NewCluster(rr, cfg, nil, nil)
+		if err := c.DeleteSecrets(context.Background()); err != nil {
+			t.Fatalf("DeleteSecrets: %v", err)
+		}
+		for _, call := range rr.afterPreflight(t, "delete", "secrets") {
+			for _, a := range call.args {
+				if a == "byo-image-pull" {
+					t.Fatalf("a Secret this tool did not build must not be deleted: %+v", call)
+				}
+			}
+		}
+	})
+	// With credentials present and no name configured, DeleteSecrets must name the
+	// same DERIVED default GenSecrets built the Secret under -- not skip it, and not
+	// invent a different name.
+	t.Run("derived name when credentials are present and no name is configured", func(t *testing.T) {
+		cfg := adminCfg()
+		cfg.Image.User, cfg.Image.Pass = "u", "SECRET-REG-PASS"
+		rr := &recRunner{}
+		c := NewCluster(rr, cfg, nil, nil)
+		if err := c.DeleteSecrets(context.Background()); err != nil {
+			t.Fatalf("DeleteSecrets: %v", err)
+		}
+		calls := rr.afterPreflight(t, "delete", "secrets")
+		want := []string{"delete", "secret", "dev-broker-image-pull", "-n", "solace", "--ignore-not-found"}
+		var saw bool
+		for _, call := range calls {
+			if eqArgs(call.args, want) {
+				saw = true
+			}
+		}
+		if !saw {
+			t.Errorf("DeleteSecrets calls = %+v, want one deleting the derived name %v", calls, want)
 		}
 	})
 }

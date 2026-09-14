@@ -240,11 +240,38 @@ func TestTLSSecretErrors(t *testing.T) {
 	})
 }
 
+// TestDockerRegistrySecretEmptyName pins the defence-in-depth guard inside
+// dockerRegistrySecret, reachable through a different path than before. Clearing
+// kubernetes.imagePullSecret alone no longer gets here: the sample fixture also supplies
+// image.user/image.pass, so ImagePullSecretName now falls through to the derived default
+// instead of "" (see TestDockerRegistrySecretDerivesTheDefaultName). DockerRegistrySecret's
+// own doc comment says it is "called only when ManagesImagePullSecret is true, so the
+// derived name is always a real name here" -- this proves the other half of that claim by
+// breaking the assumption on purpose: with neither a configured name nor credentials,
+// ImagePullSecretName itself returns "", and the guard is what turns that into a build
+// error instead of a Secret manifest with an empty name.
 func TestDockerRegistrySecretEmptyName(t *testing.T) {
 	cfg := loadK8s(t)
 	cfg.K8s.ImagePullSecret = ""
+	cfg.Image.User, cfg.Image.Pass = "", ""
 	if _, err := DockerRegistrySecret(cfg); err == nil {
-		t.Error("DockerRegistrySecret should fail with an empty pull-secret name")
+		t.Error("DockerRegistrySecret should fail when ImagePullSecretName has nothing to give it")
+	}
+}
+
+// TestDockerRegistrySecretDerivesTheDefaultName is the state this function had no
+// coverage for before ImagePullSecretName existed: credentials present, no
+// kubernetes.imagePullSecret configured, the Secret is still built -- under
+// <kubernetes.name>-image-pull rather than failing or silently naming nothing.
+func TestDockerRegistrySecretDerivesTheDefaultName(t *testing.T) {
+	cfg := loadK8s(t)
+	cfg.K8s.ImagePullSecret = ""
+	got, err := DockerRegistrySecret(cfg)
+	if err != nil {
+		t.Fatalf("DockerRegistrySecret: %v", err)
+	}
+	if !bytes.Contains(got, []byte("name: dev-broker-image-pull")) {
+		t.Errorf("the Secret must carry the derived name:\n%s", got)
 	}
 }
 
@@ -347,6 +374,48 @@ func TestGenSecretsBuildsATLSSecretItOwns(t *testing.T) {
 	for _, want := range []string{"kubernetes.io/tls", "solace-tls-secret"} {
 		if !bytes.Contains(got, []byte(want)) {
 			t.Errorf("the built TLS Secret is missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// A pull secret follows the identical rule the TLS Secret above does: keyed on the
+// MATERIAL (image.user/image.pass), never on the NAME (kubernetes.imagePullSecret).
+
+// TestGenSecretsSkipsAnImagePullSecretItDoesNotOwn is the pull-secret analogue of
+// TestGenSecretsSkipsATLSSecretItDoesNotOwn: a configured name with no credentials behind
+// it is a Secret the operator created themselves, and GenSecrets must not invent
+// credentials to rebuild it -- there are none to invent.
+func TestGenSecretsSkipsAnImagePullSecretItDoesNotOwn(t *testing.T) {
+	cfg := loadK8s(t) // sample sets kubernetes.imagePullSecret
+	cfg.Image.User, cfg.Image.Pass = "", ""
+
+	got, err := GenSecrets(cfg)
+	if err != nil {
+		t.Fatalf("no credentials needed, so this must not fail: %v", err)
+	}
+	if bytes.Contains(got, []byte(".dockerconfigjson")) {
+		t.Errorf("no pull secret may be built when the env file supplies no credentials:\n%s", got)
+	}
+	// The credentials Secret is unaffected -- this narrows one document, not the stream.
+	if !bytes.Contains(got, []byte("username_admin_password")) {
+		t.Errorf("the admin Secret must still be rendered:\n%s", got)
+	}
+}
+
+// TestGenSecretsBuildsAnImagePullSecretUnderTheDerivedName is the other arm: credentials
+// present, no name configured -- the Secret is still rendered, under the derived default
+// rather than being silently dropped.
+func TestGenSecretsBuildsAnImagePullSecretUnderTheDerivedName(t *testing.T) {
+	cfg := loadK8s(t)
+	cfg.K8s.ImagePullSecret = ""
+
+	got, err := GenSecrets(cfg)
+	if err != nil {
+		t.Fatalf("GenSecrets: %v", err)
+	}
+	for _, want := range []string{".dockerconfigjson", "name: dev-broker-image-pull"} {
+		if !bytes.Contains(got, []byte(want)) {
+			t.Errorf("the built pull Secret is missing %q:\n%s", want, got)
 		}
 	}
 }

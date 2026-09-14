@@ -368,7 +368,7 @@ body{font-family:'Inter',system-ui,sans-serif;font-size:.88rem;color:var(--tp);b
 
   <!-- 16. Domain Certificates -->
   <div class="sec sec-env" id="s-domcert"><h3>Domain Certificates</h3>
-    <div class="f"><label>Certificate Folder</label><input id="i-domfolder" placeholder="/path/to/domain/ca" oninput="gen()"></div>
+    <div class="f"><label>Certificate Folder</label><input id="i-domfolder" placeholder="/path/to/domain/ca" oninput="gen()"><div class="h">Joined onto each filename below to make broker.domainCerts.files' full host path.</div></div>
     <div class="f"><label>Certificate Files</label><textarea id="i-domfiles" rows="2" oninput="gen()" placeholder="ca-name=filename.cer (one per line)"></textarea><div class="h">Format: ca-name=filename.cer</div></div>
   </div>
 
@@ -987,16 +987,23 @@ function genEnv(){
   }
 
   // ── broker (platform-neutral: cli scripts, diag dir, product keys, domain certs) ──
-  const dfiles=L('i-domfiles');
+  // domainCerts.files values are now FULL host paths (schema change): each
+  // "ca-name=filename.cer" line is joined onto the folder field here, since
+  // the generator has no directory-walk of its own to offer as broker.domainCerts.dirs.
+  const dfiles=L('i-domfiles'),dfolder=V('i-domfolder').replace(/\/+$/,'');
   let filesBody='';
-  dfiles.forEach(d=>{const p=d.split('=');if(p.length===2)filesBody+=`      ${yq(p[0].trim())}: ${yq(p[1].trim())}\n`;});
-  const brokerBody=kv('cliScriptsFolder',V('i-clifolder'),'  ')+kv('diagDir',V('i-diagdir'),'  ')
+  dfiles.forEach(d=>{const p=d.split('=');if(p.length===2){
+    const name=p[1].trim();
+    const full=dfolder?dfolder+'/'+name:name;
+    filesBody+=`      ${yq(p[0].trim())}: ${yq(full)}\n`;
+  }});
+  const brokerBody=kv('cliScriptsDir',V('i-clifolder'),'  ')+kv('hostDiagnosticDir',V('i-diagdir'),'  ')
     +(pkOn?klist('productKeys',L('i-pkeys'),'  '):'')
-    +blk('domainCerts',kv('folder',V('i-domfolder'),'    ')+blk('files',filesBody,'    '),'  ');
+    +blk('domainCerts',blk('files',filesBody,'    '),'  ');
   if(brokerBody)y+='\n'+blk('broker',brokerBody,'');
 
   // ── kubernetes ──
-  y+='\nkubernetes:\n'+kv('runtime',V('i-kubectl'),'  ')+kv('name',V('i-bkname'),'  ')+kv('namespace',V('i-bkns'),'  ')
+  y+='\nkubernetes:\n'+kv('command',V('i-kubectl'),'  ')+kv('name',V('i-bkname'),'  ')+kv('namespace',V('i-bkns'),'  ')
     +kv('adminSecret',V('i-admsecret'),'  ')
     +kv('tlsServerSecret',tlsSec,'  ')
     +(psOn?kv('imagePullSecret',V('i-pullsecret'),'  '):'')
@@ -1041,9 +1048,9 @@ function genEnv(){
         +kv('core',V('i-ctrcore'),'      '),'    ');
     const nblock=kv('mode',V('i-ctrnetmode'),'    ')+klist('ports',L('i-ctrports'),'    ');
 
-    y+='\ndocker:\n'+kv('runtime',V('i-dkruntime'),'  ')
+    y+='\ndocker:\n'+kv('command',V('i-dkruntime'),'  ')
       +kv('composeFile',V('i-dkcompose'),'  ')+blk('network',nblock,'  ')+blk('container',cblock,'  ');
-    y+='\npodman:\n'+kv('runtime',V('i-pdruntime'),'  ')
+    y+='\npodman:\n'+kv('command',V('i-pdruntime'),'  ')
       +`  rootless: ${$('i-pdrootless').checked}\n`
       +kv('quadletDir',V('i-pdquadlet'),'  ')+blk('network',nblock,'  ')+blk('container',cblock,'  ');
 

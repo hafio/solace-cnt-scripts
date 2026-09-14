@@ -1776,7 +1776,7 @@ func TestConfigStepsDoNotLeakSecrets(t *testing.T) {
 		"tls:\n  cert: " + certPath + "\n  certKey: " + keyPath + "\n" +
 		"docker: {}\n" +
 		"broker:\n" +
-		"  domainCerts:\n    folder: " + filepath.ToSlash(dir) + "\n    files:\n      myca: myca.pem\n" +
+		"  domainCerts:\n    files:\n      myca: " + filepath.ToSlash(filepath.Join(dir, "myca.pem")) + "\n" +
 		"  productKeys:\n    - KEY-1\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write env: %v", err)
@@ -2230,24 +2230,30 @@ func TestK8sSmokeRedundancyUnhealthy(t *testing.T) {
 	}
 }
 
+// domainCertsK8sPrefix is the env-file boilerplate every domain-certs test below
+// shares, up to but not including the broker: section.
+const domainCertsK8sPrefix = "redundancy:\n  enabled: false\n" +
+	"image:\n  repo: solace-pubsub-standard\n  tag: \"10.10.1.128\"\n" +
+	"semp:\n  adminPass: " + smokeAdminPass + "\n" +
+	"kubernetes:\n" +
+	"  name: dev-broker\n" +
+	"  namespace: solace\n" +
+	"  adminSecret: solace-admin-secret\n" +
+	"  updateStrategy: automatedRolling\n" +
+	"  storage:\n    class: standard\n    msgNodeSize: 30Gi\n"
+
 // TestK8sConfigDeleteDomainCertsConfigured covers domainCANames' loop body: every
 // other test's domainCerts.files map is empty, so the map-to-slice conversion
 // feeding RemoveDomainCerts is trivially correct by vacuity. This configures one
-// CA and asserts `config delete domain-certs` actually issues a kubectl exec
-// rather than self-skipping.
+// explicitly-named CA and asserts `config delete domain-certs` actually issues a
+// kubectl exec rather than self-skipping. files values are now full host paths
+// (the shape change); --remove needs no real file at that path since it never
+// reads or uploads anything, only the CA name.
 func TestK8sConfigDeleteDomainCertsConfigured(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "domaincerts.yaml")
-	content := "redundancy:\n  enabled: false\n" +
-		"image:\n  repo: solace-pubsub-standard\n  tag: \"10.10.1.128\"\n" +
-		"semp:\n  adminPass: " + smokeAdminPass + "\n" +
-		"kubernetes:\n" +
-		"  name: dev-broker\n" +
-		"  namespace: solace\n" +
-		"  adminSecret: solace-admin-secret\n" +
-		"  updateStrategy: automatedRolling\n" +
-		"  storage:\n    class: standard\n    msgNodeSize: 30Gi\n" +
+	content := domainCertsK8sPrefix +
 		"broker:\n" +
-		"  domainCerts:\n    folder: certs\n    files:\n      myca: myca.pem\n"
+		"  domainCerts:\n    files:\n      myca: /opt/solace/certs/myca.pem\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write env: %v", err)
 	}
@@ -2258,6 +2264,35 @@ func TestK8sConfigDeleteDomainCertsConfigured(t *testing.T) {
 	}
 	if !strings.Contains(out, "+ kubectl") {
 		t.Errorf("config delete domain-certs (configured) stdout = %q, want a '+ kubectl ...' echo", out)
+	}
+}
+
+// TestK8sConfigDeleteDomainCertsFromDirs is the sibling TestK8sConfigDeleteDomainCertsConfigured
+// names as a gap: --remove used to read only domainCerts.files, so a
+// dirs-derived CA was silently left on the broker. Both directions now go
+// through the same config.ResolveDomainCerts, so a dirs-only file must reach
+// the same kubectl exec `--remove` issues for an explicit files entry.
+func TestK8sConfigDeleteDomainCertsFromDirs(t *testing.T) {
+	dir := t.TempDir()
+	// The walk only needs the file to EXIST -- --remove never reads or uploads
+	// its content, only its name.
+	if err := os.WriteFile(filepath.Join(dir, "ca.pem"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write fixture cert: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "domaincerts-dirs.yaml")
+	content := domainCertsK8sPrefix +
+		"broker:\n" +
+		"  domainCerts:\n    dirs:\n      - " + filepath.ToSlash(dir) + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	out, err := runRootWith(t, []string{"broker", "configure", "domain-certs", "--remove", "--no-prompt",
+		"--env", path, "--platform", "kubernetes"}, echoRunner)
+	if err != nil {
+		t.Fatalf("config delete domain-certs (dirs) err = %v, want nil", err)
+	}
+	if !strings.Contains(out, "+ kubectl") {
+		t.Errorf("config delete domain-certs (dirs) stdout = %q, want a '+ kubectl ...' echo", out)
 	}
 }
 
@@ -3031,7 +3066,7 @@ func TestAnnounceCommandsNamesResolvedBinaries(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		cfg.K8s.Runtime = config.Command{name}
+		cfg.K8s.Command = config.Command{name}
 		allowRuntime(t, cfg, name)
 		a := &App{Cfg: cfg, Platform: config.K8s}
 		got := captureStderr(t, a.announceCommands)
@@ -3047,7 +3082,7 @@ func TestAnnounceCommandsNamesResolvedBinaries(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		cfg.Docker.Runtime = config.Command{name}
+		cfg.Docker.Command = config.Command{name}
 		cfg.Docker.Compose = config.Command{name, "compose"}
 		allowRuntime(t, cfg, name)
 		a := &App{Cfg: cfg, Platform: config.Docker}
@@ -3065,7 +3100,7 @@ func TestAnnounceCommandsNamesResolvedBinaries(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		cfg.Docker.Runtime = config.Command{name}
+		cfg.Docker.Command = config.Command{name}
 		cfg.Docker.Compose = config.Command{compose}
 		allowRuntime(t, cfg, name, compose)
 		a := &App{Cfg: cfg, Platform: config.Docker}
@@ -3084,7 +3119,7 @@ func TestAnnounceCommandsNamesResolvedBinaries(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		cfg.K8s.Runtime = config.Command{"solace-absent-kube"}
+		cfg.K8s.Command = config.Command{"solace-absent-kube"}
 		allowRuntime(t, cfg, "solace-absent-kube")
 		a := &App{Cfg: cfg, Platform: config.K8s}
 		if got := captureStderr(t, a.announceCommands); got != "" {
@@ -3290,7 +3325,7 @@ func TestRemoveDomainCertsOverTheCLI(t *testing.T) {
 		"image:\n  repo: solace-pubsub-standard\n  tag: \"10.10.1.128\"\n" +
 		"semp:\n  adminPass: " + smokeAdminPass + "\n" +
 		"docker: {}\n" +
-		"broker:\n  domainCerts:\n    files:\n      myca: myca.pem\n"
+		"broker:\n  domainCerts:\n    files:\n      myca: /opt/solace/certs/myca.pem\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write env: %v", err)
 	}

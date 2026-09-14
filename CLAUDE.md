@@ -157,7 +157,7 @@ declares; otherwise the declared sections decide -- exactly one is used silently
 loud error, several prompt (`interactive(a)`) or fail loudly when nothing can be asked.
 `config.DetectPlatforms` must probe the RAW YAML, because a decoded `Config` cannot answer
 the question: the platform sections are value structs, so omitted and empty are the same
-zero value, and `ApplyDefaults` writes into `kubernetes.runtime` on every platform. A file
+zero value, and `ApplyDefaults` writes into `kubernetes.command` on every platform. A file
 must therefore declare its section even when empty (`docker: {}`) -- the container schema
 has no mandatory field that would otherwise force the section to exist.
 
@@ -176,11 +176,25 @@ flag on each command that executes, rather than a root flag, which is also what 
 usage error on `convert`.
 
 **The `broker:` section** holds the post-deployment configuration every platform applies over
-the broker CLI -- `cliScriptsFolder`, `diagDir`, `productKeys`, `domainCerts`. It is
+the broker CLI -- `cliScriptsDir`, `hostDiagnosticDir`, `productKeys`, `domainCerts`. It is
 platform-neutral on purpose: platform detection (`config.DetectPlatforms`) works by which
 top-level section an env file declares, so keeping these fields under `kubernetes.*` would
 force a container env file to carry a `kubernetes:` section too and make its own platform
 undetectable.
+
+`domainCerts.dirs` is a list of directories walked ONE level deep (`config.ResolveDomainCerts`,
+`internal/config/domaincerts.go`) -- every file matching an entry's extensions (`.cer`/`.crt`/`.pem`
+by default, or its own `fileExt`) is loaded, named `<last-dir-element>_<filename>`
+(`config.DeriveCAName`). `domainCerts.files` names one certificate explicitly, `CA-NAME: full
+host path`, for a name you do not want derived or to load one file out of a directory of many.
+The resolver runs from the CLI op (`opK8sConfigDomainCerts`/`opCtrConfigDomainCerts`), not from
+`Load`/`Validate`: those run for every command on every platform, and a certificate directory
+that happens not to exist on this machine must not fail a `deploy` or `generate` that never
+touches domain certificates. Neither `dirs` nor `files` is defaulted, so an env file
+configuring neither is the same no-op `broker configure domain-certs` has always logged; a
+`dirs` entry that IS configured and cannot be read is a hard failure before anything is
+uploaded, not a skip. `--remove` resolves the same set, so a directory-derived CA is
+withdrawn exactly like an explicitly-named one.
 
 `internal/convert` is the one-way migration aid behind `solace-util convert`: it parses a legacy
 bash env file (the pre-Go `bash/env/<name>` format), maps the `SOLBK_*`/`SOLOP_*`/
@@ -216,8 +230,13 @@ same change when you add or remove a test.
 
 ### Execution guard (`internal/config/execguard.go`)
 
-`kubernetes.runtime`, `docker.runtime`, `podman.runtime` and `docker.compose` name binaries this
+`kubernetes.command`, `docker.command`, `podman.command` and `docker.compose` name binaries this
 process runs, and env files travel, so config text must not be able to choose what executes.
+The three were renamed from `.runtime`, which also makes them agree with
+`replication.sites[].via.kubernetes.command` (`config.ReplViaKube`), which always called its
+own field `command` -- the rename removes a divergence rather than creating one. Each old
+field is retained, unexported-default-free (`config.validateRenamedKeys`), so a file still
+carrying it fails loud naming the replacement instead of a bare unknown-key error.
 One function, `config.CheckCommand`, is the whole rule: every token passes a charset (control
 characters, Unicode whitespace via `unicode.IsSpace`, invisible `Cf` formatting characters,
 and the shell metacharacter set -- the Unicode halves matter because the scalar YAML form
@@ -254,10 +273,29 @@ annotation) -- and it is absent from root, so `convert` never offers it.
 compose/quadlet artifact and run by the container engine *inside* the broker, so it never
 becomes argv here.
 
+**Home-directory (`~`) expansion is a host-path feature and does not reach a command field.**
+It does not need a new rule to be kept out: `~` is already in `unsafeTokenChars`, so layer 1
+(`checkToken`) refuses it in any command token, at any position -- a stronger statement than
+`checkBinary`'s bare-name rule, since `checkBinary` only looks for `/` and `\`, which a bare
+`~` carries neither of. The host-path charset (`hostpath.go`'s `hostPathUnsafe`) is
+`unsafeTokenChars` minus exactly `\` and `~`, derived by REMOVAL so the two sets cannot drift
+(`TestHostPathCharsetIsDerivedFromTheTokenCharset`); `config.Config.expandHomePaths` (called
+from `Load`, between `Validate` and `rebaseHostPaths`) is what resolves the leading tilde on
+every host-path field this tool itself reads off disk, to `os.UserHomeDir()`. It is
+deliberately NOT the fields that are gated but never rebased (`podman.quadletDir`,
+`podman.baseDir`, `<platform>.container.dataDir`): those name a path on the machine that runs
+the CONTAINER, which for docker/podman is a Linux host even when this tool is driven from
+Windows, and `os.UserHomeDir()` only ever answers for the machine running the tool itself.
+Because `CheckHostPath`'s charset gate stopped refusing a leading tilde for every field once
+`expandHomePaths` took over interpreting it, these three go through `checkContainerHostPath`
+in `validateHostPaths` instead, which restores that refusal for exactly these fields --
+otherwise a literal `~` reaching one (an operator's typo, or the rootless `podman.quadletDir`
+default's own `xdgConfigHome` fallback in `load.go`) would sail through unexpanded.
+
 Two supporting layers: `engine.Resolve` resolves argv[0] with `exec.LookPath` and treats
 `exec.ErrDot` as an error (never the current directory). It is shared by `engine.Exec`, which
 resolves immediately before running, and by the CLI, which resolves the binaries the env file
-names (`kubernetes.runtime`, `docker.runtime`, `podman.runtime`, `docker.compose`) once at load and
+names (`kubernetes.command`, `docker.command`, `podman.command`, `docker.compose`) once at load and
 prints them as `==> using <name>: <path>` -- the location the allowlist cannot guarantee,
 reported with the rest of the preamble rather than repeated on every call. `Exec` itself is
 silent unless `-v/--verbose` installs its `Announce` hook, which traces every command as
@@ -417,7 +455,7 @@ DISPOSITION IS ADVISORY: a section fence records what THIS BUILD would do with
 that section, but `ImportPlan` always re-resolves the disposition from
 `sections.go` and warns when the two disagree, never trusting the artifact's own
 say-so. That is the same argument `internal/config/execguard.go` makes for
-`kubernetes.runtime`/`docker.runtime`/etc. -- an artifact that chose what to
+`kubernetes.command`/`docker.command`/etc. -- an artifact that chose what to
 execute would be untrusted config text doing exactly what the execution guard
 exists to prevent, just carried in a different file than the env file.
 
@@ -439,7 +477,7 @@ Removed at EXPORT (`omitAtExport`, recorded in the artifact as
 not opt-in-able -- import only ignores such a section if an older or hand-edited
 artifact still carries one, and reports it only then: `Configure SEMP
 Service` (it shuts SEMP down to change its own port, and SEMP is the channel
-import runs over), `Configure Router Name`, `Configure Redundancy`, `Create
+import runs over), `Configure Router Name`, `Configure Hostname`, `Configure Redundancy`, `Create
 Redundancy PSK`, `Configure Matelink Service`, `Configure Redundancy Service`,
 `Configure Config Sync`, `Configure System`. Three sections are applied against
 the classification's own recommendation, on the operator's explicit decision,
@@ -448,8 +486,10 @@ Usernames` overwrites the target's CLI admin password (harmless to this tool,
 but `semp.adminPass` then has to be updated to match or Kubernetes pods go out of
 readiness against the old `adminCredentialsSecret`); `Configure Replication`
 carries a config-sync PSK and mate router-name, so the mate needs re-importing to
-match; `Create Domain Certificate Authority` deletes every domain CA on the
-target first and overlaps `broker configure domain-certs`.
+match; `Create Domain Certificate Authority` removes only the domain CAs the
+target already has that this artifact also re-creates (the intersection, via
+`ClearExistingNested`) -- never every CA the target holds -- and overlaps
+`broker configure domain-certs`.
 
 **Import is three phases (`internal/broker/importops.go`).** `ImportPlan` parses
 the artifact, refuses anything this tool did not export (`checkProvenance`: no
@@ -661,7 +701,7 @@ Docker and Podman are one **host-local** platform: one container per host, so th
 - **Host Manager** ([internal/container/manager.go](internal/container/manager.go)): the container analog of `k8s.Cluster` -- `Check`/`PrepHost`/`Deploy`/`Delete`/`Status`/`Logs`/`CLI`/`Shell`. Podman renders a systemd quadlet unit; Docker a compose file. `Resolve`/`Geteuid` are injectable seams (defaults `net.LookupHost`, `os.Geteuid`) so DNS and the rootless/rootful euid guard are testable off a Linux host. There is deliberately no PSK generator seam any more: `redundancy.psk` is the operator's to supply (mandatory in an HA container group, refused at load when empty), and nothing in this package writes to an env file.
 - **Secrets are files on every platform**, read through the broker setting's `*filepath` variant and mounted at `/mnt/secrets/<setting>` -- the same naming the k8s credentials Secret uses for its data keys. That directory is deliberately NOT the engines' own `/run/secrets`, and the move has two halves that must stay together: `render.secretMount` is what the `*filepath` settings point at, and `ContainerSecret.Target()` must return the ABSOLUTE path, because a bare `target=`/`target:` is resolved by each engine under its own `/run/secrets` and the broker would then find nothing with no error anywhere. A path-valued target needs podman 4.5 and compose 2.23.1 (`docs/operations.md` version floors, none enforced at runtime). Host-side names carry `container.name` so two brokers on one host cannot collide. Podman mounts from its own store (`Secret=...,type=mount`); Docker's compose secrets are **environment-sourced** (`environment: <VAR>`), and `Deploy` passes the values to the compose child through `engine.EnvRunner.RunEnv` -- a SEPARATE interface from `engine.Runner`, which no longer carries that method, because this is the only caller in the tool that needs it and an interface offering the others the ability to put a value in a child's environment would be inviting a secret somewhere none of them should be putting one -- nothing secret is written *beside the artifact* (docker materializes each one into the container's own filesystem as a 0444 root-owned file, verified with `docker diff`, so it is on disk exactly as long as the container is and survives a restart with no variable in the environment). `--restart` is what applies a rotated value, since no artifact changes when a password does; on docker, redeploy also force-recreates a *stopped* container rather than starting it, since a plain start would replay the credentials it was created with and silently miss a rotation. Podman's not-running branch runs a plain `systemctl start`, on the assumption that quadlet replaces the container at each start and so needs no equivalent fix -- marked `ASSUMED, NOT VERIFIED` in the code, since podman was not testable here. `Echo.RunEnv` masks values as `NAME=***`.
 - **Primary-driven HA verification** ([internal/broker/verify_local.go](internal/broker/verify_local.go), [internal/broker/semp.go](internal/broker/semp.go)): the k8s `Leader`/`Redundancy` ops drive both pods from one kubectl context; containers get the same single-invocation shape from the primary host instead. Two facts make that possible: the primary's own `show redundancy` already reports the mate (`Mate Active`, ADB link fields), and the ONE command that must land on the backup -- admin `redundancy revert-activity` -- rides SEMP v1 over HTTP to `redundancy.backup.addr` (curl exec'd in the local container, creds and body on stdin via `-K -`, mirroring `Login`; port 8080, or the bridge `network.ports` mapping of container port 8080, resolved by `sempPort` off `Ops.Platform`). `LocalRole(arg)` detects the role when `arg` is empty -- `DetectRole` matches this host's name against `redundancy.*.name`, then, only if nothing matched, this machine's own interface addresses (the `LocalAddrs` seam) against `redundancy.*.addr`, which is the cloud case where the routername and the OS hostname are legitimately unrelated; loud error on no match or an ambiguous one. An explicit `--pod` wins but is checked against the same detection and WARNS on a disagreement rather than prompting. A STANDALONE container deployment needs no node entry at all: `Config.FillStandaloneNodeName` names the broker after its host at load when `redundancy.primary.name` is empty, which HA deliberately cannot do because every name there keys a group-table entry all three hosts render; backup and monitor hosts are rejected loud on both ops. `RedundancyCoordinated` asserts the primary healthy, preflights the mate's SEMP (`/SEMP/v2/monitor`, BEFORE any mutation, so a firewalled mate aborts while the group is undisturbed -- HA working only proves ports 8300-8302/8741/55555), releases/un-releases, confirms the takeover via the primary's `Mate Active` count (the deliberate weakening vs k8s's independent backup reads), reverts the mate over SEMP, and polls activity home. `LeaderLocal` reverts the mate the same way first (k8s parity) but downgrades an unreachable mate to a warning -- its own job is local. The SEMP RPC body and reply shapes are now confirmed against the broker's own schemas (`semp/semp-rpc-soltr.xsd`, `semp-rpc-reply-soltr.xsd`): the request path is `rpc > admin > redundancy > revert-activity`, `semp-version` is optional on a request, and a reply carries `<execute-result code="ok|fail">`. What is still marked NEEDS VERIFICATION ON A LIVE BROKER in semp.go is the `/SEMP` endpoint path itself and whether reverting an already-standby mate is idempotent. There is no fallback per-host handshake anymore; a failed run's recovery commands are in [docs/operations.md](docs/operations.md).
-- **Config reuse + one divergence**: container `config`/`verify` read the shared `broker.*` fields (`domainCerts`, `productKeys`, `diagDir`, `cliScriptsFolder`) -- there is no separate container config namespace. Keeping them under `kubernetes.*` would force a container env file to declare a `kubernetes:` section too, which would make the file's own platform undetectable. `semp.additionalUsers` is shared too, and every platform now applies it declaratively -- the users exist from the broker's first boot, with nothing to run afterwards. Only the delivery differs, and the difference is the CRD's rather than a preference. Containers mount the password as a FILE (`/mnt/secrets/username_<u>_password`, reached through `username_<u>_passwordfilepath`) with the access level in the artifact. Kubernetes puts BOTH halves in the pod environment, from a Secret of its own (`<kubernetes.name>-additional-users`, `k8s.AdditionalUsersSecret`) that the CR names in `spec.extraEnvVarsSecret`: the CRD offers `extraEnvVars`/`extraEnvVarsCM`/`extraEnvVarsSecret` and NO volume passthrough, so there is no way to mount an arbitrary Secret and `username_<u>_passwordfilepath` would name a path nothing creates.
+- **Config reuse + one divergence**: container `config`/`verify` read the shared `broker.*` fields (`domainCerts`, `productKeys`, `hostDiagnosticDir`, `cliScriptsDir`) -- there is no separate container config namespace. Keeping them under `kubernetes.*` would force a container env file to declare a `kubernetes:` section too, which would make the file's own platform undetectable. `semp.additionalUsers` is shared too, and every platform now applies it declaratively -- the users exist from the broker's first boot, with nothing to run afterwards. Only the delivery differs, and the difference is the CRD's rather than a preference. Containers mount the password as a FILE (`/mnt/secrets/username_<u>_password`, reached through `username_<u>_passwordfilepath`) with the access level in the artifact. Kubernetes puts BOTH halves in the pod environment, from a Secret of its own (`<kubernetes.name>-additional-users`, `k8s.AdditionalUsersSecret`) that the CR names in `spec.extraEnvVarsSecret`: the CRD offers `extraEnvVars`/`extraEnvVarsCM`/`extraEnvVarsSecret` and NO volume passthrough, so there is no way to mount an arbitrary Secret and `username_<u>_passwordfilepath` would name a path nothing creates.
 
 That Secret is separate from `kubernetes.adminSecret` and must be: `extraEnvVarsSecret` is projected with `envFrom`, which exports EVERY key of the Secret it names, so pointing it at the credentials Secret would publish the admin and monitor passwords to get the extra users in. It is also why `config.validateAdditionalUsers` holds these usernames to a stricter rule on Kubernetes -- the kubelet silently DROPS variables whose names are not identifiers, so a `.` or `-` would yield a user with no password and nothing to say so. `broker.AdditionalUsers`, the retired broker-CLI op, is gone: this is the replacement its marker described.
 
@@ -744,7 +784,7 @@ why the constructor takes the same raw line sink `Cluster`, `Manager` and `Ops` 
 SITE's own `via.kubernetes` block -- a DR mate is usually a different cluster --
 and `TestNewMateChannelUsesTheSiteNotTheLocalDeployment` is what stops it quietly driving the
 local broker while reporting on the remote one. That site's `command` goes through
-`config.SiteCommand`, the same execution guard as `kubernetes.runtime` and always against the
+`config.SiteCommand`, the same execution guard as `kubernetes.command` and always against the
 KUBERNETES allowlist whatever this end runs on (`TestSiteCommandGuarded`). The SEMP leg
 (`sempmate.go`) needs no broker-type discovery at all -- which sibling structure the reply
 populates says which platform it is -- and its `<execute-result code="ok|fail">` is a real

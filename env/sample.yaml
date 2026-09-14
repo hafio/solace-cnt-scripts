@@ -167,7 +167,7 @@ tls:                                # uncomment cert+certKey together once you h
 #                                   # `configure data-replication` needs none of it
 #         kubernetes:
 #           command: kubectl        # THIS FIELD RUNS A BINARY: same rule as
-#                                   # kubernetes.runtime -- a bare name from
+#                                   # kubernetes.command -- a bare name from
 #                                   # {kubectl, oc} followed by flags only. Carry the
 #                                   # cluster here: `kubectl --context sg`
 #           namespace: solace-sg
@@ -192,7 +192,7 @@ tls:                                # uncomment cert+certKey together once you h
 #                                   # and there is no prompt for the password
 #           # pass: ""              # secret; discouraged, this file travels
 #           # passSecret:           # a Secret read with this site's via.kubernetes
-#           #   namespace: solace-dr    # command, or this file's kubernetes.runtime
+#           #   namespace: solace-dr    # command, or this file's kubernetes.command
 #           #   name: solace-admin-secret
 #           #   key: admin-password
 #   vpns:                           # listed = replication ENABLED at both sites. A VPN
@@ -203,12 +203,34 @@ tls:                                # uncomment cert+certKey together once you h
 
 # broker: platform-neutral post-deployment settings, applied over the broker CLI.
 # broker:
-#   cliScriptsFolder: cli           # local folder holding .cli scripts
-#   diagDir: diag-configs           # local folder for gathered diagnostics
-#   productKeys: []                 # `broker configure product-keys`
-#   domainCerts:
-#     folder: certs
-#     files: {}                     # CA-NAME: cert filename
+#   cliScriptsDir: cli               # local folder holding .cli scripts
+#   hostDiagnosticDir: diag-configs  # local folder for gathered diagnostics
+#   productKeys: []                  # `broker configure product-keys`
+#   domainCerts:                     # HOST paths. A relative one resolves against THIS
+#                                    # FILE's directory; an absolute one is used as-is.
+#                                    # A leading ~ expands to the home directory of the
+#                                    # user RUNNING this tool, which makes such a path
+#                                    # non-portable between operators -- write it out in
+#                                    # full in any env file you share
+#     dirs:                          # every matching file DIRECTLY inside each entry is
+#                                    # loaded; subdirectories are NOT walked. A dir that
+#                                    # cannot be read fails the command before anything
+#                                    # is uploaded -- it is not skipped. Unset means no
+#                                    # directories, which is a no-op like an empty files:
+#       - /opt/solace/prod-cas       # plain path -> the default extensions cer, crt, pem
+#       - path: /opt/solace/partner-cas    # ...or a mapping, to name your own set
+#         fileExt: cer,crt,pem       # REPLACES the default for THIS dir only
+#     files: {}                      # CA-NAME: FULL host path. Use it for a certificate
+#                                    # whose derived name you do not want, or to load one
+#                                    # file out of a directory of many, e.g.
+#                                    # my-ca-name: /opt/solace/partner-cas/some-ca.pem
+#                                    # The CA name is the operand of `create domain-
+#                                    # certificate-authority` AND the filename inside the
+#                                    # broker, so it is letters, digits, underscore, dash
+#                                    # and period, 64 chars max. A name under dirs: is
+#                                    # derived as <last-dir-element>_<filename>; two
+#                                    # certificates resolving to one name is an error
+#                                    # naming both source paths
 
 # A real env file declares only the platform(s) it targets: the CLI detects the platform
 # from which of kubernetes:/docker:/podman: is present, so an unused section must be left
@@ -216,7 +238,7 @@ tls:                                # uncomment cert+certKey together once you h
 # prompt. An empty section still counts -- `docker: {}` is enough. All three appear here
 # only so every key has one place to look it up.
 kubernetes:
-  # runtime: kubectl                # the cluster CLI. A scalar is split on whitespace,
+  # command: kubectl                # the cluster CLI. A scalar is split on whitespace,
                                     # so it can carry a profile:
                                     # `kubectl --kubeconfig /path/.kubeconfig-dev`.
                                     # THIS FIELD RUNS A BINARY: restricted to a bare
@@ -232,7 +254,13 @@ kubernetes:
                                     # WITHOUT them the Secret must already exist (made
                                     # by hand, or by cert-manager) and is only
                                     # referenced -- never read, written or deleted
-  imagePullSecret: solace-image-pull   # built from image.user/pass
+  imagePullSecret: solace-image-pull   # optional; unset derives <name>-image-pull
+                                    # when image.user/pass are set. WITH those
+                                    # credentials, this tool builds the Secret (this
+                                    # name or the derived default) and removes it on
+                                    # teardown; WITHOUT them, a configured name is a
+                                    # Secret that already exists and is only
+                                    # referenced -- same rule as tlsServerSecret above
   # imagePullPolicy: IfNotPresent   # Always | IfNotPresent | Never
   updateStrategy: automatedRolling  # automatedRolling | manualPodRestart
   serviceAccount: solace-sa         # optional
@@ -307,8 +335,8 @@ kubernetes:
   # healthCheck either: the operator runs its own probes and gates traffic on them.
 
 docker:
-  # runtime: docker                 # a bare name from {docker, docker-compose, nerdctl}
-                                    # then flags only. Same rules as kubernetes.runtime:
+  # command: docker                 # a bare name from {docker, docker-compose, nerdctl}
+                                    # then flags only. Same rules as kubernetes.command:
                                     # THIS FIELD RUNS A BINARY. A wrapper such as
                                     # `lima nerdctl` needs --allow-command lima.
                                     # sudo/doas/su/pkexec are never approvable -- run
@@ -351,7 +379,7 @@ docker:
   #     - 8080:8080                 # 17 ports Kubernetes defaults to are published
 
 podman:
-  # runtime: podman                 # same rules as docker.runtime; only `podman`
+  # command: podman                 # same rules as docker.command; only `podman`
   rootless: false                   # true = user systemd + `podman unshare` chown
   # quadletDir: /etc/containers/systemd   # rootless: $XDG_CONFIG_HOME/containers/systemd
   baseDir: /opt/solace              # mandatory, must be ABSOLUTE. Host directory for

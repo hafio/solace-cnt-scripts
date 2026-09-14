@@ -234,8 +234,8 @@ func (a *App) announceKubeContext() {
 // runs -- so the information sits with `==> env file:` in the preamble instead of
 // repeating itself between report lines on every call.
 //
-// The set is exactly the four fields the execution guard exists for (kubernetes.runtime,
-// docker.runtime, podman.runtime, docker.compose), read through their guarded accessors:
+// The set is exactly the four fields the execution guard exists for (kubernetes.command,
+// docker.command, podman.command, docker.compose), read through their guarded accessors:
 // those are the binaries CONFIG TEXT chose, which is the whole reason their location is
 // worth showing. The tool's own fixed helpers (mkdir, chown, rm, sh, systemctl) were
 // chosen here, not by an env file, so they are announced only under --verbose.

@@ -55,10 +55,10 @@ and if it looks like a legacy bash env file, the error points at `solace-util co
 ### Relative paths resolve against the env file, not the current directory
 
 Every **host path** in the file -- `tls.cert`, `tls.certKey`, `tls.cas`,
-`broker.cliScriptsFolder`, `broker.diagDir`, `broker.domainCerts.folder`,
-`docker.composeFile` -- is resolved against **the directory the env file itself was found
-in**, never against the directory the command was run from. So
-`/srv/solace/env/prod.yaml` declaring `tls.cert: certs/tls.crt` means
+`broker.cliScriptsDir`, `broker.hostDiagnosticDir`, `broker.domainCerts.dirs[].path`,
+`broker.domainCerts.files{}`, `docker.composeFile` -- is resolved against **the directory
+the env file itself was found in**, never against the directory the command was run from.
+So `/srv/solace/env/prod.yaml` declaring `tls.cert: certs/tls.crt` means
 `/srv/solace/env/certs/tls.crt`, whichever directory you drive it from. An absolute value
 is left exactly as written.
 
@@ -69,13 +69,12 @@ broker starts, and TLS is not what you configured. systemd gives a unit no usefu
 directory, so there was never a current directory that would have made the relative form
 work.
 
-Four fields deliberately do **not** follow the rule:
+Three fields deliberately do **not** follow the rule:
 
 | Field | Why |
 | --- | --- |
 | `<platform>.container.dataDir` | **Required absolute** instead. It is the host side of a bind mount *and* what `broker remove --delete-data` deletes recursively, so quietly changing which directory that points at is not a fix. The default `/opt/solace/data` already satisfies it |
 | `podman.quadletDir` | Checked, never resolved. The unit must live where systemd scans, so resolving a relative value would invent a location systemd never reads. Both defaults are already absolute |
-| `broker.domainCerts.files` | Each value is a bare filename, used both host-side and as the name inside the broker, so there is nothing to resolve. A separator in one is already refused |
 | `podman.baseDir` | **Mandatory and required absolute.** It is a `Volume=` source too, and it receives a file containing a private key, so resolving a relative value would invent a location for that key which you never named |
 
 Host paths are also **character-checked**, and the rule is deliberately looser than the one
@@ -84,10 +83,27 @@ backslash, a colon and a tilde, because `C:\certs\tls.crt` and an 8.3 short name
 `C:\Users\RUNNER~1\...` are real paths, while a command token may carry none of them. What
 a path may **not** carry is a `$` or a shell metacharacter (both container artifacts write
 these values verbatim, and compose interpolates `$` across the whole document), whitespace
-(a mount is written `source:target:options` on one line, so a space cannot be delimited), a
-control or invisible character, or a **leading** `~` -- nothing here expands a home
-directory, so `~/certs` would resolve to a literal `~` directory. The check runs on the
-value as you wrote it, before any resolution.
+(a mount is written `source:target:options` on one line, so a space cannot be delimited), or
+a control or invisible character. The check runs on the value as you wrote it, before any
+resolution.
+
+**A leading `~` expands to your own home directory.** `~`, or `~/...`, or `~\...`, expands to
+`os.UserHomeDir()` -- the home directory of whoever is **running this tool** -- before the
+relative-path rule above ever sees it, so the expanded value is already absolute and is never
+joined onto the env file's directory. A tilde anywhere else in the value is left alone, which
+is what keeps an 8.3 short name like `C:\Users\RUNNER~1\...` working. `~someoneelse/...` (another
+user's home) is not supported and is refused by name rather than guessed at. An unresolvable
+home directory is an error naming the field. This applies to every field the rule above
+resolves; the three fields in the table keep refusing a leading `~` exactly as they refuse any
+relative value, because they name a path on the machine that runs the **container** -- for
+docker/podman that is a Linux host even when you drive this tool from Windows -- and
+`os.UserHomeDir()` only ever answers for the machine running the tool itself.
+
+A `~` path is the one value in this schema that does **not travel**. Every other host path
+either is absolute or resolves against the env file's own directory, so the same file
+describes the same deployment on any machine; a `~` path resolves against whoever runs the
+tool, so an env file carrying one means something different for each operator. Write it out
+in full in any file you share.
 
 ## Which platform runs
 
@@ -146,23 +162,23 @@ Common optional knobs:
 | `image.registry` | docker.io | Registry prefix for the image reference |
 | `kubernetes.storage.class` | cluster default | StorageClass for the broker PVCs |
 | `kubernetes.updateStrategy` | `automatedRolling` | `automatedRolling` or `manualPodRestart` |
-| `kubernetes.runtime` | `kubectl` | Cluster CLI (legacy `KUBE`). A scalar is split on whitespace, so it can be a drop-in (`oc`) or a profile (`kubectl --kubeconfig <file>`). **Restricted** -- see [The command fields are executable content](#the-command-fields-are-executable-content) |
-| `docker.runtime` / `podman.runtime` | `docker` / `podman` | Container CLI (legacy `CONTAINER_RUNTIME`), same forms and the same restrictions as `kubernetes.runtime` |
-| `docker.compose` | `<runtime> compose` | The compose invocation. Set it to `docker-compose` on a host carrying only the standalone v1 binary; same forms and restrictions as `runtime`, plus the one permitted `compose` subcommand |
+| `kubernetes.command` | `kubectl` | Cluster CLI (legacy `KUBE`). A scalar is split on whitespace, so it can be a drop-in (`oc`) or a profile (`kubectl --kubeconfig <file>`). **Restricted** -- see [The command fields are executable content](#the-command-fields-are-executable-content) |
+| `docker.command` / `podman.command` | `docker` / `podman` | Container CLI (legacy `CONTAINER_RUNTIME`), same forms and the same restrictions as `kubernetes.command` |
+| `docker.compose` | `<command> compose` | The compose invocation. Set it to `docker-compose` on a host carrying only the standalone v1 binary; same forms and restrictions as `docker.command`, plus the one permitted `compose` subcommand |
 | `<docker\|podman>.container.healthCheck.enabled` | `false` | Adds an engine health check polling the broker's own `/health-check/readiness` on port 5550 every 5s, so `docker ps` and podman's auto-restart see readiness rather than liveness. Needs broker **10.26 or later** and a version-numbered `image.tag`; set `healthCheck.cmd` to supply your own probe instead (which skips the version check). Container-only by design -- on Kubernetes the operator already probes the pods |
 | `kubernetes.tlsServerSecret` | -- | Name of the TLS Secret the broker uses; its presence enables the CR's TLS block. Lives under `kubernetes.*` because it names a Kubernetes Secret object -- the cert/key files themselves stay platform-neutral under `tls.*`. **Naming it does not mean building it**: with `tls.cert`/`tls.certKey` set, this tool builds the Secret and removes it on teardown; without them the Secret must already exist and is only referenced -- see [Bring your own TLS Secret](#bring-your-own-tls-secret) |
 | `tls.cert` / `tls.certKey` | -- | The server certificate and its private key, as two separate host files. **Inseparable on every platform**: setting one without the other is refused at load, in both directions. On docker and podman the broker reads the certificate as ONE file containing the key followed by the certificate, and this tool builds that file from the two halves. Kubernetes takes them as two keys in a Secret and lets the operator assemble them -- a Secret carrying only `tls.crt` is one the broker cannot start a listener over |
 | `tls.cas` | -- | Trusted CA files, applied by `broker configure domain-certs` into the broker's own trust store. They are **not** part of the server certificate and are not mounted into the container or the pod |
 | `<docker\|podman>.container.name` | `solace` | The container's name, and the stem of every derived name (the podman unit and service, the host-side secret names). Held to the engines' own grammar: it must start with a letter or digit, then letters, digits, `.`, `_` or `-`. A name that YAML would read as a boolean or number (`yes`, `off`, `0123`) is legal here and quoted in the generated compose file, so it stays the string you wrote. On docker it is also the compose **project** name, lowercased with anything outside `[a-z0-9_-]` folded to `-`, since compose's grammar is narrower than the engines' -- override with `COMPOSE_PROJECT_NAME` ([operations.md](operations.md#docker-and-podman-mechanics)) |
 | `podman.baseDir` | -- | **Mandatory on podman**, absolute. Host directory for files this tool writes for podman: today the server-certificate bundle, which contains the private key, written `0600` in a `0700` directory. Mandatory rather than defaulted because where a private key lands on your host is your decision. Kept separate from `quadletDir`, since the unit must live where systemd scans. Removed by `broker remove`, not by `--delete-data`. Docker needs no equivalent: a compose file can inline what a quadlet unit cannot, so docker's bundle never touches the host |
-| `kubernetes.imagePullSecret` | -- | Name of the image-pull Secret built from `image.user`/`image.pass`; its presence enables the CR's `pullSecrets` block and the operator's `regcred`. The registry credentials themselves stay under `image.*` (docker/podman use them for `<runtime> login`) |
+| `kubernetes.imagePullSecret` | -- | Name of the image-pull Secret the CR references. **Optional**: unset derives `<kubernetes.name>-image-pull` when registry credentials are configured, and names nothing (no `pullSecrets` block) when they are not. **Naming it does not mean building it** -- the same rule `kubernetes.tlsServerSecret` follows just above: with `image.user`/`image.pass` set (or their `*Env` equivalents, resolved into them at load), this tool builds the Secret under this name or the derived default, applies it alongside the operator's own fixed-name `regcred` Secret, and removes both on teardown; without those credentials, a configured name points at a Secret that must already exist -- created by hand or by a cluster admin -- and is only referenced, never built or deleted. The registry credentials themselves stay under `image.*` (docker/podman use them for `<command> login`, which has no operator and no `regcred` of its own) |
 | `kubernetes.imagePullPolicy` | -- | `Always` \| `IfNotPresent` \| `Never`; unset keeps the CR's own `IfNotPresent` |
 | `kubernetes.adminSecret` | `solace-admin-secret` | Name of the Kubernetes Secret holding the admin/monitor credentials. |
 | `kubernetes.operator.namespace` | `pubsubplus-operator-system` | Namespace the cluster-scoped EventBroker Operator is installed to and addressed in. Two rules only, and neither one asks the cluster: use this when set, otherwise the fixed default that `operator deploy` installs to -- so `operator deploy`, `operator remove` and every other operator command always resolve the SAME namespace. It used to be discovered by listing every namespace's Deployments and taking the first one whose name merely CONTAINED the operator's, an unanchored match with no uniqueness check that could resolve to another team's operator on a cluster running two installs; that search is gone. Stays optional -- most deployments never set it |
 | `semp.additionalUsers` | -- | Extra CLI (management) users, each `{username, accessLevel, password\|passwordEnv}` with `accessLevel` one of `none`, `read-only`, `mesh-manager`, `read-write`, `admin`. Created at boot on every platform. The username must start with a letter or `_` and be 1-32 characters (the broker's own rule); on Kubernetes it may not contain `.` or `-` either, because the credentials ride the pod environment there and the kubelet drops variables whose names are not identifiers. See [Extra CLI users differ by platform](operations.md#extra-cli-users-differ-by-platform) |
 | `semp.adminPassEnv` (and every other `*Env`) | -- | Name of an environment variable holding the secret, instead of the value itself. See [Secrets](#secrets) |
 | `timezone` | -- | Broker timezone, all platforms (the CR's `timezone` and the containers' `TZ`). Omitted keeps the image default |
-| `broker.cliScriptsFolder` / `broker.diagDir` / `broker.productKeys` / `broker.domainCerts` | `cli` / `diag-configs` / -- / -- | Platform-neutral: host folder for `cli --input` scripts, host folder for `diagnostics` output, the list `broker configure product-keys` applies, and the CA files `broker configure domain-certs` loads. Every platform runs these same post-deployment steps identically, which is why the section sits at the top level rather than under `kubernetes.*`. The first two are defaulted on every platform; the folders are **host** paths and resolve against the env file's directory ([above](#relative-paths-resolve-against-the-env-file-not-the-current-directory)) |
+| `broker.cliScriptsDir` / `broker.hostDiagnosticDir` / `broker.productKeys` / `broker.domainCerts` | `cli` / `diag-configs` / -- / -- | Platform-neutral: host folder for `broker perform cli-script` scripts, host folder for `diagnostics` output, the list `broker configure product-keys` applies, and the CA certificates `broker configure domain-certs` loads (`dirs`, a list of directories walked one level deep, plus `files`, explicit `CA-NAME: full host path` entries -- see [operations.md](operations.md#post-deployment-configuration-order)). Every platform runs these same post-deployment steps identically, which is why the section sits at the top level rather than under `kubernetes.*`. The first two are defaulted on every platform; `domainCerts.dirs`/`files` are **not** defaulted, so an env file that configures none is a no-op. A `files` key is checked at LOAD against the same charset and 64-character cap a directory-derived name satisfies by construction, and an entry with no path is refused there too -- the directory WALK still waits for `broker configure domain-certs`, since a directory that does not exist on this machine must not fail a `deploy` that never touches certificates. All of them are **host** paths and resolve against the env file's directory ([above](#relative-paths-resolve-against-the-env-file-not-the-current-directory)) |
 | `kubernetes.securityContext` | -- | `runAsUser`/`fsGroup` for the pod. Omitted entirely when unset |
 | `kubernetes.containerSecurity` | -- | `runAsUser`/`runAsGroup`/`readOnlyRootFilesystem` for the broker container |
 | `scaling.*` | see [Scaling](#scaling) | Broker sizing, applied on every platform -- the CR's `spec.systemScaling` on Kubernetes, container environment variables on docker and podman |
@@ -366,7 +382,7 @@ replication:
 | `via.kubernetes.namespace` / `.name` | The mate's namespace, and its PubSubPlusEventBroker name, which its pod is named after |
 | `via.semp.host` / `.port` | The mate's SEMP address. **Not derived from `endpoints`**: replication runs over the message backbone, so a reachable replication endpoint proves nothing about SEMP reachability |
 | `via.semp.tls` / `.insecure` | `https` rather than `http`, and whether to skip certificate verification for a self-signed mate. Declared, never inferred from this broker's own posture -- this hop is a WAN rather than a rack |
-| `via.semp.pass` / `.passEnv` / `.passSecret` | Exactly one of the three supplies the **mate's** admin password, never this deployment's `semp.adminPass` -- a DR site is a different broker, and reusing this one's password would fail at best and hide the mistake if the two happened to match. `passSecret` is `{namespace, name, key}` of a Kubernetes Secret, read with that site's own `via.kubernetes.command` when it has one and this file's `kubernetes.runtime` otherwise. The username is always `admin`, and there is no prompt for the password |
+| `via.semp.pass` / `.passEnv` / `.passSecret` | Exactly one of the three supplies the **mate's** admin password, never this deployment's `semp.adminPass` -- a DR site is a different broker, and reusing this one's password would fail at best and hide the mistake if the two happened to match. `passSecret` is `{namespace, name, key}` of a Kubernetes Secret, read with that site's own `via.kubernetes.command` when it has one and this file's `kubernetes.command` otherwise. The username is always `admin`, and there is no prompt for the password |
 | `replication.vpns[].name` | Listing a VPN **enables** replication for it at both sites. A VPN replicating on the broker but absent from this list has its replication **shut down** by `broker configure data-replication` -- the file is authoritative. Each name appears once |
 | `replication.vpns[].activeAt` | Which site holds the **active** role for that VPN; the other is standby. It names a `virtualRouterName`, not a router name |
 
@@ -385,7 +401,7 @@ half-configured switchover waiting to happen.
 
 ## The command fields are executable content
 
-`kubernetes.runtime`, `docker.runtime`, `podman.runtime`, `docker.compose` and each
+`kubernetes.command`, `docker.command`, `podman.command`, `docker.compose` and each
 `replication.sites[].via.kubernetes.command` name a binary this tool runs **on your
 machine**. Env files travel -- repositories, pull requests, shared
 archives -- so the person who wrote one is routinely not the person who runs it. Treat an
@@ -428,7 +444,7 @@ To make that review short, the fields are restricted. A command is accepted only
    in subcommand position after all:
 
    ```yaml
-   kubernetes.runtime: kubectl --insecure-skip-tls-verify delete   # accepted; runs `delete`
+   kubernetes.command: kubectl --insecure-skip-tls-verify delete   # accepted; runs `delete`
    docker.compose: docker-compose --verbose down                   # the container equivalent
    ```
 
@@ -462,13 +478,13 @@ case-sensitive on purpose, because `KUBECTL` is a genuinely different file where
 say it is, and a positive match that folded case would approve a binary nobody listed. This is
 not a
 ban on running as root -- rootful podman needs it. It is about *where* you elevate. A
-`runtime: sudo podman` elevates every command this tool issues, for the whole life of an env
+`command: sudo podman` elevates every command this tool issues, for the whole life of an env
 file, decided by whoever wrote that file. Elevate the tool instead, at the moment you run it,
 so the privilege belongs to one invocation you chose:
 
 ```sh
 sudo solace-util broker deploy -e prod.yaml   # yes (prod.yaml is a podman env file)
-# runtime: sudo podman  in the env file      # never
+# command: sudo podman  in the env file      # never
 ```
 
 The same check runs twice -- once when the env file is loaded, and again immediately before
@@ -481,7 +497,7 @@ parsing would fix either:
 - **A compromised machine.** If an attacker has already put a trojan `kubectl` on your
   `PATH`, they own the host; nothing this tool checks can help. What it does do is make the
   binary's real location visible -- before any work starts, each binary this env file names
-  (`kubernetes.runtime`, `docker.runtime`, `podman.runtime`, `docker.compose`) is resolved and
+  (`kubernetes.command`, `docker.command`, `podman.command`, `docker.compose`) is resolved and
   printed as `==> using <name>: <resolved path>`, and `-v/--verbose` prints every command as
   it runs -- and refuse to resolve a bare name from the current directory.
 - **Config that is malicious but perfectly legitimate in form.** `kubernetes.namespace: production`,

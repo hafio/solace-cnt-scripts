@@ -84,7 +84,7 @@ func (c *Cluster) logf(format string, a ...any) { c.progress().Step(format, a...
 // ns is the broker namespace.
 func (c *Cluster) ns() string { return c.Cfg.K8s.Namespace }
 
-// cmd is the configured cluster CLI (kubernetes.runtime, default `kubectl`): argv[0]
+// cmd is the configured cluster CLI (kubernetes.command, default `kubectl`): argv[0]
 // plus any leading arguments that precede every call's own. Ported from the bash
 // KUBE variable, which the scripts expanded unquoted so it could carry a whole
 // profile (`kubectl --kubeconfig <file>`), not just a binary name.

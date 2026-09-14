@@ -23,7 +23,7 @@ import (
 // The site is addressed by its OWN kubernetes block, not by this env file's: a DR mate
 // is a different deployment, usually in a different cluster, and the cluster is carried
 // in that block's `command` (e.g. `kubectl --context dr`) so it passes the execution
-// guard exactly as kubernetes.runtime does.
+// guard exactly as kubernetes.command does.
 
 // NewMateChannel builds the channel to one replication site over its own cluster CLI.
 //

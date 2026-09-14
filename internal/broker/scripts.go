@@ -2,7 +2,6 @@ package broker
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -97,14 +96,30 @@ func removeServerCertScript() string {
 }
 
 // domainCertsScript loads each domain certificate authority (052 lines 20-34).
-// cas maps CA name -> certificate filename (already uploaded to the certs dir).
-// CA names are emitted in sorted order for deterministic output (bash iterated a
-// hash in unspecified order).
-func domainCertsScript(cas map[string]string) string {
+// cas are the CA names, already uploaded to the certs dir under their own name
+// (config.ResolveDomainCerts, Ops.DomainCerts) -- the caller sorts them for
+// deterministic output, the way removeDomainCertsScript's caller does.
+//
+// The `certificate file` operand is the CA name itself, not a separate
+// filename, because the upload destination is now certPath(name)
+// (config_ops.go) -- so the name IS the in-broker filename. That is also why
+// this no longer takes a map: once both operands are one string, a map's value
+// could only ever disagree with its key.
+//
+// NEEDS VERIFICATION ON A LIVE BROKER: that `certificate file <name>` resolves
+// against the certs directory the upload lands in. The upload destination is
+// repo-evidenced (certPath), and this is the same shape 052 used, but the
+// previous code passed a FILENAME here that happened to equal the uploaded
+// name, so no run to date has distinguished "the broker resolves this operand
+// as a bare name in the certs dir" from "it happened to match". If the broker
+// wants a path instead, every domain CA load fails at the `certificate file`
+// line and the transcript scan reports it -- loud, not silent, which is the
+// right direction to be wrong in.
+func domainCertsScript(cas []string) string {
 	var b strings.Builder
 	b.WriteString(cliHome + "enable\nconfigure\nssl\n")
-	for _, ca := range sortedKeys(cas) {
-		fmt.Fprintf(&b, "create domain-certificate-authority %s\ncertificate file %s\nexit\n", ca, cas[ca])
+	for _, ca := range cas {
+		fmt.Fprintf(&b, "create domain-certificate-authority %[1]s\ncertificate file %[1]s\nexit\n", ca)
 	}
 	b.WriteString("end\nshow domain-certificate-authority ca-name *\n")
 	return b.String()
@@ -472,13 +487,4 @@ var gatherShowCommands = []showCmd{
 	{"username * detail", "username-detail"},
 	{"version", "version"},
 	{"web-manager", "web-manager"},
-}
-
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }

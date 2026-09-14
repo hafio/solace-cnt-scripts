@@ -651,7 +651,7 @@ describes.
 
   assert-leader        make this node the config-sync leader (HA)
   redundancy-test      exercise a real failover and fail back (HA, INVASIVE)
-  gather-diagnostics   collect a support bundle into broker.diagDir
+  gather-diagnostics   collect a support bundle into broker.hostDiagnosticDir
   semp-login-check     prove the admin credentials work over SEMP
   export-config        capture the broker's configuration as one artifact
   import-config <file> apply a captured configuration back (DESTRUCTIVE)
@@ -693,7 +693,7 @@ solace-util broker perform assert-leader [flags]
 Run a Solace CLI script in the broker
 
 Uploads a local Solace CLI script and runs it in the broker; a bare
-filename resolves under broker.cliScriptsFolder.
+filename resolves under broker.cliScriptsDir.
 
 A rejected line does not stop the rest of the script, but the run is then
 reported as a failure.
@@ -759,10 +759,10 @@ solace-util broker perform export-config [flags]
 
 ### solace-util broker perform gather-diagnostics
 
-Gather a support bundle into broker.diagDir
+Gather a support bundle into broker.hostDiagnosticDir
 
 Runs the broker's full diagnostic sweep and downloads the resulting bundle
-to broker.diagDir.
+to broker.hostDiagnosticDir.
 
 Kubernetes collects one bundle per role by default; --pod narrows to just
 one.

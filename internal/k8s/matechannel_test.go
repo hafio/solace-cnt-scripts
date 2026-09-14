@@ -313,7 +313,7 @@ func TestReadSecretKeyEscapesADottedKey(t *testing.T) {
 
 // TestReadSecretKeyFallsBackToThisClusterCLI proves a SEMP-reached site can still keep
 // its password in a cluster: with no via.kubernetes to borrow a command from, the read
-// uses THIS env file's kubernetes.runtime.
+// uses THIS env file's kubernetes.command.
 func TestReadSecretKeyFallsBackToThisClusterCLI(t *testing.T) {
 	r := &recRunner{out: []byte("czNjcmV0Cg==")}
 	site := sempSite()
@@ -327,8 +327,8 @@ func TestReadSecretKeyFallsBackToThisClusterCLI(t *testing.T) {
 		t.Error("a site with no via.kubernetes has no cluster command to borrow; " +
 			"the read must fall back to this env file's runtime")
 	}
-	if r.calls[0].name != cfg.K8s.Runtime.Name() {
-		t.Errorf("read ran %q, want this env file's runtime %q", r.calls[0].name, cfg.K8s.Runtime.Name())
+	if r.calls[0].name != cfg.K8s.Command.Name() {
+		t.Errorf("read ran %q, want this env file's command %q", r.calls[0].name, cfg.K8s.Command.Name())
 	}
 }
 

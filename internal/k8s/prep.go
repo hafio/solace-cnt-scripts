@@ -117,8 +117,8 @@ func (c *Cluster) secretPreflight() error {
 }
 
 // GenSecrets builds every applicable secret (admin always; TLS when
-// kubernetes.tlsServerSecret is set; the image-pull secret when
-// kubernetes.imagePullSecret is set) and
+// kubernetes.tlsServerSecret is set; the image-pull secret when registry
+// credentials are present, config.Config.ManagesImagePullSecret) and
 // joins them into one multi-doc manifest -- porting 012's secret set. It is the
 // rendering behind both CreateSecrets and `broker generate`, so what a user
 // reviews is exactly what gets applied. The manifests carry the base64-encoded
@@ -144,7 +144,11 @@ func GenSecrets(cfg *config.Config) ([]byte, error) {
 		docs = append(docs, tls)
 	}
 
-	if cfg.K8s.ImagePullSecret != "" {
+	// Keyed on the MATERIAL, not on the name, the identical reason ManagesTLSSecret is
+	// just above: a named Secret this env file supplies no credentials for is one the
+	// operator created themselves, the CR still references it, and there is nothing here
+	// to build from.
+	if cfg.ManagesImagePullSecret() {
 		pull, err := DockerRegistrySecret(cfg)
 		if err != nil {
 			return nil, err
@@ -198,8 +202,11 @@ func (c *Cluster) DeleteSecrets(ctx context.Context) error {
 	if c.Cfg.ManagesTLSSecret() && c.Cfg.K8s.TLSServerSecret != "" {
 		names = append(names, c.Cfg.K8s.TLSServerSecret)
 	}
-	if c.Cfg.K8s.ImagePullSecret != "" {
-		names = append(names, c.Cfg.K8s.ImagePullSecret)
+	// Only the image-pull Secret this tool built, the same rule as the TLS Secret just
+	// above: a named Secret with no credentials behind it is the operator's own, not ours
+	// to remove.
+	if c.Cfg.ManagesImagePullSecret() {
+		names = append(names, c.Cfg.ImagePullSecretName())
 	}
 	if len(c.Cfg.SEMP.AdditionalUsers) > 0 {
 		names = append(names, c.Cfg.AdditionalUsersSecretName())

@@ -23,7 +23,7 @@ import (
 // drives cross-pod runs from the primary host instead, reaching the backup over the
 // SEMP control channel (LeaderLocal/RedundancyCoordinated).
 // Container config/verify reuse the shared kubernetes.* fields (DomainCerts, ProductKeys,
-// DiagDir, CLIScriptsFolder) as the broker-ops config source -- no schema change.
+// HostDiagnosticDir, CLIScriptsDir) as the broker-ops config source -- no schema change.
 
 // ctrOps builds a broker.Ops over the node-local container exec transport. The
 // platform lets the SEMP mate channel resolve a bridge network's port mapping.
@@ -129,9 +129,15 @@ func opCtrConfigServerCerts(a *App) error {
 }
 
 // opCtrConfigDomainCerts loads or removes the configured domain certificate
-// authorities, like its k8s sibling; --remove asks before it acts.
+// authorities, like its k8s sibling; --remove asks before it acts. The
+// directory walk (config.ResolveDomainCerts) runs here, at the op, for the
+// same reason opK8sConfigDomainCerts records, and for both directions.
 func opCtrConfigDomainCerts(a *App) error {
 	remove, err := wantRemove(a)
+	if err != nil {
+		return err
+	}
+	certs, err := config.ResolveDomainCerts(a.Cfg.Broker.DomainCerts, nil)
 	if err != nil {
 		return err
 	}
@@ -140,10 +146,9 @@ func opCtrConfigDomainCerts(a *App) error {
 			"remove the configured domain CA certificates from", containerWhat(a)) {
 			return nil
 		}
-		return ctrOps(a).RemoveDomainCerts(bg(), config.Primary, domainCANames(a.Cfg))
+		return ctrOps(a).RemoveDomainCerts(bg(), config.Primary, domainCANames(certs))
 	}
-	return ctrOps(a).DomainCerts(bg(), config.Primary,
-		a.Cfg.Broker.DomainCerts.Folder, a.Cfg.Broker.DomainCerts.Files)
+	return ctrOps(a).DomainCerts(bg(), config.Primary, certs)
 }
 
 func opCtrConfigProductKeys(a *App) error {
@@ -205,7 +210,7 @@ func opCtrConfigDefaultUsers(a *App) error {
 func opCtrConfigLeader(a *App) error { return ctrOps(a).LeaderLocal(bg(), a.pod) }
 
 // opCtrExecCLI / opCtrExecShell upload and run a local script in the broker container.
-// A bare filename resolves under broker.cliScriptsFolder; a path is used as given -- the
+// A bare filename resolves under broker.cliScriptsDir; a path is used as given -- the
 // same rule as the k8s handlers, through the same helper.
 // opCtrExportConfig captures this host's broker configuration.
 //
@@ -247,7 +252,7 @@ func resolveContainerScript(a *App, file, kind string) (string, error) {
 	if config.HasPathSeparator(file) {
 		return file, nil
 	}
-	return filepath.Join(a.Cfg.Broker.CLIScriptsFolder, file), nil
+	return filepath.Join(a.Cfg.Broker.CLIScriptsDir, file), nil
 }
 
 // check / smoke steps
@@ -271,7 +276,7 @@ func opCtrVerifyRedundancy(a *App) error {
 // opCtrVerifyDiagnostics gathers show-command output and a diagnostics bundle from
 // this host's broker into the configured diagnostics dir.
 func opCtrVerifyDiagnostics(a *App) error {
-	return ctrOps(a).Diagnostics(bg(), a.Cfg.Broker.DiagDir, nowStamp(), a.days, config.Primary)
+	return ctrOps(a).Diagnostics(bg(), a.Cfg.Broker.HostDiagnosticDir, nowStamp(), a.days, config.Primary)
 }
 
 // ctrLogin tests a SEMP login as the configured admin user against this host's

@@ -22,7 +22,7 @@ import (
 // (config.neverAllowed), which TestAllowCommandsRejectsEscalation covers.
 func wrappedCtrCfg() *config.Config {
 	cfg := ctrCfg(config.Docker, "true")
-	cfg.Docker.Runtime = config.Command{"lima", "nerdctl"}
+	cfg.Docker.Command = config.Command{"lima", "nerdctl"}
 	cfg.Docker.Compose = nil // let compose derive from the wrapped runtime
 	if err := cfg.AllowCommands([]string{"lima"}); err != nil {
 		panic("wrappedCtrCfg: " + err.Error()) // a fixture bug, not a test failure
@@ -36,9 +36,9 @@ func unapprovedCtrCfg(p config.Platform) *config.Config {
 	cfg := ctrCfg(p, "true")
 	cmd := config.Command{"lima", string(p)}
 	if p == config.Podman {
-		cfg.Podman.Runtime = cmd
+		cfg.Podman.Command = cmd
 	} else {
-		cfg.Docker.Runtime = cmd
+		cfg.Docker.Command = cmd
 		cfg.Docker.Compose = nil
 	}
 	return cfg
@@ -184,7 +184,7 @@ func TestManagerHonoursRuntime(t *testing.T) {
 				t.Errorf("method = %q, want %q", got.method, tc.wantMethod)
 			}
 			if got.name != "lima" {
-				t.Errorf("argv[0] = %q, want lima (from docker.runtime)", got.name)
+				t.Errorf("argv[0] = %q, want lima (from docker.command)", got.name)
 			}
 			if !eqArgs(got.args, tc.wantArgs) {
 				t.Errorf("args = %v, want %v", got.args, tc.wantArgs)
@@ -239,7 +239,7 @@ func TestCtrTransportHonoursRuntime(t *testing.T) {
 				t.Errorf("method = %q, want %q", got.method, tc.wantMethod)
 			}
 			if got.name != "lima" {
-				t.Errorf("argv[0] = %q, want lima (from docker.runtime)", got.name)
+				t.Errorf("argv[0] = %q, want lima (from docker.command)", got.name)
 			}
 			if !eqArgs(got.args, tc.wantArgs) {
 				t.Errorf("args = %v, want %v", got.args, tc.wantArgs)

@@ -9,7 +9,7 @@ import (
 
 // decodeStrict runs a document through the same strict decoder Load uses, so the
 // schema tests below exercise the real load path. The sibling of command_test.go's
-// decodeRuntime, which returns one field rather than the error.
+// decodeCommand, which returns one field rather than the error.
 func decodeStrict(doc string, c *Config) error {
 	dec := yaml.NewDecoder(strings.NewReader(doc))
 	dec.KnownFields(true)
@@ -78,7 +78,7 @@ func TestExecBinariesCoversEveryPlatform(t *testing.T) {
 
 // TestCheckCommandAccepts is the accept half of the guard matrix: the shapes an
 // operator legitimately writes. Each case names the field it stands for, because
-// the same rules apply to kubernetes.runtime, docker.runtime, podman.runtime and
+// the same rules apply to kubernetes.command, docker.command, podman.command and
 // docker.compose from one implementation.
 func TestCheckCommandAccepts(t *testing.T) {
 	cases := []struct {
@@ -141,9 +141,9 @@ func TestCheckCommandRejects(t *testing.T) {
 		want  string
 	}{
 		// Empty.
-		{"empty command", clusterRules(), Command{}, nil, "kubernetes.runtime is empty"},
-		{"nil command", clusterRules(), nil, nil, "kubernetes.runtime is empty"},
-		{"empty argument", clusterRules(), Command{"kubectl", ""}, nil, "kubernetes.runtime[1] is an empty argument"},
+		{"empty command", clusterRules(), Command{}, nil, "kubernetes.command is empty"},
+		{"nil command", clusterRules(), nil, nil, "kubernetes.command is empty"},
+		{"empty argument", clusterRules(), Command{"kubectl", ""}, nil, "kubernetes.command[1] is an empty argument"},
 
 		// Layer 2: an unlisted binary, whatever it is.
 		{"curl", clusterRules(), Command{"curl"}, nil, `"curl" is not a binary this tool runs`},
@@ -172,7 +172,7 @@ func TestCheckCommandRejects(t *testing.T) {
 		{"joined flag then word", clusterRules(), Command{"kubectl", "--context=prod", "delete"}, nil, "not allowed in subcommand position"},
 		// The subword exception is field-scoped: `compose` is a bare word anywhere
 		// except index 1 of docker.compose.
-		{"compose subword on runtime", runtimeRules(Docker), Command{"docker", "compose"}, nil, "not allowed in subcommand position"},
+		{"compose subword on command", runtimeRules(Docker), Command{"docker", "compose"}, nil, "not allowed in subcommand position"},
 		// ...and only as the LAST token: anything after it is a token this tool did
 		// not append, which is the smuggling the rule exists to stop.
 		{"compose then extra word", composeRules(), Command{"docker", "compose", "up"}, nil, "not allowed in subcommand position"},
@@ -242,7 +242,7 @@ func TestCheckCommandRejects(t *testing.T) {
 		// The message names the code point, since the character cannot be seen.
 		{"names the code point", clusterRules(), Command{"kubectl", "--context", "pr\u200bod"}, nil, "U+200B"},
 		// The charset applies to every token, not just argv[0].
-		{"metachar in later token", clusterRules(), Command{"kubectl", "--context", "prod;rm"}, nil, `kubernetes.runtime[2]`},
+		{"metachar in later token", clusterRules(), Command{"kubectl", "--context", "prod;rm"}, nil, `kubernetes.command[2]`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -363,7 +363,7 @@ func TestCharsetAgreesAcrossBothYAMLForms(t *testing.T) {
 	for _, r := range spaces {
 		// The scalar form: Fields splits here, so the character never survives into
 		// a token. Any rune Fields treats as a separator...
-		scalar := decodeRuntime(t, "kubernetes:\n  runtime: \"kubectl --context a"+string(r)+"b\"\n")
+		scalar := decodeCommand(t, "kubernetes:\n  command: \"kubectl --context a"+string(r)+"b\"\n")
 		if len(scalar) != 4 {
 			t.Errorf("U+%04X: scalar form produced %d tokens (%q), want 4 -- strings.Fields did not split it", r, len(scalar), scalar)
 		}
@@ -396,7 +396,7 @@ func TestGuardErrorsAreActionable(t *testing.T) {
 		if strings.Contains(msg, "\n") {
 			t.Errorf("CheckCommand(%q) message spans lines; it must be one line: %q", cmd, msg)
 		}
-		if !strings.Contains(msg, "kubernetes.runtime") {
+		if !strings.Contains(msg, "kubernetes.command") {
 			t.Errorf("CheckCommand(%q) message does not name the field: %q", cmd, msg)
 		}
 		if !strings.Contains(msg, "--allow-command") && !strings.Contains(msg, "kubectl, oc") &&
@@ -476,14 +476,14 @@ func TestValidatorAndExecutorAgree(t *testing.T) {
 func setGuardCommand(c *Config, p Platform, cmd Command) {
 	switch p {
 	case Docker:
-		c.Docker.Runtime = cmd
-		// Keep compose independently valid, so a docker case tests the runtime
+		c.Docker.Command = cmd
+		// Keep compose independently valid, so a docker case tests the command
 		// field alone rather than tripping over a compose derived from it.
 		c.Docker.Compose = Command{"docker", "compose"}
 	case Podman:
-		c.Podman.Runtime = cmd
+		c.Podman.Command = cmd
 	default:
-		c.K8s.Runtime = cmd
+		c.K8s.Command = cmd
 	}
 }
 
@@ -500,9 +500,9 @@ func guardCommandOf(c *Config, p Platform) (Command, error) {
 // or a future caller may construct without config.Load -- must still be refused.
 func TestExecutorRejectsWithoutValidate(t *testing.T) {
 	c := &Config{}
-	c.K8s.Runtime = Command{"./evil"}
-	c.Docker.Runtime = Command{"curl"}
-	c.Podman.Runtime = Command{"lima", "podman"}
+	c.K8s.Command = Command{"./evil"}
+	c.Docker.Command = Command{"curl"}
+	c.Podman.Command = Command{"lima", "podman"}
 	c.Docker.Compose = Command{"docker", "rm"}
 
 	if _, err := c.ClusterCommand(); err == nil {
@@ -627,13 +627,13 @@ func TestAllowedBinaryIsNotGloballyAllowed(t *testing.T) {
 	if err := approved.AllowCommands([]string{"lima"}); err != nil {
 		t.Fatalf("AllowCommands = %v", err)
 	}
-	approved.Podman.Runtime = Command{"lima", "podman"}
+	approved.Podman.Command = Command{"lima", "podman"}
 	if _, err := approved.RuntimeCommand(Podman); err != nil {
 		t.Fatalf("approved config rejected `lima podman`: %v", err)
 	}
 
 	plain := &Config{}
-	plain.Podman.Runtime = Command{"lima", "podman"}
+	plain.Podman.Command = Command{"lima", "podman"}
 	if _, err := plain.RuntimeCommand(Podman); err == nil {
 		t.Error("an --allow-command approval leaked into a config that never received it")
 	}
@@ -646,7 +646,7 @@ func TestAllowedBinaryIsNotGloballyAllowed(t *testing.T) {
 // approved and what Manager.compose runs are the same expression.
 func TestComposeCommandDerivation(t *testing.T) {
 	c := &Config{}
-	c.Docker.Runtime = Command{"docker"}
+	c.Docker.Command = Command{"docker"}
 	got, err := c.ComposeCommand()
 	if err != nil {
 		t.Fatalf("ComposeCommand = %v", err)
@@ -673,9 +673,9 @@ func TestComposeCommandDerivation(t *testing.T) {
 // approved compose command by way of the derivation.
 func TestComposeDerivationInheritsRejection(t *testing.T) {
 	c := &Config{}
-	c.Docker.Runtime = Command{"curl"}
+	c.Docker.Command = Command{"curl"}
 	if _, err := c.ComposeCommand(); err == nil {
-		t.Error("a compose command derived from an unlisted runtime was accepted")
+		t.Error("a compose command derived from an unlisted command was accepted")
 	}
 }
 

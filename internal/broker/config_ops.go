@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 
@@ -56,26 +55,41 @@ func (o *Ops) ServerCert(ctx context.Context, dt string, roles ...config.Role) e
 }
 
 // DomainCerts loads the given domain certificate authorities into the node,
-// porting 052. files maps CA name -> certificate filename located under folder;
-// each file is uploaded to the certs dir and referenced by the generated CLI.
-func (o *Ops) DomainCerts(ctx context.Context, role config.Role, folder string, files map[string]string) error {
-	if len(files) == 0 {
+// porting 052. certs is the already-resolved set (config.ResolveDomainCerts):
+// each entry's Name is the CA name AND the in-broker filename, and Path is the
+// full host path to read the certificate from -- no folder to join it onto any
+// more, since the resolver has already done that.
+//
+// Every name is validated BEFORE anything is uploaded (rule F: fail loud
+// before upload), matching the discipline ProductKeys documents. What used to
+// be a second validName call on the host-side FILENAME is gone: that value is
+// now a full host path (broker.validName's charset would refuse the first '/'
+// or '\' in it), and it is no longer either a CLI operand or an in-broker
+// path -- only a local argument to UploadFile, gated instead by
+// config.CheckHostPath at load. Its gate is config.ResolveDomainCerts, which
+// runs the equivalent charset/length/".." checks against the CA name itself
+// before this is ever called.
+func (o *Ops) DomainCerts(ctx context.Context, role config.Role, certs []config.DomainCert) error {
+	if len(certs) == 0 {
 		o.logf("No domain certificate authorities configured -- skipping.")
 		return nil
 	}
-	for _, ca := range sortedKeys(files) {
-		file := files[ca]
-		if err := validName("domain CA name", ca); err != nil {
+	sorted := append([]config.DomainCert(nil), certs...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+
+	names := make([]string, 0, len(sorted))
+	for _, c := range sorted {
+		if err := validName("domain CA name", c.Name); err != nil {
 			return err
 		}
-		if err := validName("domain certificate filename", file); err != nil {
-			return err
-		}
-		if err := o.T.UploadFile(ctx, role, filepath.Join(folder, file), certPath(file)); err != nil {
-			return fmt.Errorf("upload domain certificate %q: %w", file, err)
+		names = append(names, c.Name)
+	}
+	for _, c := range sorted {
+		if err := o.T.UploadFile(ctx, role, c.Path, certPath(c.Name)); err != nil {
+			return fmt.Errorf("upload domain certificate %q: %w", c.Name, err)
 		}
 	}
-	out, err := o.RunCLI(ctx, role, "load-domain-certs", domainCertsScript(files))
+	out, err := o.RunCLI(ctx, role, "load-domain-certs", domainCertsScript(names))
 	if err != nil {
 		return err
 	}

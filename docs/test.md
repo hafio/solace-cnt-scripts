@@ -55,7 +55,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-78 test files, 1262 test functions. Three of those are not tests. Two are os/exec
+80 test files, 1307 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -66,19 +66,19 @@ launched from.
 
 | Package | Files | Tests |
 | --- | --- | --- |
-| internal/k8s | 18 | 200 |
+| internal/k8s | 18 | 208 |
 | internal/broker | 22 | 426 |
-| internal/cli | 11 | 189 |
-| internal/config | 12 | 176 |
+| internal/cli | 11 | 190 |
+| internal/config | 14 | 211 |
 | internal/container | 6 | 132 |
 | internal/convert | 1 | 37 |
-| internal/render | 2 | 32 |
+| internal/render | 2 | 33 |
 | internal/engine | 2 | 27 |
 | internal/output | 1 | 16 |
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **78** | **1262** |
+| **Total** | **80** | **1307** |
 
 
 ## Coverage
@@ -178,7 +178,7 @@ type behind the platform CLI overrides and the execution guard that decides what
 `Command` may be, the scaling block that sizes the broker on every platform, and the
 platform vocabulary the CLI resolves against, the host-path rules every file-valued
 key is held to, and the two storage stories a Kubernetes deployment may tell.
-176 tests across 12 files.
+211 tests across 14 files.
 
 ### command_test.go
 
@@ -192,9 +192,10 @@ key is held to, and the two storage stories a Kubernetes deployment may tell.
 | `TestCommandString` | Display rendering, used by the check reports and error messages |
 | `TestValidateProbeCommandAccepts` | The container health-check probe keeps the loose rules, because it runs inside the broker rather than here: a path, and a shell pipeline with metacharacters, both pass, as does an unset command. The field-by-field opposite of `TestCheckCommandRejects` |
 | `TestValidateProbeCommandRejects` | Even the probe rejects empty arguments and control characters (newline, NUL), naming the field and the offending index |
-| `TestValidateRejectsBadRuntime` | A malformed runtime fails `Validate` for all three platforms, ahead of the mandatory-field checks, so the message names the runtime rather than the fields also missing |
-| `TestRuntimeDefaults` | Defaults resolve to exactly one token with no leading args (`kubectl`/`docker`/`podman`), so existing argv is byte-identical; `kubernetes.runtime` is defaulted on every platform |
+| `TestValidateRejectsBadCommand` | A malformed command fails `Validate` for all three platforms, ahead of the mandatory-field checks, so the message names the command field rather than the fields also missing |
+| `TestRuntimeDefaults` | Defaults resolve to exactly one token with no leading args (`kubectl`/`docker`/`podman`), so existing argv is byte-identical; `kubernetes.command` is defaulted on every platform |
 | `TestRuntimeExplicitValueSurvivesDefaults` | A configured override is never overwritten by defaulting |
+| `TestRenamedRuntimeKeysFailLoud` | The three renamed `.runtime` keys (`kubernetes`/`docker`/`podman`): the old key still decodes (so the file reaches an actionable error instead of a bare unknown-field one), is never defaulted, and `Validate`'s message names the `.command` replacement |
 
 ### execguard_test.go
 
@@ -325,6 +326,37 @@ between runs would create a second authority beside the first rather than update
 | `TestDeriveCANameRefusesWhatItCannotName` | The refusals, which exist so nothing is silently dropped or silently merged: a directory or file with no usable characters, and a directory name so long nothing is left to shorten. Each error must also name the explicit `files:` entry, since that is how an operator gets past a name this cannot derive |
 | `TestMatchesCertExt` | Which files in a directory are offered to the broker. A filter rather than every file is the safe default, because a certificate directory routinely also holds a README, a private key or an editor backup -- uploading one of those as a certificate authority fails at best and installs something unintended at worst. Also covers case-insensitivity, a caller's own extension set REPLACING the default, and the dot being optional |
 
+### domaincerts_resolve_test.go
+
+Covers `ResolveDomainCerts` (the merge of `broker.domainCerts.dirs` and `.files` into the set
+actually uploaded) and `CertDir.UnmarshalYAML` (the two-shape `dirs` entry). `fakeReader`
+builds a `DirReader` over an in-memory `map[string][]os.DirEntry`, so the walk is exercised
+with no directory needing to exist on the machine running the test -- `fakeDirEntry` is the
+minimal `os.DirEntry` that lets it.
+
+| Test | What it covers |
+| --- | --- |
+| `TestResolveDomainCertsWalksOneDirDefaultExtensions` | One dir, default extensions: matching files are found, a non-matching extension and a subdirectory (rule B: never walked) are skipped, names come back sorted by filename, and the path is joined under the dir |
+| `TestResolveDomainCertsFileExtOverridesDefault` | A dir's own `fileExt` REPLACES the default rather than adding to it: a `.crt` file in a dir configured for `der` alone is excluded |
+| `TestResolveDomainCertsUnreadableDirFailsLoudBeforeUpload` | Rule F: a dir that cannot be read is a hard failure naming the field and the dir, not a skip |
+| `TestResolveDomainCertsFilesTakeFullPathVerbatim` | A `files` entry's name and path pass through unchanged -- no join, no derivation |
+| `TestResolveDomainCertsEmptyIsANoOp` | Neither `dirs` nor `files` configured resolves to an empty set with no error, which is what keeps `broker configure domain-certs`'s no-op alive |
+| `TestResolveDomainCertsDuplicateAcrossDirs` | The likely real-world collision: `DeriveCAName` uses only a dir's last path element, so two dirs sharing one collide on every shared filename. The error names both source paths and the colliding CA name |
+| `TestResolveDomainCertsDuplicateAgainstExplicitFile` | The third collision shape: a directory-derived name colliding with an operator-chosen `files` key |
+| `TestResolveDomainCertsRefusesDotDot` | The gap `DeriveCAName`'s own charset does not close: `.` is CA-name-safe, so a stem ending in one derives a name containing `..`, which `broker.validName` (the in-broker-filename guard) would otherwise refuse at upload time. Caught here so the error names the source file |
+| `TestValidExplicitCANameRejects` / `TestValidExplicitCANameAccepts` | An explicit `files` key held to the same charset, length and `..` rules a derived name already satisfies by construction |
+| `TestSplitFileExt` | The comma-separated `fileExt` parses into `MatchesCertExt`'s `[]string` form, and empty means "no override" (nil, not an empty non-nil slice, which would match nothing) |
+| `TestDefaultDirReaderReadsARealDirectory` | The one test touching a real filesystem, and it creates its own `t.TempDir()` rather than depending on one already existing |
+| `TestCertDirUnmarshalScalar` / `TestCertDirUnmarshalMapping` | The two accepted shapes: a bare path, or `{path, fileExt}` |
+| `TestCertDirUnmarshalMappingNeedsPath` | A mapping with no `path` fails to decode rather than silently walking nothing |
+| `TestCertDirUnmarshalRejectsUnknownKey` | The strictness `Command.UnmarshalYAML` does not need: a custom `UnmarshalYAML` takes over decoding for the node, so `KnownFields(true)` never reaches inside it -- a typo'd `fileExts:` must fail loud rather than silently keep the default extensions |
+| `TestCertDirUnmarshalRejectsOtherKinds` | A `dirs` entry that is neither a scalar nor a mapping (e.g. a nested list) fails to decode |
+| `TestCertDirUnmarshalMapping` | A `dirs` entry accepts either shape -- a plain scalar path, or a mapping carrying `path` and an optional `fileExt` -- following the precedent `config.Command` already sets for a field with two spellings. The mapping form takes a CLOSED key set, so a typo inside an entry fails rather than being ignored, which is the same rule the rest of this schema follows |
+| `TestValidExplicitCANameAccepts` | An operator-chosen name under `files:` is held to the same charset and length as a derived one. It has to be: the name is the operand of the broker's `create domain-certificate-authority` AND the filename the certificate lands under inside the broker, so a name that is legal in neither place would fail at the broker rather than at load |
+| `TestDomainCertsNamesAreCheckedAtLoadNotAtUpload` | The TIMING, which is the whole point of it. `ResolveDomainCerts` runs at the OP rather than at load because it READS DIRECTORIES -- a certificate directory that does not exist on this machine must not fail a `deploy` or `generate` that never touches domain certificates. The cost was that everything else about the block waited too, so a `files` key that was never a legal CA name survived generate, deploy and verify and surfaced only at the one command that uploads. A key and an empty value are pure string facts about the env file, needing no filesystem, so they moved to `validateDomainCerts` at load; this is what stops them drifting back |
+| `TestDomainCertsRenameErrorWinsOverTheNewBlock` | The ORDER of the two checks: a file still carrying the retired `broker.domainCerts.folder` has not written the new block yet, so it must hear that its key was renamed and RESHAPED -- not a complaint about the shape of something it never wrote |
+| `TestResolveDomainCertsSameFileReachedTwice` | The case the general duplicate-name message described badly. When one file is reached by two entries -- a `dirs` path listed twice, or a `files` entry naming a certificate a `dirs` entry already walks -- `prev` and `path` are the SAME string, so that message printed one path twice and sent an operator hunting for a second certificate that does not exist. Asserts the entry-duplication message fires and the two-certificate one does not |
+
 ### scaling_test.go
 
 The scaling-tier table: `scaling.maxConnections` fixes the broker's CPU on every
@@ -375,23 +407,30 @@ and the keys deliberately exempt from it.
 | Test | What it covers |
 | --- | --- |
 | `TestHostPathCharsetIsDerivedFromTheTokenCharset` | Why `hostPathUnsafe` is built by `strings.Map` rather than typed out: two hand-written charsets drift, and the drift is invisible until an operator hits the one character in one list and not the other. It asserts the relationship, not the contents -- widening `unsafeTokenChars` widens the path set automatically |
-| `TestCheckHostPathAccepts` | The shapes an operator legitimately writes, including the two Windows forms a command token may not carry |
+| `TestCheckHostPathAccepts` | The shapes an operator legitimately writes, including the two Windows forms a command token may not carry, and every leading-`~` shape: `CheckHostPath` no longer refuses one (`expandHomePaths` is what interprets it), so at the as-written charset gate a tilde is just another admitted character |
 | `TestCheckHostPathRejects` | Each refusal with its own reason, so a message that stops naming the cause fails here rather than confusing an operator |
-| `TestLeadingTildeIsRefusedButAnEmbeddedOneIsNot` | The carve-out pinned on its own, because the two cases differ only by the tilde's position and the reasons are unrelated: nothing here expands a home directory, while an 8.3 short name is a real path a Windows runner hands us for its own temp directory |
+| `TestExpandTilde` | `expandTilde` directly, over an injected home-directory func: bare `~`, `~/...`, `~\...`, a non-tilde value left untouched, an embedded tilde (8.3 short name) left untouched, `~user/...` refused by name, an unresolvable home directory refused, and an expanded value containing whitespace refused (the real-world `C:\Users\John Smith` case) |
 | `TestIsAbsHostPath` | The question asked for both operating systems at once, which is the point -- `filepath.IsAbs` alone answers only for the machine running the test, so one env file would be judged differently depending on where it was loaded |
 | `TestBaseNameSplitsOnBothSeparators` | The cross-platform agreement test. The value becomes an in-broker filename AND a Secret data key, so two answers for one env-file name two different objects rather than differing cosmetically |
-| `TestHasPathSeparator` | The name-or-path question `broker perform cli-script` and the domain-certificate filenames both rest on |
-| `TestValidateHostPathsChecksEveryPlatformsFields` | The gate fires for every field it covers, on every platform. It uses a character the path charset refuses (`$`) so a failure can only have come from `CheckHostPath`, and sets one field at a time so a message naming the wrong field is caught rather than masked by a neighbour |
+| `TestHasPathSeparator` | The name-or-path question a bare CLI/shell script argument rests on: a bare name resolves under `broker.cliScriptsDir`, a path is used as given |
+| `TestValidateHostPathsChecksEveryPlatformsFields` | The gate fires for every field it covers, on every platform. It uses a character the path charset refuses (`$`) so a failure can only have come from `CheckHostPath`, and sets one field at a time so a message naming the wrong field is caught rather than masked by a neighbour. Covers `broker.domainCerts.dirs[0]` and `.files[ca]` alongside the renamed `cliScriptsDir`/`hostDiagnosticDir` |
 | `TestValidateHostPathsMatchesTheRebaseList` | The drift test between the two halves of the host-path story: a rebased field must also be gated. The reverse is allowed and deliberate -- `podman.quadletDir` is gated but never rebased, because the unit has to live where systemd scans |
-| `TestRebaseResolvesAgainstTheEnvFileDirectory` | The join itself: relative values move, absolute ones do not, and an empty value stays empty rather than becoming the base directory |
+| `TestRebaseResolvesAgainstTheEnvFileDirectory` | The join itself: relative values move, absolute ones do not. Covers `broker.domainCerts.dirs[].path` and `.files{}` (a map, so its own write-back loop) alongside the renamed folder fields |
 | `TestRebaseIsANoOpWithoutABaseDir` | The property `internal/convert` and every hand-built `Config` depend on -- `ApplyDefaults` and `Validate` are called directly, with no path to derive a base from, and those paths behave exactly as before |
 | `TestQuadletDirAndDataDirAreNotRebased` | The two deliberate exclusions, each for its own reason: the unit must live where systemd scans, and the data dir is what a recursive delete points at |
 | `TestPodmanBaseDirIsRequiredAndAbsolute` | Both halves of the one mandatory path key. Mandatory rather than defaulted because it receives the server-certificate bundle, which contains a PRIVATE KEY; required absolute rather than rebased because it is a quadlet `Volume=` source, and podman reads a relative source as a NAMED VOLUME -- mounting an empty volume over the certificate with no error at all |
 | `TestDataDirMustBeAbsolute` | The one host path REQUIRED absolute rather than resolved, with a message explaining both halves of why: it is a bind-mount source (podman reads a bare one as a named volume) and it is what `broker remove --delete-data` deletes recursively |
-| `TestDomainCertsFolderIsDefaulted` | A promise the sample env file made that the code did not keep: an omitted folder made `filepath.Join("", file)` collapse to a bare filename resolved against whatever directory the command ran from |
+| `TestContainerHostPathsRefuseATilde` | The gap that opened when `CheckHostPath` stopped refusing a leading `~` for every field: `podman.quadletDir`/`podman.baseDir`/`<platform>.container.dataDir` are excluded from `expandHomePaths` (they name a path on the machine that runs the CONTAINER, not this tool), so `checkContainerHostPath` restores the refusal for exactly these three -- and confirms `docker.composeFile`, which IS expanded, is not caught by the same net |
+| `TestDomainCertsDirsAreNotDefaulted` | Replaces `TestDomainCertsFolderIsDefaulted`: the retired `folder` key defaulted to `certs`, but its replacement, `dirs`, deliberately does NOT -- an unconfigured file must stay the documented no-op, and defaulting a dir that does not exist would turn that no-op into a hard failure under rule F (an unreadable configured dir is an error) |
+| `TestRenamedBrokerKeysFailLoud` | The three retained-legacy-field migrations for `broker.cliScriptsFolder`/`diagDir`/`domainCerts.folder`: the old key decodes, is never defaulted, and `Validate`'s error names the replacement |
+| `TestExpandHomePathsRunsBeforeRebaseAndDoesNotDependOnBaseDir` | The regression pin for the whole tilde-expansion feature: `expandHomePaths` must run before `rebaseHostPaths` (an expanded value is already absolute, so it is never joined onto `baseDir`) AND with `baseDir == ""` (the `internal/convert`/hand-built-`Config` case) -- either gap reintroduces the literal `~` segment the old refusal existed to prevent |
 | `TestContainerCertRequiresKey` | A deliberate tightening: `tls.cert` without `tls.certKey` now fails to load on docker and podman. Until the server certificate got a real delivery path the container renderers mounted `tls.cert` ALONE and never read the key, so broker-owned TLS could only have worked if that one file already carried it. Failing at load names the missing field; the old behaviour produced a running broker whose TLS quietly did not work. Kubernetes is unaffected -- the operator assembles both halves from a Secret |
 | `TestKubernetesNameIsBoundedByItsDerivedNames` | A name that passes on its own and still produces an object the cluster refuses: `kubernetes.name` is a DNS-1123 label, so 63 characters is legal for the name itself, but the operator suffixes it into every object it creates and Kubernetes copies a pod's name into the `statefulset.kubernetes.io/pod-name` label, whose values stop at 63 |
 | `TestContainerNameMustBeAnEngineName` | The half of `container.name`'s grammar the charset check did not cover: the FIRST character must be alphanumeric. `-broker` passes the charset and both engines refuse it -- but not before this tool has written it into a compose file and a quadlet unit, and not before it has reached argument positions where a leading dash reads as a flag |
+| `TestLoadExpandsATildeThroughTheWholePipeline` | The WIRING, which nothing else pinned: every other tilde test calls the expansion directly, so deleting its single call from `Load` left the suite green. That is a real gap rather than a stylistic one, because the behaviour it replaced -- an outright refusal of a leading `~` -- was reached through `Validate`, whose own wiring IS pinned, so the swap traded a tested behaviour for an untested one. Drives the real home-directory lookup through a full `Load`, and asserts both that the tilde is gone and that the result sits under the home directory rather than being rebased onto the env file's own directory, which is exactly the failure the old refusal existed to prevent |
+| `TestExpandHomePathsCoversEveryFieldItClaims` | Every field the pass lists, set at once, because the failure this shape is most likely to have is a MISSING expansion rather than a wrong one: `expandHomePaths` is a hand-written list, so a field added to the schema later -- or dropped from the list in a refactor -- reaches the filesystem with a literal `~` in it and surfaces as a missing file far from the env file. Setting two CAs, two certificate dirs and two map entries also pins the three loops, which a one-value-per-field test cannot |
+| `TestExpandHomePathsReportsWhichFieldFailed` | The error names the field, for each SHAPE the pass holds -- a plain field, a list element, a certificate dir and a map entry keyed by CA name. The field name is the whole value of the message here: an operator sees it, not the struct, and "starts with '~'" alone would leave them searching a dozen path keys. Driven by the `~user/...` form, which is refused by name rather than guessed at |
+| `TestExpandHomePathsSurfacesAnUnresolvableHome` | The remaining branch, through the `homeDir` seam: when the home directory itself cannot be determined, that is an error naming the field rather than a silent fallthrough that leaves the tilde in the value |
 
 ### storage_test.go
 
@@ -425,6 +464,24 @@ or the operator created it and the env file only says which one the broker shoul
 | `TestSuppliedCertsNeedASecretName` | Files with no name give the Secret nowhere to be created and the CR no `tls` block, so the certificate would be silently unused -- the quietest failure mode here, and the one worth a loud error |
 | `TestNoTLSAtAllStaysValid` | TLS is opt-in on every platform, and the two checks above must not have made the plainest deployment fail |
 
+### imagepullsecret_test.go
+
+The image-pull Secret follows the identical two-sided rule `tlssecret_test.go` pins for
+TLS: this tool builds it from `image.user`/`image.pass`, or the operator -- or a cluster
+admin, or external-secrets -- created it themselves, and `kubernetes.imagePullSecret` only
+says which one the broker CR should reference. `pullSecretCfg(name, user, pass)` is the
+shared fixture.
+
+| Test | What it covers |
+| --- | --- |
+| `TestManagesImagePullSecretNeedsBothCredentials` | All four corners of `image.user` x `image.pass`: only the pair together makes the Secret this tool's to build, the same AND `ManagesTLSSecret` uses for `tls.cert`/`tls.certKey` -- a lone username or a lone password cannot build a `dockerconfigjson` Secret, so it must read as bring-your-own rather than half a credential |
+| `TestImagePullSecretNameConfiguredNameWins` | An operator-chosen name is never overridden by the derived default, whether or not this tool goes on to build the Secret behind it |
+| `TestImagePullSecretNameDerivedWhenCredentialsButNoName` | The common case: credentials with no configured name derive `<kubernetes.name>-image-pull`, the same `<name>-<suffix>` shape `AdditionalUsersSecretName` already uses for the extra-users Secret |
+| `TestImagePullSecretNameBringYourOwn` | The subtle middle state a future reader would otherwise "fix" into a validation error: a name with NO credentials behind it. `ManagesImagePullSecret` comes back false so nothing here builds, applies or deletes it, `ImagePullSecretName` still returns the configured name so the CR can reference it, and `Validate` accepts it as a legal deployment |
+| `TestImagePullSecretNameEmptyWithNeither` | Neither a name nor credentials: `ImagePullSecretName` returns `""` rather than inventing one for a Secret that will never exist, which is what keeps every reference site a plain `if n := ...; n != ""` check instead of also asking `ManagesImagePullSecret`, and `Validate` still accepts it |
+| `TestImagePullSecretDerivedSuffixFitsWhereAdditionalUsersAlreadyFits` | Pins "no new length bound needed" as a RELATIONSHIP rather than a re-typed constant: `-image-pull` need only stay shorter than the `-additional-users` suffix `AdditionalUsersSecretName` already fits within `kubernetes.name`'s own bound, for that same bound to cover the new suffix without a dedicated test |
+| `TestImagePullSecretCredentialsResolveFromPassEnv` | Pins "or equivalent" through a full `Load`, not a hand-built `Config`: `image.passEnv` resolves into `Image.Pass` during load (`resolveSecretRefs`), so credentials supplied only as an env-var reference must still make `ManagesImagePullSecret` true and derive the same default name a literal `image.pass` would |
+
 ### replication_test.go
 
 | Test | What it covers |
@@ -434,7 +491,7 @@ or the operator created it and the env file only says which one the broker shoul
 | `TestValidateReplicationRejects` | Every way the block can be wrong, each message naming the field: not exactly 2 sites, a missing or duplicated `virtualRouterName`, missing/empty/overlapping `routerNames`, no endpoints, an empty host, a port outside 1-65535, `transport: encrypted` (refused by name, pointing at `ssl`), an unknown transport, three endpoints on one transport, a `via` declaring both mechanisms, each missing `via.kubernetes` field, `via.semp` without a host or with a bad port, zero or two credential sources, an incomplete `passSecret`, a nameless or duplicated VPN, and an `activeAt` naming nothing or naming a ROUTER name instead of a virtual-router name |
 | `TestValidateReplicationEmptyViaAccepted` | A site with no `via` still loads. The block says how to reach a site when it is the MATE and only the switch command needs it, so requiring it at load would refuse a file that configures replication perfectly well for the local-only command |
 | `TestReplicationLocate` | A broker finds itself by ANY of its site's router names -- the HA backup node reports its own name, not the primary's -- and both non-happy paths are errors: no match prints what was read beside every declared name, and an overlap refuses rather than resolving to whichever site came first |
-| `TestSiteCommandGuarded` | A replication site's cluster CLI is re-checked when the command is fetched, not only at load: a binary off the kubernetes allowlist and one carrying a metacharacter are both refused, `Validate` names `replication.sites[0].via.kubernetes.command` rather than `kubernetes.runtime`, a site reached over SEMP says so, and an unknown `virtualRouterName` is refused |
+| `TestSiteCommandGuarded` | A replication site's cluster CLI is re-checked when the command is fetched, not only at load: a binary off the kubernetes allowlist and one carrying a metacharacter are both refused, `Validate` names `replication.sites[0].via.kubernetes.command` rather than the top-level `kubernetes.command` (the two now differ only by prefix, which makes the distinction sharper than before the rename), a site reached over SEMP says so, and an unknown `virtualRouterName` is refused |
 | `TestReplicationPassEnvResolves` | The mate's admin password resolves through the one `secretRefs` list. Without an entry there a `passEnv` would stay an unexpanded variable NAME and be sent to the mate as the password |
 | `TestReplicationCredentialChars` | The mate password gets the same charset check as every other credential -- it reaches a curl config on stdin where a newline breaks out of its line -- and the error never echoes the value |
 
@@ -480,7 +537,7 @@ without a live broker;
 fixtures stand in for a captured `show current-config` transcript; and
 `exportconfigReadCounter` wraps `App.PromptIn` to prove a confirmation prompt was never
 actually read, not merely that the command did not block.
-189 tests across 11 files.
+190 tests across 11 files.
 
 Because the platform is a flag rather than the first word of a command, the
 invocations here name it explicitly (`--platform docker`) rather than relying on
@@ -577,7 +634,8 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 | `TestStandaloneRouternameFallsBackToTheHost` | The load-time fill (`App.fillStandaloneNodeName`) end to end: a standalone container env file naming no routername renders an artifact whose `hostname` AND `routername` are the HOST's name, announced on stderr. Through the real command, because the point of filling at load is that every reader agrees -- the artifact here, the check report and the DNS check elsewhere, all off one value |
 | `TestConfiguredRouternameSurvivesTheFallback` | The other half: a configured routername is never overwritten by the host's name |
 | `TestK8sSmokeRedundancyUnhealthy` | `broker perform redundancy-test` fails on its first check rather than polling: over the echo seam, `engine.Echo`'s empty `show redundancy` output makes `primaryRedundancyUp` false, so `opK8sVerifyRedundancy` returns the redundancy-unhealthy error before any SEMP login |
-| `TestK8sConfigDeleteDomainCertsConfigured` | With a CA actually configured, `broker configure domain-certs --remove` issues a kubectl exec instead of self-skipping -- every other test's `domainCerts.files` map is empty, so `domainCANames`'s map-to-slice conversion was correct only by vacuity until this one configures a CA |
+| `TestK8sConfigDeleteDomainCertsConfigured` | With one explicitly-named CA configured (`domainCerts.files`, now a full host path), `broker configure domain-certs --remove` issues a kubectl exec instead of self-skipping -- every other test's `files` map is empty, so `domainCANames`'s conversion was correct only by vacuity until this one configures a CA |
+| `TestK8sConfigDeleteDomainCertsFromDirs` | The gap the test above alone would miss: `--remove` now resolves `domainCerts.dirs` too (`config.ResolveDomainCerts`), sharing the resolver with the apply direction, so a directory-derived CA is not silently left on the broker the way it would be if `--remove` read only `.files` |
 | `TestConvertParseError` | a malformed legacy env file (unterminated array assignment) surfaces the parser's own error through the CLI |
 | `TestConvertWriteError` | an -o path whose parent directory is absent fails with a wrapped write error naming the path |
 | `TestK8sGenSecretsMissingCertFile` | kubernetes.tlsServerSecret configured with an unreadable tls.cert fails loud naming the read failure through `broker generate`, instead of only being caught at real deploy time |
@@ -807,7 +865,7 @@ mapping, and the YAML emitter. 37 tests.
 
 | Test | What it covers |
 | --- | --- |
-| `TestConvertLegacyK8sEnv` | `testdata/legacy-k8s.env` converts end to end and matches `testdata/legacy-k8s.yaml.golden`: platform detected as kubernetes and written as a `kubernetes:` section, `true` -> `yes`, every scalar/array/associative value mapped, `${SOLBK_NS}` expanded, a trailing comment stripped, an explicit `0` kept, a multi-word `KUBE` preserved as `kubernetes.runtime` argv, and only the two expected advisories. The fixture sets `SOLBK_MSGNODE_CPU`, as every real legacy file does, so the drop is exercised here: it warns, and no `cpu` reaches the YAML. It also sets `REPL_MATE`/`REPL_CONN_SSL`/`REPL_PSK`, and none of them survive: the `replication:` block now describes BOTH sites of a DR pair, which three variables about one mate cannot populate, so they are dropped with a warning naming all three (B5 itself stays covered by `TestParseSingleQuotedDollarSurvives`, at the parser level where the bug was) |
+| `TestConvertLegacyK8sEnv` | `testdata/legacy-k8s.env` converts end to end and matches `testdata/legacy-k8s.yaml.golden`: platform detected as kubernetes and written as a `kubernetes:` section, `true` -> `yes`, every scalar/array/associative value mapped, `${SOLBK_NS}` expanded, a trailing comment stripped, an explicit `0` kept, a multi-word `KUBE` preserved as `kubernetes.command` argv, `SOLBK_DOMAINCERT_FOLDER` joined onto the one `SOLBK_DOMAINCERT_FILES` entry to make a full-host-path `domainCerts.files` value (with `dirs` left unset) and its own advisory, and only the three expected advisories total. The fixture sets `SOLBK_MSGNODE_CPU`, as every real legacy file does, so the drop is exercised here: it warns, and no `cpu` reaches the YAML. It also sets `REPL_MATE`/`REPL_CONN_SSL`/`REPL_PSK`, and none of them survive: the `replication:` block now describes BOTH sites of a DR pair, which three variables about one mate cannot populate, so they are dropped with a warning naming all three (B5 itself stays covered by `TestParseSingleQuotedDollarSurvives`, at the parser level where the bug was) |
 | `TestParseSingleQuotedDollarSurvives` | The B5 regression. Single quotes are bash's idiom for keeping `$` literal, and the tokenizer used to strip quoting before `expand()` ran -- so `SOLBK_REDUNDANCY_PSK='p$s3cret'` silently converted to `psk: "p"`, truncating the secret with no warning and surfacing much later as an unexplained redundancy failure. The name in the fixture is unassigned, which is exactly the case that vanished into `""` |
 | `TestParseMixedQuotingExpandsOnlyTheExpandableHalf` | Why literalness is tracked per SEGMENT rather than per word: in `a'$b'"$B"` the single-quoted half stays literal even though `B` is a real assigned variable, while the double-quoted half still expands. A per-word flag could not express this |
 | `TestParseArrayElementsPreserveQuoting` | The array body is a SECOND, separate call site from the scalar path (`tokenizeSegments` + per-word expand in `parse()`), so it gets its own coverage rather than being assumed to follow |
@@ -822,9 +880,9 @@ mapping, and the YAML emitter. 37 tests.
 | `TestConvertExplicitPlatformWins` | `--platform` overrides detection and suppresses the detection warning |
 | `TestConvertUnmappedVariablesWarn` | Variables with no YAML equivalent are named in the warnings, not dropped silently |
 | `TestConvertBashPlumbingIsSilent` | Bootstrap-only variables (`EXDIR`, `GENONLY`) are dropped without noise |
-| `TestConvertKubeMapsToK8sRuntime` | `KUBE` becomes `kubernetes.runtime` in every shape it carried: a drop-in (`oc`), a wrapper (`microk8s kubectl`), a `--kubeconfig` profile, and an absolute path -- no warning |
-| `TestConvertKubeEchoIsDropped` | `KUBE="echo"` was the bash preview trick, so it warns pointing at `generate` and emits no `runtime`, rather than becoming a runtime that no-ops every command |
-| `TestConvertKubeSilentOnContainerPlatform` | `KUBE` belongs to the Kubernetes bootstrap: a container conversion consumes it silently and never emits `kubernetes.runtime` |
+| `TestConvertKubeMapsToK8sRuntime` | `KUBE` becomes `kubernetes.command` in every shape it carried: a drop-in (`oc`), a wrapper (`microk8s kubectl`), a `--kubeconfig` profile, and an absolute path -- no warning |
+| `TestConvertKubeEchoIsDropped` | `KUBE="echo"` was the bash preview trick, so it warns pointing at `generate` and emits no `command`, rather than becoming a command that no-ops every call |
+| `TestConvertKubeSilentOnContainerPlatform` | `KUBE` belongs to the Kubernetes bootstrap: a container conversion consumes it silently and never emits `kubernetes.command` |
 | `TestConvertRedundancySpellings` | Both legacy spellings normalise onto the schema's own, any case -- `true`/`yes` become `"true"` and `false`/`no` become `"false"`, quoted because both are YAML-ambiguous -- while anything else copies through as a plain scalar with a warning |
 | `TestConvertRedundancyOmitted` | An unset SOLBK_REDUNDANCY emits no key either way, but a container source is warned that its bootstrap defaulted to HA while this CLI defaults to standalone; a k8s source stays silent because the defaults already agree |
 | `TestConvertDockerRunModeWarns` | DOCKER_MODE=run is dropped with the removal reason rather than carried over to fail validation later |
@@ -951,8 +1009,9 @@ fixture itself.
 | `TestSkipIfStandalone` | The HA-only guard is false in HA and true in standalone |
 | `TestServerCert` | The uploaded bundle is key+cert+CA concatenated, plus the apply script |
 | `TestServerCertRequiresCert` | Missing `tls.cert`/`certKey` errors |
-| `TestDomainCerts` | Each CA file is uploaded and the load script matches the generated one |
+| `TestDomainCerts` | Each resolved `config.DomainCert` is uploaded to `certPath(name)` (not a filename) and the load script matches the generated one |
 | `TestDomainCertsRejectsBadName` | A CA name with a space is rejected before any upload |
+| `TestDomainCertsAcceptsAFullHostPath` | The inverted assertion from before the shape change: the local source is a full host path, already resolved by `config.ResolveDomainCerts`, and must upload rather than error -- it is no longer a CLI operand or an in-broker path, only a local argument to `UploadFile` |
 | `TestDomainCertsEmptySkips` | No configured certs means no calls at all |
 | `TestDisableDefaultVPN` | The hardening script is uploaded and its scripts are cleaned up with one `rm -f` |
 | `TestDisableDefaultUsers` | Every parsed VPN gets a `client-username default` line |
@@ -1009,7 +1068,7 @@ Branch coverage for the paths the happy-path tests in `broker_test.go` cannot re
 | `TestExecCLIRunError` | A failed run errors, and cleanup is still attempted |
 | `TestServerCertBundleReadError` | Unreadable cert/key files error |
 | `TestServerCertCAReadError` | An unreadable CA file errors |
-| `TestDomainCertsBadFilename` | A certificate *filename* with a space is rejected (the CA name being valid) |
+| `TestDomainCertsAcceptsAPathWithSpaces` | Replaces `TestDomainCertsBadFilename`: the certificate value is now a full host path, not an in-broker filename or CLI operand, so a path with a space (already gated by `config.CheckHostPath` at load) must be ACCEPTED here, not rejected |
 | `TestDiagnosticsTwoRolesNoBundle` | Output with no "Diagnostics saved" line pulls only the configs zip, once per role |
 | `TestDiagnosticsRunError` | A transport `Run` failure surfaces |
 | `TestLeaderPollCondError` | A failing `show redundancy` propagates, and the detail dump still runs |
@@ -1257,7 +1316,7 @@ Pins the generated broker CLI script text -- these strings are what the broker e
 | `TestRevertActivityTrailingSpace` | The redundancy-test revert keeps its trailing space; the leader-path revert does not |
 | `TestAssertLeaderScript` | Asserts leader for router and all VPNs, ending with the config-sync database show |
 | `TestServerCertScript` | The cert filename format plus the script's prefix, load line, and closing show |
-| `TestDomainCertsScriptSorted` | Map input emits CAs in sorted order for deterministic output, with the right prefix/suffix and per-CA block |
+| `TestDomainCertsScriptSorted` | The caller's order is emitted as given (no internal sort any more), with the right prefix/suffix, and the `certificate file` operand is the CA NAME itself -- the upload destination is `certPath(name)`, so the name IS the in-broker filename the operand resolves against |
 | `TestDisableDefaultUsersScriptQuoting` | A VPN name containing a space stays one quoted token |
 | `TestRemoveProductKeysScript` | The revocation form confirmed on a live broker, whole: `no product-key <key>` under the same preamble |
 | `TestProductKeyScriptsShareAPreamble` | Apply and remove open with the same `home`/`enable`/`admin` and close with the same `show product-key`. A removal that reached `no product-key` from a different CLI context than the apply reached `product-key` from would fail in a way no test comparing only its own literal would catch |
@@ -1268,7 +1327,6 @@ Pins the generated broker CLI script text -- these strings are what the broker e
 | `TestParseVPNNamesNoSeparator` | Output without a separator row yields no names |
 | `TestGatherConfigsScript` | Prefix, first show command, `gather-diagnostics` with days substituted, and one line per configured show |
 | `TestZipConfigsScript` | The zip command is present |
-| `TestSortedKeys` | `sortedKeys` returns map keys in sorted order |
 | `TestEveryScriptTurnsPagingOffAfterHome` | Every script generator emits `no paging` immediately after every `home`. A paginated report re-prints its column header and rule partway down, and the rule then reads as a data row of all dashes -- which is how `show message-vpn * replication` grew a phantom VPN named after its own separator. The parsers tolerate a repeat as a backstop; turning paging off at the source is the fix. It walks every generator rather than the ones that came to mind, because the gap it closes was exactly a set of scripts written with `home` and without `no paging` |
 
 ### sections_test.go
@@ -1515,7 +1573,7 @@ Everything driven through `kubectl`: the read-only permission preflight, prep, d
 operator, day-2 ops, secrets, and the pod transport, plus the operator's watch-list
 algebra and the namespace occupancy gate, plus the mate channel that reaches a
 replication site in another cluster, and the Secret read that supplies a mate's
-password. 200 tests across 18 files.
+password. 208 tests across 18 files.
 
 ### matechannel_test.go
 
@@ -1529,7 +1587,7 @@ password. 200 tests across 18 files.
 | `TestNewMateChannelRefusesANonKubeSite` | A site declaring `via.semp` is refused here rather than silently driven over the wrong mechanism |
 | `TestReadSecretKeyArgvAndDecoding` | The mate-password read: the SITE's own cluster CLI, one key fetched by jsonpath rather than `-o yaml` (which would pull every other key of the Secret through this process), and the value base64-decoded with the trailing newline dropped -- the one `kubectl create secret --from-file` keeps and `echo` adds, which would otherwise be sent as part of the password |
 | `TestReadSecretKeyEscapesADottedKey` | The silent-failure case: an unescaped dot in a jsonpath member is read as a PATH STEP, so `{.data.tls.key}` looks inside a `tls` object that does not exist and kubectl exits 0 printing nothing |
-| `TestReadSecretKeyFallsBackToThisClusterCLI` | A SEMP-reached site can still keep its password in a cluster: with no `via.kubernetes` to borrow a command from, the read uses THIS env file's `kubernetes.runtime` |
+| `TestReadSecretKeyFallsBackToThisClusterCLI` | A SEMP-reached site can still keep its password in a cluster: with no `via.kubernetes` to borrow a command from, the read uses THIS env file's `kubernetes.command` |
 | `TestReadSecretKeyRefusesAnEmptyReading` | kubectl exits 0 and prints nothing for a key the Secret does not carry, so without this the mate would be dialled with an empty password and the failure would surface as a login refusal against a perfectly healthy broker |
 | `TestReadSecretKeyRefusesNonBase64` | `.data` is always base64 and `.stringData` is write-only, so a value that does not decode means the wrong field was read -- refused rather than decoded to garbage |
 | `TestReadSecretKeyGuardsTheCommand` | The execution guard runs on this path too, and stops BEFORE exec: the read is built straight from a `*config.Config` and must not assume `Validate` ever ran |
@@ -1588,7 +1646,7 @@ one wrongly reported occupied merely stays. The gate is built to fail toward "oc
 
 | Test | What it covers |
 | --- | --- |
-| `TestClusterHonoursRuntime` | Every `Cluster` helper (`kubectl`, `apply`, `deleteStdin`, `output`, `interactiveExec`) runs argv[0] from `kubernetes.runtime` and places its leading arguments ahead of the subcommand |
+| `TestClusterHonoursRuntime` | Every `Cluster` helper (`kubectl`, `apply`, `deleteStdin`, `output`, `interactiveExec`) runs argv[0] from `kubernetes.command` and places its leading arguments ahead of the subcommand |
 | `TestTransportHonoursRuntime` | The pod transport does the same for `exec`, `exec -i`, the stdin `Upload`, and both `cp` directions |
 | `TestExecutorRefusesUnapprovedRuntime` | The executor half of enforce-twice: a `Cluster` and a transport built straight from a `*config.Config` that never went through `config.Load` still refuse an unapproved `microk8s kubectl`, on all eleven paths that could reach exec -- and hand the runner nothing at all, since refusing after the call would mean the binary already ran |
 | `TestRuntimeDefaultArgvUnchanged` | With the default runtime the argv is exactly `kubectl ...` with no extra tokens -- the regression guard for every existing `+ kubectl ...` assertion |
@@ -1640,6 +1698,7 @@ instead of the first.
 | `TestValidateConfigSectionNeverFails` | M11: the report-level companion to `TestPortRowsNeverFail` -- `validationRows` alone must never move `checkReport.failed()` off zero |
 | `TestValidateReportsThePreSharedKeyChoice` | On Kubernetes an empty pre-shared key is a legitimate deployment rather than a gap -- the operator generates and distributes one -- so the report has to say WHICH of the two keys the group will end up using; nothing else shows it, since neither the CR nor the Secret exists until deploy. A configured key is reported by naming the Secret entry it becomes and never the value itself, and a standalone broker gets no row at all |
 | `TestValidateSaysWhoOwnsTheTLSSecret` | Naming a Secret and supplying the files it is built from are separate decisions, and the report is the only place the difference shows before a deploy: read as "this tool will create it" in the case where it will not, a missing Secret is first discovered by a pod that will not mount. Covers both origins, plus the `tls.certPassphrase` warning -- the CRD's `spec.tls` has no passphrase field, so an encrypted key cannot be used on this platform -- and that the passphrase itself never reaches the output |
+| `TestValidateReportsTheDerivedImagePullSecretName` | The "image pull" row's own version of the test above: the row now prints `cfg.ImagePullSecretName()`, not `cfg.K8s.ImagePullSecret` directly, so it must show the Secret that will actually exist -- including the DERIVED default -- rather than only what the env file spelled out, or an operator reading a name matching nothing they configured would read it as a bug instead of the default it is. Covers all three states: a configured name (reported as-is), credentials present with no name (the derived default), and neither (`(none)`/`(none)`) |
 | `TestValidateSkipsTheStorageClassWhenEveryNodeIsCustomMounted` | Closes a gap the shared name hid: there are two `storageRows`, and only the config-side one branched on custom mounts. It drives a recording runner rather than `engine.Echo` on purpose -- the Echo path short-circuits every cluster-backed row to "skipped (preview)" before `storageRows` is reached, so a preview cannot see this either way, and a test written over Echo asserts nothing. The cluster-side namesake ran the class check regardless -- and since `validateStorage` refuses class and `customVolumeMount` together, it always fell through to the cluster default. On a cluster with no default (bare metal, static provisioning -- exactly why someone pre-creates PVCs) that FAILED the whole report over a class the deploy never touches, and advised setting a key `config.Load` then refuses. Also guards that dead-end advice against coming back |
 | `TestValidateStillChecksTheClassWhenOnlySomeNodesAreMounted` | The guard asks per role rather than off `UsesCustomMounts`, so a partly covered group -- which still has claims to bind -- keeps being checked. `validateStorage` forbids that state today; this is what stops the check silently disappearing if the rule is ever relaxed |
 | `TestCheckReportSkipsEmptySections` | A section with no rows (e.g. Placement on a standalone config) prints no header at all, rather than an empty block |
@@ -1655,7 +1714,7 @@ instead of the first.
 | `TestCreateSecretsAdminOnly` | With no TLS or pull secret only the admin secret is applied, as a single document |
 | `TestCreateSecretsAllThree` | Admin + TLS + pull secret join into one multi-doc apply, and the registry password reaches neither argv nor plaintext stdin |
 | `TestCreateSecretsPreflight` | Missing TLS inputs fail before any apply runs |
-| `TestDeleteSecrets` | All configured secrets are deleted; admin-only config deletes one |
+| `TestDeleteSecrets` | All configured secrets are deleted; admin-only config deletes one. Both the TLS and the image-pull Secret follow the MATERIAL, not the NAME (`ManagesTLSSecret`/`ManagesImagePullSecret`): a Secret this env file only names, with no credentials behind it, is the operator's own and survives; with credentials present and no name configured, the delete targets the same DERIVED default `GenSecrets` built the Secret under, not a skip and not an invented name |
 | `TestUpdateServerCertSecret` | The TLS secret is applied on stdin; an unset secret name errors |
 | `TestCreateSecretsFailsWithoutAdminFields` | CreateSecrets can pass secretPreflight (TLS-only) and still fail loud inside GenSecrets when semp.adminPass/kubernetes.adminSecret are unset, with zero applies made |
 | `TestCreateSecretsStopsOnPreflightFailure` | A refused `auth can-i create secrets` stops CreateSecrets before GenSecrets reads the TLS private key off disk -- loading key material for a cluster that will not accept it is work worth not doing |
@@ -1708,11 +1767,14 @@ instead of the first.
 | --- | --- |
 | `TestWatchNamespace` | `WATCH_NAMESPACE` joins: broker namespace appended by default, onto a configured list, or omitted when disabled -- plus the dedupe half, since a list that already named the broker namespace (the common case, `watchBrokerNs` defaults on) listed it twice in the report and the applied Deployment. Entries are trimmed, empties and trailing commas dropped, repeats inside the list collapsed, first occurrence winning. controller-runtime's map-keyed cache hid the repeat at runtime, so only these cases can catch a regression |
 | `TestOperatorImage` | The registry-prefix rule now shared by `RenderOperator` and `CheckEnv`: prefixed when `image.registry` is set, raw when it is not. Its own test rather than only being reached through the 119 KB bundle render, because the report and the apply drifted for exactly as long as each owned a copy |
-| `TestRenderOperatorSubstitutions` | Every substitution point lands (namespace, watch list, image with/without registry prefix, resources, pull-secret reference) and no template marker survives -- and the bundle carries no `.dockerconfigjson`, since the reference is a name and the Secret is its own artifact |
+| `TestRenderOperatorSubstitutions` | Every substitution point lands (namespace, watch list, image with/without registry prefix, resources, pull-secret reference) and no template marker survives -- and the bundle carries no `.dockerconfigjson`, since the reference is a name and the Secret is its own artifact. The "no pull secret" subtest now clears `image.user`/`image.pass` alongside the name, since the sample fixture also supplies credentials and the gate moved to them |
+| `TestRenderOperatorPullSecretGatesOnCredentials` | The state that had no coverage before `ManagesImagePullSecret` existed: `kubernetes.imagePullSecret` NAMES a Secret, but with no `image.user`/`image.pass` behind it that is the operator's own bring-your-own case -- the broker CR can still reference such a Secret (`render.BrokerCR`), but the operator bundle can only ever reference its OWN fixed-name regcred, and there are no credentials here to build one from, so the block must stay omitted exactly as if no name had been configured at all |
 | `TestRenderOperatorHonoursThePassedWatchList` | Why the watch list is a PARAMETER rather than something RenderOperator derives. `operator deploy` reconciles this env file against what is installed and applies the UNION, which cannot be recovered from config -- a renderer that recomputed it would discard the union and re-narrow the operator on every deploy. The list passed is deliberately unrelated to the config, so the test fails if the parameter is ignored |
 | `TestGenOperator` | Render-only uses the configured operator namespace, or the fixed default when unset |
+| `TestGenOperatorSplicesRegcredOnCredentialsNotOnName` | The gate `GenOperator` shares with `RenderOperator` and `OperatorApply`: whether the operator's own regcred Secret is spliced into the stream depends on `image.user`/`image.pass`, never on whether `kubernetes.imagePullSecret` happens to be set -- that name belongs to the BROKER's own pull secret (`DockerRegistrySecret`) and has no bearing on the operator's fixed-name `regcred` artifact. Covers both directions: credentials with no broker pull-secret name still splices regcred in, and a named broker pull secret with no credentials splices nothing |
 | `TestOperatorApply` | The three applies in dependency order: the bundle's own Namespace document alone, then the regcred into it, then the rest of the bundle -- each `apply -f -` on stdin. The bundle half carries no `.dockerconfigjson`, so everything applied is byte-for-byte a `generate` output |
-| `TestOperatorApplyNoPullSecret` | With no pull secret the regcred apply is skipped entirely: namespace then bundle, and nothing applied mentions regcred |
+| `TestOperatorApplyNoCredentialsSkipsRegcred` | Covers the branch where no registry credentials are configured: the regcred apply is skipped entirely, leaving namespace + bundle, and the preflight itself never probes the `secrets` permission it does not need. This used to clear `kubernetes.imagePullSecret` (the name) to reach that branch; the gate moved to the CREDENTIALS (`config.Config.ManagesImagePullSecret`), so clearing the name alone no longer suppresses anything -- see the next row for the state that replaces it |
+| `TestOperatorApplyNamedPullSecretWithoutCredentials` | The state that had no coverage before the credentials gate existed: `kubernetes.imagePullSecret` names a Secret this env file supplies no `image.user`/`image.pass` for. `render.BrokerCR` still references it by name (the broker CR side of the bring-your-own case), but the operator bundle can only ever reference its OWN fixed-name regcred -- and there are no credentials here to build one from, so `OperatorApply` must build, probe for and apply nothing extra, identical to no name being configured at all |
 | `TestOperatorDelete` | With `deleteCRDs=false`, teardown deletes only the non-CRD documents (Deployment, RBAC, ...) with `--ignore-not-found`, and the piped manifest carries no `kind: CustomResourceDefinition` document at all |
 | `TestOperatorDeleteWithCRDs` | With `deleteCRDs=true` and no broker CRs found (M3's guard, satisfied here), OperatorDelete lists PubSubPlusEventBroker CRs across all namespaces, then deletes the CRD document in a SECOND, separate `kubectl delete` call rather than folded into the first -- the split that stops a routine operator teardown from cascade-deleting every PubSubPlusEventBroker resource in the cluster |
 | `TestOperatorDeleteRefusesCRDWhenBrokersExist` | M3: any PubSubPlusEventBroker CR still visible anywhere in the cluster refuses the CRD deletion outright -- deleting the CRDs would cascade-delete it along with every broker this env file never mentioned. The operator Deployment/RBAC removal still runs; only the CRD layer is refused, and each `<namespace>/<name>` is named in both the returned error and the warning on stderr |
@@ -1726,6 +1788,7 @@ instead of the first.
 | `TestOperatorDescribe` | OperatorDescribe issues `describe deployment/<name> -n <opNS>` against the resolved operator namespace |
 | `TestOperatorNamespaceIsNotInTheDeleteStream` | The safety property the document split exists for. The Namespace document used to sit in `rest`, so `operator remove` deleted it in the same `delete -f -` stream as the Deployment -- cascading to everything else in that namespace, with none of the occupancy checks the broker's own namespace gets |
 | `TestOperatorDeleteKeepsTheNamespaceAndRemovesTheRegcred` | The consequence of keeping the namespace: the image-pull Secret used to be reaped as namespace content, so it now needs deleting BY NAME or a registry credential outlives every teardown |
+| `TestOperatorDeleteOmitsRegcredWithoutCredentials` | The delete-side counterpart to `TestOperatorApplyNoCredentialsSkipsRegcred` and `TestOperatorApplyNamedPullSecretWithoutCredentials`. Unlike apply, the regcred rides the SAME delete call as the rest of the bundle rather than one of its own, so there is no separate call to assert absent -- only that the one call never mentions it, and the `secrets` permission is never probed, whether or not a name is configured (both "no name, no credentials" and "name set, bring-your-own" subtests) |
 | `TestOperatorProbesEveryKindItTouches` | The fix for a check that passed and then failed halfway through the work: probing only the CRD meant an identity allowed to create CustomResourceDefinitions but not ClusterRoleBindings got past the preflight and died mid-apply -- the exact state `Preflight` exists to prevent |
 | `TestOperatorRestartProbesTheOperatorNamespace` | A silent defect pinned: the restart happens in the operator's namespace while its permission check asked about the broker's, so an identity permitted in one and not the other passed and then failed |
 
@@ -1839,12 +1902,15 @@ AGE column is reproducible.
 | `TestAdminSecretCarriesThePSKOnlyWhenSet` | The Kubernetes half of the PSK asymmetry, from the Secret's side. The key rides in the SAME Secret as the credentials -- the CR points at it through a separate field, so one object serves both -- and under the CRD's own spelling (`preshared_auth_key`), not ours. An unset key adds no entry at all: an empty one is a key the operator would honour, and the group then fails to form on it |
 | `TestGenSecretsSkipsATLSSecretItDoesNotOwn` | The fix for a real failure: an env file naming an existing Secret and supplying no cert/key made `broker generate` read `certs/tls.crt` -- an invented path -- and fail on a file the operator never mentioned. The stream still carries the credentials Secret, so this narrows one document rather than the whole thing |
 | `TestGenSecretsBuildsATLSSecretItOwns` | The other arm: with the pair supplied the Secret is rendered as before, under the configured name. `writeTempPEM` is the stub-file helper -- the renderers copy the bytes rather than parsing them |
+| `TestGenSecretsSkipsAnImagePullSecretItDoesNotOwn` | The pull-secret analogue of the TLS test above: a configured name with no credentials behind it is a Secret the operator created themselves, and `GenSecrets` must not invent credentials to rebuild it -- there are none to invent. The credentials Secret is unaffected, since this narrows one document, not the stream |
+| `TestGenSecretsBuildsAnImagePullSecretUnderTheDerivedName` | The other arm: credentials present, no name configured -- the Secret is still rendered, under the derived default rather than being silently dropped |
 | `TestAdditionalUsersSecretCarriesBothHalves` | Each user's access level AND password ride the Secret, even though the level is not sensitive: `extraEnvVarsSecret` is the only channel the CRD gives us for an environment variable, so a setting that must reach the broker as one has nowhere else to go -- unlike the container platforms, which put it in the artifact. The values are base64 in the data block, so neither plaintext may appear anywhere |
 | `TestAdditionalUsersSecretRefusesAnEmptyPassword` | The guard's own branch. Defensive rather than everyday: `config.Validate` refuses an empty additionalUsers password at load, so reaching this needs a `Config` built in code -- which is exactly what the executors are handed, and the same reason `AdminSecret` keeps its own empty-password check |
 | `TestAdditionalUsersSecretIsAbsentWithNoUsers` | nil, not an empty Secret. An empty one would be an object to create, name and clean up for nothing, and the CR omits `extraEnvVarsSecret` in the same case -- naming a Secret that does not exist fails the pod |
 | `TestAdditionalUsersStayOutOfTheCredentialsSecret` | The property the two-Secret split exists for, and it is not tidiness: `extraEnvVarsSecret` is projected with `envFrom`, which exports EVERY key of the Secret it names. If these users lived in the credentials Secret, pointing the CR at it would publish the ADMIN and MONITOR passwords to get the extra users in. Asserted in both directions |
 | `TestGenSecretsIncludesTheAdditionalUsers` | The stream `broker deploy` applies and `broker generate` prints carries the Secret, and omits it entirely when no users are configured |
-| `TestDockerRegistrySecretEmptyName` | An empty pull-secret name errors |
+| `TestDockerRegistrySecretEmptyName` | Pins the defence-in-depth guard inside `dockerRegistrySecret`, reachable through a different path than before: clearing `kubernetes.imagePullSecret` alone no longer gets here, since the sample fixture also supplies credentials and `ImagePullSecretName` falls through to the derived default. With neither a configured name nor credentials, `ImagePullSecretName` itself returns `""`, and this guard is what turns that into a build error instead of a Secret manifest with an empty name |
+| `TestDockerRegistrySecretDerivesTheDefaultName` | The state this function had no coverage for before `ImagePullSecretName` existed: credentials present, no `kubernetes.imagePullSecret` configured, the Secret is still built -- under `<kubernetes.name>-image-pull` rather than failing or silently naming nothing |
 
 ### transport_test.go
 
@@ -1869,7 +1935,7 @@ behind `broker status` and the server-certificate delivery each engine needs.
 
 | Test | What it covers |
 | --- | --- |
-| `TestManagerHonoursRuntime` | The manager's shell-outs (`run`, `output`, `CLI`, `Shell`) run argv[0] from `docker.runtime` with its leading arguments ahead of the subcommand -- the bash bootstrap expanded `${CONTAINER_RUNTIME}` unquoted, so a wrapper like `sudo -n docker` has to reach exec as argv |
+| `TestManagerHonoursRuntime` | The manager's shell-outs (`run`, `output`, `CLI`, `Shell`) run argv[0] from `docker.command` with its leading arguments ahead of the subcommand -- the bash bootstrap expanded `${CONTAINER_RUNTIME}` unquoted, so a wrapper like `sudo -n docker` has to reach exec as argv |
 | `TestManagerReachableProbesRuntimeThenCompose` | Docker `Reachable` probes both the engine and compose, and the derived compose default keeps the runtime wrapper (`sudo -n docker compose`, not a bare `docker compose`) |
 | `TestCtrTransportHonoursRuntime` | The node-local transport does the same for `exec`, the stdin `Upload`, and `cp` |
 | `TestCtrRuntimeDefaultArgvUnchanged` | A single-token runtime produces exactly the argv it did before, for both docker and podman |
@@ -2094,7 +2160,7 @@ variable, so what a run prints is decided by the CLI, in one place.
 ## internal/render
 
 Manifest and unit-file rendering, guarded by committed goldens, plus the server
-certificate's two delivery routes. 32 tests across 2 files.
+certificate's two delivery routes. 33 tests across 2 files.
 
 ### render_test.go
 
@@ -2119,6 +2185,7 @@ certificate's two delivery routes. 32 tests across 2 files.
 | `TestNoCustomVolumeMountEmitsNothing` | The block is absent, not empty: an empty array is a different statement from an unset field, and the operator reads them differently |
 | `TestExtraEnvVarsSecretFollowsTheUsers` | The CR half of `semp.additionalUsers`. The field names a Secret, so emitting it with no users would point the operator at an object that does not exist and fail the pod on a mount the deployment never needed -- the same rule `preSharedAuthKeySecret` follows. Also pins that no password reaches the CR |
 | `TestPreSharedAuthKeySecretFollowsTheKey` | The Kubernetes half of the PSK asymmetry. The field names a Secret, not a value, so emitting it unconditionally would point the operator at a Secret carrying no `preshared_auth_key` entry -- breaking a deployment the operator would otherwise have keyed itself. Absent means "generate your own", and `pskEnv` counts as a configured key |
+| `TestImagePullSecretBlockFollowsTheStates` | Pins the CR's own half of the three states `config.Config.ImagePullSecretName` documents: the renderer asks only "is there a name to reference" -- it never re-derives `ManagesImagePullSecret` itself. Covers all three: credentials present with no name configured renders the DERIVED default; a configured name with NO credentials behind it (the operator's own bring-your-own Secret) still gets referenced, since refusing would break a legitimate pre-created pull secret this tool does not own; neither configured omits the block entirely, the same "absent, not empty" rule `preSharedAuthKeySecret` and `extraEnvVarsSecret` follow |
 | `TestSecretTargetsAreAbsolutePaths` | The guard for the silent half of the secrets-directory move. Both engines resolve a BARE `target=`/`target:` under their own `/run/secrets`, so if `Target` ever went back to returning just the setting name the file would be created, the container would start, and the broker would look under `secretMount` and find nothing -- with no error from the engine, the tool, or the broker's own startup |
 | `TestSecretsAndCertDoNotNest` | No secret's file can collide with the server certificate's mount, which is the hazard the old layout carried: the cert lived INSIDE the secrets directory, so a setting named `tls.crt` would have been the same path. They are separate trees now, and this asserts it rather than trusting it |
 | `TestComposeProjectIsDeclaredNotDerived` | With no top-level `name:`, compose takes the project name from the basename of the directory holding the file -- so it changes when the artifact is generated elsewhere or the directory is renamed, and the previous project's containers, network and volumes become orphans `down` no longer finds |
@@ -2267,7 +2334,7 @@ new fake.
 - Tests needing a clean single-broker pass write their own minimal env to a temp file:
   `writeStandaloneEnv` (k8s-shaped) and `writeCtrStandaloneEnv` (container-shaped, needs a
   `redundancy:` block) in `internal/cli/cli_test.go`. `writeRuntimeEnv`
-  (`internal/cli/allowcommand_test.go`) is the same idea parameterized by `kubernetes.runtime`, for
+  (`internal/cli/allowcommand_test.go`) is the same idea parameterized by `kubernetes.command`, for
   driving one hostile or wrapped command through the whole CLI.
 - **`guardConfig`** (`internal/config/execguard_test.go`) is a config that validates cleanly
   on every platform with only the command fields left to vary, so a `Validate` failure in the

@@ -24,6 +24,20 @@ func (c *Config) Validate(p Platform) error {
 			"Kubernetes already required. monitorPass, monitorPassEnv and additionalUsers keep their names")
 	}
 
+	// Six more renamed keys, checked the same way: each retained field
+	// (config.go) is never defaulted, so a non-empty value here means the
+	// operator's own file still uses the old spelling.
+	if err := c.validateRenamedKeys(); err != nil {
+		return err
+	}
+
+	// After the rename check, deliberately: a file still carrying the retired
+	// broker.domainCerts.folder must hear that its key was renamed AND reshaped,
+	// not a complaint about the new block it has not written yet.
+	if err := c.validateDomainCerts(); err != nil {
+		return err
+	}
+
 	// redundancy.enabled is a shared enum on every platform.
 	switch c.Redundancy.Enabled {
 	case "true", "false":
@@ -87,6 +101,87 @@ func (c *Config) Validate(p Platform) error {
 	}
 }
 
+// validateDomainCerts checks the two things about broker.domainCerts that need no
+// filesystem, at LOAD -- which is the whole reason they are here and not left to
+// config.ResolveDomainCerts.
+//
+// The resolver deliberately runs at the OP (opK8sConfigDomainCerts), not at load,
+// because it reads directories: a certificate directory that happens not to exist on
+// this machine must not fail a `deploy` or a `generate` that never touches domain
+// certificates. But a files KEY and an empty files VALUE are pure string facts about
+// the env file, so deferring them buys nothing and costs the operator a full
+// generate/deploy/verify cycle before the typo surfaces -- at the one command that
+// actually uploads, which is the worst moment to learn the name was never legal.
+//
+// The key is held to validExplicitCAName (domaincerts.go) rather than a rule of its
+// own: a directory-derived name satisfies that charset by construction, since
+// DeriveCAName sanitises it, and an explicit one is typed straight into the env file
+// with nothing sanitising it at all. One rule, two sources, so the two cannot drift
+// into disagreeing about what a legal CA name is.
+func (c *Config) validateDomainCerts() error {
+	// Sorted, and inline rather than through a helper: the package already has a
+	// sortedKeys for map[string]int, and ResolveDomainCerts sorts its own copy of
+	// these same keys the same way. The order matters because Go randomises map
+	// iteration -- an error that named a different one of two bad keys per run
+	// would make a bug report unreproducible.
+	names := make([]string, 0, len(c.Broker.DomainCerts.Files))
+	for ca := range c.Broker.DomainCerts.Files {
+		names = append(names, ca)
+	}
+	sort.Strings(names)
+	for _, ca := range names {
+		if err := validExplicitCAName(ca); err != nil {
+			return err
+		}
+		// Empty is not "will be defaulted" here, which is the asymmetry
+		// CheckHostPath encodes for every other path field (it returns nil on an
+		// empty value for exactly that reason, hostpath.go). Nothing defaults a
+		// files entry: the operator named a certificate authority and gave it no
+		// certificate, so the entry can only ever fail -- at upload, reading "".
+		if c.Broker.DomainCerts.Files[ca] == "" {
+			return fmt.Errorf("broker.domainCerts.files[%s] has no path: an entry names a certificate "+
+				"authority and the FULL host path of its certificate, and nothing defaults the path. "+
+				"Give it one, or remove the entry", ca)
+		}
+	}
+	return nil
+}
+
+// validateRenamedKeys refuses the six keys renamed away from this schema,
+// naming the replacement -- the same pattern scaling.go's retired maxPool
+// uses, rather than a silent alias: an env file setting both the old and the
+// new spelling would otherwise have no defined winner.
+//
+// Every field checked here is retained in config.go specifically so it decodes
+// (rather than failing strict-decoding with a bare unknown-field error) and is
+// NEVER written by ApplyDefaults, which is what makes "non-empty" mean "the
+// operator's own file set it" rather than "ApplyDefaults filled it just now".
+func (c *Config) validateRenamedKeys() error {
+	if len(c.K8s.Runtime) > 0 {
+		return fmt.Errorf("kubernetes.runtime was renamed to kubernetes.command (got: %q)", c.K8s.Runtime.String())
+	}
+	if len(c.Docker.Runtime) > 0 {
+		return fmt.Errorf("docker.runtime was renamed to docker.command (got: %q)", c.Docker.Runtime.String())
+	}
+	if len(c.Podman.Runtime) > 0 {
+		return fmt.Errorf("podman.runtime was renamed to podman.command (got: %q)", c.Podman.Runtime.String())
+	}
+	if c.Broker.CLIScriptsFolder != "" {
+		return fmt.Errorf("broker.cliScriptsFolder was renamed to broker.cliScriptsDir (got: %q)",
+			c.Broker.CLIScriptsFolder)
+	}
+	if c.Broker.DiagDir != "" {
+		return fmt.Errorf("broker.diagDir was renamed to broker.hostDiagnosticDir (got: %q)", c.Broker.DiagDir)
+	}
+	if c.Broker.DomainCerts.Folder != "" {
+		return fmt.Errorf("broker.domainCerts.folder was renamed to broker.domainCerts.dirs, and its shape "+
+			"changed: dirs is a LIST of directories to walk (each entry a plain path, or a mapping with "+
+			"path and an optional fileExt), and broker.domainCerts.files now takes a FULL host path as its "+
+			"value rather than a bare filename under folder (got folder: %q)", c.Broker.DomainCerts.Folder)
+	}
+	return nil
+}
+
 // validateHostPaths runs CheckHostPath over every field whose value is a path on
 // the machine running this tool. The list is per platform because the fields are:
 // only a container platform has a compose file or a data dir, and only kubernetes
@@ -94,41 +189,66 @@ func (c *Config) Validate(p Platform) error {
 // platform-neutral and checked everywhere, since a container deployment reads the
 // same certificate and the same script folder.
 //
-// TestValidateHostPathsCoversEveryHostPathField pins the list against
+// TestValidateHostPathsMatchesTheRebaseList pins the list against
 // rebaseHostPaths, so a field that gains a rebase without a check, or the reverse,
 // fails rather than quietly diverging.
 func (c *Config) validateHostPaths(p Platform) error {
 	fields := []struct{ field, value string }{
 		{"tls.cert", c.TLS.Cert},
 		{"tls.certKey", c.TLS.CertKey},
-		{"broker.cliScriptsFolder", c.Broker.CLIScriptsFolder},
-		{"broker.diagDir", c.Broker.DiagDir},
-		{"broker.domainCerts.folder", c.Broker.DomainCerts.Folder},
+		{"broker.cliScriptsDir", c.Broker.CLIScriptsDir},
+		{"broker.hostDiagnosticDir", c.Broker.HostDiagnosticDir},
 	}
 	for i, ca := range c.TLS.CAs {
 		fields = append(fields, struct{ field, value string }{fmt.Sprintf("tls.cas[%d]", i), ca})
 	}
+	for i, d := range c.Broker.DomainCerts.Dirs {
+		fields = append(fields,
+			struct{ field, value string }{fmt.Sprintf("broker.domainCerts.dirs[%d]", i), d.Path})
+	}
+	for ca, path := range c.Broker.DomainCerts.Files {
+		fields = append(fields,
+			struct{ field, value string }{fmt.Sprintf("broker.domainCerts.files[%s]", ca), path})
+	}
+	for _, f := range fields {
+		if err := CheckHostPath(f.field, f.value); err != nil {
+			return err
+		}
+	}
+	// The container-host fields: checked but never rebased AND never
+	// tilde-expanded (expandHomePaths, hostpath.go), because each is a path on
+	// the machine that runs the container rather than the machine running this
+	// tool -- so they go through checkContainerHostPath, which additionally
+	// refuses a leading '~' rather than silently letting one reach the artifact.
+	var containerFields []struct{ field, value string }
 	switch p {
 	case Docker:
-		fields = append(fields,
-			struct{ field, value string }{"docker.composeFile", c.Docker.ComposeFile},
+		containerFields = append(containerFields,
 			struct{ field, value string }{"docker.container.dataDir", c.Docker.Container.DataDir},
 		)
 	case Podman:
-		fields = append(fields,
-			// The quadlet dir is checked but never rebased: the unit has to live
-			// where systemd scans, so a relative value is an operator error rather
-			// than something to resolve helpfully.
+		containerFields = append(containerFields,
+			// The quadlet dir is never rebased: the unit has to live where systemd
+			// scans, so a relative value is an operator error rather than
+			// something to resolve helpfully.
 			struct{ field, value string }{"podman.quadletDir", c.Podman.QuadletDir},
-			// Likewise checked but never rebased, and required absolute above: it is
-			// a `Volume=` source, and resolving a relative one would invent a
+			// Likewise never rebased, and required absolute above: it is a
+			// `Volume=` source, and resolving a relative one would invent a
 			// location for a private key that the operator did not name.
 			struct{ field, value string }{"podman.baseDir", c.Podman.BaseDir},
 			struct{ field, value string }{"podman.container.dataDir", c.Podman.Container.DataDir},
 		)
 	}
-	for _, f := range fields {
-		if err := CheckHostPath(f.field, f.value); err != nil {
+	for _, f := range containerFields {
+		if err := checkContainerHostPath(f.field, f.value); err != nil {
+			return err
+		}
+	}
+	// docker.composeFile IS expanded and rebased (it is read by this tool, not
+	// the container), so it takes the ordinary gate above rather than
+	// checkContainerHostPath.
+	if p == Docker {
+		if err := CheckHostPath("docker.composeFile", c.Docker.ComposeFile); err != nil {
 			return err
 		}
 	}

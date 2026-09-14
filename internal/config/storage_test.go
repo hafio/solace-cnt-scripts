@@ -15,7 +15,7 @@ func storageCfg(class string, redundancy string, mounts map[string]string) *Conf
 	c.Redundancy.Enabled = redundancy
 	c.K8s.Name = "dev-broker"
 	c.K8s.Namespace = "solace"
-	c.K8s.Runtime = Command{"kubectl"}
+	c.K8s.Command = Command{"kubectl"}
 	c.K8s.UpdateStrategy = "automatedRolling" // validateK8s checks it beyond the required set
 	c.K8s.Storage.Class = class
 	c.K8s.Storage.CustomVolumeMount = mounts

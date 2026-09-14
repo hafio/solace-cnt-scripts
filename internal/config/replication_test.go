@@ -297,7 +297,12 @@ func TestSiteCommandGuarded(t *testing.T) {
 		}
 	})
 
-	t.Run("names the site's own field, not kubernetes.runtime", func(t *testing.T) {
+	// The two field names now differ only by prefix (kubernetes.command, renamed
+	// from kubernetes.runtime, vs replication.sites[N].via.kubernetes.command),
+	// which makes this assertion sharper than it used to be: naming the
+	// top-level field instead of the site's own would be one word away from
+	// passing a looser check.
+	t.Run("names the site's own field, not kubernetes.command", func(t *testing.T) {
 		bad := validReplication()
 		bad.Sites[0].Via.Kubernetes.Command = Command{"curl"}
 		err := replConfig(bad).Validate(K8s)

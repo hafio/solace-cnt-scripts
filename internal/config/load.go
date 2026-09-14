@@ -48,6 +48,13 @@ func Load(path string, p Platform, allowCommands ...string) (*Config, error) {
 	// checkout directory through a charset check it never agreed to, and a path
 	// with a space in it would fail a load for a reason the env file did not cause.
 	//
+	// Home-directory expansion runs next, before the rebase: an expanded value is
+	// already absolute, so the rebase below leaves it alone rather than joining
+	// the env file's directory onto it (expandHomePaths' own doc comment has the
+	// full ordering argument).
+	if err := c.expandHomePaths(); err != nil {
+		return nil, err
+	}
 	// filepath.Abs so the result does not depend on the working directory a moment
 	// later, and so an absolutized `Volume=` source is genuinely absolute -- a
 	// base of "." would otherwise leave every path relative and reintroduce
@@ -143,21 +150,20 @@ func (c *Config) ApplyDefaults(p Platform) {
 	// The cluster CLI (bash KUBE). Defaulted for every platform, not just k8s, so
 	// the resolved command is printable and testable from any code path; only the
 	// k8s renderers and transport ever read it.
-	setDefaultCmd(&c.K8s.Runtime, "kubectl")
+	setDefaultCmd(&c.K8s.Command, "kubectl")
 
 	// The broker-ops folders apply to every platform: `broker perform cli-script` reads the
 	// one and verify diagnostics writes the other, on kubernetes and containers
 	// alike. Defaulted unconditionally so neither branch has to remember to.
-	setDefault(&c.Broker.DiagDir, "diag-configs")
-	setDefault(&c.Broker.CLIScriptsFolder, "cli")
-	// The sample env file has always shown `folder: certs` as this key's default,
-	// under a header stating that a commented-out key shows the value that applies
-	// when it is omitted -- but nothing ever set it, so an omitted folder made
-	// filepath.Join("", file) collapse to a bare filename resolved against whatever
-	// directory the command ran from. Defaulting it makes the documented promise
-	// true and puts the value under the same env-file-relative rule as every other
-	// host path (hostpath.go).
-	setDefault(&c.Broker.DomainCerts.Folder, "certs")
+	setDefault(&c.Broker.HostDiagnosticDir, "diag-configs")
+	setDefault(&c.Broker.CLIScriptsDir, "cli")
+	// broker.domainCerts.dirs is deliberately NOT defaulted, unlike the retired
+	// `folder` key it replaces (which used to default to "certs"). dirs/files
+	// empty is the no-op `broker configure domain-certs` has always logged
+	// ("No domain certificate authorities configured -- skipping"), and rule F
+	// makes an unreadable dir a hard failure rather than a skip -- defaulting a
+	// dir that a deployment configuring no domain certificates never created
+	// would turn that no-op into a failure on every such deployment.
 
 	if p == K8s {
 		c.applyK8sDefaults()
@@ -241,14 +247,14 @@ func (c *Config) applyContainerDefaults(p Platform) {
 	setDefaultInt(&c.Scaling.MaxGuaranteedMsgMB, 10)
 
 	if p == Docker {
-		setDefaultCmd(&c.Docker.Runtime, "docker")
+		setDefaultCmd(&c.Docker.Command, "docker")
 		// The compose plugin is a subcommand of the runtime, so its default is
 		// derived from the (possibly overridden) runtime rather than hardcoded --
 		// a host with only the standalone v1 binary sets docker.compose instead.
 		c.Docker.Compose = c.composeOrDerived()
 	}
 	if p == Podman {
-		setDefaultCmd(&c.Podman.Runtime, "podman")
+		setDefaultCmd(&c.Podman.Command, "podman")
 		// Derive the three rootless-dependent knobs in one place.
 		if c.Podman.Rootless {
 			if c.Podman.QuadletDir == "" {
@@ -287,9 +293,9 @@ func applyContainerBlockDefaults(b *Container) {
 func (c *Config) ContainerRuntime(p Platform) Command {
 	switch p {
 	case Docker:
-		return c.Docker.Runtime
+		return c.Docker.Command
 	case Podman:
-		return c.Podman.Runtime
+		return c.Podman.Command
 	default:
 		return nil
 	}

@@ -73,6 +73,13 @@ type Config struct {
 	// internal/convert never goes through Load, has no path to derive a base from,
 	// and must keep behaving exactly as it did -- paths left as written.
 	baseDir string
+
+	// homeDir resolves the current user's home directory for leading-'~'
+	// expansion (expandHomePaths, hostpath.go). nil means the real
+	// os.UserHomeDir; a test swaps it in so the home-directory branches do not
+	// depend on the environment the test happens to run in. Unexported for the
+	// same reason baseDir is -- no env file can supply its own answer here.
+	homeDir func() (string, error)
 }
 
 // AdditionalUsersSecretName is the Secret carrying admin.additionalUsers, which the broker
@@ -97,6 +104,39 @@ func (c *Config) AdditionalUsersSecretName() string {
 // nothing here reads, applies or deletes it.
 func (c *Config) ManagesTLSSecret() bool {
 	return c.TLS.Cert != "" || c.TLS.CertKey != ""
+}
+
+// ManagesImagePullSecret reports whether this tool builds the broker's image-pull Secret
+// itself, which is true exactly when the env file supplies registry credentials to build it
+// from. It is ManagesTLSSecret's rule again, for the same reason: naming the Secret
+// (kubernetes.imagePullSecret) only says the broker should USE one -- it may already exist,
+// created by hand or by a cluster admin, in which case the CR references it by name and
+// nothing here builds, applies or deletes it. "Or equivalent" (image.passEnv) needs no
+// separate check here: resolveSecretRefs (secretref.go) resolves it into Image.Pass during
+// Load, so testing Image.Pass alone already covers it.
+func (c *Config) ManagesImagePullSecret() bool {
+	return c.Image.User != "" && c.Image.Pass != ""
+}
+
+// ImagePullSecretName is the name the broker CR should reference, or "" when there is
+// nothing to reference. Three states, and the middle one is the one a future reader will
+// otherwise "fix" into an error: kubernetes.imagePullSecret set names a Secret this tool
+// either builds (credentials present, below) or merely points the CR at (credentials
+// absent -- the same bring-your-own case ManagesTLSSecret documents, and NOT an invention:
+// mirroring it is the consistent choice, where refusing it would reject a pull secret a
+// cluster admin or external-secrets legitimately pre-created); neither a configured name
+// nor credentials means no pullSecrets block anywhere. The default is derived only under
+// ManagesImagePullSecret -- never invented for an unnamed Secret with no credentials behind
+// it -- which is what keeps every reference site an `if n := c.ImagePullSecretName(); n !=
+// ""` rename rather than a restructure.
+func (c *Config) ImagePullSecretName() string {
+	if c.K8s.ImagePullSecret != "" {
+		return c.K8s.ImagePullSecret
+	}
+	if c.ManagesImagePullSecret() {
+		return c.K8s.Name + "-image-pull"
+	}
+	return ""
 }
 
 // RedundancyEnabled reports HA mode (redundancy.enabled: true). Container HA and k8s HA
@@ -420,7 +460,7 @@ func (v ReplVia) Set() bool { return v.Kubernetes != nil || v.SEMP != nil }
 
 // ReplViaKube reaches the mate with its own cluster CLI. Command carries the cluster
 // rather than a --context flag of this tool's: it then passes the same execution guard
-// as kubernetes.runtime, so `kubectl --context dr` is checked by the machinery already
+// as kubernetes.command, so `kubectl --context dr` is checked by the machinery already
 // in place and --allow-command stays the only door to widen the allowlist.
 type ReplViaKube struct {
 	Command   Command `yaml:"command"`   // THIS FIELD RUNS A BINARY (SiteCommand)
@@ -452,7 +492,7 @@ type ReplViaSEMP struct {
 
 // ReplPassSecret names a Kubernetes Secret holding the mate's admin password. It is read
 // with that site's via.kubernetes.command when it has one, and this file's
-// kubernetes.runtime otherwise -- so a site reached over SEMP can still keep its password
+// kubernetes.command otherwise -- so a site reached over SEMP can still keep its password
 // in a cluster this machine can read.
 type ReplPassSecret struct {
 	Namespace string `yaml:"namespace"`
@@ -519,15 +559,24 @@ func (r Replication) Locate(routerName string) (self, mate ReplSite, err error) 
 // kubernetes: section to reach them -- which made "which platform is this file
 // for?" unanswerable from the file itself (DetectPlatforms).
 type Broker struct {
-	CLIScriptsFolder string      `yaml:"cliScriptsFolder"` // SOLBK_CLISCRIPTS_FOLDER
-	DiagDir          string      `yaml:"diagDir"`          // SOLBK_DIAG_DIR
-	ProductKeys      []string    `yaml:"productKeys"`      // SOLBK_PRODUCTKEYS
-	DomainCerts      DomainCerts `yaml:"domainCerts"`
+	CLIScriptsDir     string      `yaml:"cliScriptsDir"`     // SOLBK_CLISCRIPTS_FOLDER
+	HostDiagnosticDir string      `yaml:"hostDiagnosticDir"` // SOLBK_DIAG_DIR
+	ProductKeys       []string    `yaml:"productKeys"`       // SOLBK_PRODUCTKEYS
+	DomainCerts       DomainCerts `yaml:"domainCerts"`
+
+	// CLIScriptsFolder and DiagDir are retained, unused for anything but the
+	// rename error validateRenamedKeys (validate.go) prints, following the
+	// maxPool pattern (scaling.go): a plain unknown-field decode error would not
+	// say what to rename a key to. NEVER defaulted -- ApplyDefaults fills only
+	// CLIScriptsDir/HostDiagnosticDir above, so a non-empty value here means the
+	// operator's own file still uses the old key.
+	CLIScriptsFolder string `yaml:"cliScriptsFolder"`
+	DiagDir          string `yaml:"diagDir"`
 }
 
 // K8sConfig holds everything specific to the operator-based Kubernetes deployment.
 type K8sConfig struct {
-	Runtime         Command `yaml:"runtime"`         // KUBE (default: kubectl)
+	Command         Command `yaml:"command"`         // KUBE (default: kubectl)
 	Name            string  `yaml:"name"`            // SOLBK_NAME
 	Namespace       string  `yaml:"namespace"`       // SOLBK_NS
 	AdminSecret     string  `yaml:"adminSecret"`     // SOLBK_USR_SECRET: Secret holding the admin/monitor creds
@@ -549,6 +598,15 @@ type K8sConfig struct {
 	Placement         Placement         `yaml:"placement"`
 	LoadBalancer      LoadBalancer      `yaml:"loadBalancer"`
 	Ports             []string          `yaml:"ports"` // SOLBK_PORTS "name=port[/proto]"
+
+	// Runtime is retained so an env file carrying the removed kubernetes.runtime
+	// fails with an actionable rename error (validateRenamedKeys) instead of a
+	// bare unknown-field decode error -- the maxPool pattern (scaling.go). NEVER
+	// defaulted: ApplyDefaults fills only Command above, so a non-empty value
+	// here means the operator's own file still uses the old key. This also
+	// makes the top-level platform CLI agree with replication's own
+	// via.kubernetes.command (ReplViaKube), which always used that name.
+	Runtime Command `yaml:"runtime"`
 }
 
 // Storage is how each broker node gets its data volume: provisioned from a StorageClass,
@@ -716,14 +774,94 @@ type LoadBalancer struct {
 }
 
 // DomainCerts are trusted domain CA certificates loaded post-deploy.
+//
+// Dirs are walked one level deep (never a subdirectory) for every file matching
+// its extensions, deriving a CA name per file (config.DeriveCAName). Files
+// names one certificate explicitly, by the CA name an operator chooses and its
+// FULL host path -- for a certificate whose derived name is unwanted, or to
+// load one file out of a directory of many. config.ResolveDomainCerts merges
+// the two into the set actually uploaded; see its doc comment for the merge
+// order and the duplicate-name rule.
 type DomainCerts struct {
-	Folder string            `yaml:"folder"` // SOLBK_DOMAINCERT_FOLDER
-	Files  map[string]string `yaml:"files"`  // SOLBK_DOMAINCERT_FILES [CA-NAME]=filename
+	Dirs  []CertDir         `yaml:"dirs"`
+	Files map[string]string `yaml:"files"` // CA-NAME -> full host path
+
+	// Folder is retained so an env file carrying the removed
+	// broker.domainCerts.folder fails with an actionable rename error
+	// (validateRenamedKeys) instead of a bare unknown-field decode error --
+	// the maxPool pattern (scaling.go). It is NOT a drop-in rename: the
+	// replacement is broker.domainCerts.dirs, a LIST, and it is never
+	// defaulted (unlike the retired folder default -- see load.go). It stays
+	// here rather than in the retired-field group in Broker because it is
+	// this block's own key, not a top-level one.
+	Folder string `yaml:"folder"`
+}
+
+// CertDir is one directory broker.domainCerts.dirs walks: every file directly
+// inside it (never a subdirectory, rule B) whose extension matches FileExt --
+// or the default cer/crt/pem (config.MatchesCertExt) when FileExt is empty --
+// is loaded as a domain CA, named by config.DeriveCAName.
+type CertDir struct {
+	Path string
+	// FileExt REPLACES the default extensions for this dir alone, as a
+	// comma-separated list (config.MatchesCertExt tolerates either spelling of
+	// the leading dot and folds case). Empty keeps the default.
+	FileExt string
+}
+
+// UnmarshalYAML accepts either a scalar (a plain path, taking the default
+// extensions) or a mapping with `path` and an optional `fileExt` -- the same
+// two-shape precedent Command.UnmarshalYAML sets above (a scalar or an
+// explicit structure). The mapping form is decoded by hand against a CLOSED
+// key set for the reason Scaling's own UnmarshalYAML is (scaling.go): a custom
+// UnmarshalYAML takes over decoding for the node it is declared on, so
+// yaml.v3's KnownFields(true) (load.go) never reaches inside it -- without this
+// check, a typo'd `fileExts:` would decode clean, leave FileExt at "", and
+// silently fall back to the default extensions instead of failing loud the way
+// every other typo in this schema does.
+func (d *CertDir) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		var s string
+		if err := value.Decode(&s); err != nil {
+			return err
+		}
+		d.Path, d.FileExt = s, ""
+		return nil
+	case yaml.MappingNode:
+		var path, fileExt string
+		havePath := false
+		for i := 0; i+1 < len(value.Content); i += 2 {
+			key, val := value.Content[i], value.Content[i+1]
+			switch key.Value {
+			case "path":
+				if err := val.Decode(&path); err != nil {
+					return err
+				}
+				havePath = true
+			case "fileExt":
+				if err := val.Decode(&fileExt); err != nil {
+					return err
+				}
+			default:
+				return fmt.Errorf("line %d: broker.domainCerts.dirs entry has an unknown key %q; "+
+					"expected path and, optionally, fileExt", key.Line, key.Value)
+			}
+		}
+		if !havePath {
+			return fmt.Errorf("line %d: broker.domainCerts.dirs entry needs a path", value.Line)
+		}
+		d.Path, d.FileExt = path, fileExt
+		return nil
+	default:
+		return fmt.Errorf("line %d: a broker.domainCerts.dirs entry must be a path, or a mapping with "+
+			"path and optionally fileExt", value.Line)
+	}
 }
 
 // DockerConfig holds docker-only deployment options plus the shared container block.
 type DockerConfig struct {
-	Runtime Command `yaml:"runtime"` // CONTAINER_RUNTIME override (default: docker)
+	Command Command `yaml:"command"` // CONTAINER_RUNTIME override (default: docker)
 	// Compose is the compose invocation, whose form differs per host: the modern
 	// plugin is a runtime subcommand (`docker compose`), the standalone v1 binary
 	// is its own executable (`docker-compose`). Unset defaults to the configured
@@ -732,11 +870,17 @@ type DockerConfig struct {
 	ComposeFile string    `yaml:"composeFile"` // DOCKER_COMPOSE_FILE
 	Network     Network   `yaml:"network"`
 	Container   Container `yaml:"container"`
+
+	// Runtime is retained so an env file carrying the removed docker.runtime
+	// fails with an actionable rename error (validateRenamedKeys) instead of a
+	// bare unknown-field decode error. NEVER defaulted: ApplyDefaults fills only
+	// Command above.
+	Runtime Command `yaml:"runtime"`
 }
 
 // PodmanConfig holds podman-only deployment options plus the shared container block.
 type PodmanConfig struct {
-	Runtime    Command `yaml:"runtime"`    // CONTAINER_RUNTIME override (default: podman)
+	Command    Command `yaml:"command"`    // CONTAINER_RUNTIME override (default: podman)
 	Rootless   bool    `yaml:"rootless"`   // PODMAN_ROOTLESS
 	QuadletDir string  `yaml:"quadletDir"` // QUADLET_DIR override
 	// BaseDir is the host directory for files THIS TOOL writes for podman, as
@@ -757,6 +901,12 @@ type PodmanConfig struct {
 	// Derived from Rootless in ApplyDefaults (not read from YAML).
 	SystemctlUser string `yaml:"-"`
 	WantedBy      string `yaml:"-"`
+
+	// Runtime is retained so an env file carrying the removed podman.runtime
+	// fails with an actionable rename error (validateRenamedKeys) instead of a
+	// bare unknown-field decode error. NEVER defaulted: ApplyDefaults fills only
+	// Command above.
+	Runtime Command `yaml:"runtime"`
 }
 
 // Network is the container networking mode + published ports.

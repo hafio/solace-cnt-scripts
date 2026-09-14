@@ -7,9 +7,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// decodeRuntime runs a document through the same strict decoder Load uses, so
+// decodeCommand runs a document through the same strict decoder Load uses, so
 // these cases exercise the real schema path rather than a bare Command.
-func decodeRuntime(t *testing.T, doc string) Command {
+func decodeCommand(t *testing.T, doc string) Command {
 	t.Helper()
 	var c Config
 	dec := yaml.NewDecoder(strings.NewReader(doc))
@@ -17,7 +17,7 @@ func decodeRuntime(t *testing.T, doc string) Command {
 	if err := dec.Decode(&c); err != nil {
 		t.Fatalf("decode %q: %v", doc, err)
 	}
-	return c.K8s.Runtime
+	return c.K8s.Command
 }
 
 // TestCommandUnmarshal pins both accepted forms. The scalar form reproduces the
@@ -29,36 +29,36 @@ func TestCommandUnmarshal(t *testing.T) {
 		doc  string
 		want []string
 	}{
-		{"scalar binary", "kubernetes:\n  runtime: kubectl\n", []string{"kubectl"}},
-		{"scalar drop-in", "kubernetes:\n  runtime: oc\n", []string{"oc"}},
-		{"scalar wrapper", "kubernetes:\n  runtime: microk8s kubectl\n", []string{"microk8s", "kubectl"}},
-		{"scalar profile", "kubernetes:\n  runtime: kubectl --kubeconfig /tmp/kc\n",
+		{"scalar binary", "kubernetes:\n  command: kubectl\n", []string{"kubectl"}},
+		{"scalar drop-in", "kubernetes:\n  command: oc\n", []string{"oc"}},
+		{"scalar wrapper", "kubernetes:\n  command: microk8s kubectl\n", []string{"microk8s", "kubectl"}},
+		{"scalar profile", "kubernetes:\n  command: kubectl --kubeconfig /tmp/kc\n",
 			[]string{"kubectl", "--kubeconfig", "/tmp/kc"}},
 		// Quoting the scalar groups it for YAML, not for the split: bash did not
 		// honour embedded quotes when word splitting either.
-		{"quoted scalar still splits", "kubernetes:\n  runtime: \"kubectl --context=dev\"\n",
+		{"quoted scalar still splits", "kubernetes:\n  command: \"kubectl --context=dev\"\n",
 			[]string{"kubectl", "--context=dev"}},
-		{"whitespace runs collapse", "kubernetes:\n  runtime: \"  oc   version  \"\n", []string{"oc", "version"}},
-		{"empty scalar", "kubernetes:\n  runtime: \"\"\n", nil},
+		{"whitespace runs collapse", "kubernetes:\n  command: \"  oc   version  \"\n", []string{"oc", "version"}},
+		{"empty scalar", "kubernetes:\n  command: \"\"\n", nil},
 		{"omitted", "kubernetes:\n  name: dev-broker\n", nil},
-		{"flow sequence", "kubernetes:\n  runtime: [microk8s, kubectl]\n", []string{"microk8s", "kubectl"}},
-		{"block sequence", "kubernetes:\n  runtime:\n    - kubectl\n    - --context=dev\n",
+		{"flow sequence", "kubernetes:\n  command: [microk8s, kubectl]\n", []string{"microk8s", "kubectl"}},
+		{"block sequence", "kubernetes:\n  command:\n    - kubectl\n    - --context=dev\n",
 			[]string{"kubectl", "--context=dev"}},
 		// The escape hatch the scalar form cannot express.
 		{"sequence keeps embedded spaces",
-			"kubernetes:\n  runtime:\n    - 'C:\\Program Files\\bin\\kubectl.exe'\n    - --context=dev\n",
+			"kubernetes:\n  command:\n    - 'C:\\Program Files\\bin\\kubectl.exe'\n    - --context=dev\n",
 			[]string{`C:\Program Files\bin\kubectl.exe`, "--context=dev"}},
-		{"empty sequence", "kubernetes:\n  runtime: []\n", nil},
+		{"empty sequence", "kubernetes:\n  command: []\n", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := decodeRuntime(t, tc.doc)
+			got := decodeCommand(t, tc.doc)
 			if len(got) != len(tc.want) {
-				t.Fatalf("runtime = %#v, want %#v", []string(got), tc.want)
+				t.Fatalf("command = %#v, want %#v", []string(got), tc.want)
 			}
 			for i := range tc.want {
 				if got[i] != tc.want[i] {
-					t.Errorf("runtime[%d] = %q, want %q", i, got[i], tc.want[i])
+					t.Errorf("command[%d] = %q, want %q", i, got[i], tc.want[i])
 				}
 			}
 		})
@@ -69,7 +69,7 @@ func TestCommandUnmarshal(t *testing.T) {
 // an argv, so it fails loud at decode rather than exec'ing an empty binary.
 func TestCommandUnmarshalRejectsOtherKinds(t *testing.T) {
 	var c Config
-	err := yaml.Unmarshal([]byte("kubernetes:\n  runtime:\n    bin: kubectl\n"), &c)
+	err := yaml.Unmarshal([]byte("kubernetes:\n  command:\n    bin: kubectl\n"), &c)
 	if err == nil {
 		t.Fatal("a mapping should not decode as a command")
 	}
@@ -87,9 +87,9 @@ func TestCommandUnmarshalPropagatesDecodeErrors(t *testing.T) {
 	}{
 		// Any plain scalar decodes into a string, so the one failing case is a
 		// tag that carries its own decoding: !!binary with invalid base64.
-		{"scalar", "kubernetes:\n  runtime: !!binary \"*not base64*\"\n", "base64"},
+		{"scalar", "kubernetes:\n  command: !!binary \"*not base64*\"\n", "base64"},
 		// A sequence element that is not a scalar cannot become an argument.
-		{"sequence element", "kubernetes:\n  runtime:\n    - [nested]\n", "cannot unmarshal"},
+		{"sequence element", "kubernetes:\n  command:\n    - [nested]\n", "cannot unmarshal"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -105,10 +105,10 @@ func TestCommandUnmarshalPropagatesDecodeErrors(t *testing.T) {
 	}
 }
 
-// TestValidateRejectsBadRuntime: a malformed command fails the load rather than
+// TestValidateRejectsBadCommand: a malformed command fails the load rather than
 // reaching os/exec. The execution guard runs ahead of the platform checks, so the
-// message names the runtime field, not the mandatory fields also missing here.
-func TestValidateRejectsBadRuntime(t *testing.T) {
+// message names the command field, not the mandatory fields also missing here.
+func TestValidateRejectsBadCommand(t *testing.T) {
 	cases := []struct {
 		name  string
 		p     Platform
@@ -116,22 +116,22 @@ func TestValidateRejectsBadRuntime(t *testing.T) {
 		want  string
 	}{
 		{
-			name:  "k8s runtime with a newline",
+			name:  "k8s command with a newline",
 			p:     K8s,
-			setup: func(c *Config) { c.K8s.Runtime = Command{"kubectl\n--all-namespaces"} },
-			want:  "kubernetes.runtime[0] contains a control character",
+			setup: func(c *Config) { c.K8s.Command = Command{"kubectl\n--all-namespaces"} },
+			want:  "kubernetes.command[0] contains a control character",
 		},
 		{
-			name:  "docker runtime with an empty argument",
+			name:  "docker command with an empty argument",
 			p:     Docker,
-			setup: func(c *Config) { c.Docker.Runtime = Command{"docker", ""} },
-			want:  "docker.runtime[1] is an empty argument",
+			setup: func(c *Config) { c.Docker.Command = Command{"docker", ""} },
+			want:  "docker.command[1] is an empty argument",
 		},
 		{
-			name:  "podman runtime with a NUL",
+			name:  "podman command with a NUL",
 			p:     Podman,
-			setup: func(c *Config) { c.Podman.Runtime = Command{"pod\x00man"} },
-			want:  "podman.runtime[0] contains a control character",
+			setup: func(c *Config) { c.Podman.Command = Command{"pod\x00man"} },
+			want:  "podman.command[0] contains a control character",
 		},
 	}
 	for _, tc := range cases {
@@ -141,7 +141,7 @@ func TestValidateRejectsBadRuntime(t *testing.T) {
 			tc.setup(c)
 			err := c.Validate(tc.p)
 			if err == nil {
-				t.Fatal("a malformed runtime must fail validation")
+				t.Fatal("a malformed command must fail validation")
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error = %v, want it to contain %q", err, tc.want)
@@ -278,11 +278,11 @@ func TestRuntimeDefaults(t *testing.T) {
 		get  func(*Config) Command
 		want string
 	}{
-		{K8s, func(c *Config) Command { return c.K8s.Runtime }, "kubectl"},
-		{Docker, func(c *Config) Command { return c.Docker.Runtime }, "docker"},
-		{Podman, func(c *Config) Command { return c.Podman.Runtime }, "podman"},
-		// kubernetes.runtime is defaulted on every platform, not just k8s.
-		{Docker, func(c *Config) Command { return c.K8s.Runtime }, "kubectl"},
+		{K8s, func(c *Config) Command { return c.K8s.Command }, "kubectl"},
+		{Docker, func(c *Config) Command { return c.Docker.Command }, "docker"},
+		{Podman, func(c *Config) Command { return c.Podman.Command }, "podman"},
+		// kubernetes.command is defaulted on every platform, not just k8s.
+		{Docker, func(c *Config) Command { return c.K8s.Command }, "kubectl"},
 	}
 	for _, tc := range cases {
 		c := &Config{}
@@ -296,14 +296,49 @@ func TestRuntimeDefaults(t *testing.T) {
 // TestRuntimeExplicitValueSurvivesDefaults: an override must not be overwritten.
 func TestRuntimeExplicitValueSurvivesDefaults(t *testing.T) {
 	c := &Config{}
-	c.K8s.Runtime = Command{"microk8s", "kubectl"}
-	c.Docker.Runtime = Command{"lima", "nerdctl"}
+	c.K8s.Command = Command{"microk8s", "kubectl"}
+	c.Docker.Command = Command{"lima", "nerdctl"}
 	c.ApplyDefaults(Docker)
 
-	if got := c.K8s.Runtime.String(); got != "microk8s kubectl" {
-		t.Errorf("kubernetes.runtime = %q, want the configured value", got)
+	if got := c.K8s.Command.String(); got != "microk8s kubectl" {
+		t.Errorf("kubernetes.command = %q, want the configured value", got)
 	}
-	if got := c.Docker.Runtime.String(); got != "lima nerdctl" {
-		t.Errorf("docker.runtime = %q, want the configured value", got)
+	if got := c.Docker.Command.String(); got != "lima nerdctl" {
+		t.Errorf("docker.command = %q, want the configured value", got)
+	}
+}
+
+// TestRenamedRuntimeKeysFailLoud pins the six-key migration for the three .runtime
+// keys: the old spelling decodes (so the file gets an actionable error rather than
+// a bare unknown-field one), is never defaulted, and Validate names the rename.
+func TestRenamedRuntimeKeysFailLoud(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  string
+		p    Platform
+		want string
+	}{
+		{"kubernetes.runtime", "kubernetes:\n  runtime: kubectl\n  name: n\n  namespace: n\n",
+			K8s, "kubernetes.runtime was renamed to kubernetes.command"},
+		{"docker.runtime", "docker:\n  runtime: docker\n", Docker, "docker.runtime was renamed to docker.command"},
+		{"podman.runtime", "podman:\n  runtime: podman\n", Podman, "podman.runtime was renamed to podman.command"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var c Config
+			dec := yaml.NewDecoder(strings.NewReader(tc.doc))
+			dec.KnownFields(true)
+			if err := dec.Decode(&c); err != nil {
+				t.Fatalf("the old key must still decode (that is the point): %v", err)
+			}
+			c.ApplyDefaults(tc.p)
+			err := c.Validate(tc.p)
+			if err == nil {
+				t.Fatal("the old key must fail validation")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to contain %q", err, tc.want)
+			}
+		})
 	}
 }

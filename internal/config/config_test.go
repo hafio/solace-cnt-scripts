@@ -239,8 +239,8 @@ func TestResolveNodeHA(t *testing.T) {
 
 func TestContainerRuntime(t *testing.T) {
 	c := &Config{}
-	c.Docker.Runtime = Command{"docker"}
-	c.Podman.Runtime = Command{"lima", "podman"}
+	c.Docker.Command = Command{"docker"}
+	c.Podman.Command = Command{"lima", "podman"}
 	tests := []struct {
 		p    Platform
 		want string
@@ -300,11 +300,11 @@ func TestApplyDefaultsK8s(t *testing.T) {
 	if c.K8s.AdminSecret != "solace-admin-secret" {
 		t.Errorf("K8s.AdminSecret = %q", c.K8s.AdminSecret)
 	}
-	if c.Broker.DiagDir != "diag-configs" {
-		t.Errorf("DiagDir = %q", c.Broker.DiagDir)
+	if c.Broker.HostDiagnosticDir != "diag-configs" {
+		t.Errorf("HostDiagnosticDir = %q", c.Broker.HostDiagnosticDir)
 	}
-	if c.Broker.CLIScriptsFolder != "cli" {
-		t.Errorf("CLIScriptsFolder = %q", c.Broker.CLIScriptsFolder)
+	if c.Broker.CLIScriptsDir != "cli" {
+		t.Errorf("CLIScriptsDir = %q", c.Broker.CLIScriptsDir)
 	}
 	if c.K8s.Storage.MonNodeSize != "5Gi" {
 		t.Errorf("Storage.MonNodeSize = %q", c.K8s.Storage.MonNodeSize)
@@ -404,8 +404,8 @@ func TestApplyDefaultsDocker(t *testing.T) {
 	c := &Config{}
 	c.ApplyDefaults(Docker)
 
-	if c.Docker.Runtime.String() != "docker" {
-		t.Errorf("Docker.Runtime = %q, want docker", c.Docker.Runtime)
+	if c.Docker.Command.String() != "docker" {
+		t.Errorf("Docker.Command = %q, want docker", c.Docker.Command)
 	}
 	// The compose default is derived from the runtime, not hardcoded, so a runtime
 	// override carries into it.
@@ -419,11 +419,11 @@ func TestApplyDefaultsDocker(t *testing.T) {
 		t.Errorf("Docker.Container.Name = %q, want solace", c.Docker.Container.Name)
 	}
 	// Container config/verify reuse these broker.* fields, so they default here too.
-	if c.Broker.DiagDir != "diag-configs" {
-		t.Errorf("container DiagDir = %q, want diag-configs", c.Broker.DiagDir)
+	if c.Broker.HostDiagnosticDir != "diag-configs" {
+		t.Errorf("container HostDiagnosticDir = %q, want diag-configs", c.Broker.HostDiagnosticDir)
 	}
-	if c.Broker.CLIScriptsFolder != "cli" {
-		t.Errorf("container CLIScriptsFolder = %q, want cli", c.Broker.CLIScriptsFolder)
+	if c.Broker.CLIScriptsDir != "cli" {
+		t.Errorf("container CLIScriptsDir = %q, want cli", c.Broker.CLIScriptsDir)
 	}
 	assertContainerBlockDefaults(t, c.Docker.Container)
 	assertContainerScaling(t, c)
@@ -434,8 +434,8 @@ func TestApplyDefaultsPodmanRootful(t *testing.T) {
 	c.Podman.Rootless = false
 	c.ApplyDefaults(Podman)
 
-	if c.Podman.Runtime.String() != "podman" {
-		t.Errorf("Podman.Runtime = %q, want podman", c.Podman.Runtime)
+	if c.Podman.Command.String() != "podman" {
+		t.Errorf("Podman.Command = %q, want podman", c.Podman.Command)
 	}
 	if c.Podman.Network.Mode != "host" {
 		t.Errorf("Podman.Network.Mode = %q, want host", c.Podman.Network.Mode)
@@ -1136,7 +1136,7 @@ func TestValidateContainerBadNetworkMode(t *testing.T) {
 }
 
 // TestValidateDockerComposeCommand covers the compose command as an exec-bound
-// Command, the same boundary check kubernetes.runtime and docker.runtime get.
+// Command, the same boundary check kubernetes.command and docker.command get.
 func TestValidateDockerComposeCommand(t *testing.T) {
 	c := validContainerConfig(Docker, "true")
 	c.Docker.Compose = Command{"docker", ""}

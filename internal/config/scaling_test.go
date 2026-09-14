@@ -302,7 +302,7 @@ func setContainerMem(c *Config, p Platform, mem string) {
 
 // decodeScaling runs a document through the same strict decoder Load uses, up
 // to but NOT including ApplyDefaults/Validate -- so an explicit 0 is still
-// visible here, the same reason decodeRuntime (command_test.go) stops short
+// visible here, the same reason decodeCommand (command_test.go) stops short
 // of the full Load pipeline. Every case below exercises the real schema path,
 // including Scaling.UnmarshalYAML, rather than a bare Scaling built in Go.
 func decodeScaling(t *testing.T, doc string) (*Config, error) {

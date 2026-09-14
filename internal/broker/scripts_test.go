@@ -69,9 +69,13 @@ func TestServerCertScript(t *testing.T) {
 	}
 }
 
+// TestDomainCertsScriptSorted pins that the caller's order is emitted as given --
+// domainCertsScript no longer sorts internally (Ops.DomainCerts sorts before
+// calling it) -- and that the `certificate file` operand is the CA NAME itself,
+// not a separate filename: the upload destination is certPath(name), so the
+// name IS the in-broker filename the operand has to resolve against.
 func TestDomainCertsScriptSorted(t *testing.T) {
-	// Unsorted map input must emit CAs in sorted order for deterministic output.
-	got := domainCertsScript(map[string]string{"zeta": "z.pem", "alpha": "a.pem"})
+	got := domainCertsScript([]string{"alpha", "zeta"})
 	if !strings.HasPrefix(got, "home\nno paging\nenable\nconfigure\nssl\n") {
 		t.Errorf("domainCertsScript prefix: %q", got)
 	}
@@ -81,10 +85,10 @@ func TestDomainCertsScriptSorted(t *testing.T) {
 	a := strings.Index(got, "create domain-certificate-authority alpha")
 	z := strings.Index(got, "create domain-certificate-authority zeta")
 	if a < 0 || z < 0 || a > z {
-		t.Errorf("domainCertsScript not sorted (alpha=%d zeta=%d): %q", a, z, got)
+		t.Errorf("domainCertsScript did not preserve the given order (alpha=%d zeta=%d): %q", a, z, got)
 	}
-	if !strings.Contains(got, "create domain-certificate-authority alpha\ncertificate file a.pem\nexit\n") {
-		t.Errorf("domainCertsScript missing alpha block: %q", got)
+	if !strings.Contains(got, "create domain-certificate-authority alpha\ncertificate file alpha\nexit\n") {
+		t.Errorf("domainCertsScript missing alpha block, or the operand is not the CA name: %q", got)
 	}
 }
 
@@ -244,15 +248,9 @@ func TestZipConfigsScript(t *testing.T) {
 	}
 }
 
-func TestSortedKeys(t *testing.T) {
-	got := sortedKeys(map[string]string{"c": "", "a": "", "b": ""})
-	want := []string{"a", "b", "c"}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("sortedKeys = %v, want %v", got, want)
-		}
-	}
-}
+// TestSortedKeys is GONE with sortedKeys(map[string]string): domainCertsScript's
+// only caller now sorts a []string of CA names directly (Ops.DomainCerts), so
+// there is no map left in this package for it to sort keys from.
 
 // TestEveryScriptTurnsPagingOffAfterHome is the invariant behind the parsers.
 //
@@ -273,7 +271,7 @@ func TestEveryScriptTurnsPagingOffAfterHome(t *testing.T) {
 		"revertActivityConfigure": revertActivityConfigureScript(),
 		"serverCert":              serverCertScript("2026-09-13"),
 		"removeServerCert":        removeServerCertScript(),
-		"domainCerts":             domainCertsScript(map[string]string{"ca": "ca.crt"}),
+		"domainCerts":             domainCertsScript([]string{"ca"}),
 		"removeDomainCerts":       removeDomainCertsScript([]string{"ca"}),
 		"disableDefaultVPN":       disableDefaultVPNScript(),
 		"enableDefaultVPN":        enableDefaultVPNScript(),

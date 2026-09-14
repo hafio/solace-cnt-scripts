@@ -189,9 +189,14 @@ func TestConvertLegacyK8sEnv(t *testing.T) {
 	if len(c.TLS.CAs) != 1 || c.TLS.CAs[0] != "/path/to/ca/cert" {
 		t.Errorf("tls.cas = %v", c.TLS.CAs)
 	}
-	// Associative array.
-	if c.Broker.DomainCerts.Files["CERT_NAME"] != "cert.crt" {
-		t.Errorf("domainCerts.files = %v", c.Broker.DomainCerts.Files)
+	// Associative array. The value is now SOLBK_DOMAINCERT_FOLDER joined onto the
+	// filename -- a full host path -- rather than the bare filename alone, since
+	// broker.domainCerts.files no longer has a folder to resolve against.
+	if want := "/path/to/domain/ca/cert.crt"; c.Broker.DomainCerts.Files["CERT_NAME"] != want {
+		t.Errorf("domainCerts.files = %v, want CERT_NAME = %q", c.Broker.DomainCerts.Files, want)
+	}
+	if len(c.Broker.DomainCerts.Dirs) != 0 {
+		t.Errorf("domainCerts.dirs = %v, want unset: convert has no directory walk to offer instead", c.Broker.DomainCerts.Dirs)
 	}
 	// ${SOLBK_NS} expanded from the earlier assignment.
 	if len(c.K8s.Placement.AntiAffinityNS) != 1 || c.K8s.Placement.AntiAffinityNS[0] != "solace-namespace" {
@@ -213,10 +218,10 @@ func TestConvertLegacyK8sEnv(t *testing.T) {
 		t.Errorf("replication must not be carried over from REPL_*, got %+v", c.Replication)
 	}
 	// KUBE was expanded unquoted by the bash scripts, so a whole kubectl profile
-	// has to survive the conversion as kubernetes.runtime, split into argv.
+	// has to survive the conversion as kubernetes.command, split into argv.
 	wantRuntime := config.Command{"kubectl", "--kubeconfig", "/home/localadmin/.kubeconfig-dev"}
-	if c.K8s.Runtime.String() != wantRuntime.String() {
-		t.Errorf("kubernetes.runtime = %v, want %v", c.K8s.Runtime, wantRuntime)
+	if c.K8s.Command.String() != wantRuntime.String() {
+		t.Errorf("kubernetes.command = %v, want %v", c.K8s.Command, wantRuntime)
 	}
 	// EXDIR is bash plumbing; every other variable in the file is mapped, so the
 	// only warning allowed here is the replication advisory -- this fixture does set
@@ -225,8 +230,12 @@ func TestConvertLegacyK8sEnv(t *testing.T) {
 	// SOLBK_MSGNODE_CPU is the second allowed warning: the fixture sets it, as
 	// every real legacy file does, and broker CPU is now fixed by the scaling
 	// tier -- so it is dropped with a reason rather than carried over.
+	// SOLBK_DOMAINCERT_FOLDER is the third: the fixture sets both it and
+	// SOLBK_DOMAINCERT_FILES, so the join warning fires every time this fixture
+	// converts.
 	for _, w := range res.Warnings {
-		if strings.Contains(w, "REPL_MATE") || strings.Contains(w, "SOLBK_MSGNODE_CPU") {
+		if strings.Contains(w, "REPL_MATE") || strings.Contains(w, "SOLBK_MSGNODE_CPU") ||
+			strings.Contains(w, "SOLBK_DOMAINCERT_FOLDER") {
 			continue
 		}
 		t.Errorf("unexpected warning converting the sample: %s", w)
@@ -236,6 +245,9 @@ func TestConvertLegacyK8sEnv(t *testing.T) {
 	}
 	if !hasWarning(res.Warnings, "SOLBK_MSGNODE_CPU") {
 		t.Error("the sample sets SOLBK_MSGNODE_CPU, so the removal advisory should have fired")
+	}
+	if !hasWarning(res.Warnings, "SOLBK_DOMAINCERT_FOLDER") {
+		t.Error("the sample sets both SOLBK_DOMAINCERT_FOLDER and _FILES, so the join advisory should have fired")
 	}
 	// SOLOP_CPU is "500m" in this fixture, so a bare `cpu: "2"` could only be the
 	// dropped msgNode one.
@@ -405,11 +417,11 @@ func TestConvertKubeMapsToK8sRuntime(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			res := convertOK(t, k8sEnv+tc.kube+"\n", config.K8s)
-			if got := strictDecode(t, res.YAML).K8s.Runtime; got.String() != tc.want {
-				t.Errorf("kubernetes.runtime = %q, want %q", got, tc.want)
+			if got := strictDecode(t, res.YAML).K8s.Command; got.String() != tc.want {
+				t.Errorf("kubernetes.command = %q, want %q", got, tc.want)
 			}
 			if hasWarning(res.Warnings, "KUBE") {
-				t.Errorf("KUBE maps to kubernetes.runtime now and must not warn; warnings = %v", res.Warnings)
+				t.Errorf("KUBE maps to kubernetes.command now and must not warn; warnings = %v", res.Warnings)
 			}
 		})
 	}
@@ -417,7 +429,7 @@ func TestConvertKubeMapsToK8sRuntime(t *testing.T) {
 
 // TestConvertKubeEchoIsDropped pins the one KUBE value that must not carry over:
 // "echo" was the bash trick for previewing commands, and as a real
-// kubernetes.runtime it would turn every cluster call into a no-op whose stdout the
+// kubernetes.command it would turn every cluster call into a no-op whose stdout the
 // parsing steps then misread. The warning has to name what replaced it, which is
 // `generate` -- rendering the artifact rather than faking the command away.
 func TestConvertKubeEchoIsDropped(t *testing.T) {
@@ -425,8 +437,8 @@ func TestConvertKubeEchoIsDropped(t *testing.T) {
 	if !hasWarning(res.Warnings, "generate") {
 		t.Errorf("KUBE=echo should warn and point at generate; warnings = %v", res.Warnings)
 	}
-	if got := strictDecode(t, res.YAML).K8s.Runtime; len(got) != 0 {
-		t.Errorf("kubernetes.runtime = %q, want it omitted so the kubectl default applies", got)
+	if got := strictDecode(t, res.YAML).K8s.Command; len(got) != 0 {
+		t.Errorf("kubernetes.command = %q, want it omitted so the kubectl default applies", got)
 	}
 }
 
@@ -437,8 +449,8 @@ func TestConvertKubeSilentOnContainerPlatform(t *testing.T) {
 	if hasWarning(res.Warnings, "KUBE") {
 		t.Errorf("KUBE must be consumed silently on a container platform; warnings = %v", res.Warnings)
 	}
-	if got := strictDecode(t, res.YAML).K8s.Runtime; len(got) != 0 {
-		t.Errorf("a container conversion must not emit kubernetes.runtime, got %q", got)
+	if got := strictDecode(t, res.YAML).K8s.Command; len(got) != 0 {
+		t.Errorf("a container conversion must not emit kubernetes.command, got %q", got)
 	}
 }
 

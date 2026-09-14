@@ -34,15 +34,14 @@ scaling:
   maxGuaranteedMsgMB: 10
 
 broker:
-  cliScriptsFolder: cliscripts
-  diagDir: "/path/to/diag-configs/dir"
+  cliScriptsDir: cliscripts
+  hostDiagnosticDir: "/path/to/diag-configs/dir"
   domainCerts:
-    folder: "/path/to/domain/ca"
     files:
-      CERT_NAME: cert.crt
+      CERT_NAME: "/path/to/domain/ca/cert.crt"
 
 kubernetes:
-  runtime: "kubectl --kubeconfig /home/localadmin/.kubeconfig-dev"
+  command: "kubectl --kubeconfig /home/localadmin/.kubeconfig-dev"
   name: solace-broker
   namespace: solace-namespace
   adminSecret: solace-cli-secret

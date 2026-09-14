@@ -2,7 +2,10 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -193,4 +196,183 @@ func MatchesCertExt(file string, exts []string) bool {
 		}
 	}
 	return false
+}
+
+// --- resolving broker.domainCerts into the set actually uploaded ------------
+//
+// Everything below is new: it turns the DomainCerts an env file declares into
+// the merged {CA name -> host path} set broker.Ops.DomainCerts uploads and
+// `broker configure domain-certs --remove` withdraws. It is deliberately NOT
+// called from Load/ApplyDefaults/Validate, which run for every command on
+// every platform -- a certificate directory that does not exist on this
+// machine must not fail `generate`, `convert`, or a deploy that never touches
+// domain certificates. It is called from the CLI ops (opK8sConfigDomainCerts /
+// opCtrConfigDomainCerts), immediately before anything is uploaded, which is
+// exactly rule F's "fail loud before anything is uploaded" -- not "at load".
+
+// DirReader lists the entries directly inside dir, without descending into any
+// subdirectory (rule B: the walk is one level deep). It is the seam
+// ResolveDomainCerts reads through -- the same shape as
+// container.Manager.Resolve/Geteuid -- so a test can supply a fake listing,
+// including the unreadable-directory and duplicate-name branches, with no
+// directory needing to exist on the machine running the test.
+type DirReader func(dir string) ([]os.DirEntry, error)
+
+// DefaultDirReader is the seam's real implementation.
+func DefaultDirReader(dir string) ([]os.DirEntry, error) { return os.ReadDir(dir) }
+
+// DomainCert is one resolved certificate authority: the name it is created
+// under -- derived from its directory and filename, or the explicit
+// broker.domainCerts.files key -- and the full host path this tool reads the
+// certificate from.
+type DomainCert struct {
+	Name string
+	Path string
+}
+
+// ResolveDomainCerts walks dc.Dirs and folds in dc.Files, producing the merged
+// set both the upload path and `--remove` need. readDir is nil in production
+// (DefaultDirReader applies) and a fake in tests.
+//
+// Every check runs before anything is returned, so a caller never has to
+// upload a partial set: a dir that cannot be read is a hard failure naming the
+// dir (rule F -- a MISSING dir is not skipped, and neither is a permission
+// error); and two certificates resolving to one CA name is a hard failure
+// naming both source paths, across three distinct collision shapes -- two dirs
+// sharing a last path element (DeriveCAName uses only that element, so
+// `/a/prod-cas` and `/b/prod-cas` derive identically), two files whose derived
+// names collide only after DeriveCAName's own overflow shortening (which its
+// doc comment already asks callers to treat as one duplicate), and a derived
+// name colliding with an explicit broker.domainCerts.files key.
+//
+// Order: each dir's matching files, sorted by filename for determinism within
+// the dir, in the order dirs are declared; then broker.domainCerts.files, by
+// CA name. That order is also what the upload and the generated CLI script use
+// -- a caller that wants a different one (broker.Ops.DomainCerts sorts by CA
+// name for a fully deterministic transcript) is free to re-sort the result.
+func ResolveDomainCerts(dc DomainCerts, readDir DirReader) ([]DomainCert, error) {
+	if readDir == nil {
+		readDir = DefaultDirReader
+	}
+	seen := make(map[string]string, len(dc.Dirs)+len(dc.Files))
+	var out []DomainCert
+
+	add := func(name, path string) error {
+		if err := checkNoDotDot(name); err != nil {
+			return err
+		}
+		if prev, dup := seen[name]; dup {
+			// Same name AND same path means one source was walked twice, which is
+			// not a certificate-naming collision at all: it is a duplicated
+			// broker.domainCerts.dirs entry (or a dir also named under files).
+			// The general message names the path twice and so describes nothing,
+			// which sends an operator hunting for a second certificate that does
+			// not exist.
+			if prev == path {
+				return fmt.Errorf("%q is loaded twice under the certificate authority name %q: the same "+
+					"file is reached by two broker.domainCerts entries. Remove the duplicate dirs entry, "+
+					"or the files entry naming a certificate one of the dirs already walks", path, name)
+			}
+			return fmt.Errorf("two certificates resolve to the certificate authority name %q: %q and %q. "+
+				"Rename one of the files, move it out of the directory it is walked from, or name it "+
+				"explicitly under broker.domainCerts.files to give it a name of your own choosing",
+				name, prev, path)
+		}
+		seen[name] = path
+		out = append(out, DomainCert{Name: name, Path: path})
+		return nil
+	}
+
+	for i, dir := range dc.Dirs {
+		entries, err := readDir(dir.Path)
+		if err != nil {
+			return nil, fmt.Errorf("broker.domainCerts.dirs[%d] (%s) cannot be read: %w", i, dir.Path, err)
+		}
+		exts := splitFileExt(dir.FileExt)
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			if e.IsDir() || !MatchesCertExt(e.Name(), exts) {
+				continue
+			}
+			names = append(names, e.Name())
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			ca, err := DeriveCAName(dir.Path, name)
+			if err != nil {
+				return nil, err
+			}
+			if err := add(ca, filepath.Join(dir.Path, name)); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	fileKeys := make([]string, 0, len(dc.Files))
+	for ca := range dc.Files {
+		fileKeys = append(fileKeys, ca)
+	}
+	sort.Strings(fileKeys)
+	for _, ca := range fileKeys {
+		if err := validExplicitCAName(ca); err != nil {
+			return nil, err
+		}
+		if err := add(ca, dc.Files[ca]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// splitFileExt turns a dir's comma-separated fileExt into MatchesCertExt's
+// []string form. Empty means "no override", which is what makes MatchesCertExt
+// fall back to its own default -- passing a non-nil empty slice would instead
+// match nothing at all.
+func splitFileExt(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
+}
+
+// checkNoDotDot refuses a CA name containing "..", the one rule DeriveCAName's
+// own charset does not need to enforce: '.' is itself CA-name-safe, so a stem
+// ending in one (or a directory named "..") derives a name containing "..".
+// That name becomes the in-broker filename (broker.certPath), where
+// broker.validName's own ".." ban is the only guard against writing outside
+// the certs directory -- refusing it here, at resolve time, is what lets the
+// error name the source instead of failing at upload after the file has
+// already been read.
+func checkNoDotDot(name string) error {
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("the certificate authority name %q must not contain \"..\": it becomes the "+
+			"in-broker filename, which refuses that sequence. Rename the source file or directory, or "+
+			"name this certificate explicitly under broker.domainCerts.files", name)
+	}
+	return nil
+}
+
+// validExplicitCAName checks a broker.domainCerts.files KEY against the same
+// rules a directory-derived name already satisfies by construction
+// (DeriveCAName's own sanitising): CANameMax and the caNameSafe charset,
+// letters/digits/underscore/dash/period. Unlike a derived name, an explicit
+// one is typed straight into the env file with nothing sanitising it first, so
+// it needs the full check rather than only the ".." rule above.
+func validExplicitCAName(name string) error {
+	if name == "" {
+		return fmt.Errorf("a broker.domainCerts.files key must not be empty")
+	}
+	if len(name) > CANameMax {
+		return fmt.Errorf("broker.domainCerts.files key %q is %d characters, at most %d (config.CANameMax): "+
+			"it becomes the in-broker filename and the operand of `create domain-certificate-authority`",
+			name, len(name), CANameMax)
+	}
+	for _, r := range name {
+		if !caNameSafe(r) {
+			return fmt.Errorf("broker.domainCerts.files key %q is invalid: only letters, digits, underscore, "+
+				"dash and period are allowed -- like a directory-derived name, it becomes the in-broker "+
+				"filename and the operand of `create domain-certificate-authority`", name)
+		}
+	}
+	return checkNoDotDot(name)
 }

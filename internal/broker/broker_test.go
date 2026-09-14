@@ -463,16 +463,16 @@ func TestServerCertRequiresCert(t *testing.T) {
 func TestDomainCerts(t *testing.T) {
 	ft := &fakeTransport{}
 	o, _ := newTestOps(t, &config.Config{}, ft)
-	files := map[string]string{"myca": "myca.pem"}
-	if err := o.DomainCerts(context.Background(), config.Primary, "certs", files); err != nil {
+	certs := []config.DomainCert{{Name: "myca", Path: filepath.Join("certs", "myca.pem")}}
+	if err := o.DomainCerts(context.Background(), config.Primary, certs); err != nil {
 		t.Fatalf("DomainCerts error: %v", err)
 	}
 	if len(ft.uploadFiles) != 1 ||
 		ft.uploadFiles[0].local != filepath.Join("certs", "myca.pem") ||
-		ft.uploadFiles[0].dest != certPath("myca.pem") {
+		ft.uploadFiles[0].dest != certPath("myca") {
 		t.Errorf("DomainCerts uploadFiles = %v", ft.uploadFiles)
 	}
-	if body := ft.wrappedCall(t, "load-domain-certs").stdin; body != domainCertsScript(files) {
+	if body := ft.wrappedCall(t, "load-domain-certs").stdin; body != domainCertsScript([]string{"myca"}) {
 		t.Errorf("load-domain-certs body = %q", body)
 	}
 }
@@ -480,7 +480,8 @@ func TestDomainCerts(t *testing.T) {
 func TestDomainCertsRejectsBadName(t *testing.T) {
 	ft := &fakeTransport{}
 	o, _ := newTestOps(t, &config.Config{}, ft)
-	if err := o.DomainCerts(context.Background(), config.Primary, "certs", map[string]string{"bad name": "x.pem"}); err == nil {
+	certs := []config.DomainCert{{Name: "bad name", Path: "x.pem"}}
+	if err := o.DomainCerts(context.Background(), config.Primary, certs); err == nil {
 		t.Error("DomainCerts should reject a CA name with a space")
 	}
 	if len(ft.uploadFiles) != 0 {
@@ -488,10 +489,27 @@ func TestDomainCertsRejectsBadName(t *testing.T) {
 	}
 }
 
+// TestDomainCertsAcceptsAFullHostPath pins the inverted assertion from before the
+// domainCerts shape change: the local source is now a full host path (already
+// resolved by config.ResolveDomainCerts), not a bare filename joined onto a
+// folder -- and it must upload rather than error, since it is no longer either a
+// CLI operand or an in-broker path, only a local argument to UploadFile.
+func TestDomainCertsAcceptsAFullHostPath(t *testing.T) {
+	ft := &fakeTransport{}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	certs := []config.DomainCert{{Name: "myca", Path: filepath.FromSlash("/opt/solace/prod-cas/ca.pem")}}
+	if err := o.DomainCerts(context.Background(), config.Primary, certs); err != nil {
+		t.Fatalf("DomainCerts with a full host path must be accepted: %v", err)
+	}
+	if len(ft.uploadFiles) != 1 || ft.uploadFiles[0].local != filepath.FromSlash("/opt/solace/prod-cas/ca.pem") {
+		t.Errorf("DomainCerts uploadFiles = %v", ft.uploadFiles)
+	}
+}
+
 func TestDomainCertsEmptySkips(t *testing.T) {
 	ft := &fakeTransport{}
 	o, _ := newTestOps(t, &config.Config{}, ft)
-	if err := o.DomainCerts(context.Background(), config.Primary, "certs", nil); err != nil {
+	if err := o.DomainCerts(context.Background(), config.Primary, nil); err != nil {
 		t.Fatalf("DomainCerts empty error: %v", err)
 	}
 	if len(ft.uploadFiles) != 0 || len(ft.outputs) != 0 {

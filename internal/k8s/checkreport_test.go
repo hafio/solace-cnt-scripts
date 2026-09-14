@@ -511,6 +511,49 @@ func TestValidateSaysWhoOwnsTheTLSSecret(t *testing.T) {
 	}
 }
 
+// TestValidateReportsTheDerivedImagePullSecretName is the "image pull" row's own version
+// of TestValidateSaysWhoOwnsTheTLSSecret: the row now prints cfg.ImagePullSecretName(),
+// not cfg.K8s.ImagePullSecret directly, so it must show the Secret that will actually
+// exist -- including the DERIVED default -- rather than merely what the env file spelled
+// out, or an operator reading a name that matches nothing they configured would read it as
+// a bug instead of the default it is.
+func TestValidateReportsTheDerivedImagePullSecretName(t *testing.T) {
+	run := func(t *testing.T, mutate func(*config.Config)) string {
+		t.Helper()
+		cfg := loadK8s(t)
+		mutate(cfg)
+		buf := &bytes.Buffer{}
+		c := NewCluster(engine.Echo{W: buf}, cfg, nil, buf)
+		if err := c.Validate(context.Background()); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		return buf.String()
+	}
+
+	// The sample names its own secret: the row must show that name verbatim, unchanged
+	// from before ImagePullSecretName existed.
+	named := run(t, func(c *config.Config) {})
+	if !strings.Contains(named, "secret=solace-image-pull") || !strings.Contains(named, "creds=set") {
+		t.Errorf("a configured name must be reported as-is:\n%s", named)
+	}
+
+	// No configured name, credentials present: the row must show the DERIVED default --
+	// the name the Secret this tool builds will actually carry -- not "(none)".
+	derived := run(t, func(c *config.Config) { c.K8s.ImagePullSecret = "" })
+	if !strings.Contains(derived, "secret=dev-broker-image-pull") || !strings.Contains(derived, "creds=set") {
+		t.Errorf("an unset name with credentials present must report the derived default:\n%s", derived)
+	}
+
+	// Neither configured: nothing to reference, nothing to build.
+	none := run(t, func(c *config.Config) {
+		c.K8s.ImagePullSecret = ""
+		c.Image.User, c.Image.Pass = "", ""
+	})
+	if !strings.Contains(none, "secret=(none)") || !strings.Contains(none, "creds=(none)") {
+		t.Errorf("neither a name nor credentials configured must report (none)/(none):\n%s", none)
+	}
+}
+
 // TestValidateSkipsTheStorageClassWhenEveryNodeIsCustomMounted closes a gap the shared
 // name hid: there are two storageRows, and only the config-side one branched on custom
 // mounts. The cluster-side namesake ran the class check regardless -- and since

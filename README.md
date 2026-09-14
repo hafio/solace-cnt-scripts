@@ -45,14 +45,14 @@ needs and is safe to re-run.
 ## Requirements
 
 - **Kubernetes:** `kubectl` on your `PATH` and a reachable cluster/context. The binary
-  shells out to `kubectl`; it does not embed a Kubernetes client. Set `kubernetes.runtime`
+  shells out to `kubectl`; it does not embed a Kubernetes client. Set `kubernetes.command`
   to use `oc` instead, or to carry a whole profile such as
   `kubectl --kubeconfig /path/.kubeconfig-dev`.
 - **Docker / Podman:** the `docker` or `podman` binary on your `PATH`, on the host that runs
   the broker. Podman deploys a systemd **quadlet** unit and needs systemd; Docker deploys
   through **compose**, so that host needs the compose plugin (`docker compose`) or the
   standalone `docker-compose` binary -- set `docker.compose` when it is the latter.
-- **Building from source:** Go 1.26+.
+- **Building from source:** Go 1.27+.
 
 Version-specific caveats (podman secret flags, the compose version the generated file
 needs, wrapper runtimes such as `microk8s kubectl`) are in
@@ -278,7 +278,7 @@ The full surface -- every command, argument, and flag with its default -- is
 | `broker configure data-replication` | all | Converge this broker to the `replication:` block -- mate addresses, which VPNs replicate, each one's role. Never contacts the mate |
 | `broker perform assert-leader` | all | Assert the config-sync leader (HA only) |
 | `broker perform redundancy-test` | all | Exercise a real failover and fail back (HA only; **disturbs the broker**) |
-| `broker perform gather-diagnostics` | all | Gather a support bundle into `broker.diagDir` (`--days`) |
+| `broker perform gather-diagnostics` | all | Gather a support bundle into `broker.hostDiagnosticDir` (`--days`) |
 | `broker perform semp-login-check` | all | Prove an authenticated SEMP request works |
 | `broker perform export-config` | all | Capture the broker's configuration as one artifact (`--vpn`, `--broker-only`, `-o`) |
 | `broker perform import-config <file>` | all | Apply a captured configuration back; **tears down and rebuilds an existing VPN** |

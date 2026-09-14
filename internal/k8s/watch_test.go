@@ -196,7 +196,7 @@ func deployJSON(watch string) []byte {
 
 func watchCluster(watch string, cfgWatch string) (*Cluster, *recRunner, *bytes.Buffer) {
 	cfg := &config.Config{}
-	cfg.K8s.Runtime = config.Command{"kubectl"}
+	cfg.K8s.Command = config.Command{"kubectl"}
 	cfg.K8s.Namespace = "solace"
 	cfg.K8s.Name = "dev-broker"
 	cfg.K8s.Operator.WatchNamespaces = cfgWatch
@@ -252,7 +252,7 @@ func TestReconcileWatchDecidesWhatToApply(t *testing.T) {
 // operator the whole cluster, so the plan has to say so rather than just applying it.
 func TestReconcileWatchFlagsAWideningAsAQuestion(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.K8s.Runtime = config.Command{"kubectl"}
+	cfg.K8s.Command = config.Command{"kubectl"}
 	cfg.K8s.Namespace = "solace"
 	no := false
 	cfg.K8s.Operator.WatchBrokerNS = &no // with no watchNamespaces: "watch everything"

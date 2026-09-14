@@ -11,13 +11,13 @@ import (
 // command would run with an empty argv[0].
 func haCfg() *config.Config {
 	return &config.Config{Redundancy: config.Redundancy{Enabled: "true"}, K8s: config.K8sConfig{
-		Runtime: config.Command{"kubectl"}, Name: "dev-broker", Namespace: "solace",
+		Command: config.Command{"kubectl"}, Name: "dev-broker", Namespace: "solace",
 	}}
 }
 
 func saCfg() *config.Config {
 	return &config.Config{Redundancy: config.Redundancy{Enabled: "false"}, K8s: config.K8sConfig{
-		Runtime: config.Command{"kubectl"}, Name: "dev-broker", Namespace: "solace",
+		Command: config.Command{"kubectl"}, Name: "dev-broker", Namespace: "solace",
 	}}
 }
 

@@ -83,13 +83,13 @@ func (c *Cluster) preflightOne(ctx context.Context, p probe) error {
 		// server. kubectl's own message is on stderr and wrapped in here too.
 		return fmt.Errorf("cannot check permission to %s %s in %s: %w\n"+
 			"  log in first (kubectl: `kubectl config use-context <ctx>`; OpenShift: `oc login <server>`), "+
-			"or point kubernetes.runtime at the right profile", verb, resource, where, err)
+			"or point kubernetes.command at the right profile", verb, resource, where, err)
 	default:
 		// Exit 0 with something other than "yes" -- a wrapper that swallowed the
 		// answer, or a kubectl whose output shape changed. Refusing is the safe
 		// direction: proceeding would mean assuming a permission nobody confirmed.
 		return fmt.Errorf("could not read the answer to `auth can-i %s %s` (got %q); "+
-			"if kubernetes.runtime wraps kubectl, make sure it passes stdout through unchanged", verb, resource, answer)
+			"if kubernetes.command wraps kubectl, make sure it passes stdout through unchanged", verb, resource, answer)
 	}
 }
 

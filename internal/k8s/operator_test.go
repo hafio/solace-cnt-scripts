@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"solace/internal/config"
 )
 
 func boolPtr(b bool) *bool { return &b }
@@ -98,7 +100,14 @@ func TestRenderOperatorSubstitutions(t *testing.T) {
 	t.Run("no registry, no pull secret, watch list without broker ns", func(t *testing.T) {
 		cfg := loadK8s(t)
 		cfg.Image.Registry = ""
+		// The gate moved to the CREDENTIALS (config.Config.ManagesImagePullSecret):
+		// clearing the name alone no longer suppresses the block, since the sample
+		// fixture also supplies image.user/image.pass. Both are cleared here so this
+		// subtest still exercises the "nothing configured at all" case its name
+		// promises; TestRenderOperatorPullSecretGatesOnCredentials covers the state
+		// this used to test by itself -- a name with no credentials behind it.
 		cfg.K8s.ImagePullSecret = ""
+		cfg.Image.User, cfg.Image.Pass = "", ""
 		cfg.K8s.Operator.WatchNamespaces = "team-a"
 		cfg.K8s.Operator.WatchBrokerNS = boolPtr(false)
 		out, err := RenderOperator(cfg, "op-ns", watchNamespace(cfg))
@@ -115,6 +124,27 @@ func TestRenderOperatorSubstitutions(t *testing.T) {
 			t.Error("regcred reference must be omitted when no pull secret is configured")
 		}
 	})
+}
+
+// TestRenderOperatorPullSecretGatesOnCredentials pins the state that had no coverage
+// before ManagesImagePullSecret existed: kubernetes.imagePullSecret NAMES a Secret, but
+// with no image.user/image.pass behind it that is the operator's bring-your-own case
+// (config.Config.ManagesImagePullSecret's own doc comment) -- the broker CR can still
+// reference such a Secret (render.BrokerCR), but the operator bundle can only ever
+// reference its OWN fixed-name regcred, which there are no credentials here to build, so
+// the block must stay omitted exactly as if no name had been configured at all.
+func TestRenderOperatorPullSecretGatesOnCredentials(t *testing.T) {
+	cfg := loadK8s(t) // sample: kubernetes.imagePullSecret AND image.user/image.pass set
+	cfg.Image.User, cfg.Image.Pass = "", ""
+	out, err := RenderOperator(cfg, "op-ns", watchNamespace(cfg))
+	if err != nil {
+		t.Fatalf("RenderOperator: %v", err)
+	}
+	s := string(out)
+	if strings.Contains(s, "imagePullSecrets:") || strings.Contains(s, "- name: regcred") {
+		t.Errorf("kubernetes.imagePullSecret is set but no credentials are configured, so the operator "+
+			"bundle must carry no pull-secret reference:\n%s", s)
+	}
 }
 
 // TestRenderOperatorHonoursThePassedWatchList is why the watch list is a PARAMETER rather
@@ -167,6 +197,43 @@ func TestGenOperator(t *testing.T) {
 			t.Fatalf("GenOperator: %v", err)
 		}
 		mustContain(t, string(out), "  namespace: "+defaultOperatorNS+"\n")
+	})
+}
+
+// TestGenOperatorSplicesRegcredOnCredentialsNotOnName pins the gate GenOperator shares
+// with RenderOperator and OperatorApply: whether the operator's own regcred Secret is
+// spliced into the stream depends on image.user/image.pass, never on whether
+// kubernetes.imagePullSecret happens to be set -- that name belongs to the BROKER's own
+// pull secret (DockerRegistrySecret) and has no bearing on the operator's fixed-name
+// "regcred" artifact.
+func TestGenOperatorSplicesRegcredOnCredentialsNotOnName(t *testing.T) {
+	t.Run("credentials present, no broker pull-secret name configured", func(t *testing.T) {
+		cfg := loadK8s(t)
+		cfg.K8s.ImagePullSecret = ""
+		out, err := GenOperator(cfg)
+		if err != nil {
+			t.Fatalf("GenOperator: %v", err)
+		}
+		s := string(out)
+		for _, want := range []string{"kind: Secret", "name: regcred", ".dockerconfigjson"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("credentials are configured, so the regcred must be spliced in even with no broker "+
+					"pull-secret name set (%q missing):\n%s", want, s)
+			}
+		}
+	})
+	t.Run("named broker pull secret, no credentials", func(t *testing.T) {
+		cfg := loadK8s(t) // sample: kubernetes.imagePullSecret = solace-image-pull
+		cfg.Image.User, cfg.Image.Pass = "", ""
+		out, err := GenOperator(cfg)
+		if err != nil {
+			t.Fatalf("GenOperator: %v", err)
+		}
+		s := string(out)
+		if strings.Contains(s, "regcred") || strings.Contains(s, ".dockerconfigjson") {
+			t.Errorf("kubernetes.imagePullSecret names a Secret the operator did not build, so GenOperator "+
+				"has no credentials to build ITS OWN regcred from:\n%s", s)
+		}
 	})
 }
 
@@ -231,12 +298,16 @@ func TestOperatorApply(t *testing.T) {
 	}
 }
 
-// TestOperatorApplyNoPullSecret covers the branch where no image-pull secret is
-// configured: the regcred apply is skipped entirely, leaving namespace + bundle.
-func TestOperatorApplyNoPullSecret(t *testing.T) {
+// TestOperatorApplyNoCredentialsSkipsRegcred covers the branch where no registry
+// credentials are configured: the regcred apply is skipped entirely, leaving namespace +
+// bundle. This used to clear kubernetes.imagePullSecret (the name) to reach that branch;
+// the gate moved to the CREDENTIALS (config.Config.ManagesImagePullSecret), so clearing
+// the name alone no longer suppresses anything -- see
+// TestOperatorApplyNamedPullSecretWithoutCredentials for the state that replaces it.
+func TestOperatorApplyNoCredentialsSkipsRegcred(t *testing.T) {
 	cfg := loadK8s(t)
 	cfg.K8s.Operator.Namespace = "op-ns"
-	cfg.K8s.ImagePullSecret = ""
+	cfg.Image.User, cfg.Image.Pass = "", ""
 	rr := &recRunner{}
 	c := NewCluster(rr, cfg, nil, nil)
 	if err := c.OperatorApply(context.Background()); err != nil {
@@ -244,7 +315,7 @@ func TestOperatorApplyNoPullSecret(t *testing.T) {
 	}
 	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
 	if len(calls) != 4 {
-		t.Fatalf("OperatorApply without pull secret made %d calls after the probe, want 4 "+
+		t.Fatalf("OperatorApply without credentials made %d calls after the probe, want 4 "+
 			"(version read + watch-list read + namespace + bundle)", len(calls))
 	}
 	// calls[0] and calls[1] are the two cluster-wide reads (installed version, installed
@@ -255,11 +326,96 @@ func TestOperatorApplyNoPullSecret(t *testing.T) {
 	}
 	for _, call := range applies {
 		if strings.Contains(call.stdin, "regcred") {
-			t.Errorf("no pull secret configured, so nothing applied may mention regcred:\n%s", call.stdin)
+			t.Errorf("no credentials configured, so nothing applied may mention regcred:\n%s", call.stdin)
 		}
 	}
 	if !strings.Contains(applies[1].stdin, "kind: Deployment") {
 		t.Errorf("the bundle must still carry the controller Deployment:\n%s", applies[1].stdin)
+	}
+	// The preflight itself must not ask about a permission this run never needs --
+	// operatorProbes only appends the "secrets" probe when withRegcred is true.
+	for _, call := range rr.calls {
+		if len(call.args) >= 4 && call.args[0] == "auth" && call.args[1] == "can-i" && call.args[3] == "secrets" {
+			t.Errorf("no credentials configured, so the regcred permission must never be probed: %+v", call)
+		}
+	}
+}
+
+// TestOperatorApplyNamedPullSecretWithoutCredentials is the state that had no coverage
+// before the credentials gate existed: kubernetes.imagePullSecret names a Secret this env
+// file supplies no image.user/image.pass for. render.BrokerCR still references it by name
+// (the broker CR side of the bring-your-own case), but the operator bundle can only ever
+// reference its OWN fixed-name regcred -- and there are no credentials here to build one
+// from, so OperatorApply must build, probe for and apply nothing extra, identical to no
+// name being configured at all.
+func TestOperatorApplyNamedPullSecretWithoutCredentials(t *testing.T) {
+	cfg := loadK8s(t) // sample: kubernetes.imagePullSecret = solace-image-pull
+	cfg.K8s.Operator.Namespace = "op-ns"
+	cfg.Image.User, cfg.Image.Pass = "", ""
+	rr := &recRunner{}
+	c := NewCluster(rr, cfg, nil, nil)
+	if err := c.OperatorApply(context.Background()); err != nil {
+		t.Fatalf("OperatorApply: %v", err)
+	}
+	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
+	if len(calls) != 4 {
+		t.Fatalf("OperatorApply with a named-but-unbuilt pull secret made %d calls after the probe, want 4 "+
+			"(version read + watch-list read + namespace + bundle)", len(calls))
+	}
+	for _, call := range calls[2:] {
+		if strings.Contains(call.stdin, "kind: Secret") || strings.Contains(call.stdin, ".dockerconfigjson") {
+			t.Errorf("a named pull secret with no credentials is the operator's bring-your-own case: "+
+				"nothing here may build or apply a Secret for it:\n%s", call.stdin)
+		}
+		if strings.Contains(call.stdin, "imagePullSecrets:") {
+			t.Errorf("the operator bundle can only reference its OWN regcred, so it must carry no "+
+				"imagePullSecrets block when there are no credentials to build one from:\n%s", call.stdin)
+		}
+	}
+}
+
+// TestOperatorDeleteOmitsRegcredWithoutCredentials is the delete-side counterpart to
+// TestOperatorApplyNoCredentialsSkipsRegcred and TestOperatorApplyNamedPullSecretWithoutCredentials.
+// Unlike apply, the regcred rides the SAME delete call as the rest of the bundle rather
+// than one of its own (OperatorDelete's own comment explains why: it is folded into `rest`
+// so the teardown stays one ordered `delete -f -`), so there is no separate call to assert
+// absent -- only that the one call never mentions it, whether or not a name is configured.
+func TestOperatorDeleteOmitsRegcredWithoutCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*config.Config)
+	}{
+		{"no name, no credentials", func(c *config.Config) {
+			c.K8s.ImagePullSecret = ""
+			c.Image.User, c.Image.Pass = "", ""
+		}},
+		{"name set, no credentials (bring-your-own)", func(c *config.Config) {
+			c.Image.User, c.Image.Pass = "", ""
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := loadK8s(t)
+			cfg.K8s.Operator.Namespace = "op-ns"
+			tc.mutate(cfg)
+			rr := &recRunner{}
+			c := NewCluster(rr, cfg, nil, nil)
+			if err := c.OperatorDelete(context.Background(), false); err != nil {
+				t.Fatalf("OperatorDelete: %v", err)
+			}
+			calls := rr.afterPreflights(t, probe{verb: "delete", resource: "customresourcedefinitions"})
+			if len(calls) != 1 {
+				t.Fatalf("OperatorDelete(deleteCRDs=false) made %d call(s) after the probe, want 1 "+
+					"(the non-CRD documents)", len(calls))
+			}
+			if strings.Contains(calls[0].stdin, "regcred") {
+				t.Errorf("no credentials configured, so the delete stream must not mention regcred:\n%s", calls[0].stdin)
+			}
+			for _, call := range rr.calls {
+				if len(call.args) >= 4 && call.args[0] == "auth" && call.args[1] == "can-i" && call.args[3] == "secrets" {
+					t.Errorf("no credentials configured, so the regcred permission must never be probed: %+v", call)
+				}
+			}
+		})
 	}
 }
 

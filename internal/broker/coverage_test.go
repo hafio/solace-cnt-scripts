@@ -299,17 +299,24 @@ func TestServerCertCAReadError(t *testing.T) {
 	}
 }
 
-// --- DomainCerts bad-filename branch ---------------------------------------
+// --- DomainCerts: a full host path is accepted, not a filename branch ------
+//
+// This used to be TestDomainCertsBadFilename, pinning validName's rejection of
+// a certificate FILENAME containing a space -- config_ops.go's own second
+// validName call, which the shape change deletes outright. The value is no
+// longer an in-broker path or a CLI operand, only a local argument to
+// UploadFile, so a path with a space in it (which config.CheckHostPath already
+// refuses at load, long before this is ever called) must be ACCEPTED here.
 
-func TestDomainCertsBadFilename(t *testing.T) {
+func TestDomainCertsAcceptsAPathWithSpaces(t *testing.T) {
 	ft := &fakeTransport{}
 	o, _ := newTestOps(t, &config.Config{}, ft)
-	// CA name is valid; the certificate filename contains a space.
-	if err := o.DomainCerts(context.Background(), config.Primary, "certs", map[string]string{"myca": "bad name.pem"}); err == nil {
-		t.Error("DomainCerts should reject a certificate filename with a space")
+	certs := []config.DomainCert{{Name: "myca", Path: "/opt/my certs/bad name.pem"}}
+	if err := o.DomainCerts(context.Background(), config.Primary, certs); err != nil {
+		t.Errorf("DomainCerts must accept a host path with a space (it is no longer a CLI operand): %v", err)
 	}
-	if len(ft.uploadFiles) != 0 {
-		t.Error("DomainCerts must not upload when the filename is invalid")
+	if len(ft.uploadFiles) != 1 {
+		t.Error("DomainCerts should have uploaded the one configured certificate")
 	}
 }
 
@@ -527,7 +534,8 @@ func TestServerCertRunCLIError(t *testing.T) {
 func TestDomainCertsUploadFileError(t *testing.T) {
 	ut := &uploadErrTransport{fakeTransport: &fakeTransport{}, err: errors.New("upload boom")}
 	o := &Ops{T: ut, Cfg: &config.Config{}, Out: &bytes.Buffer{}, PollInterval: 0}
-	err := o.DomainCerts(context.Background(), config.Primary, "certs", map[string]string{"myca": "myca.pem"})
+	certs := []config.DomainCert{{Name: "myca", Path: "myca.pem"}}
+	err := o.DomainCerts(context.Background(), config.Primary, certs)
 	if err == nil || !strings.Contains(err.Error(), "upload domain certificate") {
 		t.Errorf("DomainCerts upload error = %v, want wrapped %q", err, "upload domain certificate")
 	}
@@ -546,7 +554,8 @@ func TestDomainCertsRunCLIError(t *testing.T) {
 		return nil, nil
 	}}
 	o, buf := newTestOps(t, &config.Config{}, ft)
-	err := o.DomainCerts(context.Background(), config.Primary, "certs", map[string]string{"myca": "myca.pem"})
+	certs := []config.DomainCert{{Name: "myca", Path: "myca.pem"}}
+	err := o.DomainCerts(context.Background(), config.Primary, certs)
 	if err == nil {
 		t.Error("DomainCerts should return the load-domain-certs error")
 	}

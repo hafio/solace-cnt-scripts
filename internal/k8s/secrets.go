@@ -212,19 +212,25 @@ func dockerRegistrySecret(name, ns string, cfg *config.Config) ([]byte, error) {
 	}.render(), nil
 }
 
-// DockerRegistrySecret builds the broker image-pull secret (name =
-// kubernetes.imagePullSecret) in the broker namespace.
+// DockerRegistrySecret builds the broker image-pull secret -- named
+// kubernetes.imagePullSecret when set, else the derived default
+// (config.Config.ImagePullSecretName) -- in the broker namespace. Called only when
+// ManagesImagePullSecret is true, so the derived name is always a real name here, never "".
 func DockerRegistrySecret(cfg *config.Config) ([]byte, error) {
-	return dockerRegistrySecret(cfg.K8s.ImagePullSecret, cfg.K8s.Namespace, cfg)
+	return dockerRegistrySecret(cfg.ImagePullSecretName(), cfg.K8s.Namespace, cfg)
 }
 
-// operatorRegcred builds the operator's image-pull secret under the fixed name
 // operatorRegcredName is the fixed name of the operator's image-pull Secret. Named
 // rather than inlined because OperatorDelete has to remove it BY NAME: it is applied
 // separately from the bundle and used to be reaped along with the operator namespace,
-// which is no longer deleted.
+// which is no longer deleted. Fixed rather than derived the way the broker's own pull
+// secret is (config.Config.ImagePullSecretName) is the operator's own deliberate choice:
+// the operator install is one thing shared by every env file in the cluster, so there is
+// no per-file name to derive it from, and "regcred" stays the name whether or not this env
+// file names its own kubernetes.imagePullSecret.
 const operatorRegcredName = "regcred"
 
+// operatorRegcred builds the operator's image-pull secret under the fixed name
 // "regcred" in the operator namespace opNS (010:29).
 func operatorRegcred(cfg *config.Config, opNS string) ([]byte, error) {
 	return dockerRegistrySecret(operatorRegcredName, opNS, cfg)

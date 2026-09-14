@@ -88,9 +88,9 @@ func BrokerCR(c *config.Config) []byte {
 		pullPolicy = "IfNotPresent"
 	}
 	fmt.Fprintf(&b, "    pullPolicy: %s\n", pullPolicy)
-	if c.K8s.ImagePullSecret != "" {
+	if name := c.ImagePullSecretName(); name != "" {
 		fmt.Fprint(&b, "    pullSecrets:\n")
-		fmt.Fprintf(&b, "    - name: %s\n", c.K8s.ImagePullSecret)
+		fmt.Fprintf(&b, "    - name: %s\n", name)
 	}
 	if c.K8s.ServiceAccount != "" {
 		fmt.Fprint(&b, "  serviceAccount:\n")

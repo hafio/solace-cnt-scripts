@@ -24,7 +24,7 @@ func occCfg() *config.Config {
 	c := &config.Config{}
 	// The runtime is what the exec guard checks before argv is built, so a fixture
 	// without one fails inside CheckCommand rather than reaching the code under test.
-	c.K8s.Runtime = config.Command{"kubectl"}
+	c.K8s.Command = config.Command{"kubectl"}
 	c.K8s.Namespace = "solace"
 	c.K8s.Name = "dev-broker"
 	return c

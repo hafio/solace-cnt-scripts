@@ -650,6 +650,47 @@ func TestExtraEnvVarsSecretFollowsTheUsers(t *testing.T) {
 	}
 }
 
+// TestImagePullSecretBlockFollowsTheStates pins the CR's own half of the three states
+// config.Config.ImagePullSecretName documents (config.go). The renderer asks only "is
+// there a name to reference" -- it never re-derives ManagesImagePullSecret itself -- and
+// the middle state below is the one a future reader would otherwise "fix" into requiring
+// credentials: a configured name with none behind it is a Secret the operator created by
+// hand or with external-secrets, and the CR must still reference it by name even though
+// this tool builds, applies and deletes nothing for it.
+func TestImagePullSecretBlockFollowsTheStates(t *testing.T) {
+	// State 1: credentials present (the sample's image.user/pass), no name configured --
+	// the CR must carry the DERIVED default, kubernetes.name + "-image-pull", which is
+	// the exact name GenSecrets/DockerRegistrySecret build the Secret under.
+	c := load(t, config.K8s) // sample sets both image.user/pass and kubernetes.imagePullSecret
+	c.K8s.ImagePullSecret = ""
+	got := string(BrokerCR(c))
+	want := "    pullSecrets:\n    - name: dev-broker-image-pull\n"
+	if !strings.Contains(got, want) {
+		t.Errorf("CR must carry the derived pull-secret name when credentials are present and no name is "+
+			"configured:\n%s", got)
+	}
+
+	// State 2: a name configured but NO credentials -- this tool never built the Secret
+	// behind it, yet the CR must still reference it by name. Refusing would break a
+	// pre-created pull secret, a legitimate and common setup this tool does not own.
+	c.K8s.ImagePullSecret = "operator-provided-secret"
+	c.Image.User = ""
+	c.Image.Pass = ""
+	got = string(BrokerCR(c))
+	want = "    pullSecrets:\n    - name: operator-provided-secret\n"
+	if !strings.Contains(got, want) {
+		t.Errorf("CR must reference a pre-existing named pull secret even with no credentials configured:\n%s", got)
+	}
+
+	// State 3: neither a name nor credentials configured -- no block at all, the same
+	// "absent, not empty" rule preSharedAuthKeySecret and extraEnvVarsSecret follow.
+	c.K8s.ImagePullSecret = ""
+	got = string(BrokerCR(c))
+	if strings.Contains(got, "pullSecrets") {
+		t.Errorf("no name and no credentials configured, so the field must be absent:\n%s", got)
+	}
+}
+
 // TestSecretPreflight pins the precondition `broker deploy` and `broker generate`
 // share: creating a secret with an empty value leaves the broker with a blank
 // password or mate-link key that only fails later, so it is refused up front.

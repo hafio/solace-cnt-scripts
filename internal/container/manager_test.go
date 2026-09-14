@@ -45,7 +45,7 @@ func ctrCfg(p config.Platform, redundancy string) *config.Config {
 	c.Scaling.CPU = "2"
 	switch p {
 	case config.Podman:
-		c.Podman.Runtime = config.Command{"podman"}
+		c.Podman.Command = config.Command{"podman"}
 		c.Podman.Container.Name = "sol-pod"
 		c.Podman.Container.RunUser = "1000:1000"
 		c.Podman.Container.Mem = "6898m"
@@ -58,7 +58,7 @@ func ctrCfg(p config.Platform, redundancy string) *config.Config {
 		c.Podman.BaseDir = "/opt/solace"
 		c.Podman.Network.Mode = "host"
 	default:
-		c.Docker.Runtime = config.Command{"docker"}
+		c.Docker.Command = config.Command{"docker"}
 		c.Docker.Container.Name = "solace"
 		c.Docker.Container.RunUser = "0:0"
 		c.Docker.Container.Mem = "6898m"

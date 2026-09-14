@@ -476,7 +476,7 @@ const brokerPerformLong = "One-shot actions against a running broker; not settin
 	"describes.\n\n" +
 	"  assert-leader        make this node the config-sync leader (HA)\n" +
 	"  redundancy-test      exercise a real failover and fail back (HA, INVASIVE)\n" +
-	"  gather-diagnostics   collect a support bundle into broker.diagDir\n" +
+	"  gather-diagnostics   collect a support bundle into broker.hostDiagnosticDir\n" +
 	"  semp-login-check     prove the admin credentials work over SEMP\n" +
 	"  export-config        capture the broker's configuration as one artifact\n" +
 	"  import-config <file> apply a captured configuration back (DESTRUCTIVE)\n" +
@@ -545,12 +545,12 @@ func newPerformRedundancyTestCmd(app *App) *cobra.Command {
 }
 
 const performGatherDiagnosticsLong = "Runs the broker's full diagnostic sweep and downloads the resulting bundle\n" +
-	"to broker.diagDir.\n\n" +
+	"to broker.hostDiagnosticDir.\n\n" +
 	"Kubernetes collects one bundle per role by default; --pod narrows to just\n" +
 	"one."
 
 func newPerformGatherDiagnosticsCmd(app *App) *cobra.Command {
-	c := withLong(dispatchLeaf(app, "gather-diagnostics", "Gather a support bundle into broker.diagDir",
+	c := withLong(dispatchLeaf(app, "gather-diagnostics", "Gather a support bundle into broker.hostDiagnosticDir",
 		platformOps(opK8sVerifyDiagnostics, opCtrVerifyDiagnostics)), performGatherDiagnosticsLong)
 	c.Flags().IntVar(&app.days, "days", 1, "days of logs/diagnostics to gather")
 	registerFlagCompletion(c, "days", cobra.NoFileCompletions)
@@ -609,7 +609,7 @@ func newPerformImportConfigCmd(app *App) *cobra.Command {
 }
 
 const performCLIScriptLong = "Uploads a local Solace CLI script and runs it in the broker; a bare\n" +
-	"filename resolves under broker.cliScriptsFolder.\n\n" +
+	"filename resolves under broker.cliScriptsDir.\n\n" +
 	"A rejected line does not stop the rest of the script, but the run is then\n" +
 	"reported as a failure."
 

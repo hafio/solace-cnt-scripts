@@ -326,13 +326,37 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 	// The broker section is platform-neutral: every platform applies these over
 	// the broker CLI after deployment, so it is written whatever the target is.
 	d.section("broker", func(d *doc) {
-		d.kv("cliScriptsFolder", v.s("SOLBK_CLISCRIPTS_FOLDER"))
-		d.kv("diagDir", v.s("SOLBK_DIAG_DIR"))
+		d.kv("cliScriptsDir", v.s("SOLBK_CLISCRIPTS_FOLDER"))
+		d.kv("hostDiagnosticDir", v.s("SOLBK_DIAG_DIR"))
 		d.list("productKeys", v.l("SOLBK_PRODUCTKEYS"))
-		d.block("domainCerts", func(d *doc) {
-			d.kv("folder", v.s("SOLBK_DOMAINCERT_FOLDER"))
-			d.pairs("files", v.m("SOLBK_DOMAINCERT_FILES"))
-		})
+		// SOLBK_DOMAINCERT_FOLDER + SOLBK_DOMAINCERT_FILES[CA]=filename named an
+		// explicit CA per file, relative to one folder -- exactly what
+		// broker.domainCerts.files now holds directly, as CA-NAME: full host
+		// path. There is no `dirs` equivalent to emit instead: `dirs` walks a
+		// directory and DERIVES a name per file, which would rename every
+		// certificate the bash pair named explicitly and would also load any
+		// OTHER file the folder happens to contain. Joining folder+filename here
+		// keeps both the exact file set and the exact names the source
+		// configured.
+		if folder, files := v.s("SOLBK_DOMAINCERT_FOLDER"), v.m("SOLBK_DOMAINCERT_FILES"); len(files) > 0 {
+			joined := make(map[string]string, len(files))
+			for ca, file := range files {
+				joined[ca] = joinDomainCertPath(folder, file)
+			}
+			d.block("domainCerts", func(d *doc) {
+				d.pairs("files", joined)
+			})
+			if folder != "" {
+				warns = append(warns, "SOLBK_DOMAINCERT_FOLDER was joined onto each SOLBK_DOMAINCERT_FILES "+
+					"entry to make broker.domainCerts.files, whose values are now full host paths; "+
+					"broker.domainCerts.dirs was left unset")
+			}
+		} else if folder != "" {
+			// A folder with no files named anything to join it onto; nothing was
+			// ever read from it, so there is nothing faithful to emit.
+			warns = append(warns, "SOLBK_DOMAINCERT_FOLDER was set with no SOLBK_DOMAINCERT_FILES entries, "+
+				"so nothing loaded any certificate from it; dropped")
+		}
 	})
 
 	// KUBE is read on every platform even though only the kubernetes section can
@@ -344,7 +368,7 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 
 	if p == config.K8s {
 		d.sectionMarker("kubernetes", func(d *doc) {
-			d.kv("runtime", kube)
+			d.kv("command", kube)
 			d.kv("name", v.s("SOLBK_NAME"))
 			d.kv("namespace", v.s("SOLBK_NS"))
 			// SOLBK_USR_SECRET named the k8s Secret, so it lands in the kubernetes section
@@ -429,7 +453,7 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 			}
 		}
 		d.sectionMarker(string(p), func(d *doc) {
-			d.kv("runtime", v.s("CONTAINER_RUNTIME"))
+			d.kv("command", v.s("CONTAINER_RUNTIME"))
 			if p == config.Docker {
 				// docker.mode was removed along with run mode: docker deploys through
 				// compose and nothing else, so there is no key left to carry the value
@@ -476,10 +500,10 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 	return d.b.String(), warns
 }
 
-// kubeCommand resolves the bash KUBE variable to the kubernetes.runtime value. KUBE was
+// kubeCommand resolves the bash KUBE variable to the kubernetes.command value. KUBE was
 // the cluster CLI, expanded unquoted so it could carry a whole profile
 // (`kubectl --kubeconfig <file>`, bash/env/customer-sample:7) rather than just a
-// binary name -- exactly what kubernetes.runtime now holds.
+// binary name -- exactly what kubernetes.command now holds.
 //
 // It is read unconditionally, even on a container platform, so the variable is
 // consumed silently there instead of being reported unmapped.
@@ -645,6 +669,19 @@ func commentSafe(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// joinDomainCertPath joins the legacy SOLBK_DOMAINCERT_FOLDER onto one
+// SOLBK_DOMAINCERT_FILES filename, in the shape the bash CLI script actually
+// read it: folder + "/" + filename (bash/052-load-domain-certs.sh). Forward
+// slash always, never filepath.Join -- the bash variables carry no notion of
+// which OS conversion runs on, and every other path this converter emits is
+// forward-slash already.
+func joinDomainCertPath(folder, file string) string {
+	if folder == "" {
+		return file
+	}
+	return strings.TrimRight(folder, "/") + "/" + file
 }
 
 // scalar renders a string value, quoting anything a YAML reader could misread as

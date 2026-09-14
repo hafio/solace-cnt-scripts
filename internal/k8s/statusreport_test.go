@@ -89,7 +89,7 @@ func reportCluster(t *testing.T, f *fixtureRunner) (*Cluster, *bytes.Buffer) {
 	cfg.K8s.Namespace = "solace"
 	cfg.K8s.Name = "dev-broker"
 	cfg.K8s.Operator.Namespace = "solace-operator"
-	cfg.K8s.Runtime = config.Command{"kubectl"}
+	cfg.K8s.Command = config.Command{"kubectl"}
 
 	buf := &bytes.Buffer{}
 	c := NewCluster(f, cfg, nil, buf)
@@ -304,7 +304,7 @@ func TestStatusReportsArePreviewableUnderEcho(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.K8s.Namespace = "solace"
 	cfg.K8s.Operator.Namespace = "solace-operator"
-	cfg.K8s.Runtime = config.Command{"kubectl"}
+	cfg.K8s.Command = config.Command{"kubectl"}
 	c := NewCluster(engine.Echo{W: buf}, cfg, nil, buf)
 
 	for name, fn := range map[string]func() error{

@@ -104,7 +104,7 @@ func (m *Manager) out() io.Writer {
 // and DNS/euid probes are previewed rather than performed.
 func (m *Manager) isEcho() bool { _, ok := m.R.(engine.Echo); return ok }
 
-// runtime is the guarded runtime command (docker.runtime / podman.runtime): argv[0]
+// runtime is the guarded runtime command (docker.command / podman.command): argv[0]
 // plus any leading arguments that precede every call's own. It re-runs
 // config.CheckCommand on every call -- the Manager is built straight from a
 // *config.Config, so it is the executor half of the guard's two enforcement points

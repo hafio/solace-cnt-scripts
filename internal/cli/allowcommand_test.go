@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// writeRuntimeEnv writes a standalone env whose kubernetes.runtime is the given command,
+// writeRuntimeEnv writes a standalone env whose kubernetes.command is the given command,
 // so a test can drive the whole CLI -- flag parsing, config.Load, Validate, and the
 // executors -- against one hostile or wrapped value.
 func writeRuntimeEnv(t *testing.T, runtime string) string {
@@ -18,7 +18,7 @@ func writeRuntimeEnv(t *testing.T, runtime string) string {
 	doc := "redundancy:\n  enabled: false\n" +
 		"image:\n  repo: solace/solace-pubsub-standard\n  tag: \"10.10.1.35\"\n" +
 		"semp:\n  adminPass: " + smokeAdminPass + "\n" +
-		"kubernetes:\n  name: broker\n  namespace: solace\n  runtime: " + runtime + "\n" +
+		"kubernetes:\n  name: broker\n  namespace: solace\n  command: " + runtime + "\n" +
 		"  storage:\n    msgNodeSize: 30Gi\n"
 	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
 		t.Fatalf("writing env: %v", err)
@@ -201,7 +201,7 @@ func TestHostileRuntimeIsRefusedByEveryVerb(t *testing.T) {
 		t.Run(strings.Join(verb, " "), func(t *testing.T) {
 			_, err := runRootWith(t, append(append([]string{}, verb...), "--platform", "kubernetes", "--env", env), echoRunner)
 			if err == nil {
-				t.Fatalf("`solace %s` ran with an unlisted binary as kubernetes.runtime", strings.Join(verb, " "))
+				t.Fatalf("`solace %s` ran with an unlisted binary as kubernetes.command", strings.Join(verb, " "))
 			}
 			if !strings.Contains(err.Error(), "is not a binary this tool runs") {
 				t.Errorf("error = %v, want the allowlist refusal", err)
@@ -219,7 +219,7 @@ func TestSmuggledSubcommandIsRefused(t *testing.T) {
 			env := writeRuntimeEnv(t, runtime)
 			_, err := runRootWith(t, []string{"broker", "status", "--platform", "kubernetes", "--env", env}, echoRunner)
 			if err == nil {
-				t.Fatalf("kubernetes.runtime %q was accepted", runtime)
+				t.Fatalf("kubernetes.command %q was accepted", runtime)
 			}
 			msg := err.Error()
 			if !strings.Contains(msg, "subcommand position") && !strings.Contains(msg, `"--" is not allowed`) {
@@ -237,7 +237,7 @@ func TestPathRuntimeIsRefused(t *testing.T) {
 			env := writeRuntimeEnv(t, runtime)
 			_, err := runRootWith(t, []string{"broker", "status", "--platform", "kubernetes", "--env", env}, echoRunner)
 			if err == nil {
-				t.Fatalf("kubernetes.runtime %q was accepted", runtime)
+				t.Fatalf("kubernetes.command %q was accepted", runtime)
 			}
 			if !strings.Contains(err.Error(), "must be a bare binary name, not a path") {
 				t.Errorf("error = %v, want the bare-name refusal", err)

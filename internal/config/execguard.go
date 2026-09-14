@@ -8,7 +8,7 @@ import (
 	"unicode/utf8"
 )
 
-// An env file is executable content. kubernetes.runtime, docker.runtime, podman.runtime
+// An env file is executable content. kubernetes.command, docker.command, podman.command
 // and docker.compose each name a binary this process runs on the operator's own
 // machine, and env files travel -- repos, pull requests, shared archives -- so the
 // person who wrote one is routinely not the person who runs it. Everything in this
@@ -40,7 +40,7 @@ import (
 // value from a ZERO-arity boolean flag -- so a bare word after a boolean reaches
 // subcommand position, which is the one thing the paragraph above says is covered:
 //
-//	kubernetes.runtime: kubectl --insecure-skip-tls-verify delete
+//	kubernetes.command: kubectl --insecure-skip-tls-verify delete
 //
 // passes (at i=1 the token starts with `-`; at i=2 `delete` is taken for its
 // value), and the real argv becomes `kubectl --insecure-skip-tls-verify delete
@@ -52,7 +52,7 @@ import (
 // or carrying a per-binary table of which flags take values, which is a
 // compatibility burden that silently rots as those CLIs add flags. Neither is worth
 // it at this trust level: reaching this needs write access to the env file, and
-// anyone with that can also set kubernetes.runtime to any allowlisted binary and
+// anyone with that can also set kubernetes.command to any allowlisted binary and
 // aim it at any cluster, which the trust-model note in docs/configuration.md
 // already tells reviewers to read env files as executable content. So the rule to
 // carry away is the one stated above -- argv[0] and bare tokens are guaranteed,
@@ -81,7 +81,7 @@ var execBinaries = map[Platform][]string{
 // They are all privilege-escalation wrappers, and the reason is not that escalating
 // is wrong -- rootful podman genuinely needs root -- but that escalating HERE is the
 // wrong place for it. `sudo solace-util deploy` elevates one process the operator
-// chose, visibly, at the moment they typed it. A `runtime: sudo podman` elevates
+// chose, visibly, at the moment they typed it. A `command: sudo podman` elevates
 // every command this tool issues for the lifetime of an env file, decided by whoever
 // wrote that file, and the operator who approves it once on the command line cannot
 // see what it will be used for. Escalate before invoking this tool, never through it.
@@ -122,20 +122,20 @@ const pathSeparators = `/\`
 // tool executes has exactly one rules value, built by the helpers below, so the
 // per-field differences live in one place rather than at the call sites.
 type commandRules struct {
-	field    string   // schema path, for error messages ("kubernetes.runtime")
+	field    string   // schema path, for error messages ("kubernetes.command")
 	platform Platform // which allowlist applies
 	subword  string   // the single bare subcommand this field may carry at index 1
 }
 
-// clusterRules guard kubernetes.runtime -- the cluster CLI, checked on every platform
+// clusterRules guard kubernetes.command -- the cluster CLI, checked on every platform
 // because ApplyDefaults fills it everywhere and only k8s reads it.
 func clusterRules() commandRules {
-	return commandRules{field: "kubernetes.runtime", platform: K8s}
+	return commandRules{field: "kubernetes.command", platform: K8s}
 }
 
-// runtimeRules guard docker.runtime / podman.runtime.
+// runtimeRules guard docker.command / podman.command.
 func runtimeRules(p Platform) commandRules {
-	return commandRules{field: platformKey(p) + ".runtime", platform: p}
+	return commandRules{field: platformKey(p) + ".command", platform: p}
 }
 
 // siteRules guard one replication site's via.kubernetes.command -- the cluster CLI this
@@ -405,7 +405,7 @@ func (c *Config) AllowCommands(names []string) error {
 // An UNSET field is skipped rather than refused, which is the one place the two
 // enforcement points deliberately differ. In this schema an omitted key, an empty
 // string and an empty list all mean "unset" (setDefaultCmd), ApplyDefaults runs
-// before Validate on every path config.Load takes, and reporting "kubernetes.runtime is
+// before Validate on every path config.Load takes, and reporting "kubernetes.command is
 // empty" for a file that simply never mentioned it would be a worse error than the
 // mandatory-fields list it would displace. The executor has no such context -- by
 // the time it is asked, an empty command means an empty argv -- so CheckCommand
@@ -415,9 +415,9 @@ func (c *Config) validateExecCommands(p Platform) error {
 		rules commandRules
 		cmd   Command
 	}{
-		// kubernetes.runtime is checked on every platform: ApplyDefaults fills it
+		// kubernetes.command is checked on every platform: ApplyDefaults fills it
 		// everywhere, and it is printable from any code path.
-		{clusterRules(), c.K8s.Runtime},
+		{clusterRules(), c.K8s.Command},
 	}
 	if p.IsContainer() {
 		fields = append(fields, struct {
@@ -434,7 +434,7 @@ func (c *Config) validateExecCommands(p Platform) error {
 		}{composeRules(), c.composeOrDerived()})
 	}
 	// A replication site's own cluster CLI is config text that reaches os/exec exactly
-	// like kubernetes.runtime, so it goes through the same guard on every platform --
+	// like kubernetes.command, so it goes through the same guard on every platform --
 	// the mate may be in a cluster whatever this end runs on. Indexed by position here
 	// because a file whose virtualRouterName is missing must still be told where to
 	// look.
@@ -493,11 +493,11 @@ func viaDescription(v ReplVia) string {
 	}
 }
 
-// ClusterCommand returns the guarded kubernetes.runtime command. Every k8s executor
+// ClusterCommand returns the guarded kubernetes.command command. Every k8s executor
 // resolves argv[0] through this rather than reading the field, so the check the
 // validator ran is re-run immediately before argv is built.
 func (c *Config) ClusterCommand() (Command, error) {
-	cmd := c.K8s.Runtime
+	cmd := c.K8s.Command
 	if err := CheckCommand(clusterRules(), cmd, c.extraAllowed); err != nil {
 		return nil, err
 	}
@@ -535,7 +535,7 @@ func (c *Config) composeOrDerived() Command {
 	if len(c.Docker.Compose) > 0 {
 		return c.Docker.Compose
 	}
-	derived := make(Command, 0, len(c.Docker.Runtime)+1)
-	derived = append(derived, c.Docker.Runtime...)
+	derived := make(Command, 0, len(c.Docker.Command)+1)
+	derived = append(derived, c.Docker.Command...)
 	return append(derived, "compose")
 }

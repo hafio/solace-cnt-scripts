@@ -34,7 +34,11 @@ type operatorTmplVars struct {
 // RenderOperator renders the operator bundle for namespace opNS, porting the heredoc
 // substitutions of 010-deploy-operator.sh: the operator image is prefixed with
 // Image.Registry/ when set (010:2019); the imagePullSecrets block is emitted only when
-// an image-pull secret is configured.
+// registry credentials are present (config.Config.ManagesImagePullSecret). The regcred
+// Secret it references is this tool's own fixed-name artifact, built from those same
+// credentials -- so a kubernetes.imagePullSecret naming a Secret the operator created
+// themselves, with no credentials behind it, gives the operator bundle nothing to
+// reference, and the block stays omitted.
 //
 // watch is the WATCH_NAMESPACE value to substitute, and is a PARAMETER rather than
 // something derived here from cfg. That is the whole point: the operator is
@@ -62,7 +66,7 @@ func RenderOperator(cfg *config.Config, opNS, watch string) ([]byte, error) {
 		Image:          operatorImage(cfg),
 		CPU:            op.CPU,
 		Mem:            op.Mem,
-		PullSecret:     cfg.K8s.ImagePullSecret != "",
+		PullSecret:     cfg.ManagesImagePullSecret(),
 	}
 	t, err := template.New("operator").Parse(operatorBundle)
 	if err != nil {
@@ -136,7 +140,7 @@ func GenOperator(cfg *config.Config) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.K8s.ImagePullSecret == "" {
+	if !cfg.ManagesImagePullSecret() {
 		return bundle, nil
 	}
 	ns, rest := splitAfterNamespace(bundle)
@@ -194,7 +198,7 @@ func (c *Cluster) OperatorApply(ctx context.Context) error {
 	// meant an identity allowed to create custom resource definitions but not
 	// ClusterRoleBindings passed this check and died halfway through the apply --
 	// which is the exact state Preflight exists to prevent.
-	if err := c.PreflightAll(ctx, operatorProbes("create", opNS, c.Cfg.K8s.ImagePullSecret != "")...); err != nil {
+	if err := c.PreflightAll(ctx, operatorProbes("create", opNS, c.Cfg.ManagesImagePullSecret())...); err != nil {
 		return err
 	}
 	// Before anything is applied: the operator is cluster-scoped, and `apply`
@@ -229,7 +233,7 @@ func (c *Cluster) OperatorApply(ctx context.Context) error {
 	if err := c.apply(ctx, ns); err != nil {
 		return fmt.Errorf("apply operator namespace: %w", err)
 	}
-	if c.Cfg.K8s.ImagePullSecret != "" {
+	if c.Cfg.ManagesImagePullSecret() {
 		regcred, err := operatorRegcred(c.Cfg, opNS)
 		if err != nil {
 			return fmt.Errorf("build operator regcred: %w", err)
@@ -416,7 +420,7 @@ func (c *Cluster) OperatorDelete(ctx context.Context, deleteCRDs bool) error {
 	opNS := c.operatorNS(ctx)
 	// The same set the apply probes, with `delete`. The Namespace is absent because
 	// this command no longer deletes it.
-	if err := c.PreflightAll(ctx, operatorProbes("delete", opNS, c.Cfg.K8s.ImagePullSecret != "")...); err != nil {
+	if err := c.PreflightAll(ctx, operatorProbes("delete", opNS, c.Cfg.ManagesImagePullSecret())...); err != nil {
 		return err
 	}
 	c.logf("deleting operator from namespace %s", opNS)
@@ -433,7 +437,7 @@ func (c *Cluster) OperatorDelete(ctx context.Context, deleteCRDs bool) error {
 	// namespace, so now that the namespace stays it has to be named explicitly -- and
 	// appending its manifest here keeps the teardown one ordered `delete -f -` instead
 	// of growing a second round trip.
-	if c.Cfg.K8s.ImagePullSecret != "" {
+	if c.Cfg.ManagesImagePullSecret() {
 		regcred, err := operatorRegcred(c.Cfg, opNS)
 		if err != nil {
 			return err
