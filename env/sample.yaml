@@ -1,99 +1,109 @@
-# The complete env-file schema for the `solace-util` CLI -- what `solace-util
-# examples full` prints, and the copy committed as env/sample.yaml. Copy to
-# env/<name>.yaml and edit; run any command with `-e <file>`. One file drives all
-# three platforms (kubernetes, docker, podman); each reads only the sections it
-# needs. For a minimal file carrying just the keys one platform cannot default,
-# run `solace-util examples kubernetes` (or docker, or podman) instead.
+# The complete env-file schema for `solace-util`. Copy to env/<name>.yaml, edit, and
+# run any command with `-e <file>`. One file can drive all three platforms; each reads
+# only the sections it needs. For a minimal starter, run
+# `solace-util examples --platform kubernetes` (or docker, or podman).
 #
-# This is a TEMPLATE with placeholder secrets. Replace admin.pass, the image
-# credentials, and nodes.psk before real use, and never commit real secrets.
+# TEMPLATE with placeholder secrets: replace semp.adminPass, the image credentials and
+# redundancy.psk before real use.
 #
-# Every secret field has a sibling *Env key holding the NAME of an environment
-# variable to read the value from instead -- `pass: CHANGE-ME` or
-# `passEnv: SOLACE_ADMIN_PASS`, never both. With the *Env form this whole file
-# carries no secret and is safe to commit; the variables must be exported before
-# any command runs, or the load fails loud naming the key and the variable.
+# Every secret key has a sibling *Env key naming an environment variable to read the
+# value from instead -- `pass: CHANGE-ME` or `passEnv: SOLACE_ADMIN_PASS`, never both.
+# With the *Env form this file carries no secret and is safe to commit.
 #
-# Secrets never reach a deployment artifact, and every platform delivers them to
-# the broker as files: on containers each one is externalized (podman's secret
-# store; docker compose secrets sourced from the environment `deploy` passes it)
-# and mounted at /run/secrets/<setting>, and on Kubernetes they live in Secret manifests
-# applied on stdin and mounted by the operator. So `generate broker` output is safe
-# to share, while `generate secrets broker` output is as sensitive as this file.
-#
-# EVERY key the schema accepts appears below. A commented-out key is optional --
-# the value shown is the default that applies when it is omitted. Keys marked
-# "mandatory" must be set, or the load fails loud naming every one that is
-# missing. Decoding is strict: an unknown or misspelled key is a hard error, so
-# a typo can never pass silently.
+# EVERY key the schema accepts appears below. A commented-out key is optional and shows
+# the default that applies when omitted. Decoding is strict: an unknown or misspelled
+# key is a hard error.
 
-# HA topology, unified across platforms: yes = redundancy group (primary+backup
-# +monitor); no = a single standalone broker. Omitting it means "no": HA
-# provisions three brokers (and three PVCs on Kubernetes), so it is opted into, never
-# inherited by accident.
-redundancy: yes
+# The HA group: whether there is one, who is in it, and the key its members
+# authenticate to each other with. Omitting `enabled` means false -- HA provisions three
+# brokers, so it is opted into rather than inherited.
+redundancy:
+  enabled: true
+  primary:
+    name: solace-primary            # the broker's routername. MANDATORY on containers in
+                                    # HA; in standalone it is optional and this host's own
+                                    # hostname is used when omitted
+    addr: 10.0.0.11                 # IP or resolvable name; mandatory on containers in HA.
+                                    # Also how a host identifies ITSELF when its hostname
+                                    # matches no name above -- the cloud case, where the
+                                    # instance is called something like ip-10-0-0-11
+  backup:
+    name: solace-backup             # mandatory on containers in HA
+    addr: 10.0.0.12                 # also reached from the primary at verify time by
+                                    # `broker perform assert-leader` and
+                                    # `broker perform redundancy-test`
+  monitor:
+    name: solace-monitor            # mandatory on containers in HA
+    addr: 10.0.0.13
+  psk: CHANGE-ME-run-openssl-rand-base64-32
+                                    # secret. YOU generate it -- nothing here does:
+                                    #   openssl rand -base64 32
+                                    #
+                                    # MANDATORY on docker/podman -- nothing distributes a
+                                    # key across three hosts, so each env file must carry
+                                    # the SAME value, and an empty one is refused at load.
+                                    # OPTIONAL on Kubernetes: left empty, the operator
+                                    # generates and distributes its own; set, it becomes
+                                    # the preshared_auth_key entry of
+                                    # kubernetes.adminSecret and the CR points at it.
+  # pskEnv: SOLACE_REDUNDANCY_PSK   # ...or name the variable holding it instead
 
-# Broker timezone, unified across platforms: the Kubernetes CR's timezone and the
-# containers' TZ are the same knob. Omitted -> the broker keeps the image default.
-# timezone: Asia/Singapore
+
+# timezone: Asia/Singapore          # omitted -> the broker keeps the image default
 
 image:
   repo: solace-pubsub-standard      # mandatory
-  tag: "10.26.0.8755"                # mandatory
-  registry: registry.example.com   # optional prefix; omit for docker.io
+  tag: "10.26.0.8755"               # mandatory
+  registry: registry.example.com    # optional prefix; omit for docker.io
   user: repo-user                   # registry login: Kubernetes builds the pull secret,
   pass: CHANGE-ME-registry          # docker/podman run `<runtime> login`. secret
   # passEnv: SOLACE_REGISTRY_PASS   # ...or name the variable holding it instead
-                                    # The pull-secret NAME and pull policy are
-                                    # Kubernetes-only: kubernetes.imagePullSecret /
-                                    # kubernetes.imagePullPolicy
 
-admin:
-  user: admin                       # container admin username. On Kubernetes the
-                                    # operator reads the fixed
-                                    # username_admin_password key, so anything other
-                                    # than "admin" is refused at load rather than
-                                    # ignored -- the name is a docker/podman knob
-  pass: CHANGE-ME-admin             # secret, mandatory on every platform
-  # passEnv: SOLACE_ADMIN_PASS      # ...or name the variable holding it instead
-  monitorPass: CHANGE-ME-monitor    # Kubernetes monitor user secret
+# semp: the broker's management (SEMP/CLI) credentials. There is no username key: the
+# built-in users are `admin` and `monitor` on every platform, which is the broker's own
+# naming and what the Kubernetes operator requires.
+semp:
+  adminPass: CHANGE-ME-admin        # secret, mandatory on every platform
+  # adminPassEnv: SOLACE_ADMIN_PASS # ...or name the variable holding it instead
+  monitorPass: CHANGE-ME-monitor    # Kubernetes monitor user. secret
   # monitorPassEnv: SOLACE_MON_PASS # ...or name the variable holding it instead
-  # additionalUsers:                # extra CLI (management) users beyond admin/monitor.
-  #   - username: appuser           # Every field is required; password takes the same
-  #     accessLevel: read-only      # literal-or-passwordEnv choice as above.
+  # additionalUsers:                # extra CLI users beyond admin/monitor. Every field
+  #   - username: appuser           # is required; password takes the same
+  #     accessLevel: read-only      # literal-or-passwordEnv choice as above
   #     password: CHANGE-ME-appuser # accessLevel: none | read-only | mesh-manager |
   #   - username: rouser            #   read-write | admin
-  #     accessLevel: mesh-manager   # Containers create these at boot. On Kubernetes
-  #     passwordEnv: SOLACE_ROPASS  # they are created by `config additional-users`
-                                    # over the broker CLI (the operator ignores extra
-                                    # keys in the credentials Secret), which is NOT
-                                    # re-runnable and rejects the characters
-                                    # : ( ) " ; ' < > , ` \ * & | in a password.
-                                    # Those characters stay fine on docker/podman,
-                                    # which mount the value as a file.
+  #     accessLevel: mesh-manager   # Created at boot on every platform. Username must
+  #     passwordEnv: SOLACE_ROPASS  # start with a letter or _, 1-32 chars; on Kubernetes
+                                    # no . or - either (they ride the pod ENVIRONMENT
+                                    # there, from <kubernetes.name>-additional-users --
+                                    # the CRD cannot mount a Secret as files)
 
-tls:
-  cert: certs/tls.crt               # server certificate (enables broker TLS listeners)
-  certKey: certs/tls.key
-  # certPassphrase: CHANGE-ME-pass  # secret; only when the key is encrypted. On
-                                    # docker/podman it is externalized like the admin
-                                    # password and reaches the broker as
-                                    # tls_servercertificate_passphrasefilepath. Not
-                                    # wired on Kubernetes: the operator mounts the
-                                    # TLS secret.
+tls:                                # uncomment cert+certKey together once you have a
+                                    # real pair: `broker generate` and `broker deploy`
+                                    # build the TLS Secret from these files.
+                                    #
+                                    # Leave them out to use a Secret that already
+                                    # exists -- name it in kubernetes.tlsServerSecret
+                                    # and nothing here reads a certificate at all
+                                    #
+                                    # HOST paths. A relative one resolves against THIS
+                                    # FILE's directory; an absolute one is used as-is
+  # cert: certs/tls.crt             # server certificate, ALONE -- a file that also
+                                    # holds its key is refused
+  # certKey: certs/tls.key          # inseparable from cert on docker/podman: the
+                                    # broker reads one file built from the pair
+  # certPassphrase: CHANGE-ME-pass  # secret; only when the key is encrypted.
+                                    # docker/podman ONLY -- the CRD has no passphrase
+                                    # field, so `validate` warns and Kubernetes needs
+                                    # an unencrypted key
   # certPassphraseEnv: SOLACE_TLS_PASS   # ...or name the variable holding it instead
-  # cas:                            # trusted domain CA files (config domain-certs)
-  #   - certs/ca.crt
-                                    # The TLS Secret NAME built from these files is
-                                    # Kubernetes-only: kubernetes.tlsServerSecret
+  # cas:                            # trusted domain CA files
+  #   - certs/ca.crt                # (`broker configure domain-certs`)
 
-# scaling: omit to take platform defaults (Kubernetes and container differ). Override any:
-#
-# maxConnections is the Solace scaling tier, and it FIXES the broker's CPU on every
-# platform -- there is no cpu key anywhere in this schema. It must be exactly one of
-# the five values below; a value between tiers is rejected, not rounded, because
-# Solace publishes no sizing for it. Memory is the tier's default and stays yours to
-# override (kubernetes.msgNode.mem, docker/podman container.mem).
+# scaling: omit to take platform defaults. maxConnections is the Solace scaling tier and
+# FIXES the broker's CPU on every platform -- there is no cpu key in this schema. It must
+# be exactly one of the five values below; a value between tiers is rejected, not rounded.
+# Memory is the tier's default and stays overridable.
 #
 #   maxConnections | cpu (fixed) | memory default
 #   ---------------+-------------+----------------
@@ -102,12 +112,6 @@ tls:
 #   10000          | 4           | 12435Mi
 #   100000         | 8           | 30925Mi
 #   200000         | 12          | 52581Mi
-#
-# Every knob below applies to every platform. Only the delivery differs: Kubernetes writes
-# them into the broker CR's spec.systemScaling, while docker and podman pass them to
-# the container as environment variables under the broker's own setting names
-# (system_scaling_*, messagespool_maxspoolusage). Two of the defaults differ by
-# platform, marked below; the rest are the same either way.
 #
 # scaling:
 #   maxConnections: 100             # Kubernetes default 100, container default 1000
@@ -119,86 +123,145 @@ tls:
 #   maxSubscriptions: 50000
 #   maxGuaranteedMsgMB: 10
 
-# replication: parsed from the legacy REPL_* variables by `solace-util convert` and kept
-# in the schema, but NO command in this binary reads it yet -- the block is
-# currently inert. Configure data replication with the standalone
-# solace-replication-generator.html, or push a CLI script with `config exec-cli`.
+# replication: a DR pair of SEPARATE brokers, per message-VPN -- each VPN active at one
+# site and standby at the other. Not redundancy: that is one HA group, this is two of
+# them. Omit the whole section unless this broker replicates.
+#
+# `broker configure data-replication` CONFIGURES this broker only: the mate addresses,
+# replication enable/disable from the vpns list, and each VPN's state active|standby.
+# `broker perform data-replication` VERIFIES and MOVES across both: it checks the mates
+# and that every listed VPN is already enabled, then demotes and promotes. It writes no
+# configuration of its own. Both take the short form `dr`.
+#
+# THIS BLOCK IS BYTE-IDENTICAL AT BOTH SITES. Nothing in it is written from one site's
+# point of view: each broker reads its own `show router-name`, finds itself in sites:,
+# and whichever entry is NOT itself is its mate. Copy it verbatim into the DR site's env
+# file -- there is nothing to reverse. The rest of the file stays site-specific.
+#
 # replication:
-#   mate: mate-router-name          # remote mate router ("v:" prefix optional)
-#   connSsl:                        # mate-link host:port entries
-#     - remote-host:55443
-#   psk: ""                         # secret; generated when left blank
+#   sites:                          # exactly 2
+#     - virtualRouterName: "v:tuas9csol1"   # the site's KEY: what activeAt references,
+#                                   # and the operand the MATE is given as
+#                                   # `replication mate virtual-router-name`. Mandatory,
+#                                   # never derived. QUOTE IT -- the colon
+#       routerNames: [tuas9csol1]   # what this broker ANSWERS TO, matched against its
+#                                   # own `show router-name`. EVERY node of the site's
+#                                   # HA group, so a backup node also finds itself
+#       endpoints:                  # how the OTHER BROKER dials this one -- never
+#                                   # dialled by this tool. At most 2 per transport;
+#                                   # an omitted transport means plainText
+#         - { host: 10.160.132.1, port: 55555 }
+#         - { host: 10.160.132.1, port: 55003, transport: compressed }
+#         - { host: 10.160.132.1, port: 55443, transport: ssl }
+#       via:                        # how THIS TOOL reaches this site when it is the
+#                                   # MATE. EXACTLY ONE child; the key present IS the
+#                                   # mechanism. Read only by `perform data-replication`
+#                                   # and only from the OTHER site's entry -- a broker
+#                                   # never reads its own, it uses this file's
+#                                   # kubernetes:/docker:/podman: section. Optional:
+#                                   # `configure data-replication` needs none of it
+#         kubernetes:
+#           command: kubectl        # THIS FIELD RUNS A BINARY: same rule as
+#                                   # kubernetes.runtime -- a bare name from
+#                                   # {kubectl, oc} followed by flags only. Carry the
+#                                   # cluster here: `kubectl --context sg`
+#           namespace: solace-sg
+#           name: solace            # the mate's PubSubPlusEventBroker name
+#     - virtualRouterName: "v:tuas8csol1"
+#       routerNames: [tuas8csol1]
+#       endpoints:
+#         - { host: 10.150.132.1, port: 55443, transport: ssl }
+#       via:
+#         semp:                     # curl, exec'd inside THIS broker's own container --
+#                                   # no second kubeconfig anywhere
+#           host: 10.150.132.1      # NOT derived from endpoints: replication runs on
+#                                   # the message backbone, so a reachable endpoint
+#                                   # proves nothing about SEMP reachability
+#           port: 1943              # 1943 with tls, 8080 without
+#           tls: true               # declared, never inferred from this broker's own
+#                                   # posture. false is allowed and WARNS: the admin
+#                                   # password then crosses a WAN in the clear
+#           # insecure: false       # skip certificate verification (self-signed mate)
+#           passEnv: SOLACE_DR_ADMIN_PASS   # exactly one of pass/passEnv/passSecret.
+#                                   # The username is always the broker's own admin,
+#                                   # and there is no prompt for the password
+#           # pass: ""              # secret; discouraged, this file travels
+#           # passSecret:           # a Secret read with this site's via.kubernetes
+#           #   namespace: solace-dr    # command, or this file's kubernetes.runtime
+#           #   name: solace-admin-secret
+#           #   key: admin-password
+#   vpns:                           # listed = replication ENABLED at both sites. A VPN
+#                                   # replicating on the broker but absent here is SHUT
+#                                   # DOWN by `configure data-replication`
+#     - { name: ORDERS,   activeAt: "v:tuas9csol1" }
+#     - { name: PAYMENTS, activeAt: "v:tuas8csol1" }
 
-# broker: platform-neutral. Every platform applies these over the broker CLI
-# after deployment (config/verify), so they live here rather than under any one
-# platform section.
+# broker: platform-neutral post-deployment settings, applied over the broker CLI.
 # broker:
-#   cliScriptsFolder: cli           # local folder holding .cli scripts (config exec-cli)
-#   diagDir: diag-configs           # local folder for verify diagnostics output
-#   productKeys: []                 # config product-keys
+#   cliScriptsFolder: cli           # local folder holding .cli scripts
+#   diagDir: diag-configs           # local folder for gathered diagnostics
+#   productKeys: []                 # `broker configure product-keys`
 #   domainCerts:
 #     folder: certs
 #     files: {}                     # CA-NAME: cert filename
 
-# A REAL env file declares only the platform(s) it targets -- the CLI
-# auto-detects which platform to use from which of kubernetes:/docker:/podman:
-# sections are present, so an unused section must be left out entirely, not
-# just emptied of keys. A file declaring more than one requires choosing, either
-# interactively or with --platform. The section must still be present even when
-# every key in it is a default, so it can be recognised: `docker: {}` is enough.
-# This file populates all three at once purely so every key has one place to
-# look it up; copy only the section(s) you need into a real env file.
+# A real env file declares only the platform(s) it targets: the CLI detects the platform
+# from which of kubernetes:/docker:/podman: is present, so an unused section must be left
+# out entirely rather than emptied. A file declaring several requires --platform or a
+# prompt. An empty section still counts -- `docker: {}` is enough. All three appear here
+# only so every key has one place to look it up.
 kubernetes:
-  # runtime: kubectl                # the cluster CLI (legacy KUBE). A scalar is split
-                                    # on whitespace, so it can carry a whole profile:
-                                    # `oc` or `kubectl --kubeconfig /path/.kubeconfig-dev`.
-                                    # THIS FIELD RUNS A BINARY ON YOUR MACHINE, so it
-                                    # is restricted: a bare name (no / or \) from
-                                    # {kubectl, oc}, then flags only -- no bare word,
-                                    # which would smuggle a subcommand ahead of the one
-                                    # the tool appends. A wrapper such as
-                                    # `microk8s kubectl` needs the operator to approve
-                                    # it per run: --allow-command microk8s. Windows
-                                    # paths in a flag value take forward slashes
-                                    # (C:/Users/you/.kube/config). See docs/configuration.md,
-                                    # "The command fields are executable content".
+  # runtime: kubectl                # the cluster CLI. A scalar is split on whitespace,
+                                    # so it can carry a profile:
+                                    # `kubectl --kubeconfig /path/.kubeconfig-dev`.
+                                    # THIS FIELD RUNS A BINARY: restricted to a bare
+                                    # name from {kubectl, oc} followed by flags only.
+                                    # A wrapper such as `microk8s kubectl` needs
+                                    # --allow-command microk8s per run
   name: dev-broker                  # mandatory
   namespace: solace                 # mandatory
-  adminSecret: solace-admin-secret  # Secret holding the admin/monitor credentials.
-                                    # additionalUsers are NOT in it: the operator reads
-                                    # only those two keys (see admin.additionalUsers)
-  tlsServerSecret: solace-tls-secret # TLS Secret built from tls.cert/certKey; its
-                                    # presence enables the CR's tls block
-  imagePullSecret: solace-image-pull # name of the image-pull secret built from
-                                    # image.user/pass
-  # imagePullPolicy: IfNotPresent   # Always | IfNotPresent | Never. Always for a
-                                    # moving tag, Never for an air-gapped cluster
+  adminSecret: solace-admin-secret  # Secret holding the admin/monitor credentials
+  # tlsServerSecret: solace-tls-secret  # names the TLS Secret and enables the CR's tls
+                                    # block. WITH tls.cert/certKey above, this tool
+                                    # builds that Secret and removes it on teardown;
+                                    # WITHOUT them the Secret must already exist (made
+                                    # by hand, or by cert-manager) and is only
+                                    # referenced -- never read, written or deleted
+  imagePullSecret: solace-image-pull   # built from image.user/pass
+  # imagePullPolicy: IfNotPresent   # Always | IfNotPresent | Never
   updateStrategy: automatedRolling  # automatedRolling | manualPodRestart
   serviceAccount: solace-sa         # optional
-  # securityContext:                # -> spec.securityContext; omitted entirely when unset
+  # securityContext:                # omitted entirely when unset
   #   runAsUser: "1000001"          # "0" asks OpenShift to auto-assign
   #   fsGroup: "1000002"
-  # containerSecurity:              # -> spec.brokerContainerSecurity
+  # containerSecurity:
   #   runAsUser: "1000001"
   #   runAsGroup: "1000002"
   #   readOnlyRootFilesystem: false # broker 10.9+
-  storage:
+  storage:                          # two ways to get a data volume. Naming both is
+                                    # refused: `class` PROVISIONS one, customVolumeMount
+                                    # mounts one that already exists
     class: standard                 # StorageClass; omit to use the cluster default
-    msgNode: 30Gi                   # mandatory
-    monNode: 5Gi
-  # msgNode:                        # message-node pod resources. There is no cpu
-  #   mem: 3410Mi                   # key: CPU is fixed by scaling.maxConnections
-                                    # (see the tier table above), and setting one is
-                                    # a load-time error. mem defaults to that tier's
-                                    # memory and stays overridable here.
+    msgNodeSize: 30Gi               # mandatory unless customVolumeMount covers every node
+    monNodeSize: 5Gi
+  #   customVolumeMount:            # mount PVCs YOU created. Every node in the
+  #     primary: solace-primary-pvc # redundancy group or none; entries for nodes a
+  #     backup: solace-backup-pvc   # standalone file does not deploy are ignored.
+  #     monitor: solace-monitor-pvc # `broker remove --delete-data` NEVER deletes these
+                                    # -- the volume may predate this broker
+  # msgNode:                        # message-node pod resources. No cpu key: CPU is
+  #   mem: 3410Mi                   # fixed by scaling.maxConnections, and setting one
+                                    # is a load-time error
   # operator:                       # cluster-scoped EventBroker Operator
-  #   image: docker.io/solace/pubsubplus-eventbroker-operator:1.4.0
-  #   namespace: pubsubplus-operator-system  # omit to use exactly this default
-  #   watchNamespaces: ""           # comma-separated list, de-duplicated; empty = the
-                                    # broker ns only, since watchBrokerNs adds it
-  #   watchBrokerNs: true           # also watch kubernetes.namespace. Setting this false with
-                                    # an empty watchNamespaces leaves WATCH_NAMESPACE
-                                    # empty, which watches EVERY namespace
+  #   image: solace/pubsubplus-eventbroker-operator:1.4.2   # unqualified on purpose:
+                                    # image.registry is prefixed onto it, so a mirrored
+                                    # operator needs no second registry key
+  #   namespace: pubsubplus-operator-system
+  #   watchNamespaces: ""           # comma-separated, de-duplicated. `operator deploy`
+                                    # UNIONS this with what the installed operator
+                                    # already watches, so several env files can share one
+  #   watchBrokerNs: true           # also watch kubernetes.namespace. false with an
+                                    # empty watchNamespaces watches EVERY namespace
   #   cpu: 500m
   #   mem: 512Mi
   loadBalancer:
@@ -206,24 +269,24 @@ kubernetes:
   #   ipPool: sample-ip-pool        # MetalLB address-pool name
   #   annotations:                  # extra service annotations, "key: value"
   #     - "external-dns.alpha.kubernetes.io/hostname: broker.example.com"
-  # ports:                            # name=containerPort[:servicePort][/proto]
+  # ports:                          # name=containerPort[:servicePort][/proto]
   #  - tcp-semp=8080
   #  - tcp-smf=55555:55556
   #  - tls-smf=55443/TCP
-  # podAnnotations:                 # -> spec.podAnnotations (key and value are quoted
-  #   prometheus.io/scrape: "true"  # for you, so any value is safe)
-  # podLabels:                      # -> spec.podLabels
+  # podAnnotations:                 # key and value are quoted for you
+  #   prometheus.io/scrape: "true"
+  # podLabels:
   #   example.com/tier: messaging
-  # placement:                      # optional pod scheduling
-  #   labelsPrimary: ["nodetype: solace"]
+  # placement:                      # optional pod scheduling. These are SELECTORS --
+  #   labelsPrimary: ["nodetype: solace"]   # this tool never labels your nodes
   #   labelsBackup: []
   #   labelsMonitor: []
   #   tolerationsPrimary: ["dedicated=solace:NoSchedule"]
   #   tolerationsBackup: []
   #   tolerationsMonitor: []
-  #   antiAffinityNamespaces: []    # default: [kubernetes.namespace]; drives the built-in
-  #   antiAffinityWeight: 100       # one-broker-per-host spread
-  #   nodeAffinity:                 # additive; unset leaves the CR exactly as above
+  #   antiAffinityNamespaces: []    # default: [kubernetes.namespace]; drives the
+  #   antiAffinityWeight: 100       # built-in one-broker-per-host spread
+  #   nodeAffinity:                 # additive; unset leaves the CR as above
   #     preferred:                  # weight 1-100 + ANDed match expressions
   #       - weight: 80
   #         match:
@@ -232,86 +295,68 @@ kubernetes:
   #       - {key: solace.com/broker, operator: Exists}   # DoesNotExist|Gt|Lt
   #   podAffinity: []               # terms: weight 0 = required, 1-100 = preferred;
   #   podAntiAffinity: []           # each needs topologyKey, plus optional
-                                    # matchLabels and namespaces. Appended after the
-                                    # antiAffinityNamespaces term above.
-  # Intentionally unsupported here (edit the CR or use kubectl if you need them):
-  #   monitoring (the Prometheus exporter sidecar), service.type (always
-  #   LoadBalancer) and per-port nodePort, extraEnvVars/extraEnvVarsCM/
-  #   extraEnvVarsSecret.
-  # There is deliberately no Kubernetes health check either: the operator already runs its
-  # own readiness and liveness probes on the broker pods and gates service traffic
-  # on them, so overriding that would only risk fighting it. healthCheck exists
-  # solely under docker:/podman:, where no such supervisor exists.
+                                    # matchLabels and namespaces
+  # Unsupported here -- edit the CR directly if you need them: monitoring (the
+  # Prometheus exporter sidecar), service.type (always LoadBalancer), per-port
+  # nodePort, extraEnvVars/extraEnvVarsCM/extraEnvVarsSecret. There is no Kubernetes
+  # healthCheck either: the operator runs its own probes and gates traffic on them.
 
 docker:
-  # runtime: docker                 # command to exec: a bare binary name from
-                                    # {docker, docker-compose, nerdctl}, then flags
-                                    # only. Same rules as kubernetes.runtime above -- this
-                                    # field runs a binary on your machine. A wrapper
-                                    # such as `lima nerdctl` needs the operator to
-                                    # approve it per run: --allow-command lima.
-                                    # sudo/doas/su/pkexec are NEVER approvable here;
-                                    # run `sudo solace-util deploy` instead, so the
-                                    # privilege belongs to one invocation you chose.
-                                    # Docker always deploys through compose -- there is
-                                    # no mode key; run mode was removed.
-  # compose: docker compose         # the compose invocation. Omitted -> the runtime
-                                    # plus `compose` (the plugin form). Set it to
-                                    # `docker-compose` on a host carrying only the
-                                    # standalone v1 binary. Same rules as runtime,
-                                    # plus one permitted trailing `compose`; every
-                                    # argument is appended after it.
+  # runtime: docker                 # a bare name from {docker, docker-compose, nerdctl}
+                                    # then flags only. Same rules as kubernetes.runtime:
+                                    # THIS FIELD RUNS A BINARY. A wrapper such as
+                                    # `lima nerdctl` needs --allow-command lima.
+                                    # sudo/doas/su/pkexec are never approvable -- run
+                                    # `sudo solace-util broker deploy` instead
+  # compose: docker compose         # omitted -> the runtime plus `compose`. Set to
+                                    # `docker-compose` for the standalone v1 binary
   # composeFile: docker-compose.yml # path of the generated compose file. It names the
-                                    # secrets it needs; `deploy` supplies their values
-                                    # through the compose process environment, so no
-                                    # secret is written beside it.
+                                    # secrets it needs; `broker deploy` supplies the
+                                    # values through the process environment, so no
+                                    # secret is written beside it
   container:
-    dataDir: /opt/solace/data       # host bind mount, mandatory
+    dataDir: /opt/solace/data       # mandatory, must be ABSOLUTE. Also what
+                                    # `broker remove --delete-data` deletes recursively
   #   name: solace                  # container name; also prefixes this host's secret
                                     # names, so two brokers on one host cannot clash
   #   runUser: "0:0"                # uid:gid the container runs as
   #   shmSize: 1g
-  #   mem: 6898m                    # memory limit, in docker's/podman's own b|k|m|g
-                                    # suffix -- NOT the Mi/Gi kubernetes.msgNode.mem takes.
-                                    # Defaults to the scaling.maxConnections tier's
-                                    # memory (container default tier 1000 -> 6898m).
-                                    # There is no cpu key: it is fixed by the tier.
+  #   mem: 6898m                    # docker's b|k|m|g suffix, NOT the Mi/Gi
+                                    # kubernetes.msgNode.mem takes. Defaults to the
+                                    # scaling tier's memory. No cpu key: fixed by tier
   #   ulimits:
   #     nofile: "2448:1048576"
   #     memlock: "-1"
   #     core: "-1"
   #   healthCheck:                  # opt-in; off leaves the artifact unchanged
-  #     enabled: true               # polls the broker's own readiness endpoint,
-                                    # curl -fs http://localhost:5550/health-check/readiness,
-                                    # so `docker ps`/`compose ps` and podman's
-                                    # auto-restart see readiness, not just liveness.
-                                    # REQUIRES broker 10.26 or later (where that
-                                    # endpoint was introduced) AND a version-numbered
-                                    # image.tag to prove it -- enabling it on an older
-                                    # or a "latest"-tagged image fails loud rather than
-                                    # deploying a probe that can never pass.
+  #     enabled: true               # polls the broker's readiness endpoint. REQUIRES
+                                    # broker 10.26+ AND a version-numbered image.tag to
+                                    # prove it; older or "latest" fails loud
   #     cmd: [curl, -fs, "http://localhost:8080/SEMP/v2/monitor"]
-                                    # optional: your own probe argv, run inside the
-                                    # container. Setting it skips the version check --
-                                    # this is how to probe a pre-10.26 broker. Podman
-                                    # renders it as a command line, so avoid tokens
-                                    # with spaces; wrap such a probe in a script.
-  #     interval: 5s                # the defaults shown are what applies when omitted
+                                    # your own probe argv, run inside the container.
+                                    # Setting it skips the version check. Podman renders
+                                    # it as a command line, so avoid tokens with spaces
+  #     interval: 5s                # the values shown are the defaults
   #     timeout: 5s
   #     retries: 3
   #     startPeriod: 60s
   # network:
   #   mode: host                    # host | bridge
-  #   ports:                        # host:container. Omitted in bridge mode, the
-  #     - 8080:8080                 # same 17 ports Kubernetes defaults to are published
+  #   ports:                        # host:container. Omitted in bridge mode, the same
+  #     - 8080:8080                 # 17 ports Kubernetes defaults to are published
 
 podman:
-  # runtime: podman                 # command to exec; same rules as docker.runtime,
-                                    # allowing only the bare name `podman`
-  rootless: false                   # true = rootless: user systemd + `podman unshare` chown
+  # runtime: podman                 # same rules as docker.runtime; only `podman`
+  rootless: false                   # true = user systemd + `podman unshare` chown
   # quadletDir: /etc/containers/systemd   # rootless: $XDG_CONFIG_HOME/containers/systemd
+  baseDir: /opt/solace              # mandatory, must be ABSOLUTE. Host directory for
+                                    # files this tool writes for podman -- today the
+                                    # server-certificate bundle, which holds the PRIVATE
+                                    # KEY, written 0600 in a 0700 directory. Kept
+                                    # separate from quadletDir, which systemd scans.
+                                    # Removed by `broker remove`, NOT by --delete-data
   container:
-    dataDir: /opt/solace/data       # mandatory
+    dataDir: /opt/solace/data       # mandatory, must be ABSOLUTE (see docker above)
   #   name: solace
   #   runUser: "0:0"
   #   shmSize: 1g
@@ -326,21 +371,3 @@ podman:
   #   mode: host
   #   ports:
   #     - 8080:8080
-
-nodes:                              # redundancy group -- identical on all hosts
-  primary:
-    name: solace-primary            # mandatory on containers (the broker's routername)
-    ip: 10.0.0.11                   # mandatory on containers in HA
-  backup:
-    name: solace-backup             # mandatory on containers in HA
-    ip: 10.0.0.12                   # also read at verify time: `config leader` and
-                                    # `smoke redundancy` reach this host's SEMP service
-                                    # here from the primary
-  monitor:
-    name: solace-monitor            # mandatory on containers in HA
-    ip: 10.0.0.13
-  psk: Q0hBTkdFLU1FLXByZXNoYXJlZC1rZXktYmFzZTY0     # secret; host-prep generates one
-  # pskEnv: SOLACE_REDUNDANCY_PSK   # ...or name the variable holding it instead. With
-                                    # this form host-prep generates nothing: create the
-                                    # key yourself (openssl rand -base64 60) and export
-                                    # the SAME value on all three hosts.

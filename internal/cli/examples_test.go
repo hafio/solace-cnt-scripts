@@ -10,18 +10,21 @@ import (
 	"solace/internal/examples"
 )
 
-// TestExamplesListsWhatItHas: bare `examples` names every template on STDOUT, so
-// `examples > list.txt` captures the list. It acts on nothing, which is why the
-// bare form prints instead of failing like a verb group would.
-func TestExamplesListsWhatItHas(t *testing.T) {
+// TestExamplesBareEmitsTheFullSchema: with no --platform, `examples` writes the complete
+// annotated schema to STDOUT. There is no name list to print any more -- the templates are
+// selected by --platform, which completion already enumerates, so a listing would be a
+// second vocabulary for the same three words.
+func TestExamplesBareEmitsTheFullSchema(t *testing.T) {
 	out, err := runRoot(t, []string{"examples"})
 	if err != nil {
 		t.Fatalf("examples err = %v, want nil", err)
 	}
-	for _, name := range examples.Names() {
-		if !strings.Contains(out, name) {
-			t.Errorf("listing does not name %q:\n%s", name, out)
-		}
+	full, err := examples.Get("full")
+	if err != nil {
+		t.Fatalf("Get(full): %v", err)
+	}
+	if out != string(full.Body) {
+		t.Error("bare examples is not the full template verbatim")
 	}
 }
 
@@ -31,7 +34,11 @@ func TestExamplesListsWhatItHas(t *testing.T) {
 func TestExamplesEmitsToStdout(t *testing.T) {
 	for _, name := range examples.Names() {
 		t.Run(name, func(t *testing.T) {
-			out, err := runRoot(t, []string{"examples", name})
+			args := []string{"examples"}
+			if name != "full" {
+				args = append(args, "--platform", name)
+			}
+			out, err := runRoot(t, args)
 			if err != nil {
 				t.Fatalf("examples %s err = %v, want nil", name, err)
 			}
@@ -46,17 +53,19 @@ func TestExamplesEmitsToStdout(t *testing.T) {
 	}
 }
 
-// TestExamplesAcceptsAPlatformAbbreviation pins the CLI-wide rule that an
-// abbreviation works wherever the word does: --platform dk and `examples dk` name
-// the same platform, expanded by the same parser at the point of use.
+// TestExamplesAcceptsAPlatformAbbreviation pins the CLI-wide rule that an abbreviation
+// works wherever the word does. It is the same --platform flag every other command reads,
+// but it resolves differently here and that is the point worth pinning: everywhere else
+// --platform must name a section the env file declares, while `examples` has no env file
+// to check against and expands the word with config.ParsePlatform alone.
 func TestExamplesAcceptsAPlatformAbbreviation(t *testing.T) {
 	for short, canonical := range map[string]string{"kube": "kubernetes", "dk": "docker", "pm": "podman"} {
 		t.Run(short, func(t *testing.T) {
-			got, err := runRoot(t, []string{"examples", short})
+			got, err := runRoot(t, []string{"examples", "--platform", short})
 			if err != nil {
-				t.Fatalf("examples %s err = %v, want nil", short, err)
+				t.Fatalf("examples --platform %s err = %v, want nil", short, err)
 			}
-			want, err := runRoot(t, []string{"examples", canonical})
+			want, err := runRoot(t, []string{"examples", "--platform", canonical})
 			if err != nil {
 				t.Fatalf("examples %s err = %v, want nil", canonical, err)
 			}
@@ -74,7 +83,7 @@ func TestExamplesWritesOutFile(t *testing.T) {
 	var out string
 	stderr := captureStderr(t, func() {
 		var err error
-		out, err = runRoot(t, []string{"examples", "docker", "-o", path})
+		out, err = runRoot(t, []string{"examples", "--platform", "docker", "-o", path})
 		if err != nil {
 			t.Fatalf("examples docker -o err = %v, want nil", err)
 		}
@@ -99,38 +108,47 @@ func TestExamplesWritesOutFile(t *testing.T) {
 	}
 }
 
-// TestExamplesRefusesToOverwrite is the destructive-path guard: an existing --out
-// path is kept, the error names the flag that would replace it, and --force is
-// what actually replaces it.
+// TestExamplesRefusesToOverwrite is the destructive-path guard. An existing --out path is
+// CONFIRMED rather than requiring a second flag: --force is gone, so the question is asked
+// the way every other destructive question in this tree is asked, and --no-prompt is the
+// one silencer. A non-interactive run without it keeps the file and says which flag would
+// have proceeded -- overwriting an env file someone has already edited is the worst
+// accident this command can have, and it must not happen unattended.
 func TestExamplesRefusesToOverwrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dev.yaml")
 	if err := os.WriteFile(path, []byte("keep me\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := runRoot(t, []string{"examples", "docker", "-o", path})
-	if err == nil || !strings.Contains(err.Error(), "--force") {
-		t.Fatalf("err = %v, want a refusal naming --force", err)
+	_, err := runRoot(t, []string{"examples", "--platform", "docker", "-o", path})
+	if err == nil {
+		t.Fatal("an existing --out path must not be replaced without confirmation")
 	}
 	if body, _ := os.ReadFile(path); string(body) != "keep me\n" {
 		t.Error("the refused write still replaced the file")
 	}
-	if _, err := runRoot(t, []string{"examples", "docker", "-o", path, "--force"}); err != nil {
-		t.Fatalf("examples docker -o --force err = %v, want nil", err)
+	if _, err := runRoot(t, []string{"examples", "--platform", "docker", "-o", path, "--no-prompt"}); err != nil {
+		t.Fatalf("examples docker -o --no-prompt err = %v, want nil", err)
 	}
 	if body, _ := os.ReadFile(path); string(body) == "keep me\n" {
-		t.Error("--force did not replace the file")
+		t.Error("--no-prompt did not replace the file")
+	}
+	// The flag it replaced must be gone, not quietly still accepted.
+	if _, err := runRoot(t, []string{"examples", "--platform", "docker", "-o", path, "--force"}); err == nil {
+		t.Error("--force was removed; it must be an unknown flag, not a silent no-op")
 	}
 }
 
-// TestExamplesRejectsAnUnknownName covers the error boundary: an unknown word is
-// refused naming every alternative, and nothing is written.
-func TestExamplesRejectsAnUnknownName(t *testing.T) {
+// TestExamplesRejectsAnUnknownPlatform covers the error boundary: an unknown word is
+// refused naming every alternative, and nothing is written. `k8s` is the interesting value
+// -- it is the spelling people reach for and is deliberately NOT accepted anywhere, so the
+// refusal has to list what is.
+func TestExamplesRejectsAnUnknownPlatform(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dev.yaml")
-	_, err := runRoot(t, []string{"examples", "k8s", "-o", path})
+	_, err := runRoot(t, []string{"examples", "--platform", "k8s", "-o", path})
 	if err == nil {
-		t.Fatal("examples k8s should fail: neither an example nor an accepted platform word")
+		t.Fatal("examples --platform k8s should fail: k8s is not an accepted platform word")
 	}
-	for _, name := range examples.Names() {
+	for _, name := range []string{"kubernetes", "docker", "podman"} {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("error %q does not name %q", err, name)
 		}
@@ -147,7 +165,7 @@ func TestExamplesNeedsNoEnvFile(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist.yaml")
 	for _, args := range [][]string{
 		{"examples", "--env", missing},
-		{"examples", "full", "--env", missing},
+		{"examples", "--platform", "docker", "--env", missing},
 	} {
 		out, err := runRoot(t, args)
 		if err != nil {

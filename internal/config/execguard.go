@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -135,6 +136,19 @@ func clusterRules() commandRules {
 // runtimeRules guard docker.runtime / podman.runtime.
 func runtimeRules(p Platform) commandRules {
 	return commandRules{field: platformKey(p) + ".runtime", platform: p}
+}
+
+// siteRules guard one replication site's via.kubernetes.command -- the cluster CLI this
+// tool runs to reach a DR mate. The allowlist is the KUBERNETES one whatever platform
+// the LOCAL broker runs on: a docker-hosted broker whose mate sits in a cluster still
+// needs kubectl allowed, and the binary being run is a cluster CLI regardless of what
+// this end is.
+//
+// site is the schema path's index. Validate passes the numeric position, since a file
+// with a missing virtualRouterName still has to say WHERE to look; SiteCommand passes
+// the name, which identifies the site better once the file is known good.
+func siteRules(site string) commandRules {
+	return commandRules{field: "replication.sites[" + site + "].via.kubernetes.command", platform: K8s}
 }
 
 // composeRules guard docker.compose. It is the one field allowed a bare token, and
@@ -419,6 +433,20 @@ func (c *Config) validateExecCommands(p Platform) error {
 			cmd   Command
 		}{composeRules(), c.composeOrDerived()})
 	}
+	// A replication site's own cluster CLI is config text that reaches os/exec exactly
+	// like kubernetes.runtime, so it goes through the same guard on every platform --
+	// the mate may be in a cluster whatever this end runs on. Indexed by position here
+	// because a file whose virtualRouterName is missing must still be told where to
+	// look.
+	for i, s := range c.Replication.Sites {
+		if s.Via.Kubernetes == nil {
+			continue
+		}
+		fields = append(fields, struct {
+			rules commandRules
+			cmd   Command
+		}{siteRules(strconv.Itoa(i)), s.Via.Kubernetes.Command})
+	}
 	for _, f := range fields {
 		if len(f.cmd) == 0 {
 			continue
@@ -428,6 +456,41 @@ func (c *Config) validateExecCommands(p Platform) error {
 		}
 	}
 	return nil
+}
+
+// SiteCommand returns the guarded cluster command for one replication site, named by its
+// virtualRouterName. It is the sibling of ClusterCommand and exists for the same reason:
+// the mate channel is built straight from a *Config and must not assume Validate ever
+// ran, so the check the validator performed is re-run immediately before argv is built.
+func (c *Config) SiteCommand(virtualRouterName string) (Command, error) {
+	for _, s := range c.Replication.Sites {
+		if s.VirtualRouterName != virtualRouterName {
+			continue
+		}
+		if s.Via.Kubernetes == nil {
+			return nil, fmt.Errorf("replication site %q is not reached over kubernetes: it declares %s",
+				virtualRouterName, viaDescription(s.Via))
+		}
+		cmd := s.Via.Kubernetes.Command
+		if err := CheckCommand(siteRules(virtualRouterName), cmd, c.extraAllowed); err != nil {
+			return nil, err
+		}
+		return cmd, nil
+	}
+	return nil, fmt.Errorf("replication.sites declares no site with virtualRouterName %q", virtualRouterName)
+}
+
+// viaDescription names what a site DOES declare, so a wrong-mechanism error says which
+// one to reach for rather than only which one is missing.
+func viaDescription(v ReplVia) string {
+	switch {
+	case v.SEMP != nil:
+		return "via.semp"
+	case v.Kubernetes != nil:
+		return "via.kubernetes"
+	default:
+		return "no via block at all"
+	}
 }
 
 // ClusterCommand returns the guarded kubernetes.runtime command. Every k8s executor

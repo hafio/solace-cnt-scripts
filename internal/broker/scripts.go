@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-
-	"solace/internal/config"
 )
 
 // The functions here are pure: each returns the exact Solace CLI script body a
@@ -13,6 +11,21 @@ import (
 // I/O) makes them golden-testable in scripts_test.go, the same discipline as
 // internal/render. They are faithful ports of the heredocs in the numbered bash
 // scripts; comments cite the source line ranges.
+
+// cliHome opens every generated script. `home` puts the session at a known level so the
+// script does not depend on where a previous command left it, and `no paging` stops the
+// broker paginating its output.
+//
+// Paging is not cosmetic here. A paginated report re-prints its column header and rule
+// partway down, and this tool PARSES those reports: the repeated rule reads as a data row
+// whose every field is a dash, which is how `show message-vpn * replication` grew a
+// phantom VPN named after its own separator. Turning paging off at the source is the fix;
+// the parsers' tolerance of a repeat is the backstop, not the other way round.
+//
+// It is one constant so the pair cannot drift apart, and so a new script cannot be
+// written with `home` and without `no paging` -- which is how the scripts that needed
+// this fix came to be missing it (operator, 2026-09-13).
+const cliHome = "home\nno paging\n"
 
 // showRedundancyScript is the one-line probe used by leader/redundancy polling
 // (050 line 34, 061 line 25).
@@ -24,9 +37,7 @@ func showRedundancyDetailScript() string { return "no paging\nshow redundancy de
 // assertLeaderScript restores the Primary as config-sync leader for the router
 // and all VPNs (050 lines 38-45).
 func assertLeaderScript() string {
-	return `home
-no paging
-enable
+	return cliHome + `enable
 admin
 config-sync assert-leader router
 config-sync assert-leader message-vpn *
@@ -36,50 +47,54 @@ show config-sync database
 
 // revertActivityScript reverts activity back to the local node (050 lines 23-27).
 func revertActivityScript() string {
-	return `home
-no paging
-enable
-admin
-redundancy revert-activity
-`
+	return cliHome + "enable\nadmin\nredundancy revert-activity\n"
 }
 
 // releaseActivityScript releases activity from the Primary (061 lines 30-34).
 func releaseActivityScript() string {
-	return `home
-no paging
-enable
-configure
-redundancy release-activity
-`
+	return cliHome + "enable\nconfigure\nredundancy release-activity\n"
 }
 
 // noReleaseActivityScript un-releases the Primary (061 lines 38-42).
 func noReleaseActivityScript() string {
-	return `home
-no paging
-enable
-configure
-no redundancy release-activity
-`
+	return cliHome + "enable\nconfigure\nno redundancy release-activity\n"
 }
 
 // revertActivityConfigureScript reverts activity from the Backup during a
 // redundancy test (061 lines 46-50). The trailing space after the command is
 // preserved from the source script.
 func revertActivityConfigureScript() string {
-	return "home\nno paging\nenable\nadmin\nredundancy revert-activity \n"
+	return cliHome + "enable\nadmin\nredundancy revert-activity \n"
 }
 
 // serverCertScript applies the uploaded TLS server certificate (051 lines 40-43).
 // dt is the date stamp (YYYY-MM-DD) that names the uploaded tls-<dt>.crt.key file.
 func serverCertScript(dt string) string {
-	return fmt.Sprintf("enable\nconfigure\nssl server-certificate %s\nshow ssl server-certificate detail\n", serverCertFile(dt))
+	return cliHome + fmt.Sprintf("enable\nconfigure\nssl server-certificate %s\nshow ssl server-certificate detail\n", serverCertFile(dt))
 }
 
 // serverCertFile is the in-broker filename the concatenated key+cert+CAs are
 // uploaded as, and the name the CLI loads (051 lines 42, 51).
 func serverCertFile(dt string) string { return "tls-" + dt + ".crt.key" }
+
+// removeServerCertScript removes the TLS server certificate the broker presents.
+// The form is the operator's, confirmed on a live broker:
+//
+//	home
+//	enable
+//	configure
+//	no ssl server-certificate
+//
+// (cliHome adds `no paging` after that `home`, as it does for every script here.)
+//
+// Emitted verbatim, and it is the one script here that ends with NO confirming `show`.
+// Every other one does, because a transcript that proves what changed is worth the extra
+// line -- but `show ssl server-certificate detail` against a broker that now has no
+// certificate is unverified, and a non-zero result there would report failure for a
+// removal that already succeeded. The removal's own output is shown instead.
+func removeServerCertScript() string {
+	return cliHome + "enable\nconfigure\nno ssl server-certificate\n"
+}
 
 // domainCertsScript loads each domain certificate authority (052 lines 20-34).
 // cas maps CA name -> certificate filename (already uploaded to the certs dir).
@@ -87,7 +102,7 @@ func serverCertFile(dt string) string { return "tls-" + dt + ".crt.key" }
 // hash in unspecified order).
 func domainCertsScript(cas map[string]string) string {
 	var b strings.Builder
-	b.WriteString("no paging\nenable\nconfigure\nssl\n")
+	b.WriteString(cliHome + "enable\nconfigure\nssl\n")
 	for _, ca := range sortedKeys(cas) {
 		fmt.Fprintf(&b, "create domain-certificate-authority %s\ncertificate file %s\nexit\n", ca, cas[ca])
 	}
@@ -100,101 +115,195 @@ func domainCertsScript(cas map[string]string) string {
 // sorts them for determinism, since bash iterated a hash in unspecified order).
 func removeDomainCertsScript(cas []string) string {
 	var b strings.Builder
-	b.WriteString("no paging\nenable\nconfigure\n")
+	b.WriteString(cliHome + "enable\nconfigure\n")
 	for _, ca := range cas {
 		fmt.Fprintf(&b, "no ssl domain-certificate-authority %s\n", ca)
 	}
-	b.WriteString("home\nshow domain-certificate-authority ca-name *\n")
+	b.WriteString(cliHome + "show domain-certificate-authority ca-name *\n")
 	return b.String()
 }
 
-// disableDefaultVPNScript shuts down the default message-VPN, its default
-// client-username, and every service (053 lines 20-51).
+// disableDefaultVPNScript shuts the default message-VPN down, and nothing else.
+//
+// Deliberately narrower than its 053 ancestor, which also shut down basic and
+// client-certificate authentication, all twelve services, and
+// `ssl allow-downgrade-to-plain-text`. Shutting the VPN down already stops every
+// service it fronts, so those edits bought nothing and made the op unreversible in
+// practice: enableDefaultVPNScript would have had to restore plaintext downgrade to
+// be a true inverse, which is a security regression, or leave the VPN half-configured,
+// which is worse than not offering an enable at all. One line down, one line up.
+//
+// The default client-username is NOT touched here either -- that is
+// disableDefaultUsersScript's job, and it covers every VPN rather than just this one.
 func disableDefaultVPNScript() string {
-	return `home
-enable
+	return cliHome + `enable
 configure
-message-vpn "default"
-  authentication
-    basic shutdown
-    client-certificate
-      shutdown
-      exit
-    exit
-  service smf plain-text shutdown
-  service smf ssl shutdown
-  service web-transport plain-text shutdown
-  service web-transport ssl shutdown
-  service rest incoming plain-text shutdown
-  service rest incoming ssl shutdown
-  service mqtt plain-text shutdown
-  service mqtt ssl shutdown
-  service mqtt websocket shutdown
-  service mqtt websocket-secure shutdown
-  service amqp plain-text shutdown
-  service amqp ssl shutdown
-  no ssl allow-downgrade-to-plain-text
-  exit
-
-client-username "default" message-vpn "default"
-  shutdown
-  exit
-
 message-vpn "default"
   shutdown
   exit
 `
 }
 
+// enableDefaultVPNScript is disableDefaultVPNScript's exact inverse: it starts the
+// default message-VPN back up. Because the disable side only ever shut the VPN down,
+// this restores the broker to the state it was in beforehand without re-opening
+// anything the operator hardened by hand.
+func enableDefaultVPNScript() string {
+	return cliHome + `enable
+configure
+message-vpn "default"
+  no shutdown
+  exit
+`
+}
+
 // showVPNScript lists all message-VPNs. 053 (lines 58-61) wraps it in
 // home/enable/configure; 054 (line 20) uses the bare form to parse VPN names.
-func showVPNScript() string      { return "home\nenable\nconfigure\nshow message-vpn *\n" }
-func showVPNBareScript() string  { return "show message-vpn *\n" }
+func showVPNScript() string     { return cliHome + "enable\nconfigure\nshow message-vpn *\n" }
+func showVPNBareScript() string { return cliHome + "show message-vpn *\n" }
+
+// showRedundancyLocalScript is `show redundancy` with a script preamble, for the
+// replication paths that need to know whether the node they reached holds activity.
+//
+// showRedundancyScript is the bare one-liner the HA polls use, where the session is
+// already where it needs to be; this one opens properly because it is uploaded and run as
+// its own script.
+func showRedundancyLocalScript() string { return cliHome + "show redundancy\n" }
+
+// showReplicationScript reports the broker's replication mate: its virtual-router-name
+// and every address it is dialled on. It carries NO per-VPN role -- that is a different
+// command (showVPNReplicationScript), confirmed against real output on both platforms.
+func showReplicationScript() string { return cliHome + "show replication\n" }
+
+// showVPNReplicationScript reports every message-VPN's replication admin-state and
+// config-state as a fixed-width flag table (ParseVPNReplication).
+//
+// `replication` is a sub-command of `show message-vpn <vpn-name>`, so the plain
+// `show message-vpn *` is a different reply that carries neither flag.
+func showVPNReplicationScript() string { return cliHome + "show message-vpn * replication\n" }
+
+// setReplicationRoleScript sets one VPN's replication role.
+//
+// The operand is a BARE keyword -- the grammar is `state {active | standby}` -- even
+// though `show current-config` echoes it back quoted. The VPN name is quoted because real
+// ones contain spaces, the same reason currentConfigScript quotes it.
+//
+// This is the only command in the feature that moves a role, and the only one whose
+// ordering across two brokers matters; everything that decides WHEN to call it lives in
+// the switch plan, not here.
+func setReplicationRoleScript(vpn string, role ReplRole) string {
+	return cliHome + fmt.Sprintf("enable\nconfigure\nmessage-vpn %q\n  replication\n    state %s\n    exit\n  exit\n",
+		vpn, role)
+}
+
+// setReplicationEnabledScript turns replication on or off for one VPN. Enabling is
+// `no shutdown` and disabling is `shutdown`, inside the VPN's replication node.
+func setReplicationEnabledScript(vpn string, enabled bool) string {
+	cmd := "shutdown"
+	if enabled {
+		cmd = "no shutdown"
+	}
+	return cliHome + fmt.Sprintf("enable\nconfigure\nmessage-vpn %q\n  replication\n    %s\n    exit\n  exit\n",
+		vpn, cmd)
+}
+
+// currentConfigScript renders the `show current-config` capture that backs
+// `broker perform export-config` and, with remove set, the teardown that
+// `import-config` applies before rebuilding a VPN.
+//
+// `no paging` is mandatory and is the difference between the whole configuration
+// and the first screen of it -- gatherConfigsScript opens the same way, for the
+// same reason. It is a show command, so it needs neither `enable` nor
+// `configure`.
+//
+// The three forms come straight from the broker's own grammar,
+// `show current-config [all | message-vpn <name> [remove]]`:
+//
+//	vpn == ""   -> `show current-config all`, the whole broker including every VPN
+//	vpn != ""   -> `show current-config message-vpn "<vpn>"`
+//	remove      -> the broker generates the REMOVAL commands for that VPN instead
+//
+// remove is emitted only with a vpn, because the broker offers it only there --
+// there is no whole-broker teardown generator, which is why broker-level import
+// is a section classification rather than a delete-and-replace.
+//
+// The broker also offers a `redact` form, and this tool deliberately does not use
+// it: redaction strips exactly the credential material an import has to put back,
+// so a redacted capture is an artifact import would refuse. `Capture.Redacted` is
+// still read from the header, because a hand-edited file could claim it and import
+// should say so rather than apply a credential-free configuration.
+//
+// The vpn name is quoted because real VPN names contain spaces (a live capture
+// carried "A VPN WITH LONG NAME AND SPACES"), and it is checked by
+// validVPNName rather than validName -- validName's charset would reject exactly
+// those legitimate names.
+func currentConfigScript(vpn string, remove bool) string {
+	var b strings.Builder
+	b.WriteString(cliHome + "show current-config ")
+	if vpn == "" {
+		b.WriteString("all")
+	} else {
+		fmt.Fprintf(&b, "message-vpn %q", vpn)
+	}
+	if remove && vpn != "" {
+		b.WriteString(" remove")
+	}
+	b.WriteString("\n")
+	return b.String()
+}
 
 // disableDefaultUsersScript shuts down the "default" client-username in each of
 // the given VPNs (054 lines 33-42).
 func disableDefaultUsersScript(vpns []string) string {
+	return defaultUsersScript(vpns, "shutdown")
+}
+
+// enableDefaultUsersScript is disableDefaultUsersScript's inverse: it starts the
+// "default" client-username back up in each of the given VPNs.
+func enableDefaultUsersScript(vpns []string) string {
+	return defaultUsersScript(vpns, "no shutdown")
+}
+
+// defaultUsersScript is the shape both default-user scripts share. The only
+// difference between them is the one command applied per VPN, so it lives in one
+// place: a divergence in the surrounding home/enable/configure preamble or in the
+// closing `show` would mean the enable and disable paths reported on different things.
+func defaultUsersScript(vpns []string, command string) string {
 	var b strings.Builder
-	b.WriteString("home\nenable\nconfigure\n")
+	b.WriteString(cliHome + "enable\nconfigure\n")
 	for _, vpn := range vpns {
-		fmt.Fprintf(&b, "client-username default message-vpn %q\nshutdown\nexit\n", vpn)
+		fmt.Fprintf(&b, "client-username default message-vpn %q\n%s\nexit\n", vpn, command)
 	}
 	b.WriteString("end\nshow client-username default message-vpn *\n")
 	return b.String()
 }
 
-// additionalUsersScript creates each management (CLI) user with its password and
-// global access level. It has no bash ancestor: the operator offers no way to
-// deliver extra users declaratively -- extra data keys in the credentials Secret are
-// ignored, and extraEnvVars/extraEnvVarsSecret would expose the passwords in the
-// pod's environment -- so on k8s the users are created over the CLI instead.
-//
-// `create` fails when the user already exists, which is deliberate: the caller
-// surfaces that as an error rather than silently reconciling a password the operator
-// may have changed on purpose. Both values are quoted, and the password's characters
-// are constrained upstream (config.cliForbiddenPassword) to the set the CLI accepts
-// inside quotes, so no escaping is possible or needed here.
-//
-// CONTAINS SECRETS: the returned body carries every password, so the caller must
-// upload it on stdin and must not echo the CLI's own output, which repeats the
-// command lines back.
-func additionalUsersScript(users []config.AdditionalUser) string {
-	var b strings.Builder
-	b.WriteString("home\nno paging\nenable\nconfigure\n")
-	for _, u := range users {
-		fmt.Fprintf(&b, "create username %q password %q\n", u.Username, u.Password)
-		fmt.Fprintf(&b, "global-access-level %s\nexit\n", u.AccessLevel)
-	}
-	b.WriteString("end\n")
-	return b.String()
-}
-
 // productKeysScript applies each product key (057 lines 24-29).
-func productKeysScript(keys []string) string {
+func productKeysScript(keys []string) string { return productKeyScript(keys, "product-key") }
+
+// removeProductKeysScript revokes each product key. `no product-key <key>` is the exact
+// inverse of the apply form, confirmed on a live broker, which is why the two are one
+// function: a divergence in the preamble would mean the apply and remove paths ran in
+// different CLI contexts, and `product-key` outside `admin` is not a command.
+func removeProductKeysScript(keys []string) string { return productKeyScript(keys, "no product-key") }
+
+// productKeyScript is the shape both share. The preamble is the operator's own,
+// confirmed on a live broker:
+//
+//	home
+//	enable
+//	admin
+//	[no ]product-key <key>
+//
+// `admin` rather than `configure`: a product key is an admin-level action, and the same
+// line under `configure` is not a command. `home` leads, so the script does not depend on
+// where a session happened to be -- it was missing here and is not optional in the
+// confirmed form.
+func productKeyScript(keys []string, command string) string {
 	var b strings.Builder
-	b.WriteString("enable\nadmin\n")
+	b.WriteString(cliHome + "enable\nadmin\n")
 	for _, k := range keys {
-		fmt.Fprintf(&b, "product-key %s\n", k)
+		fmt.Fprintf(&b, "%s %s\n", command, k)
 	}
 	b.WriteString("show product-key\n")
 	return b.String()
@@ -226,11 +335,11 @@ func parseVPNNames(output string) []string {
 // by 069 (lines 38-161). days sets days-of-history for gather-diagnostics.
 func gatherConfigsScript(days int) string {
 	var b strings.Builder
-	b.WriteString("home\nno paging\n\n! some commands for specific to appliance vs software\n\n")
+	b.WriteString(cliHome + "\n! some commands for specific to appliance vs software\n\n")
 	for _, cmd := range gatherShowCommands {
 		fmt.Fprintf(&b, "show %s > configs/cliout/show-%s.out\n", cmd.args, cmd.out)
 	}
-	fmt.Fprintf(&b, "\n! gather diagnostics '%d' days\nend\nhome\nenable\nadmin\ngather-diagnostics days-of-history '%d' no-encrypt\n", days, days)
+	fmt.Fprintf(&b, "\n! gather diagnostics '%d' days\nend\n"+cliHome+"enable\nadmin\ngather-diagnostics days-of-history '%d' no-encrypt\n", days, days)
 	return b.String()
 }
 

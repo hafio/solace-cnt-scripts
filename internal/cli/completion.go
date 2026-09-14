@@ -25,7 +25,8 @@ func newCompletionCmd() *cobra.Command {
 		Short: "Print the shell auto-completion script for solace-util",
 		Long: "Print a shell's completion script on stdout. Load it to complete commands and\n" +
 			"flags, plus the values they take: env files for -e/--env, primary|backup|monitor\n" +
-			"for the [role] positionals and --pod, and directories for --base-dir and --dir.\n\n" +
+			"for --pod, platform names for --platform, and directories for --base-dir and\n" +
+			"--dir.\n\n" +
 			"Completion never reads the env file, so it stays inert -- a TAB press cannot\n" +
 			"parse config or run anything. See each shell's help for how to load it.",
 		Args:              cobra.NoArgs,

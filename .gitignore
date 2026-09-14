@@ -28,3 +28,14 @@ env.yaml
 *.key
 *.crt
 *.pem
+
+cross-platform.md
+graphify-out/20*
+semp
+# Configuration exports (`broker perform export-config`). A real capture carries the
+# broker's aes-password values and every other configured secret in encrypted form --
+# that is what makes it replayable -- so an artifact must never be committed by
+# accident. Anchored to the repo root so internal/broker/testdata/*.cli, which are
+# credential-free fixtures by construction, stay tracked.
+/*.cli
+/*.backup

@@ -3,7 +3,6 @@ package k8s
 import (
 	"context"
 	"fmt"
-	"path"
 
 	"solace/internal/config"
 )
@@ -78,7 +77,11 @@ func (c *Cluster) CopyFrom(ctx context.Context, role config.Role, files []string
 	t := NewTransport(c.R, c.Cfg)
 	var failed int
 	for _, f := range files {
-		local := path.Base(f)
+		// config.BaseName, not path.Base: the source is an in-broker path the
+		// operator typed, and path.Base splits only on '/', so a value written with
+		// a backslash would keep its directory component and become a local
+		// filename with a separator in it.
+		local := config.BaseName(f)
 		c.logf("copying %s from %s", f, roleName(role))
 		if err := t.Download(ctx, role, f, local); err != nil {
 			c.report().Fail("%s: %v", f, err)

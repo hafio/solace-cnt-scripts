@@ -15,10 +15,7 @@ import (
 // rather than under a platform because it loads no config of its own: the file
 // it reads is the argument, not -e/--env, so the app context stays unused.
 func newConvertCmd(app *App) *cobra.Command {
-	var (
-		out   string
-		force bool
-	)
+	var ()
 	cmd := &cobra.Command{
 		Use:   "convert <bash-env-file>",
 		Short: "Convert a legacy bash env file into a YAML env file",
@@ -37,11 +34,10 @@ func newConvertCmd(app *App) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return runConvert(args[0], out, app.PlatformFlag, force)
+			return runConvert(app, args[0], app.PlatformFlag)
 		},
 	}
-	cmd.Flags().StringVarP(&out, "out", "o", "", "write the YAML here instead of stdout")
-	cmd.Flags().BoolVar(&force, "force", false, "overwrite the --out file if it already exists")
+	addOutFlags(cmd, app)
 	return cmd
 }
 
@@ -52,10 +48,10 @@ func newConvertCmd(app *App) *cobra.Command {
 // existing one -- but there is no second spelling to learn. Empty still means
 // detect, which for a bash source is a question about its variable names
 // (internal/convert), not about YAML sections.
-func runConvert(src, out, platform string, force bool) error {
+func runConvert(a *App, src, platform string) error {
 	p, err := config.ParsePlatform(platform)
 	if err != nil {
-		return err
+		return asUsage(err)
 	}
 	raw, err := os.ReadFile(src)
 	if err != nil {
@@ -68,18 +64,15 @@ func runConvert(src, out, platform string, force bool) error {
 	for _, w := range res.Warnings {
 		warn("%s", w)
 	}
-	if out == "" {
-		step("converted %s for platform %s", src, res.Platform)
-		return emit(res.YAML)
+	step("converted %s for platform %s", src, res.Platform)
+	// emitOrWrite owns stdout-vs-file, the overwrite confirmation and the 0600 mode. The
+	// converted file carries the same secrets as the source, which is why the mode matters
+	// and why replacing one is worth confirming.
+	if err := emitOrWrite(a, res.YAML, "converted env file"); err != nil {
+		return err
 	}
-	if _, err := os.Stat(out); err == nil && !force {
-		return fmt.Errorf("refusing to overwrite %q: pass --force to replace it, or choose another --out path", out)
+	if a.out != "" {
+		step("review it before use; it carries the secrets from %s verbatim", src)
 	}
-	// 0o600: the converted file carries the same secrets as the source.
-	if err := os.WriteFile(out, res.YAML, 0o600); err != nil {
-		return fmt.Errorf("write %q: %w", out, err)
-	}
-	step("converted %s -> %s (platform %s)", src, out, res.Platform)
-	step("review it before use; it carries the secrets from %s verbatim", src)
 	return nil
 }

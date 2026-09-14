@@ -11,7 +11,6 @@ import (
 	"solace/internal/broker"
 	"solace/internal/config"
 	"solace/internal/k8s"
-	"solace/internal/render"
 )
 
 // The k8s handlers wire the cobra tree to the two Kubernetes entry types: k8s.Cluster
@@ -22,10 +21,9 @@ import (
 // stdout (emit).
 
 // k8sCluster builds a Cluster over the app's runner/config, wiring stdout as the report
-// sink and stdin as the prompt source (LabelNodes prompts per role).
+// sink. It wires no reader: the package asks exactly one question, through Confirm.
 func k8sCluster(a *App) *k8s.Cluster {
 	c := k8s.NewCluster(a.Runner, a.Cfg, lineSink(), os.Stdout)
-	c.In = os.Stdin
 	// Same seam container.Manager carries: the one question this side asks is
 	// whether to downgrade the cluster-scoped operator. It is the ONE question
 	// --no-prompt cannot answer -- `deploy operator` does not register the flag,
@@ -52,142 +50,288 @@ func nowStamp() string { return time.Now().Format("20060102-150405") }
 
 // lifecycle
 
-// opK8sCheck validates everything a deployment needs before it is attempted:
-// the config itself, cluster reachability, the StorageClass, and -- since the
-// operator is now installed by its own command rather than folded into the
-// bring-up -- whether the operator and its CRD are actually present. The operator
-// probe only warns: `check deploy` is read-only and a missing operator is a thing
-// to be told about, not an error in the checking.
-func opK8sCheck(a *App) error {
-	// The operator probe moved INTO the report (operatorRows), where it is a row
-	// with a verdict rather than a warning tacked on after the fact -- and where
-	// it also reports the version actually running.
-	return k8sCluster(a).CheckDeploy(bg())
-}
-
-// opK8sPrepAll runs the prep steps a broker deployment needs every time: the
-// namespace and its secrets. Both are idempotent and need no input, so this stays
-// scriptable.
+// opK8sValidate / opK8sValidateBroker / opK8sValidateOperator are the three views of
+// one report (k8s/checkreport.go). One builder behind all three is what makes the
+// whole-file view provably equal to the two halves rather than a third thing that has to
+// be kept in step with them.
 //
-// Two things are deliberately NOT here. The operator is cluster-scoped and shared
-// between brokers, so installing it is its own command (`deploy operator`). And
-// node labelling cannot be automated at all: the env file says WHICH LABEL a
-// broker's pods want, but only a human can say which machine should carry it, so
-// `prepare labels` is a one-off act of cluster provisioning rather than a step in
-// bringing up a broker.
-func opK8sPrepAll(a *App) error {
+// Every cluster-backed row is read from the cluster; the config echo is tagged [INFO] so
+// it cannot be mistaken for something that was checked. A missing operator is a [WARN],
+// not a failure: validating a cluster before installing anything is a normal thing to do.
+func opK8sValidate(a *App) error         { return k8sCluster(a).Validate(bg()) }
+func opK8sValidateBroker(a *App) error   { return k8sCluster(a).ValidateBroker(bg()) }
+func opK8sValidateOperator(a *App) error { return k8sCluster(a).ValidateOperator(bg()) }
+
+// opK8sDeploy brings the broker up: the prerequisites first, then the CR.
+//
+// The prerequisites are folded in rather than being their own `prepare` verb, because
+// both are idempotent -- `kubectl apply` of a Namespace and of a multi-doc Secret
+// manifest -- so running them on every deploy costs nothing and removes a step an
+// operator could forget. `deploy operator` stays separate: the operator is
+// cluster-scoped and shared between brokers, so installing it is not this broker's
+// business.
+//
+// Node labelling used to be the third prerequisite and is gone entirely; the env file's
+// placement labels are selectors the rendered CR carries, not labels this tool stamps
+// onto anyone's cluster.
+func opK8sDeploy(a *App) error {
 	c := k8sCluster(a)
 	ctx := bg()
 	if err := c.CreateNamespace(ctx); err != nil {
 		return err
 	}
-	return c.CreateSecrets(ctx)
-}
-
-// opK8sPrepLabels stamps the configured placement labels onto nodes the operator
-// picks, one per broker role. It refuses without a terminal rather than failing
-// deep inside the picker on an unreadable stdin: there is no way to express the
-// node choice in the env file or on the command line, so a non-interactive run
-// cannot do this at all, and saying so up front is the difference between an
-// actionable message and an EOF.
-func opK8sPrepLabels(a *App) error {
-	// Nothing configured means nothing to ask about, so this stays a no-op even
-	// without a terminal -- refusing there would fail a run that had no work to do.
-	if !placementConfigured(a.Cfg) {
-		step("no placement labels configured (kubernetes.placement.labels*); nothing to label")
-		return nil
+	if err := c.CreateSecrets(ctx); err != nil {
+		return err
 	}
-	if !interactive(a) {
-		return fmt.Errorf("labelling nodes needs a terminal: the env file names the label each " +
-			"broker role wants, but which machine carries it is chosen interactively, and " +
-			"there is no flag for it. Run this once by hand on a cluster you can see -- " +
-			"`prepare all` and `deploy all` do not need it")
+	if err := c.DeployBroker(ctx, false); err != nil {
+		return err
 	}
-	return k8sCluster(a).LabelNodes(bg())
+	// Fire and forget, but not fire and hope: `apply` exiting 0 does not prove the
+	// resource exists -- an admission webhook can reject it, and a CRD that is present
+	// but not yet established fails differently -- so the CR is read back before this
+	// reports success. Readiness is deliberately NOT waited on; `broker status` is for
+	// watching it come up.
+	return c.ConfirmBrokerApplied(ctx)
 }
 
-// placementConfigured reports whether any per-role node placement labels are set.
-// It gates prepare labels: with none configured there is no question to ask.
-func placementConfigured(cfg *config.Config) bool {
-	p := cfg.K8s.Placement
-	return len(p.LabelsPrimary) > 0 || len(p.LabelsBackup) > 0 || len(p.LabelsMonitor) > 0
-}
+// The namespace and secrets steps are no longer commands of their own: `broker deploy`
+// applies both, idempotently, and `broker remove` removes them. `prepare` existed only
+// because they were separate, and a prerequisite you can forget to run is a prerequisite
+// that gets forgotten.
 
-// opK8sDeploy renders and applies the broker CR.
-func opK8sDeploy(a *App) error {
-	return k8sCluster(a).DeployBroker(bg(), false)
-}
-
-// prep steps
-func opK8sPrepNamespace(a *App) error { return k8sCluster(a).CreateNamespace(bg()) }
-
-// opK8sPrepSecrets applies the broker secrets; a gen flag prints the manifests
-// instead. Unlike the other prep steps it is gen-capable, since the secrets are
-// its own artifact -- `prep secrets --gen-only` and `--gen-secrets-only` are the
-// same rendering here.
-func opK8sPrepSecrets(a *App) error {
-	return k8sCluster(a).CreateSecrets(bg())
-}
-
-// config steps
+// configure steps
 //
-// There is deliberately no run-everything step here. Each of these talks to a live
-// broker over its CLI and they are not uniformly re-runnable -- `apply
-// additional-users` fails outright on a user that already exists -- so the order
-// they should be run in is documented on the `config` command rather than baked
-// into a command that would stop halfway on a second run.
+// There is deliberately no run-everything step. Each of these talks to a live broker over
+// its CLI and they are not uniformly re-runnable, so the order that works on a fresh
+// broker is documented on the `configure` command rather than baked into a command that
+// would stop halfway through on its second run.
+//
+// Each leaf reads its direction pair (--apply/--remove, or --disable/--enable) through
+// wantRemove/wantEnable, which is also where both-at-once becomes a usage error. The
+// default direction is the one an operator wants nine times out of ten, so it needs no
+// flag at all.
 
-func opK8sConfigLeader(a *App) error { return k8sOps(a).Leader(bg()) }
-
-// opK8sConfigServerCert loads/updates the TLS server certificate. On k8s the
-// secret-managed path (kubernetes.tlsServerSecret set) updates the Secret so the
-// operator mounts it (051 fast path); otherwise the CLI path uploads key+cert+CAs
-// into each broker node.
-func opK8sConfigServerCert(a *App) error {
+// opK8sConfigServerCerts loads, updates or removes the TLS server certificate.
+//
+// The secret-managed path (kubernetes.tlsServerSecret set) rewrites the Secret and lets
+// the operator mount it -- nothing is exec'd into the broker and no pod is restarted.
+// Without it, the certificate is loaded over the broker CLI on every node that needs it.
+//
+// --remove is CLI-only and spans the same nodes the apply path does. It has no
+// secret-managed form, and refuses rather than inventing one -- see the branch below.
+func opK8sConfigServerCerts(a *App) error {
+	remove, err := wantRemove(a)
+	if err != nil {
+		return err
+	}
+	if remove {
+		// Secret-managed deployments have no CLI removal, and must not pretend to: the
+		// operator mounts kubernetes.tlsServerSecret and would reconcile the certificate
+		// straight back, so the command would report success over a broker that still
+		// presents it. Say where the certificate actually comes from instead.
+		if a.Cfg.K8s.TLSServerSecret != "" {
+			return fmt.Errorf("the TLS server certificate comes from the Secret %q, which the operator "+
+				"mounts -- removing it over the broker CLI would be undone at the next reconcile.\n"+
+				"  To stop presenting it, clear kubernetes.tlsServerSecret (the CR's TLS block goes with it) "+
+				"and redeploy; the Secret itself is removed by `broker remove` when this env file owns it",
+				a.Cfg.K8s.TLSServerSecret)
+		}
+		// The whole group, like the apply path: a certificate gone from one node and
+		// still loaded on another is a half state nobody asked for. --pod still narrows.
+		roles, err := podRoles(a, k8s.HARoles(a.Cfg))
+		if err != nil {
+			return err
+		}
+		if !confirmAction(a, "Remove the TLS server certificate from", "remove the TLS server certificate from",
+			k8sWhat(a, "broker "+a.Cfg.K8s.Name)) {
+			return nil
+		}
+		return k8sOps(a).RemoveServerCerts(bg(), roles...)
+	}
 	if a.Cfg.K8s.TLSServerSecret != "" {
+		// Whether this env file supplies the files to rebuild it is UpdateServerCertSecret's
+		// question, not this one's: a Secret-backed deployment never wants the CLI path,
+		// and being told the Secret is managed elsewhere beats being asked for a
+		// certificate whose only use would be to overwrite someone else's.
 		return k8sCluster(a).UpdateServerCertSecret(bg())
 	}
-	return k8sOps(a).ServerCert(bg(), today(), k8s.HARoles(a.Cfg)...)
+	roles, err := podRoles(a, k8s.HARoles(a.Cfg))
+	if err != nil {
+		return err
+	}
+	return k8sOps(a).ServerCert(bg(), today(), roles...)
 }
 
+// opK8sConfigDomainCerts loads or removes the configured domain certificate authorities.
+// --remove is implemented here, unlike its siblings, because
+// `no ssl domain-certificate-authority` is a documented CLI form -- and, like every
+// other removal in this tree, it asks before it acts.
 func opK8sConfigDomainCerts(a *App) error {
-	return k8sOps(a).DomainCerts(bg(), config.Primary, a.Cfg.Broker.DomainCerts.Folder, a.Cfg.Broker.DomainCerts.Files)
-}
-func opK8sConfigDisableVPN(a *App) error { return k8sOps(a).DisableDefaultVPN(bg(), config.Primary) }
-func opK8sConfigDisableUsers(a *App) error {
-	return k8sOps(a).DisableDefaultUsers(bg(), config.Primary)
-}
-func opK8sConfigProductKeys(a *App) error {
-	return k8sOps(a).ProductKeys(bg(), a.Cfg.Broker.ProductKeys, k8s.ProductKeyRoles(a.Cfg)...)
-}
-
-// opK8sConfigAdditionalUsers creates the extra CLI users. Primary only: management
-// users are router-level config that config-sync replicates to the mates.
-//
-// VERIFIED 2026-08-21: config-sync replicates BOTH management `username` and
-// `client-username` to every node in the redundancy group, so applying them to the
-// primary alone is correct and widening this to k8s.HARoles would just re-create
-// users the mates already have.
-func opK8sConfigAdditionalUsers(a *App) error {
-	return k8sOps(a).AdditionalUsers(bg(), config.Primary, a.Cfg.Admin.AdditionalUsers)
-}
-
-// opK8sExecCLI uploads and runs a local Solace CLI script in the target pod. A bare
-// filename (no path separator) is resolved under the configured cliScripts folder; a
-// path is used as-is. The interactive file-picker menu of the bash 059 is not ported.
-func opK8sExecCLI(a *App, file string) error {
-	if file == "" {
-		return fmt.Errorf("a CLI script file is required (e.g. `solace-util config exec-cli setup.cli`)")
+	remove, err := wantRemove(a)
+	if err != nil {
+		return err
 	}
 	role, err := podRole(a)
 	if err != nil {
 		return err
 	}
-	localPath := file
-	if !strings.ContainsAny(file, `/\`) {
-		localPath = filepath.Join(a.Cfg.Broker.CLIScriptsFolder, file)
+	if remove {
+		if !confirmAction(a, "Remove", "remove",
+			k8sWhat(a, "the configured domain CA certificates from broker "+a.Cfg.K8s.Name)) {
+			return nil
+		}
+		return k8sOps(a).RemoveDomainCerts(bg(), role, domainCANames(a.Cfg))
+	}
+	return k8sOps(a).DomainCerts(bg(), role,
+		a.Cfg.Broker.DomainCerts.Folder, a.Cfg.Broker.DomainCerts.Files)
+}
+
+// opK8sConfigProductKeys applies or revokes the configured product keys. The roles
+// default to primary and, in HA, backup -- never the monitor, which carries no message
+// spool -- and BOTH directions use that same set: a key revoked on the primary and left
+// on the backup is a licensing state that changes at the next failover.
+func opK8sConfigProductKeys(a *App) error {
+	remove, err := wantRemove(a)
+	if err != nil {
+		return err
+	}
+	roles, err := podRoles(a, k8s.ProductKeyRoles(a.Cfg))
+	if err != nil {
+		return err
+	}
+	if remove {
+		if !confirmAction(a, "Revoke every configured product key from", "revoke the product keys from",
+			k8sWhat(a, "broker "+a.Cfg.K8s.Name)) {
+			return nil
+		}
+		return k8sOps(a).RemoveProductKeys(bg(), a.Cfg.Broker.ProductKeys, roles...)
+	}
+	return k8sOps(a).ProductKeys(bg(), a.Cfg.Broker.ProductKeys, roles...)
+}
+
+// opK8sConfigDefaultVPN shuts the default message-VPN down, or starts it back up.
+// One node: config-sync replicates it to the mates. Shutting it down stops every
+// client connection using it, so that direction asks first, like every other
+// disruptive `broker configure` leaf.
+func opK8sConfigDefaultVPN(a *App) error {
+	enable, err := wantEnable(a)
+	if err != nil {
+		return err
+	}
+	role, err := podRole(a)
+	if err != nil {
+		return err
+	}
+	if enable {
+		return k8sOps(a).EnableDefaultVPN(bg(), role)
+	}
+	if !confirmAction(a, "Shut down", "shut down",
+		k8sWhat(a, "the default message-VPN on broker "+a.Cfg.K8s.Name)) {
+		return nil
+	}
+	return k8sOps(a).DisableDefaultVPN(bg(), role)
+}
+
+// opK8sConfigDefaultUsers shuts the "default" client-username down in every VPN, or
+// starts it back up. One node, for the same config-sync reason. Shutting it down
+// blocks any client still relying on that username, so that direction asks first.
+func opK8sConfigDefaultUsers(a *App) error {
+	enable, err := wantEnable(a)
+	if err != nil {
+		return err
+	}
+	role, err := podRole(a)
+	if err != nil {
+		return err
+	}
+	if enable {
+		return k8sOps(a).EnableDefaultUsers(bg(), role)
+	}
+	if !confirmAction(a, "Shut down", "shut down",
+		k8sWhat(a, "the default client-username in every message-VPN on broker "+a.Cfg.K8s.Name)) {
+		return nil
+	}
+	return k8sOps(a).DisableDefaultUsers(bg(), role)
+}
+
+// opK8sConfigLeader asserts the config-sync leader. It drives the whole redundancy group,
+// so it takes no --pod.
+func opK8sConfigLeader(a *App) error { return k8sOps(a).Leader(bg()) }
+
+// `config apply additional-users` is gone, and so is the broker-CLI op behind it.
+// admin.additionalUsers is applied declaratively now: k8s.AdditionalUsersSecret builds a
+// Secret of its own and the CR names it in spec.extraEnvVarsSecret, so the users exist from
+// the broker's first boot rather than being created afterwards by a command that was not
+// re-runnable. There is nothing left to wire here.
+
+// opK8sExecCLI uploads and runs a local Solace CLI script in the target pod. A bare
+// filename (no path separator) is resolved under the configured cliScripts folder; a
+// path is used as-is. The interactive file-picker menu of the bash 059 is not ported.
+// opK8sExportConfig captures the broker's configuration from the target pod.
+//
+// It takes a role rather than resolving one itself because it is wired through
+// withPodRole: a capture reads one node, and on Kubernetes which node matters --
+// config-sync makes the mates agree on VPN-level configuration but NOT on
+// per-node settings, so a capture of the primary does not fully describe the
+// backup.
+func opK8sExportConfig(a *App, role config.Role) error {
+	return runExport(a, k8sOps(a), role)
+}
+
+// opK8sImportConfig applies a captured configuration to the target pod.
+//
+// Unlike opK8sExecCLI the path is used exactly as given, with no
+// broker.cliScriptsFolder resolution. cliScriptsFolder holds scripts an operator
+// maintains; this file is an artifact export-config just wrote, so resolving it
+// somewhere else would look for it where it is not.
+func opK8sImportConfig(a *App, file string) error {
+	role, err := podRole(a)
+	if err != nil {
+		return err
+	}
+	return runImport(a, k8sOps(a), role, file)
+}
+
+func opK8sExecCLI(a *App, file string) error {
+	role, localPath, err := resolveScript(a, file, "CLI")
+	if err != nil {
+		return err
 	}
 	return k8sOps(a).ExecCLI(bg(), role, localPath)
+}
+
+// opK8sExecShell uploads and runs a local shell script inside the target pod.
+//
+// It resolves its filename exactly like opK8sExecCLI -- a bare name under
+// broker.cliScriptsFolder, a path as given -- so an operator who keeps both kinds of
+// script in one place does not have to remember which command treats the folder
+// differently. What it runs is arbitrary code inside the broker container; the command's
+// help says so, and says that the output is shown in full.
+func opK8sExecShell(a *App, file string) error {
+	role, localPath, err := resolveScript(a, file, "shell")
+	if err != nil {
+		return err
+	}
+	return k8sOps(a).ExecShellScript(bg(), role, localPath)
+}
+
+// resolveScript is the filename-and-role resolution both script runners share: a bare
+// filename resolves under broker.cliScriptsFolder, a path is used as given, and the pod
+// comes from --pod. One definition, so the two runners cannot resolve the same argument
+// to two different files.
+func resolveScript(a *App, file, kind string) (config.Role, string, error) {
+	if file == "" {
+		return config.Primary, "", usagef("a %s script file is required", kind)
+	}
+	role, err := podRole(a)
+	if err != nil {
+		return config.Primary, "", err
+	}
+	localPath := file
+	if !config.HasPathSeparator(file) {
+		localPath = filepath.Join(a.Cfg.Broker.CLIScriptsFolder, file)
+	}
+	return role, localPath, nil
 }
 
 // check / smoke steps
@@ -208,7 +352,7 @@ func opK8sVerifyLogin(a *App, role config.Role) error {
 // stdout and reports ok=false (not an error) on a failed login, so the handler turns a
 // failed login into a non-zero exit.
 func k8sLogin(a *App, o *broker.Ops, role config.Role) error {
-	ok, err := o.Login(bg(), role, "admin", a.Cfg.Admin.Pass)
+	ok, err := o.Login(bg(), role, "admin", a.Cfg.SEMP.AdminPass)
 	if err != nil {
 		return err
 	}
@@ -259,9 +403,25 @@ func opK8sStatusOperator(a *App) error {
 	return c.OperatorDescribe(ctx)
 }
 
-func opK8sLogs(a *App, role config.Role) error  { return k8sCluster(a).Logs(bg(), role, nil) }
-func opK8sCLI(a *App, role config.Role) error   { return k8sCluster(a).CLI(bg(), role) }
-func opK8sShell(a *App, role config.Role) error { return k8sCluster(a).Shell(bg(), role) }
+func opK8sLogs(a *App, role config.Role) error {
+	args, err := logArgs(a)
+	if err != nil {
+		return err
+	}
+	// --previous is kubernetes-only, so it is appended here rather than in logArgs,
+	// which builds only the tokens every platform shares.
+	if a.previous {
+		args = append(args, "-p")
+	}
+	return k8sCluster(a).Logs(bg(), role, args)
+}
+
+// opK8sCLI / opK8sShell hand the terminal to a session in the pod, so the session's
+// own exit status is this tool's (childExit, exit.go). `broker perform cli-script` is
+// deliberately NOT marked: it runs a script through the CLI and reports on the
+// script, which is this tool's own judgement rather than a status to pass along.
+func opK8sCLI(a *App, role config.Role) error   { return childExit(k8sCluster(a).CLI(bg(), role)) }
+func opK8sShell(a *App, role config.Role) error { return childExit(k8sCluster(a).Shell(bg(), role)) }
 
 func opK8sCopyFrom(a *App, files []string) error {
 	role, err := podRole(a)
@@ -301,7 +461,7 @@ func opK8sRestart(a *App, roleArg string) error {
 	}
 	role, err := config.ParseRole(roleArg)
 	if err != nil {
-		return err
+		return asUsage(err)
 	}
 	if !confirmAction(a, "Restart", "restart", k8sWhat(a, "the "+roleWord(role)+" broker pod")) {
 		return nil
@@ -309,18 +469,9 @@ func opK8sRestart(a *App, roleArg string) error {
 	return c.RestartPod(bg(), role)
 }
 
-// roleWord spells a role out for a prompt; config.Role's own form is the single
-// letter used in resource names, too terse for a user-facing question.
-func roleWord(role config.Role) string {
-	switch role {
-	case config.Backup:
-		return "backup"
-	case config.Monitor:
-		return "monitor"
-	default:
-		return "primary"
-	}
-}
+// roleWord spells a role out for a prompt. It delegates to config.Role.Word, which is
+// where the canonical spelling lives now that the env file keys on it too.
+func roleWord(role config.Role) string { return role.Word() }
 
 // operator lifecycle
 
@@ -330,10 +481,17 @@ func opK8sOperatorDeploy(a *App) error {
 	return k8sCluster(a).OperatorApply(bg())
 }
 
-// opK8sOperatorRemove removes the operator. Like removing a broker it keeps the
-// expensive-to-regret layer by default -- here the CRDs, whose deletion cascades to
-// every PubSubPlusEventBroker in the cluster, including ones this env file has never
-// heard of. confirmLayer decides, and OperatorDelete reports which way it went.
+// opK8sOperatorRemove releases THIS env file's claim on the operator.
+//
+// It may not remove anything at all. The operator is cluster-scoped and shared, so
+// OperatorRelease first compares the namespaces it WATCHES against the ones this env file
+// accounts for: covering all of them means the install is this env file's to delete, and
+// covering only some means those namespaces come off the watch list and the operator stays
+// up for the rest. An operator watching every namespace is kept with a warning, since
+// "all except one" cannot be expressed.
+//
+// The layer question is the CRDs, whose deletion cascades to every PubSubPlusEventBroker
+// in the cluster -- including brokers this env file has never heard of.
 func opK8sOperatorRemove(a *App) error {
 	if !confirmDelete(a, "the EventBroker operator in namespace "+
 		k8s.OperatorNamespace(a.Cfg)+k8sContext(a)) {
@@ -369,175 +527,159 @@ func opK8sOperatorRemove(a *App) error {
 			deleteCRDs = confirmLayer(a, layerCRD)
 		}
 	}
-	return c.OperatorDelete(bg(), deleteCRDs)
+	return c.OperatorRelease(bg(), deleteCRDs)
 }
 
-func opK8sOperatorRestart(a *App) error  { return k8sCluster(a).OperatorRestart(bg()) }
-func opK8sOperatorLogs(a *App) error     { return k8sCluster(a).OperatorLogs(bg()) }
-func opK8sOperatorDescribe(a *App) error { return k8sCluster(a).OperatorDescribe(bg()) }
+// opK8sOperatorStart / opK8sOperatorStop scale the controller Deployment.
+//
+// Stopping it freezes reconciliation for EVERY namespace the operator watches, not just
+// this broker's, and nothing else reports that -- so it confirms first, through the same
+// gate a removal uses. Starting it is additive and does not.
+func opK8sOperatorStart(a *App) error { return k8sCluster(a).OperatorScale(bg(), 1) }
 
-// opK8sGenBroker / opK8sGenOperator / opK8sGenSecrets print one manifest and change
-// nothing. Rendering is a command with a named target rather than a flag on a
-// command that would otherwise deploy: an artifact you meant to inspect and a
-// cluster you meant to change should not be one typo apart.
-func opK8sGenBroker(a *App) error { return emit(render.BrokerCR(a.Cfg)) }
+func opK8sOperatorStop(a *App) error {
+	if !confirmAction(a, "Stop", "stop", "the operator, freezing reconciliation for every broker "+
+		"it watches"+k8sContext(a)) {
+		return nil
+	}
+	return k8sCluster(a).OperatorScale(bg(), 0)
+}
 
+func opK8sOperatorRestart(a *App) error { return k8sCluster(a).OperatorRestart(bg()) }
+func opK8sOperatorLogs(a *App) error {
+	args, err := logArgs(a)
+	if err != nil {
+		return err
+	}
+	return k8sCluster(a).OperatorLogs(bg(), args...)
+}
+
+// opK8sGenBroker / opK8sGenOperator print what deploy would apply and change nothing.
+// Rendering is a command of its own rather than a flag on the command that would otherwise
+// deploy: an artifact you meant to inspect and a cluster you meant to change should not be
+// one typo apart.
+// opK8sGenBroker renders the Secret manifests followed by the broker CR, joined as one
+// multi-document stream in APPLY ORDER.
+//
+// One command, not the two it used to be. `generate secrets broker` existed so the
+// credential-bearing half could be reviewed on its own, but the halves then had to be
+// applied in the right order by hand, and the ordering is the part that is easy to get
+// wrong -- the CR names Secrets that have to exist first. Emitting both in the order
+// `broker deploy` applies them makes this output the artifact rather than a description of
+// one.
+//
+// It therefore carries the admin password, the TLS private key and the registry
+// credential in base64. That is what makes Kubernetes the only platform whose generate
+// output is secret-bearing: a Secret manifest IS the artifact there, whereas a compose
+// file or quadlet unit can only ever reference a secret the engine already holds.
+func opK8sGenBroker(a *App) error {
+	b, err := k8s.GenBroker(a.Cfg)
+	if err != nil {
+		return err
+	}
+	return emitOrWrite(a, b, "broker manifests")
+}
+
+// opK8sGenOperator renders the whole operator install stream -- namespace, image-pull
+// secret when configured, then the bundle -- in the order OperatorApply applies it. The
+// separate `generate secrets operator` is gone for the same reason its broker sibling is.
 func opK8sGenOperator(a *App) error {
 	b, err := k8s.GenOperator(a.Cfg)
 	if err != nil {
 		return err
 	}
-	return emit(b)
-}
-
-func opK8sGenSecrets(a *App) error {
-	b, err := k8s.GenSecrets(a.Cfg)
-	if err != nil {
-		return err
-	}
-	return emit(b)
-}
-
-// opK8sGenOperatorSecrets prints the operator's image-pull secret. It is the
-// operator half of `generate secrets`: the bundle `generate operator` renders
-// references this secret by name but never carries it, so this is where the
-// credential is reviewed.
-func opK8sGenOperatorSecrets(a *App) error {
-	b, err := k8s.GenOperatorSecrets(a.Cfg)
-	if err != nil {
-		return err
-	}
-	return emit(b)
+	return emitOrWrite(a, b, "operator install stream")
 }
 
 // remove
 
-// opK8sDelete deletes the broker CR, keeping its PVCs unless the layer question
-// says otherwise (confirmLayer). Guarded by confirmDelete first: nothing is removed
-// without a yes.
-func opK8sDelete(a *App) error {
+// opK8sRemoveBroker is the whole prompted teardown: the broker, its secrets, optionally
+// its persistent data, and -- only if nothing else is left in it -- its namespace.
+//
+// The ORDER matters twice over. The CR goes before the PVCs because
+// kubernetes.io/pvc-protection holds a claim while a pod still mounts it, so a PVC queued
+// ahead of its workload waits forever. And the namespace question comes last, after
+// everything this env file owns is gone, because that is the only point at which "is
+// anything else in here?" has a meaningful answer.
+//
+// Keeping the data is what keeps the namespace: retained PVCs are occupancy, so a removal
+// that keeps the data cannot then cascade it away by deleting the namespace. That hazard
+// is structural rather than documented.
+func opK8sRemoveBroker(a *App) error {
 	if !confirmDelete(a, k8sWhat(a, "broker "+a.Cfg.K8s.Name)) {
 		return nil
 	}
-	return k8sCluster(a).DeleteBroker(bg(), confirmLayer(a, layerData))
-}
-
-// opK8sRemoveSecrets / opK8sRemoveNamespace confirm like every other removal.
-// Neither keeps a layer back -- `prepare` recreates both from the env file -- but
-// deleting a namespace takes everything else that happens to live in it, which is
-// exactly the kind of thing worth being asked about once.
-func opK8sRemoveSecrets(a *App) error {
-	if !confirmDelete(a, k8sWhat(a, "the secrets for broker "+a.Cfg.K8s.Name)) {
-		return nil
-	}
-	return k8sCluster(a).DeleteSecrets(bg())
-}
-
-func opK8sRemoveNamespace(a *App) error {
-	if !confirmDelete(a, "namespace "+a.Cfg.K8s.Namespace+" and everything in it"+k8sContext(a)) {
-		return nil
-	}
-	return k8sCluster(a).DeleteNamespace(bg())
-}
-func opK8sTeardownDomainCerts(a *App) error {
-	return k8sOps(a).RemoveDomainCerts(bg(), config.Primary, domainCANames(a.Cfg))
-}
-
-// orchestration
-
-// opK8sDeployAll runs the full bring-up for THIS broker: check -> namespace ->
-// secrets -> deploy -> (assert config-sync leader, HA only). Every step aborts loud
-// on failure, and every step is scriptable -- nothing here asks a question.
-//
-// Two things are deliberately absent. The operator is cluster-scoped and outlives
-// any one broker, so it belongs to `deploy operator`; this command is therefore
-// safe against a cluster whose operator other brokers already share, and `check
-// deploy` reports a missing one before the apply trips over it. Node labelling is
-// absent because it cannot be scripted at all: the env file names the label a
-// role's pods want, but only a person can say which machine carries it, so
-// `prepare labels` is a one-off act of cluster provisioning.
-func opK8sDeployAll(a *App) error {
 	c := k8sCluster(a)
 	ctx := bg()
-	if err := opK8sCheck(a); err != nil {
-		return err
-	}
-	if err := c.CreateNamespace(ctx); err != nil {
-		return err
-	}
-	if err := c.CreateSecrets(ctx); err != nil {
-		return err
-	}
-	if err := c.DeployBroker(ctx, false); err != nil {
-		return err
-	}
-	if a.Cfg.RedundancyEnabled() {
-		return k8sOps(a).Leader(ctx)
-	}
-	return nil
-}
-
-// opK8sRemoveAll tears down the broker and its namespace, leaving the cluster-scoped
-// operator installed -- it may be serving brokers this env file knows nothing about,
-// so removing it is its own explicit command. Guarded by the same confirm helpers as
-// removing the broker alone.
-func opK8sRemoveAll(a *App) error {
-	if !confirmDelete(a, "broker "+a.Cfg.K8s.Name+", its secrets and namespace "+
-		a.Cfg.K8s.Namespace+k8sContext(a)) {
-		return nil
-	}
-	deleteData := confirmLayer(a, layerData)
-	c := k8sCluster(a)
-	ctx := bg()
-	if err := c.DeleteBroker(ctx, deleteData); err != nil {
+	// The layer question is asked once, before any of the work, so a removal cannot get
+	// halfway through and then stop to ask something.
+	purge := confirmLayer(a, layerData)
+	if err := c.DeleteBroker(ctx, purge); err != nil {
 		return err
 	}
 	if err := c.DeleteSecrets(ctx); err != nil {
 		return err
 	}
-	if err := c.DeleteNamespace(ctx); err != nil {
-		return err
+	return removeNamespaceIfEmpty(a, c)
+}
+
+// removeNamespaceIfEmpty offers the namespace for deletion ONLY when nothing else is in
+// it, and never deletes one Kubernetes owns.
+//
+// Deleting a namespace cascades to everything inside, including whatever another team put
+// there, and this tool very often did not create it -- so the namespace is not in the
+// removal's delete set at all. Anything still there is listed and the namespace kept, on
+// every path including --no-prompt: a warning an operator can act on beats a prompt whose
+// yes would destroy someone else's work.
+//
+// A check that cannot run keeps the namespace too. That direction is the safety property:
+// a namespace wrongly reported empty gets cascade-deleted, while one wrongly reported
+// occupied merely stays.
+func removeNamespaceIfEmpty(a *App, c *k8s.Cluster) error {
+	if c.NamespaceIsProtected() {
+		warn("namespace %q is a Kubernetes namespace and is never removed by this tool",
+			a.Cfg.K8s.Namespace)
+		return nil
 	}
-	step("operator kept -- it is cluster-scoped and may serve other brokers " +
-		"(remove it with `solace-util remove operator`)")
-	return nil
+	contents, err := c.NamespaceContents(bg())
+	if err != nil {
+		warn("%v", err)
+		return nil
+	}
+	if len(contents) > 0 {
+		c.ReportNamespaceOccupied(contents)
+		return nil
+	}
+	if !confirmDelete(a, "the now-empty namespace "+a.Cfg.K8s.Namespace+k8sContext(a)) {
+		return nil
+	}
+	return c.DeleteNamespace(bg())
 }
 
 // k8sWhat labels a destructive Kubernetes target the way containerWhat labels a
-// container one: the object, then WHERE it is. The container prompt already named
-// its platform and container; the Kubernetes prompts named the broker and left the
-// two facts that decide blast radius unsaid.
+// container one: the object, then WHERE it is.
 //
-// Both matter, for different reasons. The namespace is in the env file but not in
+// Both facts matter, for different reasons. The namespace is in the env file but not in
 // the prompt, so an operator with several env files open had nothing to check the
-// question against. The context is not in the env file AT ALL -- the kubeconfig's
-// current context decides which cluster every call lands in, so a file that says
-// "dev" against a context that drifted to prod reads identically. It is appended
-// only when known (announceKubeContext resolved one), because a prompt that says
-// "context " with nothing after it is worse than one that does not mention it.
+// question against. The context is not in the env file AT ALL -- the kubeconfig's current
+// context decides which cluster every call lands in, so a file that says "dev" against a
+// context that has drifted to prod reads identically. It is appended only when known
+// (announceKubeContext resolved one), because a prompt that says "context " with nothing
+// after it is worse than one that does not mention it.
 func k8sWhat(a *App, object string) string {
 	return fmt.Sprintf("%s in namespace %s%s", object, a.Cfg.K8s.Namespace, k8sContext(a))
 }
 
-// k8sContext is the trailing "(context X)" clause on its own, for the prompts
-// that name their own namespace -- `remove namespace` and `remove all` say which
-// namespace goes as part of the sentence, and `remove operator` is in the
-// OPERATOR's namespace rather than the broker's. Appending k8sWhat's namespace to
-// any of those would state a second, wrong or duplicate location.
+// k8sContext is the trailing "(context X)" clause on its own, for the prompts that name
+// their own location -- the namespace question says which namespace goes as part of its
+// sentence, and the operator prompts are in the OPERATOR's namespace rather than the
+// broker's. Appending k8sWhat's namespace to any of those would state a second, wrong or
+// duplicate location.
 func k8sContext(a *App) string {
 	if a.kubeContext == "" {
 		return ""
 	}
 	return fmt.Sprintf(" (context %s)", a.kubeContext)
-}
-
-// podRole resolves the --pod flag to a role, defaulting to the Primary when unset.
-func podRole(a *App) (config.Role, error) { return config.ParseRole(a.pod) }
-
-// tlsConfigured reports whether a server certificate is available by either route: a
-// managed TLS secret, or a cert+key file pair for the CLI path.
-func tlsConfigured(cfg *config.Config) bool {
-	return cfg.K8s.TLSServerSecret != "" || (cfg.TLS.Cert != "" && cfg.TLS.CertKey != "")
 }
 
 // domainCANames returns the configured domain CA names (the keys of domainCerts.files),
@@ -549,3 +691,38 @@ func domainCANames(cfg *config.Config) []string {
 	}
 	return names
 }
+
+// podRole resolves --pod to a single role, defaulting to the Primary when unset.
+// config.ParseRole owns that default, so the empty string means primary everywhere a role
+// is read -- except `broker restart`, which reads a.pod raw because empty there means
+// "every pod, rolling".
+func podRole(a *App) (config.Role, error) {
+	role, err := config.ParseRole(a.pod)
+	return role, asUsage(err)
+}
+
+// podRoles resolves --pod against the role set an operation would use by default.
+//
+// Unset --pod keeps the default set, which is what makes the fixed sets meaningful: a
+// server certificate belongs on every node, product keys on primary and backup but never
+// the monitor. Narrowing a set of more than one is warned about, because a partly-licensed
+// or partly-certified redundancy group is almost always a mistake rather than a plan.
+func podRoles(a *App, defaults []config.Role) ([]config.Role, error) {
+	if a.pod == "" {
+		return defaults, nil
+	}
+	role, err := podRole(a)
+	if err != nil {
+		return nil, err
+	}
+	if len(defaults) > 1 {
+		warn("--pod %s narrows this to 1 of %d node(s) that would otherwise be covered",
+			role, len(defaults))
+	}
+	return []config.Role{role}, nil
+}
+
+// The `deploy all` / `remove all` orchestration is gone with the third noun. `broker
+// deploy` and `broker remove` now carry the whole per-broker lifecycle themselves, and the
+// operator has its own noun -- so there is no longer a command whose job was to sequence
+// two others, and no ambiguity about which of the three a given run touched.

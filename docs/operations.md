@@ -5,14 +5,49 @@ what re-deploying and removing actually change, and how to upgrade. For the comp
 surface see [commands.md](commands.md); for the env file see
 [configuration.md](configuration.md).
 
+- [Exit codes](#exit-codes)
 - [The preflight](#the-preflight)
+- [Version floors](#version-floors)
 - [Bringing up a fresh cluster](#bringing-up-a-fresh-cluster)
 - [Post-deployment configuration order](#post-deployment-configuration-order)
 - [Docker and Podman mechanics](#docker-and-podman-mechanics)
 - [Rendering without applying](#rendering-without-applying)
 - [Removing a broker: what stays, what goes](#removing-a-broker-what-stays-what-goes)
+- [Exporting and importing configuration](#exporting-and-importing-configuration)
+- [Data replication](#data-replication)
 - [Upgrading a running broker](#upgrading-a-running-broker)
 - [Troubleshooting](#troubleshooting)
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | It did what it was asked. |
+| 1 | It was asked for something sensible and could not do it -- an unreachable cluster, a refused permission, a broker that would not come up. |
+| 2 | The request itself was wrong: the command line, or the env file it named. |
+
+**A script may retry a 1. It must never retry a 2.** That is the whole point of the split:
+nothing about the world is going to change the outcome of a mistyped flag or an env file
+that fails validation, so a retry loop around one spins forever. The line between the two
+is "would a different invocation have helped?".
+
+An env file that cannot be found, cannot be parsed, fails validation, declares no platform
+section or declares several without `--platform` is therefore **2**, not 1 -- you chose that
+file, and no amount of waiting fixes it. So is a command or flag that does not apply to the
+platform the file selected, a bad `--pod`/`--platform`/`--since` value, and
+`--allow-command` on a command that renders without executing.
+
+**One documented exception:** a mistyped *top-level* command exits **1**, not 2
+(`solace-util depoy broker`). Cobra produces that error before this tool can classify it,
+and the available fix is worse than the gap -- it would make a mistyped command print help
+and exit **0**. A mistyped *sub*-command (`remove bogus`, `broker logs bogus`) is 2 as
+expected.
+
+**`cli` and `shell` pass their session's status through.** These two hand your terminal to
+a session inside the broker, so the exit status of whatever you ran last in there becomes
+this tool's exit status -- collapsing it to 1 would throw away the answer you asked for. No
+other command does this: everything else runs kubectl or a container engine as an
+implementation detail, and leaking those codes would make the table above meaningless.
 
 ## The preflight
 
@@ -31,111 +66,219 @@ there is no flag to skip it: previewing a command's effect without touching a cl
 what `generate` is for, and a render-only command never runs the preflight because it never
 runs anything.
 
+## Version floors
+
+The preflight above proves the runtime *answers*. It does not prove the runtime is new enough
+to understand what this tool will ask of it. These are the floors, and **nothing enforces any
+of them at runtime**:
+
+| Component | Floor | What needs it | If older |
+| --- | --- | --- | --- |
+| Docker Compose | 2.23.1 | The `environment:` secret source in the generated compose file | `broker deploy` fails on the secret source. Loud. On a host with only the standalone v1 binary, set `docker.compose: docker-compose` |
+| podman | 4.5 | `secret rm --ignore`, `secret create` reading the value from stdin, and `Secret=...,type=mount` in the quadlet unit | The unknown flag or directive surfaces at deploy time. Loud. This tool deliberately avoids `secret create --replace`, which would work but needs **4.7**, so one flag would raise the floor of the whole tool; remove-then-create is idempotent the same way |
+| Solace broker image | 10.26 | The built-in readiness endpoint the opt-in health check uses with no `cmd` of its own | Refused at load: an older tag and an unidentifiable one are both rejected. This is the one floor that IS checked, because the tag is in the env file rather than on the host |
+| EventBroker operator | bundled 1.4.2 | The `PubSubPlusEventBroker` schema this tool renders | `operator deploy` installs the bundled version. An older operator already in the cluster prompts before a downgrade |
+| kubectl / oc | none | Namespace, Secret and the custom resource are all core API shapes plus the operator's own CRD | n/a |
+| Go | 1.27 | Building the binary, pinned so builds use a patched standard library | n/a |
+
+Why nothing enforces them: `version` reports this tool's own build, the preflight probes
+reachability and one permission, and `validate` proves only that the runtime answers
+`version`. Parsing an engine's version string is its own class of problem, so the floors are
+documented rather than gated. The consequence worth knowing is that a floor failure is loud on
+every row above, so an under-versioned engine tells you at deploy time rather than running a
+broker that quietly cannot read its own credentials.
+
 ## Bringing up a fresh cluster
 
 The EventBroker operator is cluster-scoped and shared between brokers, so it is installed
-and removed on its own rather than as a side effect of any one broker's `deploy all` or
-`remove all`. A cluster that has never run this tool (or any other operator install) needs
-it once:
+and removed on its own rather than as a side effect of any one broker's `broker deploy`
+or `broker remove`. A cluster that has never run this tool (or any other operator install)
+needs it once:
 
 ```
-solace-util deploy operator -e dev.yaml
+solace-util operator deploy -e dev.yaml
 ```
 
-After that, any number of env files can each `deploy all` their own broker against the same
-cluster without touching the operator again. `check deploy` warns rather than fails when
-the operator or its CRD looks missing, so that warning is what tells you this step was
-skipped -- the actual `deploy broker` (or `deploy all`) then fails once it tries to apply a
-custom resource the cluster does not know how to reconcile.
+After that, any number of env files can each `broker deploy` their own broker against the
+same cluster. Running `operator deploy` again from a second env file does not replace the
+watch list -- it UNIONS the namespaces, so the operator keeps reconciling the brokers that
+were already there. `validate` warns rather than fails when the operator or its CRD looks
+missing, so that warning is what tells you this step was skipped -- `broker deploy` then
+fails once it tries to apply a custom resource the cluster does not know how to reconcile.
 
-`check deploy`'s report opens with a **Config** section, ahead of Deployment: it states that
+`validate`'s report opens with a **Config** section, ahead of Deployment: it states that
 the env file was already accepted -- `config.Load` validates before this report can even
 start building, so reaching the report means it passed; this is not a fresh check running --
 then lists the resolved `kubernetes.ports` as `name=port` pairs behind a leading count (e.g.
 `ports (17)` for the default set), so what will actually render into the broker CR is visible
-without deploying or running `generate broker`. Every row in this section is informational
+without deploying or running `broker generate`. Every row in this section is informational
 and can never fail the check.
+
+The rest of the report only runs once the cluster answers: an unreachable cluster marks
+everything after it `[SKIP]` rather than reporting checks it never made. From there it
+checks permission to create the broker resource, reads the installed operator to see
+whether it actually watches this broker's namespace, and checks the target StorageClass's
+volume-binding mode and whether it allows volume expansion. On docker and podman there is
+no operator, so that section of the report is omitted rather than failed.
 
 End to end, a first run against a brand-new cluster looks like:
 
 ```
-solace-util deploy operator -e dev.yaml     # once per cluster
-solace-util check deploy -e dev.yaml        # prerequisites: cluster, StorageClass, operator
-solace-util deploy all -e dev.yaml          # check -> namespace -> secrets -> CR -> leader (HA)
-solace-util check semp-login -e dev.yaml    # prove it answers
+solace-util operator deploy -e dev.yaml                  # once per cluster
+solace-util validate -e dev.yaml                         # cluster, StorageClass, operator
+solace-util broker deploy -e dev.yaml                    # namespace -> secrets -> CR
+solace-util broker perform semp-login-check -e dev.yaml  # prove it answers
+solace-util broker perform assert-leader -e dev.yaml     # HA only, once the pods are up
 ```
 
-Removing a broker (`remove broker` / `remove all`) never removes the operator either -- see
+On Kubernetes, `broker deploy` reads the CR back after applying it, since `kubectl apply`
+exiting 0 does not prove the object actually exists. Before it applies anything,
+`operator deploy` also checks permission for every resource kind the bundle needs -- not
+just the CRD -- so a missing permission is caught before the apply is half done rather than
+partway through it; an operator already watching every namespace is left alone rather than
+narrowed, and when the watch list comes out unchanged the rendered controller Deployment is
+byte-identical, so it is not rolled for nothing.
+
+Removing a broker never removes the operator either -- see
 [Removing a broker: what stays, what goes](#removing-a-broker-what-stays-what-goes) below.
 Uninstall it explicitly, and only once nothing else in the cluster still depends on it:
 
 ```
-solace-util remove operator -e dev.yaml
+solace-util operator remove -e dev.yaml
 ```
+
+`operator stop` is occasionally exactly what you want: editing a StatefulSet the operator
+owns is otherwise a fight with the controller reconciling it back. `operator restart` is for
+an operator that is wedged rather than out of date -- `operator deploy` is what re-applies a
+changed bundle. `operator logs` does not offer `--previous`: a Deployment's pod name changes
+on restart, so there is no prior container left to read, unlike `broker logs` on Kubernetes.
 
 ## Post-deployment configuration order
 
-Everything under **`config` is post-deployment**: each step drives the Solace CLI inside a
-broker that is already running, so none of it is part of `deploy` and none of it is run by
-`deploy all`. Wait for the broker to be ready (the pods, or the container/service), then run
-these in order.
+Everything under **`broker configure` and `broker perform` is post-deployment**: each step
+drives the Solace CLI inside a broker that is already running, so none of it is part of
+`broker deploy`. Wait for the broker to be ready (the pods, or the container/service), then
+run these in order.
 
-They are not uniformly re-runnable -- `config apply additional-users` fails outright on a
-user that already exists -- so the order lives here rather than in a run-everything command
-that would stop partway through a second run. On a fresh broker:
+They are not uniformly re-runnable, so the order lives here rather than in a
+run-everything command that would stop partway through a second run. On a fresh broker:
 
-1. `config leader` (HA only; on containers, run it on the primary -- it also reverts the
-   backup over SEMP first, so `nodes.backup.ip` should be reachable)
-2. `config apply server-cert` (when TLS is configured)
-3. `config apply domain-certs` (when any are listed)
-4. `config disable default-vpn`
-5. `config disable default-users`
-6. `config apply additional-users` (Kubernetes only; run after the hardening steps above,
-   and **not re-runnable** -- the broker refuses to create a user that already exists)
-7. `config apply product-keys` (when any are listed)
+1. `broker perform assert-leader` (HA only; on containers, run it on the primary -- it also reverts the
+   backup over SEMP first, so `redundancy.backup.addr` should be reachable)
+2. `broker configure server-certs` (when TLS is configured)
+3. `broker configure domain-certs` (when any are listed)
+4. `broker configure default-vpn`
+5. `broker configure default-users`
+6. `broker configure product-keys` (when any are listed)
 
-Only step 3 can be undone from here (`config delete domain-certs`). There is no un-harden,
-and no way to withdraw a server certificate or a product key through this tool.
+`broker configure data-replication` belongs to that phase too, but only when this broker is
+half of a DR pair, and it is run at both sites -- see
+[Data replication](#data-replication).
 
-**The exit code now reflects what the broker said.** Every `config apply` step (and
-`cli --input`) still runs the whole script it uploads -- a Solace CLI script is a sequence of
-independent commands, so one rejected line never stops the rest, and the output is always
-shown and the uploaded script always removed. But the command itself now fails once the
-script has finished if any line of that output contains `invalid`, `error` or `busy`
-(case-insensitively): the error names how many lines were rejected, without quoting them,
-since a CLI transcript can carry passwords. This used to only warn and exit 0.
-**This is a breaking change for automation**: a CI job that runs a `config apply` step or
-`cli --input <script>` and gates on the exit code -- and passes today -- can start failing,
-because a partly-applied script is now caught instead of silently accepted. Check any
-pipeline that runs these commands before relying on the new exit code.
+Steps 3, 4 and 5 can be undone from here: `broker configure domain-certs --remove`, and
+`--enable` on either hardening step. There is no way to withdraw a server certificate or a
+product key through this tool -- `--remove` on those two is registered but refuses, because
+no broker CLI form for it has been confirmed.
+
+Each step's own scope and failure mode is worth knowing. `server-certs` applies to every
+node in the redundancy group on Kubernetes, or this host's container on docker/podman; if
+the env file names a Secret it supplies no certificate files for, that Secret is assumed
+managed elsewhere (kubectl, cert-manager) and the command refuses rather than guessing, and
+with `kubernetes.tlsServerSecret` set, `--remove` refuses too -- the operator would put the
+certificate straight back -- so clear the key instead. `domain-certs` with none configured
+is a logged no-op, not an error. `product-keys` is never applied to the monitor node, which
+carries no message spool -- `--pod` narrows it to one node and warns, since a partly-licensed
+redundancy group is usually a mistake -- and the broker's CLI output is scanned for errors so
+a rejected or nonexistent key is reported as a failure rather than silently accepted.
+`default-vpn` does not touch the default client-username -- that is `default-users`, which
+covers every VPN rather than only this one -- and in HA, config-sync replicates both, so
+either only needs to run on one node. `default-users` reads the VPN list live from the
+broker (`show message-vpn *`), not from the env file, since which VPNs exist is broker
+state; parsing zero VPNs is a warning, not a failure.
+
+**The broker stops at the first rejected line, and the exit code says so.** Every
+`broker configure` step and `broker perform cli-script` runs its script through the
+broker's own `source script ... stop-on-error no-prompt`, the same wrapper
+`import-config` applies each chunk with. A Solace CLI script is a sequence of
+independent commands, so without that wrapper one rejected line let every later line
+run on top of it; with it the broker stops there. The output is always shown and the
+uploaded script always removed, whatever happened.
+
+The command then fails if the tail of that output carries one of the rejection keywords
+-- one list for the whole tool, shared with `import-config` rather than kept correct
+twice. Because the broker stopped, the rejection is the last thing it printed, which is
+what makes scanning the tail sound. The error names the keyword it found and never the
+line, since a CLI transcript can carry passwords; read the printed output for the
+detail.
+
+**This is a breaking change for automation**: a CI job that runs a `broker configure`
+step or `broker perform cli-script <file>` and gates on the exit code -- and passed
+before -- can start failing, because a rejected line is now caught instead of silently
+accepted, and less of the script runs after one. Check any pipeline that runs these
+commands before relying on the new exit code.
+
+A few of the other `broker perform` steps have their own operational details. `assert-leader`
+in HA first reverts activity to the primary and waits for redundancy to report Up with the
+primary active before asserting leadership; on docker/podman it runs only on the primary host
+and fails loud on a backup or monitor host, and it reverts the mate over SEMP first but
+downgrades an unreachable mate to a warning, since its own job is local. `semp-login-check`
+passes credentials on stdin as a curl config file so the password never reaches an argv,
+process list or log, and a failed login is reported as a failure of the login itself -- the
+request was made and answered, and the answer was no. `gather-diagnostics` deletes the
+helper scripts it uploads and the in-broker archive afterwards; a cleanup failure only warns
+rather than failing the collection. `cli-script`'s in-broker name is the file's own base name
+(split on both path separators), so one env file cannot name two different files depending on
+which host drove it. `shell-script` deletes the script it uploaded once the run finishes,
+even when it failed, and a script that echoes a secret prints it in the output; neither
+`shell-script` nor `broker shell` validates or reports on what runs beyond that -- they are
+the escape hatch for what this tool does not model.
 
 ### Extra CLI users differ by platform
 
-`admin.additionalUsers` reaches the broker two different ways, because the operator has no
-declarative route for it:
+`semp.additionalUsers` reaches the broker on every platform now, declaratively -- the
+users exist from its first boot, with nothing to run afterwards. What differs is how the
+password gets there:
 
-- **Docker / Podman** -- created at container boot, from the mounted password file plus a
-  `username_<username>_globalaccesslevel` setting in the artifact. Nothing to run
-  afterwards.
-- **Kubernetes** -- created post-deployment by **`solace-util config apply additional-users`**,
-  which builds a Solace CLI script and runs it on the primary. Verified against a live
-  cluster: extra `username_<user>_password` keys in the credentials Secret are **ignored by
-  the operator**, and the only declarative alternative (`extraEnvVars` /
-  `extraEnvVarsSecret`) would publish the passwords in the pod's environment, where
-  `kubectl describe` and every process in the container can read them. So the CLI is the
-  route, and the Secret carries no extra users at all.
+- **Docker / Podman** -- the password is a mounted FILE
+  (`/mnt/secrets/username_<username>_password`, pointed at by
+  `username_<username>_passwordfilepath`), and the access level rides the artifact as a
+  plain setting. Each user gets its own engine secret.
+- **Kubernetes** -- both halves ride the pod ENVIRONMENT, from a Secret of its own named
+  `<kubernetes.name>-additional-users` that the CR references in
+  `spec.extraEnvVarsSecret`.
 
-Two consequences on Kubernetes worth knowing:
+**Kubernetes is the one place a password reaches the broker as an environment variable
+rather than a file, and that is the CRD's constraint, not a choice.** `spec` offers
+`extraEnvVars`, `extraEnvVarsCM` and `extraEnvVarsSecret` and no volume passthrough, so
+there is no way to mount an arbitrary Secret as files -- `username_<u>_passwordfilepath`
+would name a path nothing creates. Anyone who can exec into the pod can read these
+passwords from its environment; if that is unacceptable for a given user, do not list them
+here. `broker validate` states where they land rather than leaving it to be discovered.
 
-- **It is not re-runnable.** The broker's `create username` fails if the user exists, and
-  that is reported rather than reconciled -- re-setting a password an operator rotated on
-  the broker would be worse. So a repeated `config apply additional-users` fails once the
-  users exist; run the other `config` steps above individually instead, or drop the
-  already-created users from the env file.
-- **The password charset is restricted.** The value goes onto a CLI line, and the broker
-  rejects ``:()";'<>,`\*&|`` inside it. An env file using one of those fails to load *for
-  Kubernetes* with the offending character named (never the password). The same file stays valid
-  for docker and podman, which write the password to a file instead.
+Two consequences worth knowing:
+
+- **The Secret is separate from `kubernetes.adminSecret`, and must be.** `extraEnvVarsSecret`
+  is projected with `envFrom`, which turns EVERY key of the Secret it names into an
+  environment variable -- pointing it at the credentials Secret would publish the admin and
+  monitor passwords too, just to get the extra users in. (Extra `username_<user>_password`
+  keys in the credentials Secret are ignored by the operator anyway; verified against a live
+  cluster.)
+- **Usernames are stricter here.** The kubelet silently DROPS environment variables whose
+  names are not letters, digits and underscores, so a username carrying `.` or `-` would
+  produce a user with no password, or no user at all. That is refused at load on Kubernetes
+  and still allowed on the container platforms, which mount a file.
+
+The broker reads these settings at boot, so changing a password takes effect when the pod
+next restarts.
+
+That left the CLI, which brought two problems the replacement has to solve:
+
+- **It was not re-runnable.** The broker's `create username` fails if the user exists, and
+  that was reported rather than reconciled -- re-setting a password an operator rotated on
+  the broker would be worse.
+- **The password charset was restricted.** The value went onto a CLI line, and the broker
+  rejects ``:()";'<>,`\*&|`` inside it. That constraint still applies on docker and podman
+  only through the file they write, so those platforms accept the full charset.
 
 ## Docker and Podman mechanics
 
@@ -148,51 +291,112 @@ with. A bare `docker run` cannot recreate an existing container, so re-deploying
 image-tag bump would fail on a name conflict where compose recreates cleanly. An env file
 carrying a `docker.mode` key fails strict decoding as an unknown field.)
 
+On a fresh host, `broker deploy` also creates and takes ownership of the data directory,
+confirms the redundancy hostnames resolve, and logs in to the configured registry, before
+creating the engine secrets and writing and starting the artifact.
+
+**The compose project name is declared, not derived.** The generated compose file carries a
+top-level `name:` taken from `docker.container.name`, lowercased with anything outside
+`[a-z0-9_-]` folded to `-`. Without it, compose names the project after the *directory* the
+file happens to sit in, so generating the artifact somewhere else -- or renaming that
+directory -- silently starts a new project and leaves the old containers, network and
+volumes as orphans `docker compose down` can no longer find. Declaring it in the file (rather
+than passing `docker compose -p`) also keeps it visible in `broker generate`, and leaves
+`COMPOSE_PROJECT_NAME` working as an override: compose's own precedence puts that environment
+variable above a file's `name:`. Export it before `broker deploy` if you need a specific
+project name -- for instance to adopt containers an earlier deployment created under the
+directory-derived name.
+
+**`broker status` reports health and restarts.** (On Kubernetes the same command instead
+reports the operator's CR conditions, then pods, Services and StatefulSets.) The `ps` line above it is deliberately
+narrowed to NAMES, IMAGE and STATUS: a broker publishes a dozen or more ports, and the
+engine's default PORTS column spends most of a terminal line listing both host bindings of
+each one, wrapping every other column into illegibility on the one report whose job is to
+answer "is it up". The ports are in the env file that chose them and in the artifact
+`broker generate` prints. Docker no longer runs `compose ps` first either -- it listed the
+same single container, carried the same ports, and compose's own `--format` takes only
+`table` or `json`, so it could not be narrowed the way the engine's `ps` can.
+
+After that line it prints a
+decoded block: name, image, state, health, restart count, and every path mounted in. Two
+fields there are not what the engine's own `ps` or a `--format` template would give you.
+*Health* is read under whichever spelling this engine uses -- docker nests it at
+`State.Health`, podman at `State.Healthcheck` -- and "no healthcheck configured" is printed
+distinctly from "unknown", because those are a deployment choice and a missing answer. On
+podman the *restart count* comes from `systemctl show -p NRestarts`, not from the engine:
+systemd restarts a quadlet unit by replacing the container, so the engine's own counter
+reads 0 on a broker that has restarted twenty times. `broker status --all` discovers
+containers by image, and any it finds that this env file does not name gets the engine's
+counter instead -- this deployment's unit is not their unit. `--detail` adds the full
+`inspect` dump on top. The container's **environment is never printed** on either platform:
+on docker the compose secrets are environment-sourced, so secrets appear only as the mount
+paths that name them.
+
+`broker logs --previous` is Kubernetes only, because a container engine keeps no prior-run
+log to read; `--since` is re-serialised through Go's duration parser before it reaches
+argv, so e.g. `90m` becomes `1h30m0s` in the command a `-v` trace shows -- expected, not an
+error.
+
 **HA verification runs from the primary.** The transport is node-local, so exec reaches
 only this host's broker -- but the broker itself is a control channel: the primary's own
 `show redundancy` already reports the mate's activity, and the one command that must land
-on the backup (`redundancy revert-activity`) is sent over SEMP to `nodes.backup.ip`. Bring
-the group up by running `deploy all <role>` on each host with its own role -- or omit
-`<role>` and it is detected by matching this host's hostname against `nodes.*`
-(case-insensitively, tolerating an FQDN on either side), announcing the role it chose on
-stderr; a hostname matching none of the three names fails loud, and one matching more than
-one fails loud too, naming every role it matched. An explicit role always wins over
-detection, which is the escape hatch for a host whose name does not match the env file.
-`generate broker` detects the same way but does NOT fail on an unrecognised host: it renders
+on the backup (`redundancy revert-activity`) is sent over SEMP to `redundancy.backup.addr`. Bring
+the group up by running `broker deploy --pod <role>` on each host with its own role -- or
+omit `--pod` and the role is detected in two passes, announced on stderr: this host's
+hostname against `redundancy.*.name` (case-insensitively, tolerating an FQDN on either
+side), then -- only if that matched nothing -- this machine's own interface addresses
+against `redundancy.*.addr`. The second pass is the cloud case: an instance reports
+`ip-10-0-0-12` while the env file names the broker `bkp-host`, so the routername and the
+OS hostname are legitimately unrelated and the address is the only thing both ends agree
+on. Matching neither fails loud, and matching more than one role fails loud too, naming
+every role it matched and how. An explicit role always wins over detection, which is the
+escape hatch for a host that matches nothing -- but it is CHECKED against what the host
+looks like, and a disagreement WARNS and proceeds. It never prompts: the operator said
+which node this is, and a deploy scripted across three hosts must not stop to ask.
+`broker generate` detects the same way but does NOT fail on an unrecognised host: it renders
 the primary's artifact with a warning, because it changes nothing and the artifact names the
 node it is for, so the fallback is visible in the output you are about to read. Refusing there
 would make reviewing another node's artifact from a laptop impossible.
-Then run `smoke redundancy` **once, on the primary host**: it confirms the primary healthy, checks
+Then run `broker perform redundancy-test` **once, on the primary host**: it confirms the primary healthy, checks
 the backup's SEMP service is reachable (before anything is disturbed), releases and
 un-releases activity so the backup takes over, then reverts the backup and waits for
-activity to come home. Backup and monitor hosts are rejected loud, and `config leader`
+activity to come home. Backup and monitor hosts are rejected loud, and `broker perform assert-leader`
 runs only on the primary. Prerequisite: the backup's SEMP port (8080, or the mapped host
 port under `network.mode: bridge`) must be reachable from the primary host -- a working HA
 group only proves the redundancy ports (8300-8302, 8741, 55555) are open, so the
 preflight fails loud with the address it tried when SEMP is firewalled.
 
-**If a `smoke redundancy` run dies partway** (including Ctrl-C, which runs no cleanup), the
+**If a `broker perform redundancy-test` run dies partway** (including Ctrl-C, which runs no cleanup), the
 group can be left released or failed over. Restore it with `no redundancy release-activity`
 on the primary's CLI, or `redundancy revert-activity` on the backup's -- or simply re-run
-`smoke redundancy` once the cause is fixed.
+`broker perform redundancy-test` once the cause is fixed.
 
 Example (HA -- run each line on the matching host; `prod.yaml` is a podman env file):
 
 ```
-solace-util deploy all primary -e prod.yaml   # on the primary host
-solace-util deploy all backup  -e prod.yaml   # on the backup host
-solace-util deploy all monitor -e prod.yaml   # on the monitor host
-solace-util config leader -e prod.yaml        # on the primary only
-solace-util smoke redundancy -e prod.yaml     # on the primary only -- drives the whole group
+solace-util broker deploy --pod primary -e prod.yaml   # on the primary host
+solace-util broker deploy --pod backup  -e prod.yaml   # on the backup host
+solace-util broker deploy --pod monitor -e prod.yaml   # on the monitor host
+solace-util broker perform assert-leader -e prod.yaml        # on the primary only
+solace-util broker perform redundancy-test -e prod.yaml     # on the primary only -- drives the whole group
 ```
 
-Naming the role explicitly is what to do when a host's name will not match `nodes.*` (or
-matches more than one); when it does match, `solace-util deploy all -e prod.yaml` alone on
-each host detects and announces the same role.
+Naming the role explicitly is what to do when a host matches no `redundancy.*` entry (or
+matches more than one); when it does match, `solace-util broker deploy -e prod.yaml` alone
+on each host detects and announces the same role.
+
+**A standalone broker names itself after its host.** `redundancy.<role>.name` is the
+routername and the container's hostname, and with one node it is always this machine --
+so leaving `redundancy.primary.name` out of a standalone docker/podman env file is
+supported, and the host's own OS hostname is used, reported as `==> routername not
+configured; using this host's name: <host>`. It is settled once, at load, so the check
+report, the DNS check, the rendered artifact and `validate` all name the same broker. HA
+is the opposite and stays mandatory in all three: each name keys that node's entry in a
+group table every host renders, and no host can fill in another machine's.
 
 ### Re-deploying is safe and explicit
 
-`deploy broker` renders the artifact and compares it with
+`broker deploy` renders the artifact and compares it with
 what is already on disk, so the three outcomes are distinguishable:
 
 - **Unchanged, broker running** -- reported as nothing to do; the broker is not touched.
@@ -206,7 +410,7 @@ what is already on disk, so the three outcomes are distinguishable:
   on quadlet's own container replacement at unit start, which is assumed but has not been
   independently verified.
   On Docker, "not running" has to be an answered probe, not an assumption: if the `ps` check
-  itself fails (a transient engine hiccup), `deploy broker` now aborts naming the container
+  itself fails (a transient engine hiccup), `broker deploy` now aborts naming the container
   rather than guessing "not running" and force-recreating a broker that might still be live --
   by hand, check `<runtime> ps` and re-run. A probe that answers and simply finds no match
   (genuinely absent, or stopped) is unaffected. Podman's equivalent path issues a plain
@@ -219,50 +423,73 @@ what is already on disk, so the three outcomes are distinguishable:
   deliberately its own flag: dropping messaging traffic is its own decision.
 
 This is what makes an image-tag bump a one-command upgrade: edit `image.tag`, then
-`solace-util deploy broker <role> --restart -e prod.yaml` (podman) or
-`solace-util deploy broker --restart -e prod.yaml` (docker). Podman needs `--restart`
+`solace-util broker deploy --pod <role> --restart -e prod.yaml` (podman) or
+`solace-util broker deploy --restart -e prod.yaml` (docker). Podman needs `--restart`
 because `systemctl start` on an already-active unit is a no-op, so without it the unit file
 is rewritten but the running container keeps the previous image.
 
-**Secrets.** `deploy broker` externalizes every secret before applying the artifact, so no
+**Secrets.** `broker deploy` externalizes every secret before applying the artifact, so no
 value is ever written into the compose file or quadlet unit (see the table under
 [Rendering without applying](#rendering-without-applying) for the names and
-paths). Podman loads them into its own secret store (`podman secret create --replace`,
-value on stdin) and the unit mounts them; Docker's compose file names a host environment
-variable per secret, and `deploy broker` sets those variables for its own `docker compose`
+paths). Podman loads them into its own secret store (`podman secret rm --ignore` then
+`podman secret create`, value on stdin) and the unit mounts them; Docker's compose file names a host environment
+variable per secret, and `broker deploy` sets those variables for its own `docker compose`
 process, so no value ever reaches an argv or a file beside the compose file. A missing
-value (notably `nodes.psk` before `prepare host` has run) fails the deploy loudly rather
-than starting a broker without a password.
+value fails the deploy loudly rather than starting a broker without a password.
+`redundancy.psk` never gets that far: it is mandatory in an HA container group and an empty
+one is refused at LOAD, with the `openssl rand -base64 32` command in the message. Nothing
+here generates it -- a key one host invented is a key the other two never see.
 
 What that does and does not buy you: **nothing is written next to the artifact** (no
 plaintext file a project-directory backup, `tar`, or non-root user would pick up, and
 nothing to clean up on teardown), but the value still ends up at rest -- Docker
 materializes each secret into the container's own filesystem as a `0444` root-owned file
-under `/run/secrets`, which is the same at-rest exposure class as podman's store. It is
-not in the container's environment, so `docker inspect` does not show it.
+at the absolute `target:` the compose file names (`/mnt/secrets/<setting>`), which is the
+same at-rest exposure class as podman's store. It is not in the container's environment, so
+`docker inspect` does not show it. That now includes the server certificate's **private
+key**, which arrives on the same channel and lands at the same `0444` inside the container --
+the same treatment the admin password already gets there, in a container that runs only the
+broker.
 
-`generate secrets broker` prints the equivalent shell, one line per secret, for running
-compose yourself: `podman secret create` commands to run once on Podman, and `export` lines to
-**source** in the shell you run `docker compose` from on Docker. A manual
-`docker compose up` needs those variables exported -- unset, compose refuses.
+**Podman is the one platform where this tool writes a secret to the host.** A quadlet unit
+cannot inline file content the way a compose file can, so the server-certificate bundle is
+written to `<podman.baseDir>/<container.name>-tls-servercertificate.pem` at mode `0600` in a
+`0700` directory, and the unit bind-mounts it read-only with an SELinux relabel. That makes
+it a second podman-side persistence layer beside the secret store, and it is why
+`podman.baseDir` is mandatory rather than defaulted: where a private key lands on your host
+is your decision, not this tool's. `broker remove` deletes the file as an artifact, like the
+quadlet unit, and unlike a leftover store secret a failure to delete it is **fatal** --
+silently leaving a private key behind is the outcome least like the rest of that teardown.
+`--delete-data` is not what removes it. A teardown that refuses because the unit could not be
+confirmed stopped deliberately leaves the file in place, since the container may still be
+reading it.
+
+**Nothing prints the secret values on a container platform any more.** There used to be a
+renderer that emitted `podman secret create` commands and `export` lines for running compose
+by hand; it went with the `generate secrets` sub-tree, because the only thing it could print
+WAS the values and `broker deploy` creates them itself -- podman through its secret store,
+docker by passing them to the compose child's environment. If you run `docker compose up`
+by hand against the generated file, you must export the variables it names yourself; unset,
+compose refuses.
 
 **Rotating a secret** takes `--restart`. A new password or PSK changes no artifact (its
 value lives in the config and, for Docker, only in the environment), so the ordinary
-"unchanged, nothing to do" path cannot see it; `deploy broker --restart` recreates the
+"unchanged, nothing to do" path cannot see it; `broker deploy --restart` recreates the
 container (Docker) or restarts the service (Podman) to pick it up, and the no-op message
 names that as the way to apply one.
 
 **Config source.** The container platform has no separate config namespace: its post-deploy
 `config` steps read the platform-neutral `broker.*` fields -- `broker.domainCerts`,
 `broker.productKeys`, `broker.diagDir`, `broker.cliScriptsFolder` -- shared verbatim with
-Kubernetes, plus `tls.cert`/`tls.certKey` (server certificate) and `admin.user`/`admin.pass`
-(SEMP login); the `nodes.*` names drive role detection for `config leader` /
-`smoke redundancy`, and `nodes.backup.ip` is also read at verify time -- it is where those
-two commands reach the backup's SEMP service from the primary. The rest of the `nodes.*`
-table and `nodes.psk` are consumed earlier, at `prepare`/`deploy` (`prepare host` generates
-the PSK and writes it back to the env file; `deploy broker` externalizes it as a secret). Container-only knobs live under `docker.*` /
+Kubernetes, plus `tls.cert`/`tls.certKey` (server certificate) and `semp.adminPass`
+(SEMP login); the `redundancy.*` names drive role detection for `broker perform assert-leader` /
+`broker perform redundancy-test`, and `redundancy.backup.addr` is also read at verify time -- it is where those
+two commands reach the backup's SEMP service from the primary. The rest of the `redundancy.*`
+table and `redundancy.psk` are consumed earlier, by `broker deploy`, which externalizes the
+key as a secret -- it does not create it, and no command here writes to an env file.
+Container-only knobs live under `docker.*` /
 `podman.*` (runtime, compose invocation, container name, data dir, network mode, rootless).
-See `solace-util examples full`, or the same text at [env/sample.yaml](../env/sample.yaml).
+See a bare `solace-util examples`, or the same text at [env/sample.yaml](../env/sample.yaml).
 
 ## Rendering without applying
 
@@ -273,34 +500,57 @@ which is what makes it the safe way to inspect an env file you did not write (se
 [The command fields are executable content](configuration.md#the-command-fields-are-executable-content)):
 
 ```
-solace-util generate broker -e dev.yaml                          # the PubSubPlusEventBroker CR (kubernetes)
-solace-util generate operator -e dev.yaml                        # the operator bundle (kubernetes)
-solace-util generate secrets broker -e dev.yaml                  # the Secret manifests (kubernetes; secret values!)
-solace-util generate secrets operator -e dev.yaml                # the operator's pull secret (kubernetes; secret values!)
-solace-util generate broker primary -e dev.yaml --platform docker    # the compose file
-solace-util generate broker primary -e dev.yaml --platform podman    # the quadlet unit
-solace-util generate secrets broker -e dev.yaml --platform docker    # commands that supply the secrets
+solace-util broker generate -e dev.yaml                            # namespace + Secrets + CR (kubernetes)
+solace-util operator generate -e dev.yaml                          # namespace + regcred + bundle (kubernetes)
+solace-util broker generate -e dev.yaml --platform docker          # the compose file
+solace-util broker generate -e dev.yaml --platform podman          # the quadlet unit
 ```
 
-`generate` is a command with a named target rather than a flag on `deploy broker`, on
+`generate` is a command with a named target rather than a flag on `broker deploy`, on
 purpose: an artifact you meant to inspect and a cluster you meant to change should not be
 one typo apart.
 
-**Secrets are never part of a deployment artifact.** Each one lives in podman's secret
-store, in a host environment variable the compose file names, or in a Kubernetes Secret --
-and the quadlet unit, compose file, CR, and operator bundle reference it by name only. So
-`generate broker` and `generate operator` output is safe to review, diff, and share, while
-**`generate secrets broker` and `generate secrets operator` print the values themselves**
-and must be handled exactly like the env file.
+**Use `-o/--out` rather than `>` to keep the artifact.** Shell redirection is not portable:
+Windows PowerShell 5.1 re-encodes this tool's plain ASCII output as UTF-16LE with a BOM, and
+`kubectl apply` then rejects the file with an error that points at the YAML rather than at
+the shell. The re-encoding happens after the command has exited, so nothing inside it can
+prevent it -- `-o` sidesteps the shell entirely:
 
-That split is why `deploy operator` issues three applies rather than one: the operator
-namespace, then the image-pull secret into it, then the rest of the bundle. Everything it
-applies is byte-for-byte what those two `generate` commands print, and the ordering is what
+```
+solace-util broker generate -e dev.yaml -o solace.yaml
+solace-util operator generate -e dev.yaml -o operator.yaml --no-prompt
+```
+
+It buys three more things over a redirect: the file appears only if the render SUCCEEDED
+(a shell truncates the target before the command even runs, so a failure leaves a
+half-written file that looks like output), the secret-bearing Kubernetes stream stays out of
+terminal scrollback, and the file is created `0600` instead of inheriting the shell's
+default. An existing path is confirmed before it is replaced -- `--no-prompt` answers yes,
+and a run with no terminal keeps the file and says which flag would have proceeded.
+
+The same `-o`/`--no-prompt` pair is on `examples` and `convert`: every command whose output
+is an artifact you keep answers the overwrite question the same way. There is no `--force`.
+
+**On docker and podman, secrets are never part of a deployment artifact.** Each one lives
+in podman's secret store or in a host environment variable the compose file names, and the
+quadlet unit and compose file reference it by name only -- so their `broker generate`
+output is safe to review, diff and share.
+
+**On Kubernetes the opposite is true, and there is only one command.** A Secret manifest IS
+the artifact, so `broker generate` and `operator generate` carry the admin password, the
+pre-shared key, the TLS private key and the registry credential in base64. There is no
+secret-free variant to reach for -- the `generate secrets` sub-tree was removed precisely
+because splitting the stream in two made the ordering the operator's problem. Treat that
+output exactly like the env file it came from.
+
+`operator deploy` issues three applies rather than one: the operator namespace, then the
+image-pull secret into it, then the rest of the bundle. Everything it applies is
+byte-for-byte what `operator generate` prints, and the ordering is what
 makes a first install work -- the secret is namespaced, and the namespace only exists in
 the bundle.
 
 The broker's own settings -- routername, redundancy, the scaling knobs -- are inlined into
-whatever `generate broker` renders: `Environment=` lines in a quadlet unit, an
+whatever `broker generate` renders: `Environment=` lines in a quadlet unit, an
 `environment:` block in a compose file, `spec.systemScaling` in the CR. There is no
 separate command for them, because there is no separate artifact.
 
@@ -310,10 +560,11 @@ container matches the data keys of the equivalent Kubernetes Secret:
 
 | Secret | In-container path | Host-side name |
 | --- | --- | --- |
-| `admin.pass` | `/run/secrets/username_<admin.user>_password` | `<container.name>-admin-password` |
-| `admin.additionalUsers[].password` | `/run/secrets/username_<username>_password` | `<container.name>-user-<username>-password` |
-| `nodes.psk` (HA) | `/run/secrets/redundancy_authentication_presharedkey_key` | `<container.name>-redundancy-psk` |
-| `tls.certPassphrase` | `/run/secrets/tls_servercertificate_passphrase` | `<container.name>-tls-passphrase` |
+| `semp.adminPass` | `/mnt/secrets/username_admin_password` | `<container.name>-admin-password` |
+| `semp.additionalUsers[].password` | `/mnt/secrets/username_<username>_password` | `<container.name>-user-<username>-password` |
+| `redundancy.psk` (HA) | `/mnt/secrets/redundancy_authentication_presharedkey_key` | `<container.name>-redundancy-psk` |
+| `tls.certPassphrase` | `/mnt/secrets/tls_servercertificate_passphrase` | `<container.name>-tls-passphrase` |
+| `tls.cert` + `tls.certKey` | `/mnt/certs/server/tls.pem` | `<container.name>-tls-servercertificate` (docker); a host FILE on podman, see below |
 
 The host-side name carries `container.name` (default `solace`) so two brokers on one host
 never share a podman store entry or a compose variable. On Kubernetes the operator mounts
@@ -322,127 +573,592 @@ the credentials Secret itself, so the only data keys that matter are
 
 ## Removing a broker: what stays, what goes
 
-`remove broker`, `remove operator` and `remove all` are the destructive commands, and each
-one keeps the layer that is expensive or impossible to get back **by default**: `remove
-broker` / `remove all` keep the broker's persistent data (Kubernetes PVCs, or the
-container's data directory); `remove operator` keeps the operator's CRDs. Deleting the CRDs
-is the sharper of the two, because they are cluster-wide -- it cascade-deletes **every**
-PubSubPlusEventBroker in the cluster, including ones this env file has never heard of, not
-just the one it describes. So `--delete-crd` refuses outright while any PubSubPlusEventBroker
-custom resource still exists anywhere in the cluster -- each is named `<namespace>/<name>` in
-the refusal, and a failure to even list them refuses too. Only the CRD layer is refused: the
-operator's own controller Deployment is removed either way. `remove all` also leaves the operator itself installed, for the
-same reason: it is cluster-scoped and may be serving other brokers, so removing it is always
-its own explicit command (see [Bringing up a fresh cluster](#bringing-up-a-fresh-cluster)).
+There is one removal per noun: **`broker remove`** and **`operator remove`**. Each keeps the
+layer that is expensive or impossible to get back **by default** -- the broker's persistent
+data (Kubernetes PVCs, or the container's data directory), and the operator's CRDs.
 
-Both removals ask about their retained layer the same way, so learning the contract on one
-teaches the other:
+`broker remove` also owns what used to be separate `remove secrets` and `remove namespace`
+commands: it deletes the broker resource, then this deployment's secrets, then considers the
+namespace. `operator remove` never removes the operator's own namespace, and prints the
+`kubectl delete namespace` line to finish by hand, so the outcome is stated rather than
+inferred. The operator's image-pull secret is removed either way.
 
-- **`--delete-data`** (on `remove broker` / `remove all`) or **`--delete-crd`** (on `remove
-  operator`) deletes the layer without asking.
-- **`--no-prompt`** asks nothing at all: it confirms the removal and takes the safe answer
-  to the layer question, so the layer is kept unless a `--delete-*` flag says otherwise.
-  The two flags answer different questions and deliberately **compose** -- a fully
-  unattended removal that also drops the data is `--delete-data --no-prompt`.
-- **Interactively, with neither flag**, you are prompted and told what the layer is and
-  what deleting it costs; only an exact, case-insensitive `yes` deletes it, and anything
-  else -- including the lenient `y` that answers the removal prompt below -- keeps it.
-- **Non-interactively with neither flag**, the layer is kept. A scripted or piped removal
-  can never lose data by omission.
-- **Either way, the outcome is printed** -- what was kept, or what was deleted -- so it is
-  never left to be inferred from silence.
-- **On `remove operator`, the CRD question is not even asked when a broker still exists.**
-  Its answer is already fixed to "keep" -- deleting the CRDs would cascade-delete that
-  broker along with every other one in the cluster -- so prompting would invite a "yes" this
-  tool will not honour. A warning names what was found instead. An explicit `--delete-crd`
-  still runs straight into the refusal above rather than being silently downgraded to
-  "kept": naming the flag earns a loud failure listing the brokers in the way, not a silent
-  no-op.
-- **On Kubernetes, a PVC delete that fails is reported as a failure.** `--delete-data` (or
-  `remove all`) still deletes every role's PVC and keeps going even if one delete fails, but
-  if any did fail after `--ignore-not-found` already absorbed the benign "already gone" case
-  -- an RBAC denial, a stuck finalizer -- `remove broker` now returns an error naming every
-  PVC that survived, instead of reporting the data as gone.
+Deleting the CRDs is the sharper of the two layers, because they are cluster-wide -- it
+cascade-deletes **every** PubSubPlusEventBroker in the cluster, including ones this env file
+has never heard of. So `--delete-crd` refuses outright while any PubSubPlusEventBroker still
+exists anywhere -- each is named `<namespace>/<name>` in the refusal, and a failure to even
+list them refuses too. Only the CRD layer is refused; the operator's controller Deployment is
+removed either way.
 
-**Docker and Podman have their own teardown wrinkles**, on top of the `--delete-data` layer
-above:
+### The layer flag raises the question
 
-- Podman's secret store is a real, separate persistence layer too -- `remove broker` /
-  `remove all` now remove every secret `deploy broker` loaded into it as part of removing
-  the container, so they no longer survive a teardown the way they used to. A secret that
-  is already gone (or fails to remove) only warns; it does not stop the removal.
-- If `systemctl stop` (Podman) or `stop` (Docker) fails, the removal now aborts before
-  touching the unit, the container, or the data directory -- it used to warn and carry on
-  regardless, which could delete a running broker's data out from under it. It continues
-  only when the broker is *confirmed* down: systemd reporting the unit `inactive`, `failed`
-  or `unknown`, or the engine listing no running container. "Still running" and "could not
-  be confirmed either way" both abort, because the case this guard exists for -- a rootless
-  Podman whose systemd user session is unreachable while `podman info` still succeeds --
-  produces the second one, and silence is not confirmation. A stop that fails only because
-  there was nothing running to stop is unaffected.
-- `remove all` (which is exactly `remove broker` on these platforms) against a host with
-  nothing deployed -- no compose file, no container by that name -- is now a no-op rather
-  than an error, matching `--ignore-not-found` everywhere else in the tool.
+The `--delete-*` flag does not answer the question, it **asks** it. Learning the contract on
+one removal teaches the other:
 
-**`remove namespace` (and the namespace half of `remove all`) refuses rather than asks when
-the namespace holds work this tool did not create.** Four Kubernetes system namespaces --
-`default`, `kube-system`, `kube-public`, `kube-node-lease` -- are refused outright and
-unconditionally, with no flag to override it: there is no interpretation of "delete
-kube-system" this tool should ever carry out. For every other namespace, its contents are
-enumerated and classified OURS or FOREIGN before the delete is even considered:
+| `--delete-data` / `--delete-crd` | `--no-prompt` | Terminal | Outcome |
+| --- | --- | --- | --- |
+| no | either | either | Layer **kept**. Nothing is asked about it. |
+| yes | no | yes | Prompted; only an exact, case-insensitive `yes` deletes it. |
+| yes | yes | either | **Deleted**, unattended. |
+| yes | no | no | Layer **kept**, with a loud warning naming `--no-prompt`. The removal itself still proceeds. |
 
-- OURS is anything named `<kubernetes.name>-pubsubplus` (every object the operator creates
-  off the broker), the broker custom resource itself, a Secret matching one of the three
-  configured secret names, and the two objects Kubernetes puts in every namespace on its own
-  (the `kube-root-ca.crt` ConfigMap, the default ServiceAccount).
-- Anything else is FOREIGN -- most notably **a second Solace broker sharing the namespace**:
-  its objects carry the same operator-assigned `-pubsubplus` suffix as ours do, but the
-  match includes the broker's own name, so a different broker stays foreign rather than
-  being swept up as ours.
-- A single foreign object refuses the **whole** delete, listing what was found. This is a
-  hard refusal, not a prompt -- `--no-prompt` cannot pass it, because there is no question
-  left to silence. When it is refused, `remove broker` and `remove secrets` still remove
-  this deployment's own objects; deleting the namespace itself is then your own `kubectl
-  delete namespace` call to make, once you have confirmed what else is in there.
-- A failure to even list the namespace's contents refuses too -- being unable to see what is
-  in there is not permission to proceed -- but a failure to list the broker custom resource
-  only warns, and the teardown proceeds by what it could see: an absent CRD is exactly the
-  state this tool's own documented removal order (brokers, then `remove operator
-  --delete-crd`, then `remove namespace`) produces, and refusing there would make a
-  legitimate teardown impossible.
+So a fully unattended removal that also drops the data is `--delete-data --no-prompt`: the
+two flags answer different questions and deliberately **compose**. There is no global
+`--yes` -- one silencer per command beats two flags whose overlap has to be memorised.
 
-This is a second, independent decision from *whether to remove the broker (or operator) at
-all*. **Every command that destroys something confirms first** -- `remove broker`,
-`remove operator`, `remove secrets`, `remove namespace`, `remove all`, and `restart broker`,
-which drops every in-flight connection (deletes pods on Kubernetes, bounces the container on
-Docker/Podman). This is now the same on all three platforms; `restart broker` used to run
-unconditionally on Docker and Podman, and on Kubernetes it now asks with the verb "Restart"
-rather than "Delete", matching the container side -- the mechanism is unchanged (it deletes
-the pod so the StatefulSet recreates it), only the prompt's wording. An interactive terminal
-is asked `[y/N]`; a non-interactive session without `--no-prompt` refuses loudly rather than
-destroying anything unattended.
+The last row is the one worth reading twice. A scripted removal cannot lose data by
+omission, and it cannot lose it by *asking* either: without a terminal to answer the
+question, the layer survives and the run says so rather than proceeding in silence.
+
+On docker and podman the directory `--delete-data` deletes recursively is exactly
+`<platform>.container.dataDir`, which is why that key is **required to be an absolute path**
+and is the one host path not resolved against the env file's directory: what a recursive
+delete points at should never move because of where the command was run from
+([configuration.md](configuration.md#relative-paths-resolve-against-the-env-file-not-the-current-directory)).
+
+Two more properties hold on every path:
+
+- **On `operator remove`, the CRD question is not even asked when a broker still exists.**
+  Its answer is already fixed to "keep", so prompting would invite a "yes" this tool will not
+  honour. A warning names what was found. An explicit `--delete-crd` still runs into the
+  refusal above rather than being downgraded to "kept": naming the flag earns a loud failure
+  listing the brokers in the way, not a silent no-op.
+- **A PVC delete that fails is reported as a failure.** `--delete-data` deletes every role's
+  PVC and keeps going even if one fails, but if any did fail after `--ignore-not-found`
+  already absorbed the benign "already gone" case -- an RBAC denial, a stuck finalizer --
+  `broker remove` returns an error naming every PVC that survived, instead of reporting the
+  data as gone.
+
+### The namespace is only offered when it is empty
+
+The namespace is **never in the delete set**. After everything this env file owns is gone,
+what remains is enumerated, and only an otherwise-empty namespace is *offered* for removal --
+as its own question, which `--no-prompt` answers yes.
+
+An occupied namespace is **listed and kept, on every path, `--no-prompt` included**. There is
+no flag that deletes it: deleting a namespace takes everything in it, including objects
+another team put there, and this tool may not have created it in the first place.
+
+- Four Kubernetes system namespaces -- `default`, `kube-system`, `kube-public`,
+  `kube-node-lease` -- are refused outright and unconditionally. There is no interpretation
+  of "delete kube-system" this tool should ever carry out.
+- Occupancy is checked ownership-BLIND, by one classifier (`Cluster.NamespaceContents`): it
+  lists a fixed set of kinds (`all`, PersistentVolumeClaims, Secrets, ConfigMaps) and
+  discounts only what Kubernetes itself puts in every namespace -- the `kube-root-ca.crt`
+  ConfigMap and the default ServiceAccount (without that, no namespace would ever read as
+  empty) -- plus a LimitRange, ResourceQuota or Event, which are cluster policy rather than
+  occupancy. Anything else still there blocks removal, with no further judgement of who put
+  it there: **a second Solace broker sharing the namespace** blocks it exactly like anything
+  else would.
+- **Retained data keeps the namespace too.** Without `--delete-data` the PVCs are still
+  there, so the namespace is not empty and is kept -- which is what makes "delete the
+  namespace and take the retained data with it" impossible to reach by accident rather than
+  merely discouraged.
+- A failure to even list the contents keeps the namespace: being unable to see what is in
+  there is not permission to proceed. That direction is the whole safety property -- a
+  namespace wrongly reported empty gets cascade-deleted, while one wrongly reported occupied
+  merely stays.
+
+**Docker and Podman have their own teardown wrinkles**, on top of the `--delete-data` layer.
+The sequence is: stop the container, remove it, remove the compose file or quadlet unit,
+remove the engine secrets and the server-certificate bundle, then ask about the data
+directory.
+
+- Podman's secret store is a real, separate persistence layer -- `broker remove` removes
+  every secret `broker deploy` loaded into it as part of removing the container. A secret
+  that is already gone (or fails to remove) only warns. The server-certificate bundle under
+  `podman.baseDir` is different: failing to remove that one is **fatal**, because leaving a
+  private key on the host is the worst outcome available.
+- If `systemctl stop` (Podman) or `stop` (Docker) fails, the removal aborts before touching
+  the unit, the container, or the data directory -- it continues only when the broker is
+  *confirmed* down: systemd reporting `inactive`, `failed` or `unknown`, or the engine
+  listing no running container. "Still running" and "could not be confirmed either way" both
+  abort, because the case this guard exists for -- a rootless Podman whose systemd user
+  session is unreachable while `podman info` still succeeds -- produces the second one, and
+  silence is not confirmation.
+- `broker remove` against a host with nothing deployed -- no compose file, no container by
+  that name -- is a no-op rather than an error, matching `--ignore-not-found` elsewhere.
+
+### Removing the operator does not always remove it
+
+`operator remove` reads the installed operator's watch list before doing anything, because
+the operator is cluster-scoped and may be serving brokers this env file knows nothing about:
+
+- If this env file's namespaces cover **everything** the operator watches, it is removed.
+- Otherwise the watch list is **narrowed** -- this env file's namespaces are dropped from it
+  and the operator keeps running for the rest. The narrowing edits only `WATCH_NAMESPACE`,
+  so a removal can never change the operator's image out from under whoever else is using it.
+- An operator watching **all** namespaces (an empty `WATCH_NAMESPACE`) cannot be narrowed to
+  exclude one, so it is kept with a warning rather than being silently left watching
+  everything minus nothing.
+
+### Every destructive command confirms
+
+`broker remove`, `operator remove` and `broker restart` all ask before acting -- `restart`
+included, because it drops every in-flight connection (it deletes pods on Kubernetes so the
+StatefulSet recreates them, and bounces the container on Docker/Podman). So do
+`broker configure default-vpn` and `broker configure default-users` when disabling (never
+when enabling: bringing something back up needs no gate), since each drops client
+connections that depend on it, and `broker configure domain-certs --remove`, since it
+deletes certificate authorities already configured on the broker. An interactive terminal is
+asked `[y/N]`; a session that does not answer, and was not given `--no-prompt`, refuses
+loudly rather than destroying anything unattended.
+
+**What counts as "answered" is decided by reading, not by what kind of stream stdin is.**
+The question always goes to stderr and the answer is always read from stdin, so a shell
+that hands this tool a pipe rather than a console -- Git Bash, and anything that wraps the
+binary -- is asked and answered normally. An input that ends without a reply is the
+unattended case, and the refusal names `--no-prompt`. The one case with no good answer is
+a scripted run whose stdin is an open pipe that nothing ever writes to and nothing ever
+closes: it waits at the question instead of refusing it. **Pass `--no-prompt` in any
+unattended run** -- CI, cron, a systemd unit -- and none of this arises.
+
+On Kubernetes, deleting a pod is graceful, not abrupt: it sends SIGTERM and honours
+`terminationGracePeriodSeconds`, and only `--force --grace-period=0` would kill outright --
+this tool never passes it. `broker stop` is not in the list above: it asks nothing, since
+nothing is deleted.
 
 **On Kubernetes, every one of those prompts also says where it will act.** The env file names
-a namespace but never a cluster -- which cluster a `kubectl` call actually reaches is decided
-entirely by the kubeconfig's current context, so a `dev.yaml` run against a context that has
-drifted to `prod` looks identical right up until the delete lands. That fact is now surfaced
-twice. First, the startup preamble prints `==> kube-context: <name>` beside the existing
-`==> using kubectl: <path>` line, read from `kubectl config current-context` -- a kubeconfig
-read, not a cluster round trip, so it costs nothing and still prints against an unreachable
-cluster. Second, the prompt itself repeats both facts: `remove broker`, `remove secrets` and
-`restart broker` read "... in namespace `<ns>` (context `<ctx>`)"; `remove namespace` and
-`remove all` already name their own namespace as part of the sentence, so they append only
-the `(context <ctx>)` clause. `remove operator` is the one exception -- it names the
-**operator's own** namespace rather than repeating the broker's, since the two can differ and
-naming the wrong one would be worse than naming none. The context clause is dropped entirely,
-never rendered as an empty `(context )`, on a kubeconfig with no current context or on a
-non-Kubernetes platform.
+a namespace but never a cluster -- which cluster a `kubectl` call reaches is decided entirely
+by the kubeconfig's current context, so a `dev.yaml` run against a context that has drifted to
+`prod` looks identical right up until the delete lands. That fact is surfaced twice. First,
+the startup preamble prints `==> kube-context: <name>` beside the `==> using kubectl: <path>`
+line, read from `kubectl config current-context` -- a kubeconfig read, not a cluster round
+trip, so it costs nothing and still prints against an unreachable cluster. Second, the prompt
+repeats both facts: `broker remove` and `broker restart` read "... in namespace `<ns>`
+(context `<ctx>`)". The namespace question names its own namespace as part of the sentence and
+appends only the `(context <ctx>)` clause. `operator remove` names the **operator's own**
+namespace rather than repeating the broker's, since the two can differ and naming the wrong
+one would be worse than naming none. The context clause is dropped entirely, never rendered as
+an empty `(context )`, on a kubeconfig with no current context or on a non-Kubernetes platform.
 
-There is no global `--yes`. `--no-prompt` is the one flag that silences all of it, so a
-script switches off one thing rather than one per question. It still cannot lose you data on
-its own: the layer stays unless `--delete-data`/`--delete-crd` names it. Two flags, two
-questions, on purpose -- dropping messaging data and cascading a CRD deletion across the
-cluster are each too costly to answer as a side effect of the other.
+## Exporting and importing configuration
+
+`broker perform export-config` and `broker perform import-config <file>` capture a
+running broker's configuration as one artifact and apply it back to a broker --
+possibly a different one. Both drive the Solace CLI over the same `<runtime> exec`
+channel every `broker configure`/`broker perform` command already uses, so neither
+needs a broker credential: authorisation is `kubectl`/`docker`/`podman` access to the
+pod or container, not `semp.adminPass`. That is also what keeps `import-config` safe
+to run even when the artifact itself changes the CLI admin password -- the channel it
+runs over never depended on that password to begin with.
+
+### What export captures, and why it is not a backup
+
+Scope is the presence of a flag, not an enum: with neither flag, export captures the
+whole broker including every message-VPN; `--vpn NAME` (repeatable) captures only the
+named VPNs; `--broker-only` captures the broker level with no VPN at all. The artifact
+is the broker's own `show current-config` output -- the only capture that covers
+product keys, CLI users, redundancy, interfaces, syslog and spool sizing, none of
+which either SEMP API exposes.
+
+**This is not a backup, and treating it as one is the mistake this section exists to
+prevent.** The artifact carries no product key, no TLS private key, no Kerberos
+keytab and no message data -- a broker rebuilt from it alone does not come up. An
+operator who believes an `export-config` capture is a disaster-recovery backup has
+stopped planning for the disaster it does not cover: recovering a lost node is still
+"deploy it from its own env file and let config-sync populate it"
+([Bringing up a fresh cluster](#bringing-up-a-fresh-cluster)), never "import this
+artifact into an empty broker". What this tool does offer for disaster recovery is
+[Data replication](#data-replication) -- a second broker already carrying the messages, which
+is a different thing from a configuration capture and is configured separately.
+
+### Handling the artifact
+
+The artifact carries every configured secret in the broker's encrypted form -- that
+is what makes it replayable by `import-config` -- so it is as sensitive as the env
+file itself, and `-o`/`--out` writes it `0600`.
+
+**Write it outside a git working tree.** `0600` protects it from other users on the
+host and does nothing at all about `git add -A`. This repo ignores `/*.cli` and
+`/*.backup` at its own root as a backstop, but that only covers the two names an
+export happens to land on here -- `-o` takes any path, and a capture written into a
+subdirectory, or into another repo, is one commit away from being published. Keep
+artifacts in a directory no repository tracks.
+
+The broker also offers a `redact` form of `show current-config`, and this tool does
+not use it. Redaction strips exactly the credential material an import has to put
+back, so a redacted capture is an artifact `import-config` would refuse: the flag
+could only ever produce a file this tool declines to read. For a copy safe to
+circulate, redact a copy of the artifact yourself, and keep the real one `0600`.
+
+The broker runs `show current-config` **in series** with configuration commands, so
+while an export is running, other configuration changes on that broker wait. Do not
+run `export-config` at the same time as `broker configure`, an `import-config`, or an
+operator-driven upgrade against the same broker -- queue them instead of overlapping.
+
+### The import lifecycle
+
+`import-config <file>` runs three phases against the target: **plan** (parse the
+artifact, read the target's broker type and message-VPNs, and classify every
+broker-level section against the fixed table below), **confirm** (see below), then
+**apply and verify**.
+
+**The destructive part, stated plainly:** a message-VPN in the artifact that already
+exists on the target is torn down first, which destroys every message spooled in
+every one of its queues and removes any object the artifact does not contain -- ACL
+profiles, client profiles, usernames, bridges, all of it. On an HA pair, config-sync
+propagates those deletions to the mate. A VPN the target does not yet have is created
+fresh instead and loses nothing.
+
+This is why VPN scope asks once for the whole run, and needs an exact `yes` rather
+than the ordinary `[y/N]` -- the same bar `--delete-data` sets on `broker remove`
+([The layer flag raises the question](#the-layer-flag-raises-the-question)).
+`--no-prompt` answers it, so `import-config <file> --no-prompt` is what a fully
+unattended overwrite looks like. Creating VPNs the target does not have destroys
+nothing and only asks `[y/N]`; broker scope never asks anything at all, because which
+broker-level sections apply is a fixed classification rather than a per-run decision
+(see below).
+
+**The apply runs as chunks, and the broker stops itself at a bad line.** The whole
+apply is one generated shell script, uploaded once and run once, that applies each
+chunk through the broker's own `source script <name> stop-on-error no-prompt` and
+checks the last ten lines of that chunk's transcript for a rejection. That matters
+because `cli -Apes` exits 0 even when the broker refuses a line: without
+`stop-on-error` one bad line let the rest of the script run on top of it, and
+without the transcript check a failed **teardown** was invisible -- the verification
+diff cannot see one, since a VPN that was never removed still satisfies every line
+the artifact asks for.
+
+Chunks run in this order, and a failure stops the run there:
+
+1. every existing VPN's teardown;
+2. `Create logging`, alone, because it ends the CLI session;
+3. `Create Usernames`, alone, because it rewrites the CLI admin password;
+4. the remaining broker-level sections;
+5. one chunk per message-VPN, **`default` first** -- it is the VPN that is edited
+   rather than recreated, and it carries the port changes most likely to be refused.
+
+**A failed apply stops there and the verification diff does not run.** The report
+names the chunk that failed and quotes the broker on it, and that is the whole
+answer -- diffing at that point would list every chunk after the failure as
+"missing", which is true and useless, burying the one line that matters under work
+that was never attempted. The diff runs only after a fully successful apply, and
+then reports whatever did not land despite the broker accepting it.
+
+The report names the chunk that failed and quotes the broker's last words on it.
+Nothing else from the apply comes back: a transcript of applying a configuration
+repeats every credential in it, so a successful chunk's output never leaves the
+broker, and the script deletes every file it wrote even if it is interrupted.
+
+Because a failure stops the run, **re-running the same import is the recovery** --
+the chunks that already applied are applied again, which is safe, and the one that
+failed is retried. Nothing resumes from a high-water mark.
+
+**Why teardown rather than reconcile:** a Solace CLI configuration block cannot be
+applied a second time, so there is no in-place update to fall back to. The teardown
+script is not written by this tool -- it is captured FROM THE TARGET with
+`show current-config message-vpn <name> remove`, so the broker orders the removal of
+its own queues, ACL profiles, client profiles, usernames and bridges in whatever
+sequence its own dependencies require.
+
+That also settles the `default` message-VPN, which cannot be deleted at all -- and
+neither can the `default` client-profile, acl-profile or client-username inside any
+VPN, which is why `broker configure default-vpn` shuts the default VPN down rather
+than removing it. The broker's `remove` output simply omits the lines it would
+refuse: importing over `default` empties it and leaves the VPN itself in place, then
+applies the artifact onto it. There is no reserved-name filter and no `default`
+branch in the import path, because a tool-written teardown would have needed a list
+of undeletable objects kept correct across broker versions, and asking the broker
+avoids owning that list at all.
+
+### Two detectors, in order
+
+`cli -Apes` exits 0 even when the broker rejects a configuration line, so the exit
+code tells you nothing and the transcript is the only evidence there is. Two things
+read it, and they run in sequence rather than both always.
+
+The first is the apply itself. Every chunk goes through the broker's own
+`source script ... stop-on-error no-prompt`, so the broker STOPS at the first rejected
+line, and the driver then checks that chunk's transcript tail for a rejection keyword.
+Because the broker stopped, the rejection is the last thing it printed -- which is what
+makes a ten-line tail scan sound rather than lucky. A rejection there names the chunk
+and reports the broker's own words.
+
+The second is verification. After a fully successful apply -- and only then --
+`import-config` re-exports the target and diffs it block by block against the artifact.
+A non-zero exit from that phase means the report found a block that differs or is
+missing. Read the printed report, which names them, rather than the exit code alone.
+
+A failed apply reports and returns without diffing. Diffing after a failure would list
+every chunk the run never reached as missing: true, and useless, since it buries the one
+line naming the actual failure.
+
+**Recovery is re-running the same command.** A failed or interrupted import leaves
+whatever it had already applied in place, half-built VPN included; running
+`import-config` again finds that VPN already exists on the target, tears it down, and
+rebuilds it from the artifact. There is no resume and no partial-apply flag -- the
+whole three-phase run repeats.
+
+### Broker scope is a fixed classification
+
+Which broker-level sections `import-config` applies, skips, or applies with lines
+dropped is baked into this build -- there is no config key, no flag and no per-run
+decision, because an artifact that chose what to execute would be exactly the
+untrusted-input hazard `internal/config/execguard.go` exists to prevent elsewhere.
+[docs/import.md](import.md) is the section-by-section table, generated from that
+classification so the published docs cannot drift from what the code does -- read it
+rather than this paragraph for the full list.
+
+**`import-config` accepts only what `export-config` produced.** An artifact carries a
+`! solace-util-export:` marker, and a file without one -- a raw `show current-config`
+capture, a hand-written script, anything else ending in `.cli` -- is refused, naming
+the command that produces an importable one. That is not fussiness: a raw capture
+still contains the sections import must never apply and the CLI transcript
+(`xps-ps-01> home`) that export cuts off, so importing one would sever the SEMP
+channel mid-run and feed echoed prompts to the CLI as commands, both invisibly
+because `cli -Apes` exits 0. An artifact from a newer export format is refused the
+same way rather than guessed at.
+
+This is a **provenance** check, not a tamper check, and the distinction matters. The
+marker is a comment; anyone editing an artifact can keep it and nothing will notice.
+It stops the wrong file being imported, not a deliberate edit -- and it could not do
+more while `broker perform cli-script` runs any script you hand it. That command is
+the acknowledged way to run unchecked CLI, and its help says so.
+
+A section marked **skip** is removed by `export-config`, not merely ignored by
+`import-config`: the artifact never contains it, and records the omission as a
+`! solace-util-omitted:` line naming the section and the reason, so what is absent
+is visible rather than something to notice. Lines an apply-filtered section drops
+(`routing interface "intf0"`, the spool sizing) are removed the same way. Import
+still ignores such a section if an older or hand-edited artifact carries one, and
+its plan report mentions skipping only then -- after a current export, it has
+nothing to mention.
+
+Several of the applied sections interrupt something while they run, and broker scope
+does not prompt before doing any of them: `Configure SMF Service` bounces all
+messaging, `Configure Service` bounces the msg-backbone data path, `Create logging`
+ends the CLI session it runs in (so it is always applied alone, in its own
+invocation), `Configure SSL` can drop live TLS sessions, and
+`Configure HealthCheck Service` bounces the endpoint the kubelet readiness probe
+depends on.
+
+### Kubernetes-specific hazards
+
+Three sections collide with fields the EventBroker operator's CR already manages, and
+each is worth knowing before running `import-config` against a Kubernetes broker:
+
+- **`Create Usernames` vs `adminCredentialsSecret`.** This section IS applied (an
+  explicit override of the classification's own recommendation), and it overwrites
+  the target's CLI admin password with the artifact's. The CLI channel itself does
+  not care -- it needs no broker credential -- but `adminCredentialsSecret` still
+  holds the old value, so every pod fails its readiness probe and the operator has no
+  way to repair that on its own. Update `semp.adminPass` to match and redeploy.
+- **`Create Redundancy PSK` vs `preSharedAuthKeySecret`.** This section is never
+  applied, precisely because of this collision: the operator ignores
+  `preSharedAuthKeySecret` updates once an HA group already exists, so a CLI-pushed
+  PSK would permanently disagree with what the Secret says, with no automatic repair.
+- **`Configure System` vs `systemScaling`.** Also never applied: the CR sets
+  connection/subscription scaling at every pod boot, so a value pushed over the CLI
+  would only survive until the next pod recreate anyway.
+
+A cross-type artifact -- a software-broker capture applied to an appliance, or the
+reverse -- is refused outright rather than partly applied. The check reads the SEMP
+schema version each side reports; the two broker families do not share a
+configuration surface (interfaces, VRF, DNS, clock and SNMP exist on one and not the
+other), so there is no partial overlap that is safe to apply.
+
+`Create Domain Certificate Authority` **is** applied, and applying it deletes every
+domain CA already on the target before loading the artifact's list, with no conflict
+check. That overlaps `broker configure domain-certs`
+([Post-deployment configuration order](#post-deployment-configuration-order)), which
+already owns this surface and is the narrower tool: it manages exactly the CAs the env
+file lists, in place, without touching anything else an `import-config` run would also
+rewrite. Prefer `domain-certs` for ordinary certificate rotation; reach for
+`import-config` only when the intent is to replace the target's whole configuration.
+
+## Data replication
+
+**Replication is a DR pair; redundancy is one HA group.** Two separate brokers, each
+message-VPN active at one site and standby at the other. A replicated deployment usually has
+both -- an HA group at each site -- and nothing here changes how either group runs locally.
+The intended steady state is declared in the env file's `replication:` block
+([Replication](configuration.md#replication)), the same text in both sites' files, and two
+commands act on it:
+
+```
+solace-util broker configure data-replication    # converge THIS broker to the block
+solace-util broker perform   data-replication    # move roles across BOTH brokers
+```
+
+Both are registered as `dr`, run on every platform, and take `--no-prompt` (which answers
+the confirmation and nothing else) plus `--pod` on Kubernetes.
+
+**Both write to ONE node of the local HA group -- the primary unless `--pod` names another
+on Kubernetes -- and config-sync carries the change to the rest.** Every replication setting
+is `HA: yes` in the broker's own config-sync table, so there is no per-node loop to run and
+no second host to visit. Config-sync is
+**assumed operational** and is never checked: it is off by default and can be oper-down, but
+an HA group in service has it running, and a stale backup after a run that reported success
+is the first place to look.
+
+**Which site a broker is comes from the broker, not the file.** The block is byte-identical
+at both ends, so nothing in it says "this one". The tool asks the broker for its own router
+name and matches it against `sites[].routerNames`. No match names the router name it read
+beside every name the file declares; a name matching both sites is a config error naming
+both. There is no "assume the first" -- a wrong guess here points a switchover at the wrong
+broker.
+
+### Configuring a site
+
+`broker configure data-replication` converges the broker it is run against, and **never
+contacts the mate**. It therefore works on every platform, needs no `via:` block anywhere,
+and cannot be blocked by a WAN outage. Run it at both sites with the same file.
+
+**The apply is TWO PHASES, in two separate broker calls**, because mate configuration (the
+address lines and the virtual-router-name) is understood to be changeable only while every VPN
+on the broker has replication disabled. That precondition is the operator's, ASSUMED rather
+than confirmed: neither mate command states one in the CLI reference, which does spell a
+precondition out where one exists for other services. It is corroborated only by the broker's
+own replayable dump, which orders the replication configuration tens of thousands of lines
+ahead of the first per-VPN enable. The phases are built for it regardless, because being
+wrong the other way means writing mate lines the broker silently refuses:
+
+1. **Mate convergence -- only when the mate actually differs** from what this broker already
+   holds (compared by address set and virtual-router-name, not by whether a removal happens to
+   be non-empty, so a broker missing one of several wanted addresses is still recognised as
+   differing). When it differs: every VPN this broker currently reports admin-enabled for
+   replication is shut down first, then the `no` forms for any mate address or
+   virtual-router-name the broker holds and the file does not carry, then the new address
+   lines rendered for THIS broker's type from the OTHER site's `endpoints` and
+   `virtualRouterName`. Rendering happens, and is checked for a broker-type mismatch, BEFORE
+   this or the per-VPN step ever writes anything. When the mate already matches, this phase
+   writes NOTHING and stops no VPN -- the report says so.
+2. **Per message-VPN, always**: for each one in `replication.vpns`, in file order --
+   `shutdown`, then `state active|standby` (the role derived from `activeAt`), then
+   `no shutdown` -- never enabled before its role is set. That ordering is ALSO the operator's
+   say-so rather than a confirmed broker rule, and it is the weaker of the two: the CLI
+   reference states no precondition on `state`, and `broker perform data-replication`'s own
+   switchover path sets `state` alone against a VPN it requires to be enabled. The cycle is
+   kept because it is the safe superset -- harmless if the rule is false, required if it is
+   true -- but it costs a brief replication interruption per VPN that setting the role alone
+   would not. Then `shutdown` on any VPN the file does not list that this broker currently has
+   replication enabled for.
+
+Phase 1's shutdown is broader than the listed VPNs: it stops replication on **every** VPN this
+broker currently has replication enabled for, including ones the file does not mention,
+whenever the mate needs to change. Enabled is a wider set than replicating -- it also catches a
+VPN enabled without a resolved role, which is exactly the VPN that would otherwise refuse the
+mate lines this phase exists to make writable. Phase 2 then turns the listed ones back on. The command takes the
+**exact-`yes`** gate rather than the ordinary `[y/N]`, the same bar `--delete-data` sets on
+`broker remove`, and states this conditionally before asking (it cannot yet know whether phase
+1 will run) alongside the role it will give each listed VPN; `--no-prompt` answers it once for
+the whole run.
+
+**A rejection is never retroactive.** Each phase runs inside the broker's own
+`source script ... stop-on-error`, so a rejected line stops THAT phase; an EARLIER phase that
+already succeeded is not rolled back. A phase-1 rejection leaves every VPN it shut down still
+down, and phase 2 is never sent. A phase-2 rejection after a successful phase 1 leaves the
+mate already converged, some prefix of the listed VPNs re-enabled, and the rest -- including
+every unlisted-but-replicating VPN -- still shut down from phase 1. The error names which
+phase stopped and states plainly what that leaves running or stopped, and points at
+`show replication` and `show message-vpn * replication` to read the rest back. **Re-running is
+SAFE** -- the whole script is recomputed from a fresh read of the broker rather than replayed,
+which also re-picks the queue-guard keyword from what the broker now reports -- but it is
+**sufficient only when the cause was transient**: a line the broker refuses for a reason in the environment is
+refused again at the same place. A re-run after a successful phase 1 is cheaper than the
+first attempt, because the mate now matches and that phase is skipped.
+
+The exit code reflects what the broker said: `cli -Apes` exits 0 even on a rejected line, so
+each phase's transcript is scanned for the same rejection keywords `import-config` uses -- one
+list, not a second one to keep correct. After a clean apply the command prints what changed
+(including every VPN phase 1 stopped, when it ran) and then the broker's own `show replication`
+and `show message-vpn * replication`, so the result is read back from the broker rather than
+asserted by the tool.
+
+**This is the one path in the feature that can produce two actives.** It is local-only by
+design, so it cannot see what the mate is doing: run it at the new-active site while the old
+site still holds that VPN active and both are active until somebody notices. That is the
+accepted trade for a command that works with the mate unreachable. The safe way to MOVE a
+role is `broker perform data-replication`; use `configure` to stand a pair up and to change
+everything that is not a live role handover.
+
+### Switching roles
+
+`broker perform data-replication` changes **nothing but per-VPN replication state**. Mate
+addresses and enablement are `configure`'s; this command only verifies them. A failover is
+therefore an edit and a run:
+
+```
+# edit replication.vpns[].activeAt in the env file (both sites' copies), then:
+solace-util broker perform data-replication -e env/prod.yaml
+```
+
+Everything that can refuse does so before the first write:
+
+- **Both channels are preflighted**, proving each site is reachable and mutating nothing. A
+  missing, malformed or unreachable `via:` block stops the run here. A site with no `via:` at
+  all is refused by name -- a switch has to change the role at both ends, so the mate must be
+  reachable.
+- **Both sites must be on their primary HA node.** A site running on its backup has already
+  had something go wrong, and stacking a DR role change on a local failover makes both harder
+  to undo. The refusal names the site and points at `broker perform assert-leader`. A
+  standalone broker has no HA group and always passes.
+- **The brokers and the file must agree about which pair this is.** Each broker's own
+  `show replication` must report the OTHER site's declared `virtualRouterName` as its mate. A
+  mismatch means the file names a site the broker never heard of, or `configure` has not been
+  run since the block changed; the refusal says which side disagrees and with what.
+- **Every listed VPN must exist and have replication enabled at both sites.** The check is
+  scoped to the list -- a VPN the file does not manage is ignored, not reported. Missing or
+  shut-down VPNs are named, and the refusal points at `configure`, which is what creates and
+  enables them.
+- **A VPN already active at BOTH sites stops the run.** This tool did not create that state
+  and will not silently repair it: demoting one side picks a winner, and which site keeps its
+  spooled messages is not a decision to make for you. Demote the side you do not want, then
+  run again.
+
+**A VPN already correct at both sites is skipped entirely** -- no demote, no promote, no
+interruption -- so a single-VPN failover never touches the VPNs that are not moving. When
+nothing is left to move the run says so, prints both sites' status and exits **without
+asking anything**: a no-op must not demand an exact-`yes`, or the question stops being read.
+Otherwise it names every move and takes the exact-`yes` gate.
+
+**The safety ordering is demote everywhere, confirm, re-read, then promote.** The demote
+lands on the site `activeAt` does NOT name, so a VPN is never demoted at the site it is about
+to be promoted at; it is issued whether or not that site currently reads active, which makes
+the step idempotent. Every demotion is then confirmed by reading it back -- a successful call
+is not evidence the broker applied it -- and the state is read **again** immediately before
+promoting, because a concurrent `configure` run or an operator at a CLI can move a role in
+between and by then the confirmation is stale. A VPN that has gone active again aborts the
+promotion phase rather than being promoted over.
+
+Stated precisely, because an over-strong claim is worse than none: **within one run, no
+promotion begins until every demotion has been confirmed and re-read.** It is a guarantee
+about the run, not about the system -- nothing locks the brokers, and a `configure` run at
+either site can still promote something. What catches an arrival that lands after the last
+read is the verification below.
+
+**Verification decides the exit code.** Both sites are re-read afterwards and printed
+(`show replication` and `show message-vpn * replication` at each), and every VPN in the list
+is checked -- the ones that moved and the ones that were skipped, since a skipped VPN is the
+run's own premise and a change there means something else is writing. Any VPN not where the
+file says it should be is a **failure**, not a warning: the whole point of the command is
+that the end state is known.
+
+### Reaching the mate
+
+`perform` needs to write the role at the far site, so the mate's entry must carry a `via:`
+block; `configure` needs none. The key that is present is the mechanism
+([Replication](configuration.md#replication)):
+
+| `via:` | What it does |
+| --- | --- |
+| `kubernetes` | Runs that site's own cluster CLI (`kubectl --context dr ...`) and drives the broker CLI in its primary pod, exactly as this tool drives a local one. The command goes through the same allowlist as `kubernetes.runtime` |
+| `semp` | Posts SEMP v1 requests, with `curl` exec'd inside THIS broker's own container -- so it needs no second kubeconfig and no new binary on your machine. The password is the MATE's admin password, never this deployment's |
+
+The SEMP leg has one advantage worth knowing when a run is being debugged: a SEMP reply
+carries an explicit `ok`/`fail` verdict, while the CLI leg has to scan a transcript because
+`cli -Apes` always exits 0.
+
+### When a run fails partway
+
+**Failing between the demote and the promote leaves those VPNs standby at BOTH sites --
+unavailable, not corrupted.** That is the intended direction to fail, and the report says so
+plainly: an operator who reads "unavailable" must not go looking for data loss.
+
+**Recovery is re-running the same command** once the cause is fixed. A both-standby VPN is
+not a special case: it fails the already-correct test, moves through a demote that is a
+no-op, and is promoted. `--no-prompt` silences the confirmation and none of the checks.
 
 ## Upgrading a running broker
 
@@ -452,34 +1168,35 @@ bump `image.tag` in the env file -- but applying it differs:
 **Kubernetes, `updateStrategy: automatedRolling` (the default)**
 
 ```
-solace-util deploy broker -e dev.yaml
+solace-util broker deploy -e dev.yaml
 ```
 
-`deploy broker` re-applies the custom resource; the operator sees the new tag and rolls the
+`broker deploy` re-applies the custom resource; the operator sees the new tag and rolls the
 pods itself (monitor, then backup, then the active node).
 
 **Kubernetes, `updateStrategy: manualPodRestart`**
 
 ```
-solace-util deploy broker -e dev.yaml     # updates the statefulset template; no pod is touched
-solace-util restart broker -e dev.yaml    # bounces monitor -> backup -> primary, waiting for each
+solace-util broker deploy -e dev.yaml     # updates the statefulset template; no pod is touched
+solace-util broker restart -e dev.yaml    # bounces monitor -> backup -> primary, waiting for each
 ```
 
-The operator deliberately waits for you here, so `deploy broker` alone changes nothing
-visible. `restart broker --pod <role>` bounces one pod if you would rather drive the order
-yourself -- `--pod` is the one way to name a Kubernetes pod, here and on `cli`, `shell`,
-`logs broker`, `check semp-login` and `status broker` too; worth doing after a failover,
+The operator deliberately waits for you here, so `broker deploy` alone changes nothing
+visible. `broker restart --pod <role>` bounces one pod if you would rather drive the order
+yourself -- `--pod` is the one way to name a Kubernetes pod (defaulting to the primary when
+omitted), here and on `cli`, `shell`,
+`broker logs`, `broker perform semp-login-check` and `broker status` too; worth doing after a failover,
 since the order above is by configured role and the active node may not be the configured
-primary. Check with `solace-util smoke redundancy` first.
+primary. Check with `solace-util broker perform redundancy-test` first.
 
 **Docker / Podman** (on each host, with its own role)
 
 ```
-solace-util deploy broker primary -e prod.yaml --restart    # prod.yaml: a podman env file
-solace-util deploy broker -e prod.yaml --restart             # prod.yaml: a docker env file
+solace-util broker deploy --pod primary -e prod.yaml --restart    # prod.yaml: a podman env file
+solace-util broker deploy -e prod.yaml --restart             # prod.yaml: a docker env file
 ```
 
-`deploy broker` compares the rendered artifact with the one on disk: unchanged is a no-op,
+`broker deploy` compares the rendered artifact with the one on disk: unchanged is a no-op,
 changed is written and then applied to the running broker -- with `--restart`, or
 after being asked. Without consent the new artifact is left in place and the command
 says the broker is still on the previous one. In an HA group, upgrade the monitor and
@@ -491,11 +1208,11 @@ backup before the primary.
 
 Both container artifacts ask the engine for `<docker|podman>.container.ulimits.nofile`
 (default `2448:1048576`). A **rootless** container cannot raise `nofile` above the hard limit
-of the user invoking podman -- the kernel refuses -- so `prepare host` checks it on a podman
-env file and stops with the exact drop-in to add when it is too low:
+of the user invoking podman -- the kernel refuses -- so `broker deploy` checks it on a
+podman env file and stops with the exact drop-in to add when it is too low:
 
 ```
-solace-util prepare host -e env/prod.yaml
+solace-util broker deploy -e env/prod.yaml
 ...
 error: rootless podman: this user's hard nofile limit is 1024, but
 podman.container.ulimits.nofile needs 1048576 -- a rootless container cannot raise it
@@ -513,17 +1230,18 @@ check runs only for `podman.rootless: true`.
 
 ### Podman secret flags
 
-`deploy broker` stores the broker's secrets with `podman secret create --replace` and mounts
-them into the container (`type=mount`), neither of which the oldest podman builds support.
-Confirm yours does (`podman secret create --help | grep -- --replace`) -- `check deploy` only
-proves the runtime answers `version`, so an unsupported flag surfaces at deploy time.
+`broker deploy` stores the broker's secrets with `podman secret rm --ignore` followed by
+`podman secret create` (value on stdin) and mounts them into the container (`type=mount`),
+none of which the oldest podman builds support. The symptom is an unknown-flag or unknown-
+directive error at deploy time, because `validate` proves only that the runtime answers
+`version`. See [Version floors](#version-floors) for the floor and why `--replace` is
+deliberately not used.
 
 ### Docker compose secrets need compose 2.23.1+
 
-The generated compose file sources each secret from a host environment variable, which needs
-**compose v2.23.1 or later** (`docker compose version`). On an older compose the
-`environment:` secret source is not understood and `deploy broker` fails. On a host carrying
-only the standalone v1 binary, set `docker.compose: docker-compose`.
+The generated compose file sources each secret from a host environment variable, so an older
+compose does not understand the `environment:` secret source and `broker deploy` fails. See
+[Version floors](#version-floors) for the version and the v1 fallback.
 
 ### Wrong cluster (kubeconfig drift)
 
@@ -537,6 +1255,34 @@ switch with `kubectl config use-context <name>` first if it does not match what 
 `--kubeconfig`/`KUBECONFIG` pointed at the wrong file produces the same symptom: the tool has
 no `--context` flag of its own, so whatever the kubeconfig currently resolves to is where the
 command runs.
+
+### Import reported failure
+
+`import-config` always re-exports the target and diffs it against the artifact after
+applying, and that diff -- never the applied script's own output -- is what decides
+the exit code (see
+[Verification is the only error detection](#verification-is-the-only-error-detection)).
+A non-zero exit means the printed report named at least one block that differs from
+the artifact or is missing from the target entirely; it does not mean a particular CLI
+line was rejected, since `cli -Apes` exits 0 either way. Read the report for which
+section and which VPN disagree, fix the cause if one is obvious (a value the target
+genuinely cannot accept, a section this build classifies differently than expected),
+and re-run `import-config` with the same file: a half-built VPN from the failed
+attempt is found, torn down, and rebuilt from scratch, so re-running is the whole
+recovery procedure -- there is no separate resume step.
+
+### A replication switch refuses before changing anything
+
+`broker perform data-replication` runs a series of checks before its first write, and each
+refusal names what to do. **Not on the primary HA node** means that site is running on its
+backup: revert activity first (`broker perform assert-leader`, or `redundancy revert-activity`
+on the backup). **The brokers and the env file disagree about which pair this is** means a
+broker's `show replication` does not name the other site's `virtualRouterName` as its mate:
+run `broker configure data-replication` at each site, which is what writes it. **Listed VPNs
+do not exist or have replication shut down** is the same answer -- `configure` is what creates
+and enables them. **A VPN active at both sites** is refused deliberately and is not repaired
+automatically; demote the side you do not want, then run again. Nothing has been written in
+any of these cases. See [Data replication](#data-replication).
 
 ### A wrapper runtime is refused
 

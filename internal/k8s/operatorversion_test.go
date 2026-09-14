@@ -65,7 +65,7 @@ func TestCompareVersions(t *testing.T) {
 // it.
 func TestOperatorVersionWarningFiresOnlyOnADowngrade(t *testing.T) {
 	const newer = "registry.example.com/solace/pubsubplus-eventbroker-operator:1.4.2"
-	const older = "registry.example.com/docker.io/solace/pubsubplus-eventbroker-operator:1.4.0"
+	const older = "registry.example.com/solace/pubsubplus-eventbroker-operator:1.4.0"
 
 	t.Run("existing newer than new -- warn", func(t *testing.T) {
 		body := operatorVersionWarning(newer, older)
@@ -159,7 +159,7 @@ func TestConfirmNoDowngradeRefusesByDefault(t *testing.T) {
 	if err := c.OperatorApply(context.Background()); err == nil {
 		t.Fatal("a downgrade with no Confirm must be refused")
 	}
-	calls := rr.afterPreflight(t, "create", "customresourcedefinitions")
+	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
 	if len(calls) != 1 {
 		t.Fatalf("refused downgrade made %d calls after the probe, want 1 (the version read only, no apply)", len(calls))
 	}
@@ -178,7 +178,7 @@ func TestConfirmNoDowngradeRefusedWhenConfirmDeclines(t *testing.T) {
 	if err := c.OperatorApply(context.Background()); err == nil {
 		t.Fatal("declining the confirm must refuse the downgrade")
 	}
-	calls := rr.afterPreflight(t, "create", "customresourcedefinitions")
+	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
 	if len(calls) != 1 {
 		t.Fatalf("declined downgrade made %d calls after the probe, want 1 (the version read only, no apply)", len(calls))
 	}
@@ -191,16 +191,17 @@ func TestConfirmNoDowngradeProceedsWhenConfirmAccepts(t *testing.T) {
 	cfg := loadK8s(t) // pull secret set -> regcred applied
 	cfg.K8s.Operator.Namespace = "op-ns"
 	rr := &recRunner{outQueue: [][]byte{
-		operatorDeployJSON("registry.example.com/docker.io/solace/pubsubplus-eventbroker-operator:1.4.2"),
+		operatorDeployJSON("registry.example.com/solace/pubsubplus-eventbroker-operator:1.4.2"),
 	}}
 	c := NewCluster(rr, cfg, nil, nil)
 	c.Confirm = func(string) bool { return true }
 	if err := c.OperatorApply(context.Background()); err != nil {
 		t.Fatalf("OperatorApply: %v", err)
 	}
-	calls := rr.afterPreflight(t, "create", "customresourcedefinitions")
-	if len(calls) != 4 {
-		t.Fatalf("accepted downgrade made %d calls after the probe, want 4 (version read + namespace + regcred + bundle)", len(calls))
+	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
+	if len(calls) != 5 {
+		t.Fatalf("accepted downgrade made %d calls after the probe, want 5 "+
+			"(version read + watch-list read + namespace + regcred + bundle)", len(calls))
 	}
 }
 
@@ -212,8 +213,8 @@ func TestConfirmNoDowngradeAsksNothingWhenNotADowngrade(t *testing.T) {
 		name     string
 		existing string
 	}{
-		{"same version", "registry.example.com/docker.io/solace/pubsubplus-eventbroker-operator:1.4.0"},
-		{"older installed -- an upgrade", "registry.example.com/docker.io/solace/pubsubplus-eventbroker-operator:1.3.0"},
+		{"same version", "registry.example.com/solace/pubsubplus-eventbroker-operator:1.4.0"},
+		{"older installed -- an upgrade", "registry.example.com/solace/pubsubplus-eventbroker-operator:1.3.0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := loadK8s(t)
@@ -228,9 +229,10 @@ func TestConfirmNoDowngradeAsksNothingWhenNotADowngrade(t *testing.T) {
 			if asked {
 				t.Error("an upgrade or same-version apply must not ask at all")
 			}
-			calls := rr.afterPreflight(t, "create", "customresourcedefinitions")
-			if len(calls) != 4 {
-				t.Fatalf("made %d calls after the probe, want 4 (version read + namespace + regcred + bundle)", len(calls))
+			calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
+			if len(calls) != 5 {
+				t.Fatalf("made %d calls after the probe, want 5 "+
+					"(version read + watch-list read + namespace + regcred + bundle)", len(calls))
 			}
 		})
 	}
@@ -257,8 +259,8 @@ func TestConfirmNoDowngradeProceedsWhenVersionReadFails(t *testing.T) {
 	if asked {
 		t.Error("a failed version read must not be treated as a downgrade to ask about")
 	}
-	calls := rr.afterPreflight(t, "create", "customresourcedefinitions")
-	if len(calls) != 4 {
+	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
+	if len(calls) != 5 {
 		t.Fatalf("made %d calls after the probe, want 4 (version read + namespace + regcred + bundle)", len(calls))
 	}
 }

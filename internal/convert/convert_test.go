@@ -113,10 +113,10 @@ func TestConvertUserPasswordsBecomeAdditionalUsers(t *testing.T) {
 	res := convertOK(t, src, config.K8s)
 	c := strictDecode(t, res.YAML)
 
-	if len(c.Admin.AdditionalUsers) != 1 {
-		t.Fatalf("additionalUsers = %+v, want only the one well-formed entry", c.Admin.AdditionalUsers)
+	if len(c.SEMP.AdditionalUsers) != 1 {
+		t.Fatalf("additionalUsers = %+v, want only the one well-formed entry", c.SEMP.AdditionalUsers)
 	}
-	u := c.Admin.AdditionalUsers[0]
+	u := c.SEMP.AdditionalUsers[0]
 	if u.Username != "appuser" || u.Password != "app-pass" || u.AccessLevel != "none" {
 		t.Errorf("converted user = %+v, want appuser/app-pass with the least-privileged level", u)
 	}
@@ -152,9 +152,10 @@ func TestConvertLegacyK8sEnv(t *testing.T) {
 	}
 	c := strictDecode(t, res.YAML)
 
-	// SOLBK_REDUNDANCY="true" is the k8s spelling of yes.
-	if c.Redundancy != "yes" {
-		t.Errorf("redundancy = %q, want yes", c.Redundancy)
+	// The k8s bootstrap already spelled it true/false, which is now the schema's
+	// spelling too -- the container bootstrap's yes/no is what needs translating.
+	if c.Redundancy.Enabled != "true" {
+		t.Errorf("redundancy.enabled = %q, want true", c.Redundancy.Enabled)
 	}
 	if c.Image.Repo != "solace-pubsub-standard" || c.Image.Tag != "latest" || c.Image.Registry != "localhost" {
 		t.Errorf("image = %+v", c.Image)
@@ -168,10 +169,10 @@ func TestConvertLegacyK8sEnv(t *testing.T) {
 	if c.K8s.Name != "solace-broker" || c.K8s.Namespace != "solace-namespace" {
 		t.Errorf("k8s identity = %q/%q", c.K8s.Name, c.K8s.Namespace)
 	}
-	if c.K8s.Storage.MsgNode != "16100Mi" || c.K8s.Storage.MonNode != "2300Mi" || c.K8s.Storage.Class != "solace-storage-class" {
+	if c.K8s.Storage.MsgNodeSize != "16100Mi" || c.K8s.Storage.MonNodeSize != "2300Mi" || c.K8s.Storage.Class != "solace-storage-class" {
 		t.Errorf("storage = %+v", c.K8s.Storage)
 	}
-	if c.Admin.Pass != "adminpassword123" || c.Admin.MonitorPass != "monitorpassword123" {
+	if c.SEMP.AdminPass != "adminpassword123" || c.SEMP.MonitorPass != "monitorpassword123" {
 		t.Error("admin credentials did not carry over")
 	}
 	if c.K8s.Operator.CPU != "500m" || c.K8s.Operator.Mem != "512Mi" {
@@ -199,17 +200,17 @@ func TestConvertLegacyK8sEnv(t *testing.T) {
 	if c.K8s.Placement.AntiAffinityWeight != 100 {
 		t.Errorf("antiAffinityWeight = %d, want 100", c.K8s.Placement.AntiAffinityWeight)
 	}
-	// Trailing comment stripped from an unquoted value.
-	if c.Replication.Mate != "mate-virtual-router-name" {
-		t.Errorf("replication.mate = %q", c.Replication.Mate)
-	}
-	if len(c.Replication.ConnSSL) != 3 || c.Replication.ConnSSL[0] != "host:port" {
-		t.Errorf("replication.connSsl = %v", c.Replication.ConnSSL)
-	}
-	// REPL_PSK='r$plPSK' is single-quoted, so the $ is literal and must survive
-	// verbatim instead of being read as a (nonexistent) ${plPSK} reference (B5).
-	if c.Replication.PSK != "r$plPSK" {
-		t.Errorf("replication.psk = %q, want the literal r$plPSK", c.Replication.PSK)
+	// The fixture sets REPL_MATE/REPL_CONN_SSL/REPL_PSK, and none of it is carried
+	// over: the replication: block now describes BOTH sites of a DR pair -- keyed by
+	// virtual-router-name, with endpoints, access and per-VPN active site -- which
+	// three variables about one mate cannot populate. Emitting a partial block would
+	// produce a file that fails Validate, so it is dropped with the warning below.
+	//
+	// B5 (a single-quoted `$` surviving expansion) keeps its own coverage in
+	// TestParseSingleQuotedDollarSurvives, at the parser level where the bug was; the
+	// PSK assertion here was only ever an end-to-end echo of it.
+	if c.Replication.Configured() {
+		t.Errorf("replication must not be carried over from REPL_*, got %+v", c.Replication)
 	}
 	// KUBE was expanded unquoted by the bash scripts, so a whole kubectl profile
 	// has to survive the conversion as kubernetes.runtime, split into argv.
@@ -219,8 +220,8 @@ func TestConvertLegacyK8sEnv(t *testing.T) {
 	}
 	// EXDIR is bash plumbing; every other variable in the file is mapped, so the
 	// only warning allowed here is the replication advisory -- this fixture does set
-	// REPL_MATE/REPL_CONN_SSL, and they map into a schema block no command reads
-	// yet. Anything else is still a failure.
+	// REPL_MATE/REPL_CONN_SSL/REPL_PSK, and none of them survive into the rebuilt
+	// replication: block. Anything else is still a failure.
 	// SOLBK_MSGNODE_CPU is the second allowed warning: the fixture sets it, as
 	// every real legacy file does, and broker CPU is now fixed by the scaling
 	// tier -- so it is dropped with a reason rather than carried over.
@@ -231,7 +232,7 @@ func TestConvertLegacyK8sEnv(t *testing.T) {
 		t.Errorf("unexpected warning converting the sample: %s", w)
 	}
 	if !hasWarning(res.Warnings, "REPL_MATE") {
-		t.Error("the sample configures replication, so the inert-block advisory should have fired")
+		t.Error("the sample configures replication, so the not-carried-over advisory should have fired")
 	}
 	if !hasWarning(res.Warnings, "SOLBK_MSGNODE_CPU") {
 		t.Error("the sample sets SOLBK_MSGNODE_CPU, so the removal advisory should have fired")
@@ -243,46 +244,50 @@ func TestConvertLegacyK8sEnv(t *testing.T) {
 	}
 }
 
-// TestConvertAdminUserIsContainerOnly covers the one admin field that is not portable:
-// SOLBK_ADM_USER named the container's admin user, but on Kubernetes the operator reads
-// the fixed username_admin_password key out of the credentials Secret, so validateK8s
-// refuses any other admin.user. Carrying the value into a k8s document would turn a
-// working bash env file into YAML that will not load, so it is dropped with the reason
-// named -- the same treatment SOLBK_MSGNODE_CPU gets.
-func TestConvertAdminUserIsContainerOnly(t *testing.T) {
-	t.Run("k8s drops it and says why", func(t *testing.T) {
-		res := convertOK(t, k8sEnv+"SOLBK_ADM_USER=\"ops\"\n", config.K8s)
-		if got := strictDecode(t, res.YAML).Admin.User; got != "" {
-			t.Errorf("admin.user = %q, want it absent on k8s:\n%s", got, res.YAML)
-		}
-		if !hasWarning(res.Warnings, "SOLBK_ADM_USER") {
-			t.Errorf("dropping the value must be reported; warnings = %v", res.Warnings)
-		}
-		// The variable is read, not ignored: an unread one would resurface in the generic
-		// unmapped list, which says nothing about why the value cannot be carried over.
-		if hasWarning(res.Warnings, "no YAML equivalent") {
-			t.Errorf("SOLBK_ADM_USER is mapped, not unmapped; warnings = %v", res.Warnings)
-		}
-		// The whole point of dropping it rather than emitting it: what is written loads.
-		if hasWarning(res.Warnings, "will not load as-is") {
-			t.Errorf("the converted k8s file must still validate; warnings = %v", res.Warnings)
-		}
-	})
-	t.Run("k8s says nothing when the value was already admin", func(t *testing.T) {
-		res := convertOK(t, k8sEnv+"SOLBK_ADM_USER=\"admin\"\n", config.K8s)
-		if hasWarning(res.Warnings, "SOLBK_ADM_USER") {
-			t.Errorf("admin is what k8s uses regardless, so nothing was lost; warnings = %v", res.Warnings)
-		}
-	})
-	t.Run("container keeps it", func(t *testing.T) {
-		res := convertOK(t, ctrEnv+"SOLBK_ADM_USER=\"ops\"\n", config.Docker)
-		if got := strictDecode(t, res.YAML).Admin.User; got != "ops" {
-			t.Errorf("admin.user = %q, want ops on docker:\n%s", got, res.YAML)
-		}
-		if hasWarning(res.Warnings, "SOLBK_ADM_USER") {
-			t.Errorf("the container platforms honour the variable; warnings = %v", res.Warnings)
-		}
-	})
+// TestConvertAdminUserIsDroppedOnEveryPlatform covers the one legacy variable with no
+// field to land in. SOLBK_ADM_USER named the container's admin user; the schema has no
+// username at all now, because the broker's admin user is `admin` everywhere -- Kubernetes
+// always required it (the operator reads the fixed username_admin_password key) and the
+// container platforms no longer diverge.
+//
+// Dropped WITH A WARNING rather than silently, on every platform, because it is a real
+// behaviour change for the deployment the source file describes: anything logging in as
+// the old name stops working. The variable is still READ, so it does not resurface in the
+// generic unmapped list, which would say nothing about why.
+func TestConvertAdminUserIsDroppedOnEveryPlatform(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  string
+		p    config.Platform
+	}{
+		{"kubernetes", k8sEnv, config.K8s},
+		{"docker", ctrEnv, config.Docker},
+	} {
+		t.Run(tc.name+" drops it and says why", func(t *testing.T) {
+			res := convertOK(t, tc.env+"SOLBK_ADM_USER=\"ops\"\n", tc.p)
+			if strings.Contains(string(res.YAML), "user:") {
+				t.Errorf("no username field exists to emit:\n%s", res.YAML)
+			}
+			if !hasWarning(res.Warnings, "SOLBK_ADM_USER") {
+				t.Errorf("dropping the value must be reported; warnings = %v", res.Warnings)
+			}
+			// Read, not ignored: an unread variable resurfaces in the generic unmapped
+			// list, which says nothing about why the value cannot be carried over.
+			if hasWarning(res.Warnings, "no YAML equivalent") {
+				t.Errorf("SOLBK_ADM_USER is mapped, not unmapped; warnings = %v", res.Warnings)
+			}
+			// The whole point of dropping it rather than emitting it: what is written loads.
+			if hasWarning(res.Warnings, "will not load as-is") {
+				t.Errorf("the converted file must still validate; warnings = %v", res.Warnings)
+			}
+		})
+		t.Run(tc.name+" says nothing when the value was already admin", func(t *testing.T) {
+			res := convertOK(t, tc.env+"SOLBK_ADM_USER=\"admin\"\n", tc.p)
+			if hasWarning(res.Warnings, "SOLBK_ADM_USER") {
+				t.Errorf("admin is what every platform uses, so nothing was lost; warnings = %v", res.Warnings)
+			}
+		})
+	}
 }
 
 func TestConvertContainer(t *testing.T) {
@@ -291,11 +296,11 @@ func TestConvertContainer(t *testing.T) {
 		t.Errorf("detected platform = %q, want docker (no docker/podman marker)", res.Platform)
 	}
 	c := strictDecode(t, res.YAML)
-	if c.Nodes.Primary.Name != "pri-host" || c.Nodes.Primary.IP != "10.0.0.1" {
-		t.Errorf("nodes.primary = %+v", c.Nodes.Primary)
+	if c.Redundancy.Primary.Name != "pri-host" || c.Redundancy.Primary.Addr != "10.0.0.1" {
+		t.Errorf("redundancy.primary = %+v", c.Redundancy.Primary)
 	}
-	if c.Nodes.Monitor.Name != "mon-host" || c.Nodes.PSK != "PSKVALUE" {
-		t.Errorf("nodes = %+v", c.Nodes)
+	if c.Redundancy.Monitor.Name != "mon-host" || c.Redundancy.PSK != "PSKVALUE" {
+		t.Errorf("redundancy = %+v", c.Redundancy)
 	}
 	if c.Docker.Container.DataDir != "/opt/solace/data" || c.Docker.Container.RunUser != "1000:1000" {
 		t.Errorf("docker.container = %+v", c.Docker.Container)
@@ -438,18 +443,20 @@ func TestConvertKubeSilentOnContainerPlatform(t *testing.T) {
 }
 
 func TestConvertRedundancySpellings(t *testing.T) {
-	// want is the emitted line, not just the value: yes/no are YAML-ambiguous and
-	// so are quoted, while a pass-through value like "maybe" is a plain scalar.
+	// want is the emitted line, not just the value: the schema spells the switch
+	// true/false, both of which are YAML-ambiguous and so are quoted, while a
+	// pass-through value like "maybe" is a plain scalar. Both legacy spellings map
+	// onto the one the schema accepts -- that translation is the whole job here.
 	cases := []struct {
 		in, want string
 		warn     bool
 	}{
-		{"true", `redundancy: "yes"`, false},
-		{"yes", `redundancy: "yes"`, false},
-		{"false", `redundancy: "no"`, false},
-		{"no", `redundancy: "no"`, false},
-		{"YES", `redundancy: "yes"`, false},
-		{"maybe", "redundancy: maybe", true},
+		{"true", `enabled: "true"`, false},
+		{"yes", `enabled: "true"`, false},
+		{"false", `enabled: "false"`, false},
+		{"no", `enabled: "false"`, false},
+		{"YES", `enabled: "true"`, false},
+		{"maybe", "enabled: maybe", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
@@ -469,14 +476,18 @@ func TestConvertRedundancySpellings(t *testing.T) {
 // differed by platform: the k8s bootstrap defaulted to standalone -- what this CLI
 // now does, so there is nothing to say -- while the container bootstrap defaulted
 // to HA. That divergence has to be named rather than quietly turning a
-// three-broker group into a single broker. Either way no key is emitted, so the
-// converter keeps its "only what the source set" contract.
+// three-broker group into a single broker. Either way no `enabled` key is emitted, so
+// the converter keeps its "only what the source set" contract.
+//
+// It is `enabled` specifically rather than the whole `redundancy:` section: the node
+// table lives under the same key now, and a source that named a node has set something
+// worth carrying over even when it left the switch alone.
 func TestConvertRedundancyOmitted(t *testing.T) {
 	t.Run("container warns about the changed default", func(t *testing.T) {
 		src := "SOLBK_IMAGE=\"r\"\nSOLBK_IMG_TAG=\"t\"\nSOLBK_ADM_PASS=\"p\"\nSOLBK_NODE_PRI_NAME=\"h\"\n"
 		res := convertOK(t, src, config.Docker)
-		if strings.Contains(string(res.YAML), "redundancy:") {
-			t.Errorf("an unset value must emit no key so the CLI default applies:\n%s", res.YAML)
+		if strings.Contains(string(res.YAML), "enabled:") {
+			t.Errorf("an unset value must emit no enabled key so the CLI default applies:\n%s", res.YAML)
 		}
 		if !hasWarning(res.Warnings, "SOLBK_REDUNDANCY") {
 			t.Errorf("container conversion should name the changed default, got %v", res.Warnings)
@@ -853,7 +864,7 @@ func TestEmptyBlocksOmitted(t *testing.T) {
 			t.Errorf("empty block %q should be omitted:\n%s", absent, out)
 		}
 	}
-	if !strings.Contains(out, "image:") || !strings.Contains(out, "nodes:") {
+	if !strings.Contains(out, "image:") || !strings.Contains(out, "redundancy:") {
 		t.Errorf("populated blocks are missing:\n%s", out)
 	}
 }

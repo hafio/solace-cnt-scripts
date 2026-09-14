@@ -16,14 +16,18 @@ import (
 const defaultOperatorNS = "pubsubplus-operator-system"
 
 // operatorDeployment is the fixed name of the operator's controller Deployment and
-// ServiceAccount (assets/operator-1.4.0.yaml.tmpl:1971).
+// ServiceAccount (assets/operator-1.4.2.yaml.tmpl).
 const operatorDeployment = "pubsubplus-eventbroker-operator"
+
+// operatorDeployRef is the same Deployment in the `<kind>/<name>` form kubectl wants for
+// rollout, logs, describe and set env. Written once so the four call sites cannot
+// disagree about the prefix.
+const operatorDeployRef = "deployment/" + operatorDeployment
 
 // Cluster performs Kubernetes operations that talk to the cluster or the operator --
 // as opposed to a running broker, which goes through internal/broker over the
 // transport. Every command routes through R, so the Echo runner records it and tests capture
-// the exact argv. Out is the report sink; In is the prompt source for the few
-// interactive operations (node labelling).
+// the exact argv. Out is the report sink; Log is the narration sink.
 type Cluster struct {
 	R   engine.Runner
 	Cfg *config.Config
@@ -34,7 +38,6 @@ type Cluster struct {
 	// discards.
 	Log func(string, ...any)
 	Out io.Writer
-	In  io.Reader
 	// Now is the clock, a seam so the AGE column the status commands render is
 	// testable against a fixed instant. nil means time.Now.
 	Now func() time.Time
@@ -42,20 +45,28 @@ type Cluster struct {
 	// Confirm asks the operator a yes/no question, the same seam
 	// container.Manager carries. nil DECLINES, which is what an unattended run
 	// must do when the question is "may I downgrade a cluster-scoped operator".
+	//
+	// This is the ONLY question this package asks, and it is a func rather than a
+	// reader/writer pair on purpose: internal/cli owns the terminal, so every other
+	// confirmation -- including the removal prompts and the namespace question -- is
+	// asked there and reaches here as a decision already made. The In/Err pair this
+	// struct once carried existed for the interactive node picker and went with it.
 	Confirm func(question string) bool
-
-	// Err is where interactive prompts are written (the node picker's banner,
-	// list and "> "). It is separate from Out because a prompt is not report
-	// content: piping stdout to a file must capture the report, not the
-	// questions asked along the way. nil -> os.Stderr, which is where every
-	// other prompt in this tool already goes.
-	Err io.Writer
 }
 
 // NewCluster builds a Cluster over the given runner, config, line sink and output
-// sink. In is left nil; callers that prompt (LabelNodes) set it explicitly.
+// sink. Confirm is left nil, which DECLINES; a caller that can ask sets it.
 func NewCluster(r engine.Runner, cfg *config.Config, log func(string, ...any), out io.Writer) *Cluster {
 	return &Cluster{R: r, Cfg: cfg, Log: log, Out: out}
+}
+
+// confirm asks the operator question through the Confirm seam. A nil Confirm DECLINES:
+// the questions this package asks are all "may I do something whose blast radius is
+// wider than this env file" -- downgrade a shared operator, widen its watch scope -- and
+// an unattended run must answer no to those. Routed through one helper so the
+// nil-declines rule cannot be spelled differently at a second call site.
+func (c *Cluster) confirm(question string) bool {
+	return c.Confirm != nil && c.Confirm(question)
 }
 
 // progress is the stderr Sink for this package's narration: phases through Step,

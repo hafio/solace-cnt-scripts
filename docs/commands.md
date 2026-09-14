@@ -20,66 +20,51 @@ solace-util
     fish
     powershell
     zsh
-  check
-    deploy
-    semp-login
-  cli
-  config
-    apply
-      additional-users
-      domain-certs
-      product-keys
-      server-cert
-    delete
-      domain-certs
-    disable
+  broker
+    cli
+    configure
+      data-replication
       default-users
       default-vpn
-    leader [role]
+      domain-certs
+      product-keys
+      server-certs
+    copy
+      from files...
+      into files...
+    deploy
+    generate
+    logs
+    perform
+      assert-leader
+      cli-script <file>
+      data-replication
+      export-config
+      gather-diagnostics
+      import-config <file>
+      redundancy-test
+      semp-login-check
+      shell-script <file>
+    remove
+    restart
+    shell
+    start
+    status
+    stop
+    validate
   convert <bash-env-file>
-  copy
-    from files...
-    into files...
-  deploy
-    all [role]
-    broker [role]
-    operator
-  diagnostics
-  examples [name]
-  generate
-    broker [role]
-    operator
-    secrets
-      broker
-      operator
-  logs
-    broker
-    operator
-  prepare
-    all
-    host
-    labels
-    namespace
-    secrets
-  remove
-    all
-    broker
-    namespace
-    operator
-    secrets
-  restart
-    broker
-    operator
-  shell
-  smoke
-    redundancy [role]
-  start
-    broker
-  status
-    broker
-    operator
-  stop
-    broker
+  examples
+  operator
+    deploy
+    generate
+    logs
+    remove
+    restart
+    start
+    status
+    stop
+    validate
+  validate
   version
 ```
 
@@ -90,66 +75,51 @@ solace-util
   - [auto-complete fish](#solace-util-auto-complete-fish)
   - [auto-complete powershell](#solace-util-auto-complete-powershell)
   - [auto-complete zsh](#solace-util-auto-complete-zsh)
-- [check](#solace-util-check)
-  - [check deploy](#solace-util-check-deploy)
-  - [check semp-login](#solace-util-check-semp-login)
-- [cli](#solace-util-cli)
-- [config](#solace-util-config)
-  - [config apply](#solace-util-config-apply)
-    - [config apply additional-users](#solace-util-config-apply-additional-users)
-    - [config apply domain-certs](#solace-util-config-apply-domain-certs)
-    - [config apply product-keys](#solace-util-config-apply-product-keys)
-    - [config apply server-cert](#solace-util-config-apply-server-cert)
-  - [config delete](#solace-util-config-delete)
-    - [config delete domain-certs](#solace-util-config-delete-domain-certs)
-  - [config disable](#solace-util-config-disable)
-    - [config disable default-users](#solace-util-config-disable-default-users)
-    - [config disable default-vpn](#solace-util-config-disable-default-vpn)
-  - [config leader](#solace-util-config-leader)
+- [broker](#solace-util-broker)
+  - [broker cli](#solace-util-broker-cli)
+  - [broker configure](#solace-util-broker-configure)
+    - [broker configure data-replication](#solace-util-broker-configure-data-replication)
+    - [broker configure default-users](#solace-util-broker-configure-default-users)
+    - [broker configure default-vpn](#solace-util-broker-configure-default-vpn)
+    - [broker configure domain-certs](#solace-util-broker-configure-domain-certs)
+    - [broker configure product-keys](#solace-util-broker-configure-product-keys)
+    - [broker configure server-certs](#solace-util-broker-configure-server-certs)
+  - [broker copy](#solace-util-broker-copy)
+    - [broker copy from](#solace-util-broker-copy-from)
+    - [broker copy into](#solace-util-broker-copy-into)
+  - [broker deploy](#solace-util-broker-deploy)
+  - [broker generate](#solace-util-broker-generate)
+  - [broker logs](#solace-util-broker-logs)
+  - [broker perform](#solace-util-broker-perform)
+    - [broker perform assert-leader](#solace-util-broker-perform-assert-leader)
+    - [broker perform cli-script](#solace-util-broker-perform-cli-script)
+    - [broker perform data-replication](#solace-util-broker-perform-data-replication)
+    - [broker perform export-config](#solace-util-broker-perform-export-config)
+    - [broker perform gather-diagnostics](#solace-util-broker-perform-gather-diagnostics)
+    - [broker perform import-config](#solace-util-broker-perform-import-config)
+    - [broker perform redundancy-test](#solace-util-broker-perform-redundancy-test)
+    - [broker perform semp-login-check](#solace-util-broker-perform-semp-login-check)
+    - [broker perform shell-script](#solace-util-broker-perform-shell-script)
+  - [broker remove](#solace-util-broker-remove)
+  - [broker restart](#solace-util-broker-restart)
+  - [broker shell](#solace-util-broker-shell)
+  - [broker start](#solace-util-broker-start)
+  - [broker status](#solace-util-broker-status)
+  - [broker stop](#solace-util-broker-stop)
+  - [broker validate](#solace-util-broker-validate)
 - [convert](#solace-util-convert)
-- [copy](#solace-util-copy)
-  - [copy from](#solace-util-copy-from)
-  - [copy into](#solace-util-copy-into)
-- [deploy](#solace-util-deploy)
-  - [deploy all](#solace-util-deploy-all)
-  - [deploy broker](#solace-util-deploy-broker)
-  - [deploy operator](#solace-util-deploy-operator)
-- [diagnostics](#solace-util-diagnostics)
 - [examples](#solace-util-examples)
-- [generate](#solace-util-generate)
-  - [generate broker](#solace-util-generate-broker)
-  - [generate operator](#solace-util-generate-operator)
-  - [generate secrets](#solace-util-generate-secrets)
-    - [generate secrets broker](#solace-util-generate-secrets-broker)
-    - [generate secrets operator](#solace-util-generate-secrets-operator)
-- [logs](#solace-util-logs)
-  - [logs broker](#solace-util-logs-broker)
-  - [logs operator](#solace-util-logs-operator)
-- [prepare](#solace-util-prepare)
-  - [prepare all](#solace-util-prepare-all)
-  - [prepare host](#solace-util-prepare-host)
-  - [prepare labels](#solace-util-prepare-labels)
-  - [prepare namespace](#solace-util-prepare-namespace)
-  - [prepare secrets](#solace-util-prepare-secrets)
-- [remove](#solace-util-remove)
-  - [remove all](#solace-util-remove-all)
-  - [remove broker](#solace-util-remove-broker)
-  - [remove namespace](#solace-util-remove-namespace)
-  - [remove operator](#solace-util-remove-operator)
-  - [remove secrets](#solace-util-remove-secrets)
-- [restart](#solace-util-restart)
-  - [restart broker](#solace-util-restart-broker)
-  - [restart operator](#solace-util-restart-operator)
-- [shell](#solace-util-shell)
-- [smoke](#solace-util-smoke)
-  - [smoke redundancy](#solace-util-smoke-redundancy)
-- [start](#solace-util-start)
-  - [start broker](#solace-util-start-broker)
-- [status](#solace-util-status)
-  - [status broker](#solace-util-status-broker)
-  - [status operator](#solace-util-status-operator)
-- [stop](#solace-util-stop)
-  - [stop broker](#solace-util-stop-broker)
+- [operator](#solace-util-operator)
+  - [operator deploy](#solace-util-operator-deploy)
+  - [operator generate](#solace-util-operator-generate)
+  - [operator logs](#solace-util-operator-logs)
+  - [operator remove](#solace-util-operator-remove)
+  - [operator restart](#solace-util-operator-restart)
+  - [operator start](#solace-util-operator-start)
+  - [operator status](#solace-util-operator-status)
+  - [operator stop](#solace-util-operator-stop)
+  - [operator validate](#solace-util-operator-validate)
+- [validate](#solace-util-validate)
 - [version](#solace-util-version)
 
 ## Reading this reference
@@ -196,39 +166,24 @@ Inherited by every command.
 
 Deploy and operate Solace PubSub+ brokers on Kubernetes, Docker, or Podman
 
-solace-util is a single CLI for deploying and operating Solace PubSub+ Event Brokers.
-It presents the same lifecycle verbs on every platform, and every verb names
-what it acts on -- run a verb on its own to see what it can act on:
+Deploy and operate Solace PubSub+ Event Brokers from one YAML env file, with the
+same commands on every platform. Name the thing, then the verb:
 
-  check deploy -> prepare all -> deploy all     build it
-  config ...                                    POST-DEPLOYMENT, over the broker CLI
-  check semp-login / smoke redundancy           prove it works
-  stop broker / start broker                    pause it without removing it
-  remove all                                    tear it down
+  broker <verb>      the broker this env file describes
+  operator <verb>    the cluster-scoped EventBroker Operator (kubernetes only)
+  validate           check the whole env file
+  examples           write a starting env file
 
-The operator is cluster-scoped and shared, so it is installed and removed on
-its own: `deploy operator`, `remove operator`.
+Every command takes -e/--env <file>; the platform comes from that file, or from
+--platform kubernetes|docker|podman when it declares more than one.
 
-`generate` renders any artifact to stdout without applying it -- that is how
-you see what a command would send before you send it.
-
-Every command takes -e/--env <file>, searched in the current directory then
-./env. The platform comes from that file: whichever of kubernetes:, docker:
-or podman: it declares is the one driven. A file declaring more than one asks
-which to use, and --platform kubernetes|docker|podman (kube|dk|pm) answers that
-up front. A few commands apply to only one platform; their help says so.
-
-No env file yet? `examples <platform>` writes one to start from, and
-`examples full` prints the whole annotated schema.
-
-Coming from the bash scripts? 'solace-util convert <bash-env-file>' turns an old
-env file into the YAML this reads.
+Exit status: 0 worked, 2 bad command line or env file, 1 anything else.
 
 ```
 solace-util
 ```
 
-Subcommands: `auto-complete`, `check`, `cli`, `config`, `convert`, `copy`, `deploy`, `diagnostics`, `examples`, `generate`, `logs`, `prepare`, `remove`, `restart`, `shell`, `smoke`, `start`, `status`, `stop`, `version`
+Subcommands: `auto-complete`, `broker`, `convert`, `examples`, `operator`, `validate`, `version`
 
 
 ### solace-util auto-complete
@@ -237,7 +192,8 @@ Print the shell auto-completion script for solace-util
 
 Print a shell's completion script on stdout. Load it to complete commands and
 flags, plus the values they take: env files for -e/--env, primary|backup|monitor
-for the [role] positionals and --pod, and directories for --base-dir and --dir.
+for --pod, platform names for --platform, and directories for --base-dir and
+--dir.
 
 Completion never reads the env file, so it stays inert -- a TAB press cannot
 parse config or run anything. See each shell's help for how to load it.
@@ -334,48 +290,281 @@ solace-util auto-complete zsh [flags]
 | `--no-descriptions` | `false` | omit the descriptions shown beside each completion |
 
 
-### solace-util check
+### solace-util broker
 
-Run read-only checks
+Deploy and operate the broker
 
-Every check here is read-only: it reports and changes nothing.
+Everything that acts on the broker this env file describes.
 
-  check deploy      before deploying -- config, cluster/engine reachability,
-                    storage or DNS, and whether the operator is installed
-  check semp-login  after deploying -- the broker answers an authenticated
-                    SEMP request
+  broker validate         check the env file and the cluster or host
+  broker generate         see exactly what would be applied
+  broker deploy           prerequisites + the broker, idempotent
+  broker status           watch it come up
+  broker configure ...    settings the env file describes (certs, keys, hardening)
+  broker perform ...      one-shot actions (diagnostics, failover test)
+  broker stop / start     pause it without removing it
+  broker remove           tear it down, prompting for each layer
 
-The failover exercise is deliberately not here: it moves live traffic, so it
-lives under `smoke` with the other invasive checks.
 
 ```
-solace-util check
+solace-util broker
 ```
 
-Runs nothing on its own. It names what `solace-util check` can act on -- `deploy`, `semp-login` -- and given a word it does not know it fails rather than reporting success.
+Runs nothing on its own. It names what `solace-util broker` can act on -- `cli`, `configure`, `copy`, `deploy`, `generate`, `logs`, `perform`, `remove`, `restart`, `shell`, `start`, `status`, `stop`, `validate` -- and given a word it does not know it fails rather than reporting success.
 
-Also available as: ck
+Also available as: br
 
 
-### solace-util check deploy
+### solace-util broker cli
 
-Validate config and platform prerequisites before deploying
+Open an interactive Solace CLI in the broker
 
-On Kubernetes this probes cluster reachability first; an unreachable
-cluster stops the check there, reporting permission, the operator, and
-the StorageClass as skipped rather than run. Once the cluster answers,
-permission to create the broker resource, whether the operator is
-installed, and the StorageClass are each checked regardless of whether
-another one failed -- a missing operator only warns, since `deploy
-operator` installs it.
+Interactive only; execs `cli -A` into the picked pod (Kubernetes) or this
+host's container (docker/podman).
 
-On docker and podman it probes the runtime (docker also checks
-compose), then the broker hostname(s) -- failing in HA on a miss but
-only noting it standalone; an unreachable runtime stops the check
-before DNS is tried.
+To run a script instead of typing at a prompt, use
+`broker perform cli-script <file>`.
 
 ```
-solace-util check deploy [flags]
+solace-util broker cli [flags]
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
+
+
+### solace-util broker configure
+
+Configure a deployed broker (certs, keys, hardening)
+
+Settings the env file describes, applied to a deployed broker over its own
+CLI.
+
+On a fresh HA broker, run in this order:
+
+  broker perform assert-leader     config-sync leader FIRST
+  broker configure server-certs
+  broker configure domain-certs
+  broker configure default-vpn     hardening
+  broker configure default-users
+  broker configure product-keys    last
+
+  broker configure data-replication   a DR pair, when there is one
+
+
+```
+solace-util broker configure
+```
+
+Runs nothing on its own. It names what `solace-util broker configure` can act on -- `data-replication`, `default-users`, `default-vpn`, `domain-certs`, `product-keys`, `server-certs` -- and given a word it does not know it fails rather than reporting success.
+
+Also available as: cfg
+
+
+### solace-util broker configure data-replication
+
+Converge this broker to the replication: block
+
+Converges THIS broker to the env file's replication: block -- the mate
+addresses, which message-VPNs replicate, and each one's active/standby role.
+
+It never contacts the mate. Run it at BOTH sites with the same file.
+
+Shuts down replication on any replicating VPN the file does not list, and can
+leave a VPN active at both sites if the mate still holds it -- move a role with
+`broker perform data-replication` instead.
+
+```
+solace-util broker configure data-replication [flags]
+```
+
+Also available as: dr
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--no-prompt` | `false` | answer yes to the confirmation |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
+
+
+### solace-util broker configure default-users
+
+Shut down the default client-usernames in all VPNs
+
+Shuts down the default client-username in every message-VPN found on the
+broker.
+
+This blocks any client still relying on the default username to connect.
+
+```
+solace-util broker configure default-users [flags]
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--disable` | `false` | shut it down (the default; accepted explicitly so a script can say so) |
+| `--enable` | `false` | start it back up instead of shutting it down |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
+
+
+### solace-util broker configure default-vpn
+
+Shut down the default message-VPN
+
+Shuts down the broker's default message-VPN.
+
+This stops every client connection using it, and every service it fronts.
+
+```
+solace-util broker configure default-vpn [flags]
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--disable` | `false` | shut it down (the default; accepted explicitly so a script can say so) |
+| `--enable` | `false` | start it back up instead of shutting it down |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
+
+
+### solace-util broker configure domain-certs
+
+Load the configured domain CA certificates
+
+Uploads the domain CA certificates broker.domainCerts describes and creates
+a domain certificate authority for each.
+
+--remove deletes those authorities from the broker; the certificate files
+themselves stay.
+
+```
+solace-util broker configure domain-certs [flags]
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--apply` | `false` | apply what the env file configures (the default; accepted explicitly so a script can say so) |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
+| `--remove` | `false` | remove it from the broker instead of applying it |
+
+
+### solace-util broker configure product-keys
+
+Apply the configured product keys
+
+Applies broker.productKeys to the primary node (and backup, in HA); fails
+loud rather than silently succeeding when none are configured.
+
+--remove revokes those keys and can leave the broker unlicensed.
+
+```
+solace-util broker configure product-keys [flags]
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--apply` | `false` | apply what the env file configures (the default; accepted explicitly so a script can say so) |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
+| `--remove` | `false` | remove it from the broker instead of applying it |
+
+
+### solace-util broker configure server-certs
+
+Load or update the TLS server certificate
+
+Loads or updates the broker's TLS server certificate, over its own CLI or,
+on Kubernetes with kubernetes.tlsServerSecret set, via the operator's Secret.
+
+--remove takes TLS down immediately on every listener configured to present
+a certificate.
+
+```
+solace-util broker configure server-certs [flags]
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--apply` | `false` | apply what the env file configures (the default; accepted explicitly so a script can say so) |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
+| `--remove` | `false` | remove it from the broker instead of applying it |
+
+
+### solace-util broker copy
+
+Copy files to or from the broker
+
+Attempts every file in both directions and reports each one, rather than
+stopping at the first failure; a partial failure still exits non-zero.
+
+```
+solace-util broker copy
+```
+
+Runs nothing on its own. It names what `solace-util broker copy` can act on -- `from`, `into` -- and given a word it does not know it fails rather than reporting success.
+
+Also available as: cp
+
+
+### solace-util broker copy from
+
+Copy files from the broker to the host
+
+Each file lands in the current directory under its base name. The base name is
+split on both separators, so a remote path written with backslashes cannot
+produce a local filename containing one.
+
+```
+solace-util broker copy from files... [flags]
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
+
+
+### solace-util broker copy into
+
+Copy files from the host into the broker
+
+--dir is the destination inside the broker, defaulting to the exec's working
+directory. The destination is not checked first: a copy into a path that does
+not exist fails for that file and says so.
+
+```
+solace-util broker copy into files... [flags]
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--dir` | (none) | destination directory inside the broker |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
+
+
+### solace-util broker deploy
+
+Deploy the broker and its prerequisites
+
+Applies every prerequisite -- namespace, secrets, TLS -- before creating the
+broker itself, and is safe to re-run.
+
+Kubernetes readiness is not waited on; use `broker status` to watch it come
+up.
+
+```
+solace-util broker deploy [flags]
 ```
 
 Also available as: dp
@@ -383,293 +572,359 @@ Also available as: dp
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (docker/podman only) |
+| `--restart` | `false` | restart an already-running broker when the deploy artifact changed (otherwise you are asked, and a non-interactive run leaves it running) (docker/podman only) |
 
 
-### solace-util check semp-login
+### solace-util broker generate
 
-Test an authenticated SEMP request against a running broker
+Render what deploy would apply, without applying it
 
-You run curl against http://localhost:8080/SEMP/v2/monitor from inside
-the broker itself -- kubectl exec on Kubernetes, docker/podman exec on a
-container host -- with the credential on stdin, never in argv or a log.
+Renders exactly what `broker deploy` would apply, without applying it.
 
-Kubernetes always logs in as the operator's fixed `admin` user, whatever
---pod you pick; docker and podman log in as whatever `admin.user` the
-env file configures.
-
-A failed login reports the response's failing HTTP status line (e.g.
-`401 Unauthorized`), and the command still exits non-zero.
+Kubernetes output can be piped straight to `kubectl apply -f -`; prefer
+-o/--out to `>` redirection, which PowerShell corrupts.
 
 ```
-solace-util check semp-login [flags]
+solace-util broker generate [flags]
+```
+
+Also available as: gen
+
+Renders to stdout and changes nothing: it runs no external command, so it needs no cluster or runtime, runs no preflight, and refuses `--allow-command` -- there is nothing here for it to approve.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--no-prompt` | `false` | answer yes to the --out overwrite question (no effect without --out) |
+| `-o`, `--out` | (none) | write the artifact to this file instead of stdout |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (docker/podman only) |
+
+
+### solace-util broker logs
+
+Read the broker's logs
+
+Reads the picked pod's log (Kubernetes) or this host's container's log
+(docker/podman).
+
+```
+solace-util broker logs [flags]
+```
+
+Also available as: lg
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `-f`, `--follow` | `false` | keep streaming new lines instead of exiting |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
+| `-p`, `--previous` | `false` | read the PREVIOUS container's logs instead of the current one (kubernetes only) |
+| `--since` | (none) | read only lines newer than this duration (e.g. 30s, 5m, 2h) |
+| `--tail` | (none) | print only this many trailing lines (a count, or `all`) |
+| `--timestamps` | `false` | prefix each line with its timestamp |
+
+
+### solace-util broker perform
+
+Run a one-shot action against the broker
+
+One-shot actions against a running broker; not settings the env file
+describes.
+
+  assert-leader        make this node the config-sync leader (HA)
+  redundancy-test      exercise a real failover and fail back (HA, INVASIVE)
+  gather-diagnostics   collect a support bundle into broker.diagDir
+  semp-login-check     prove the admin credentials work over SEMP
+  export-config        capture the broker's configuration as one artifact
+  import-config <file> apply a captured configuration back (DESTRUCTIVE)
+  cli-script <file>    run a Solace CLI script
+  shell-script <file>  run a host shell script inside the broker
+  data-replication     move replication roles across a DR pair (DESTRUCTIVE)
+
+
+```
+solace-util broker perform
+```
+
+Runs nothing on its own. It names what `solace-util broker perform` can act on -- `assert-leader`, `cli-script`, `data-replication`, `export-config`, `gather-diagnostics`, `import-config`, `redundancy-test`, `semp-login-check`, `shell-script` -- and given a word it does not know it fails rather than reporting success.
+
+Also available as: pf
+
+
+### solace-util broker perform assert-leader
+
+Assert the config-sync leader (HA only)
+
+Asserts this node as the config-sync leader for the router and every
+message-VPN; a no-op, not an error, on a standalone deployment.
+
+Run this first on a fresh HA broker, before any `broker configure` step.
+
+```
+solace-util broker perform assert-leader [flags]
 ```
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--pod` | (none) | pod role to target (p\|b\|m) (kubernetes only) |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (docker/podman only) |
 
 
-### solace-util cli
+### solace-util broker perform cli-script
 
-Open an interactive Solace CLI in the broker (Kubernetes: --pod picks the pod)
+Run a Solace CLI script in the broker
 
-With no flags this opens an interactive Solace CLI session.
+Uploads a local Solace CLI script and runs it in the broker; a bare
+filename resolves under broker.cliScriptsFolder.
 
---input runs a script through that CLI instead of opening a session: a bare
-filename is resolved under broker.cliScriptsFolder, a path is used as typed,
-and the file is uploaded to the broker and run there. A CLI script is a
-sequence of independent commands, so every line still runs even when the
-broker rejects one -- but the command now fails at the end when any line
-was rejected, instead of only warning.
+A rejected line does not stop the rest of the script, but the run is then
+reported as a failure.
 
 ```
-solace-util cli [flags]
+solace-util broker perform cli-script <file> [flags]
 ```
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `-i`, `--input` | (none) | run this Solace CLI script instead of opening an interactive session |
-| `--pod` | (none) | pod role to target (p\|b\|m) (kubernetes only) |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 
 
-### solace-util config
+### solace-util broker perform data-replication
 
-Configure a DEPLOYED broker (certs, hardening, product keys)
+Move replication roles across the DR pair
 
-Post-deployment configuration: every step here talks to a broker that is already
-deployed and running, over the Solace CLI. None of it is part of `deploy`.
+Moves each message-VPN's replication role to the site the env file names,
+across BOTH brokers: demote at the losing site, confirm it, then promote.
 
-There is no run-everything command, because these steps are not uniformly
-re-runnable. The order that works on a fresh broker is:
+It changes no configuration -- run `broker configure data-replication` first.
+Refuses unless both sites are on their primary HA node and name each other.
 
-  1. config leader                        (HA only; on containers, the primary)
-  2. config apply server-cert             (when TLS is configured)
-  3. config apply domain-certs            (when any are listed)
-  4. config disable default-vpn
-  5. config disable default-users
-  6. config apply additional-users        (Kubernetes; after the hardening, so
-                                           the sequence reads harden-then-provision.
-                                           NOT re-runnable: the broker refuses to
-                                           create a user that already exists)
-  7. config apply product-keys            (when any are listed)
-
-Only domain-certs can be undone from here (`config delete domain-certs`).
-There is no un-harden, and no way to withdraw a server certificate or a
-product key through this tool.
+Interrupts message flow for every VPN it moves.
 
 ```
-solace-util config
+solace-util broker perform data-replication [flags]
 ```
 
-Runs nothing on its own. It names what `solace-util config` can act on -- `apply`, `delete`, `disable`, `leader` -- and given a word it does not know it fails rather than reporting success.
-
-Also available as: cfg
-
-
-### solace-util config apply
-
-Apply configuration to the running broker
-
-`domain-certs` and `product-keys` run identically on every platform;
-`additional-users` is Kubernetes only, because docker and podman create
-those CLI users at container boot from the mounted password file
-instead of over the CLI here. `server-cert` does too, unless
-`kubernetes.tlsServerSecret` names a Secret, in which case Kubernetes
-rewrites that Secret directly with kubectl instead of running the
-broker-CLI path containers always use.
-
-The certificate bodies, product keys and passwords each of these
-applies ride in on an upload or over stdin -- never as an argument on
-this command's own command line.
-
-```
-solace-util config apply
-```
-
-Runs nothing on its own. It names what `solace-util config apply` can act on -- `additional-users`, `domain-certs`, `product-keys`, `server-cert` -- and given a word it does not know it fails rather than reporting success.
-
-
-### solace-util config apply additional-users
-
-Create the admin.additionalUsers CLI users (not re-runnable) (kubernetes only)
-
-Uploads a generated CLI script and runs it on the primary node only:
-management users replicate to the mates via config-sync, so one run is
-enough for the whole deployment -- every node in the group when HA is
-enabled, or the one primary on a standalone broker.
-
-A username that already exists makes the whole run fail rather than
-reconcile, and the transcript is withheld either way since it echoes
-the passwords. Delete the user on the broker, or drop it from the env
-file, then re-run this command.
-
-```
-solace-util config apply additional-users [flags]
-```
-
-Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
+Also available as: dr
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--no-prompt` | `false` | answer yes to the role-change confirmation |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 
 
-### solace-util config apply domain-certs
+### solace-util broker perform export-config
 
-Load the configured domain CA certificates
+Capture the broker's configuration as one artifact
 
-Reads broker.domainCerts.folder and broker.domainCerts.files from the env
-file, uploads each listed certificate file, then loads all of them into
-the broker with one CLI script. It targets the primary node only, even in
-an HA deployment.
+Captures the broker's configuration as a replayable Solace CLI script; it
+changes nothing on the broker.
 
-With no domain CAs configured this is a safe no-op: it logs that nothing
-is set and returns without touching the broker, rather than failing.
+--vpn NAME (repeatable) narrows to those VPNs; --broker-only excludes them
+instead -- naming both is refused.
 
 ```
-solace-util config apply domain-certs [flags]
+solace-util broker perform export-config [flags]
 ```
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--broker-only` | `false` | capture only broker-level configuration, and no message-VPN at all |
+| `--no-prompt` | `false` | answer yes to the --out overwrite question (no effect without --out) |
+| `-o`, `--out` | (none) | write the artifact to this file instead of stdout |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
+| `--vpn` | `[]` | capture only this message-VPN, repeatable for several; omit it and every VPN is captured |
 
 
-### solace-util config apply product-keys
+### solace-util broker perform gather-diagnostics
 
-Apply the configured product keys
+Gather a support bundle into broker.diagDir
 
-Fails loud with "no product keys configured" if broker.productKeys is empty
-in the env file -- there is nothing to self-skip here, unlike domain-certs.
+Runs the broker's full diagnostic sweep and downloads the resulting bundle
+to broker.diagDir.
 
-Applies to the primary node, plus the backup on a Kubernetes HA deployment
-(the monitor is skipped -- it carries no message spool); docker and podman
-have only the primary. Each key is validated before anything is uploaded,
-and the CLI script that applied it is removed from the node afterward.
+Kubernetes collects one bundle per role by default; --pod narrows to just
+one.
 
 ```
-solace-util config apply product-keys [flags]
+solace-util broker perform gather-diagnostics [flags]
+```
+
+Also available as: gd
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--days` | `1` | days of logs/diagnostics to gather |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
+
+
+### solace-util broker perform import-config
+
+Apply a captured configuration back to the broker
+
+Applies a `broker perform export-config` artifact back to a running
+broker. Only that command's own output is accepted; to run any other script,
+use `broker perform cli-script`.
+
+Any message-VPN in the artifact that already exists on the target is torn
+down and rebuilt, destroying every message spooled in it.
+
+```
+solace-util broker perform import-config <file> [flags]
 ```
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--no-prompt` | `false` | answer yes to the tear-down confirmation |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 
 
-### solace-util config apply server-cert
+### solace-util broker perform redundancy-test
 
-Load/update the TLS server certificate
+Exercise a real failover and fail back (HA only)
 
-On Kubernetes, when kubernetes.tlsServerSecret is set, this rebuilds and
-re-applies that Secret in place -- the broker already has it mounted and
-re-reads it, so no pod restart runs here. Otherwise, and always on
-docker/podman, it uploads the certificate over the broker CLI: on
-Kubernetes to every role in the deployment (primary alone, or primary,
-backup and monitor together when redundancy is enabled); on docker/podman,
-only to this host's one container.
+Fails the broker over to its mate and back for real; a no-op on a
+standalone deployment.
 
-Either path needs tls.cert and tls.certKey set.
+A Ctrl-C partway through can leave the group failed over; see
+docs/operations.md to recover.
 
 ```
-solace-util config apply server-cert [flags]
+solace-util broker perform redundancy-test [flags]
 ```
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (docker/podman only) |
 
 
-### solace-util config delete
+### solace-util broker perform semp-login-check
 
-Remove configuration from the running broker
+Test an authenticated SEMP request against the broker
 
-Only domain certificates can be withdrawn this way. A server certificate, the
-default-VPN hardening and an applied product key all stay applied.
+Runs an authenticated SEMP request from inside the broker and reports
+whether the credentials were accepted.
 
-```
-solace-util config delete
-```
-
-Runs nothing on its own. It names what `solace-util config delete` can act on -- `domain-certs` -- and given a word it does not know it fails rather than reporting success.
-
-
-### solace-util config delete domain-certs
-
-Remove the configured domain CA certificates
-
-Runs `no ssl domain-certificate-authority <name>` for every CA still listed
-under `broker.domainCerts` in the env file, then shows the broker's resulting
-CA list -- drop a CA from the file first and this command no longer knows to
-remove it; with none configured it makes no CLI call at all.
-
-The certificate files `config apply domain-certs` uploaded stay in place --
-only the CA configuration entries come out. On Kubernetes this runs against
-the primary pod only, same as `config apply domain-certs`.
+Run this after rotating the admin password.
 
 ```
-solace-util config delete domain-certs [flags]
+solace-util broker perform semp-login-check [flags]
 ```
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 
 
-### solace-util config disable
+### solace-util broker perform shell-script
 
-Shut down the broker's built-in defaults (hardening)
+Run a host shell script inside the broker
 
-Both steps are one-way: this tool has no command to re-enable what they shut down.
+Uploads a local shell script and runs it with bash inside the broker, as
+the broker's own user.
 
-```
-solace-util config disable
-```
-
-Runs nothing on its own. It names what `solace-util config disable` can act on -- `default-users`, `default-vpn` -- and given a word it does not know it fails rather than reporting success.
-
-
-### solace-util config disable default-users
-
-Shut down the default client-usernames in all VPNs
-
-You query every message-VPN on the primary node (`show message-vpn *`) and
-shut down the `default` client-username inside each one found -- not just
-a VPN literally named `default`. If no VPN names parse from that output,
-you get a warning and the broker is left untouched rather than the command
-failing.
-
-On docker and podman, "the primary node" is simply the host's one
-container.
+Bash reports one exit status for the whole run, and the full output is
+shown.
 
 ```
-solace-util config disable default-users [flags]
+solace-util broker perform shell-script <file> [flags]
 ```
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 
 
-### solace-util config disable default-vpn
+### solace-util broker remove
 
-Shut down the default message-VPN
+Remove the broker, prompting for each layer
 
-Uploads and runs two CLI scripts on the primary node (or the local
-container): one shuts down the VPN's authentication (basic and
-client-certificate), its default client-username, and every service under
-it (SMF, REST incoming, MQTT and its websocket variants, AMQP, and
-web-transport), also turning off SSL-downgrade-to-plain-text; the other
-lists the resulting VPNs. Both scripts are removed once that listing runs.
+Removes the deployed broker and its secrets on every platform.
 
-It never reaches beyond that node -- on a Kubernetes deployment with
-redundancy enabled, unlike `apply server-cert` (backup and monitor) and
-`apply product-keys` (backup). Elsewhere (docker, podman, or standalone
-Kubernetes) those two commands are primary-only as well.
+This permanently deletes the broker; add --delete-data (with its own
+confirmation) to also destroy its persistent data.
 
 ```
-solace-util config disable default-vpn [flags]
+solace-util broker remove [flags]
+```
+
+Also available as: rm
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--delete-data` | `false` | delete the broker's persistent data too (Kubernetes PVCs / the container data directory). Without it the data is kept |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+
+
+### solace-util broker restart
+
+Bounce the broker's pod(s) or container
+
+Restarts the broker's pod(s) gracefully (Kubernetes), or the container
+(docker/podman).
+
+With no --pod every pod is bounced in turn: monitor, then backup, then
+primary.
+
+This drops in-flight messaging on whatever it bounces.
+
+```
+solace-util broker restart [flags]
+```
+
+Also available as: rs
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
+
+
+### solace-util broker shell
+
+Open an interactive shell in the broker
+
+Interactive only; execs `bash` into the picked pod (Kubernetes) or this
+host's container (docker/podman).
+
+To run a script instead of typing at a prompt, use
+`broker perform shell-script <file>`.
+
+```
+solace-util broker shell [flags]
+```
+
+Also available as: sh
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
+
+
+### solace-util broker start
+
+Start a broker that is deployed but not running
+
+Starts what `broker deploy` already created; it does not create anything
+itself.
+
+Kubernetes starts primary, then backup, then monitor, waiting for each
+rollout.
+
+```
+solace-util broker start [flags]
 ```
 
 | Flag | Default | Meaning |
@@ -677,26 +932,61 @@ solace-util config disable default-vpn [flags]
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 
 
-### solace-util config leader
+### solace-util broker status
 
-Assert the config-sync leader (HA only) (containers: run on the primary; [role] is this host, detected from its name when omitted)
+Report the broker's deployment status
 
-No-ops on a standalone deployment rather than erroring. In HA it first
-reverts any released activity back home -- straight to the backup pod on
-Kubernetes, over SEMP to the mate on containers (a warning, not a failure,
-if the mate is unreachable) -- then waits for redundancy to report restored
-on the primary and asserts the primary as config-sync leader for the router
-and every message-VPN.
+Reports pod/container state, plus the operator's CR conditions on
+Kubernetes.
 
-In HA, containers refuse this on the backup or monitor host; on a
-standalone deployment every host no-ops instead, since that check runs
+--all is how to find a broker whose env file you have lost.
+
+```
+solace-util broker status [flags]
+```
+
+Also available as: sts
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--all` | `false` | report every Solace broker found, not just the one this env file describes (Kubernetes: across all namespaces; docker/podman: every Solace container on this host) |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--detail` | `false` | include the static artifacts, not just the running ones (Kubernetes: secrets, configmaps and PVCs; docker/podman: mounts, which is also where secrets appear) |
+| `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
+
+
+### solace-util broker stop
+
+Stop a running broker without removing it
+
+Scales the broker to zero replicas, or stops the container, without
+deleting anything.
+
+This takes messaging down until `broker start` brings it back.
+
+```
+solace-util broker stop [flags]
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+
+
+### solace-util broker validate
+
+Check the env file and what this broker needs
+
+Read-only, and safe to run against a system you don't want to disturb.
+
+Reports every problem it finds in one pass, rather than stopping at the
 first.
 
 ```
-solace-util config leader [role] [flags]
+solace-util broker validate [flags]
 ```
 
-Arguments: `[role]` is one of `primary` (`p`), `backup` (`b`), `monitor` (`m`) -- see [Reading this reference](#reading-this-reference).
+Also available as: vld
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -730,297 +1020,110 @@ Also available as: cv
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--force` | `false` | overwrite the --out file if it already exists |
-| `-o`, `--out` | (none) | write the YAML here instead of stdout |
-
-
-### solace-util copy
-
-Copy files to/from the broker
-
-On Kubernetes, `--pod` (p|b|m, default primary) on `from`/`into` selects
-the pod; docker and podman route to this host's single broker container
-regardless, so the verbs exist only so a script need not know which
-platform it is driving.
-
-`from` lands each file under its basename in the current directory; `into`
-defaults to `.` inside the pod or container -- the pod's login directory
-on Kubernetes -- unless `--dir` names another one. Both attempt every
-file and report per-file failures, exiting non-zero with a count instead
-of stopping at the first bad path.
-
-```
-solace-util copy
-```
-
-Runs nothing on its own. It names what `solace-util copy` can act on -- `from`, `into` -- and given a word it does not know it fails rather than reporting success.
-
-Also available as: cp
-
-
-### solace-util copy from
-
-Copy files from the broker to the host
-
-For example, `copy from /var/lib/solace/logs/debug.log` writes
-`./debug.log` in your current directory -- `kubectl cp` on Kubernetes,
-`<runtime> cp` on docker/podman.
-
-```
-solace-util copy from files... [flags]
-```
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--pod` | (none) | pod role to target (p\|b\|m) (kubernetes only) |
-
-
-### solace-util copy into
-
-Copy files from the host into the broker
-
-`into` never checks first that the pod or container exists, so copying
-into an undeployed broker surfaces as a plain `cp` error.
-
-```
-solace-util copy into files... [flags]
-```
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--dir` | (none) | destination directory inside the broker |
-| `--pod` | (none) | pod role to target (p\|b\|m) (kubernetes only) |
-
-
-### solace-util deploy
-
-Deploy the broker, the operator, or the whole broker stack
-
-`deploy broker` applies just the broker. `deploy all` runs the whole bring-up
-for it: check -> prepare -> deploy -> assert the config-sync leader (HA).
-
-Neither installs the operator. It is cluster-scoped and may already be serving
-other brokers, so `deploy operator` is its own command -- run it once per
-cluster. `check deploy` reports when it is missing.
-
-```
-solace-util deploy
-```
-
-Runs nothing on its own. It names what `solace-util deploy` can act on -- `all`, `broker`, `operator` -- and given a word it does not know it fails rather than reporting success.
-
-Also available as: dp
-
-
-### solace-util deploy all
-
-Orchestrate the whole bring-up for this broker
-
-Kubernetes runs check -> create namespace -> create secrets -> apply the
-broker CR, then asserts the config-sync leader when HA is enabled. Docker
-and podman stop after check -> prepare host -> deploy -- the leader is
-asserted separately, with `config leader` run on the primary once every
-host is up.
-
-[role] (docker/podman only) tells this host which identity -- primary,
-backup, or monitor -- to deploy its own container as; run it once per
-host, each time with that host's own role. Omitting it silently
-defaults to primary rather than detecting it from the hostname, unlike
-`config leader`.
-
-```
-solace-util deploy all [role] [flags]
-```
-
-Arguments: `[role]` is one of `primary` (`p`), `backup` (`b`), `monitor` (`m`) -- see [Reading this reference](#reading-this-reference).
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--restart` | `false` | restart an already-running broker when the deploy artifact changed (otherwise you are asked, and a non-interactive run leaves it running) (docker/podman only) |
-
-
-### solace-util deploy broker
-
-Deploy the broker (containers: this host's container; in HA the role is detected from the hostname unless given)
-
-Kubernetes: applies the PubSubPlusEventBroker CR via the configured
-`kubernetes.runtime` (`kubectl` by default). It creates neither the namespace
-nor the secrets -- run `prepare all` first, or use `deploy all` for both plus
-the broker in one step.
-
-Docker and podman: `prepare host` must have generated the PSK first. Podman
-loads every secret into its own store before writing the quadlet unit;
-docker's compose file only names an env var, filled in at run time. The
-artifact is then started, or -- if already running and changed -- restarted
-with `--restart` or your confirmation. `[role]` picks which host this is and
-is refused on Kubernetes.
-
-```
-solace-util deploy broker [role] [flags]
-```
-
-Arguments: `[role]` is one of `primary` (`p`), `backup` (`b`), `monitor` (`m`) -- see [Reading this reference](#reading-this-reference).
-
-Also available as: br
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--restart` | `false` | restart an already-running broker when the deploy artifact changed (otherwise you are asked, and a non-interactive run leaves it running) (docker/podman only) |
-
-
-### solace-util deploy operator
-
-Install the cluster-scoped EventBroker Operator (kubernetes only)
-
-After checking permission to create customresourcedefinitions, this
-installs the operator in three applies: the bundle's own Namespace
-document, then -- as a separate artifact, not part of the bundle -- the
-image-pull secret when `kubernetes.imagePullSecret` is set, then the
-rest of the bundle (CRDs, RBAC and the controller Deployment). That is
-exactly what `generate operator` and `generate secrets operator` print.
-
-Re-running it rolls the operator to a newer `kubernetes.operator.image`;
-pointing it at an OLDER image warns you and asks before applying
-anything, and running it unattended refuses outright.
-
-```
-solace-util deploy operator [flags]
-```
-
-Also available as: op
-
-Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-
-
-### solace-util diagnostics
-
-Gather a support bundle from the broker into broker.diagDir
-
-Runs the broker's full `show` command sweep plus `gather-diagnostics`, then
-downloads the zipped output plus the diagnostics bundle into broker.diagDir
--- a failed download of the bundle is a warning, not a failed run.
-
-Kubernetes gathers one archive per HA node (primary, backup, monitor when
-redundancy is enabled); docker and podman only ever have this host's one
-broker. Each run deletes the remote artifacts after downloading them.
-
-```
-solace-util diagnostics [flags]
-```
-
-Also available as: diag
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--days` | `1` | days of logs/diagnostics to gather |
+| `--no-prompt` | `false` | answer yes to the --out overwrite question (no effect without --out) |
+| `-o`, `--out` | (none) | write the artifact to this file instead of stdout |
 
 
 ### solace-util examples
 
 Print a sample env file to start from
 
-[name] is kubernetes, docker, podman or full. The three platform names give a minimal
-standalone env file carrying only the keys that platform cannot default, and
-declaring only its own section -- so the file it writes needs no --platform.
-`full` is the complete annotated schema: every key the loader accepts, the
-default each omitted one takes, and all three platform sections at once.
-Omit [name] to list them.
+`examples` on its own prints the FULL annotated schema: every key the loader accepts,
+the default each omitted one takes, and all three platform sections at once. That is
+the file to read when you want to know what is configurable.
 
-Nothing here reads an env file or contacts anything, so -e/--env is ignored
-and no cluster or container runtime has to exist yet.
+--platform writes a minimal STARTER instead: a standalone env file carrying only the
+keys that platform cannot default, and declaring only its own section -- so the file it
+writes needs no --platform of its own afterwards.
 
-Every secret in the output is a CHANGE-ME placeholder: an unedited file is
-refused by the broker rather than deployed with a password that is public in
-this repo. Each one has a sibling *Env key naming a variable to read instead,
-which is what keeps a committed env file secret-free.
+This is the one command that takes --platform without an env file to resolve it
+against, because it is what produces the env file. The abbreviations work here too
+(kube, dk, pm), expanded by the same parser every other --platform value goes through.
 
-  solace-util examples docker -o env/dev.yaml
-  solace-util examples full | less
-  solace-util eg kubernetes -o env/prod.yaml && solace-util check deploy -e env/prod.yaml
+Nothing here reads an env file or contacts anything, so -e/--env is ignored and no
+cluster or container runtime has to exist yet.
+
+Every secret in the output is a CHANGE-ME placeholder: an unedited file is refused by
+the broker rather than deployed with a password that is public in this repo. Each one
+has a sibling *Env key naming a variable to read instead, which is what keeps a
+committed env file secret-free.
+
+  solace-util examples --platform docker -o env/dev.yaml
+  solace-util examples | less
+  solace-util eg --platform kube -o env/prod.yaml && solace-util validate -e env/prod.yaml
 
 ```
-solace-util examples [name] [flags]
+solace-util examples [flags]
 ```
 
 Also available as: eg
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--force` | `false` | overwrite the --out file if it already exists |
-| `-o`, `--out` | (none) | write the env file here instead of stdout |
+| `--no-prompt` | `false` | answer yes to the --out overwrite question (no effect without --out) |
+| `-o`, `--out` | (none) | write the artifact to this file instead of stdout |
 
 
-### solace-util generate
+### solace-util operator
 
-Render a deployment artifact to stdout without applying it
+Install and operate the cluster-scoped EventBroker Operator (kubernetes only)
 
-Nothing here contacts the cluster or the container engine, so it is safe to run
-against an env file you have not vetted.
+Installs and operates the operator, which is shared across every broker it
+watches.
 
-The nouns are the same ones the acting verbs use: `generate broker` renders what
-`deploy broker` would apply, whichever platform that is -- a custom resource on
-Kubernetes, a compose file or systemd quadlet on a container host (which is
-per-host, so it takes a [role] there).
-
-Only the operator targets are platform-scoped, and because the thing does not
-exist elsewhere rather than because it goes by another name: there is no
-container operator to install.
+`operator deploy` adds this env file's namespaces to the watch list;
+`operator remove` removes them, deleting the install only when nothing
+else needs it.
 
 ```
-solace-util generate
+solace-util operator
 ```
 
-Runs nothing on its own. It names what `solace-util generate` can act on -- `broker`, `operator`, `secrets` -- and given a word it does not know it fails rather than reporting success.
+Runs nothing on its own. It names what `solace-util operator` can act on -- `deploy`, `generate`, `logs`, `remove`, `restart`, `start`, `status`, `stop`, `validate` -- and given a word it does not know it fails rather than reporting success.
 
-Also available as: gen
+Also available as: op
+
+Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
 
 
-### solace-util generate broker
+### solace-util operator deploy
 
-Render what `deploy broker` would apply
+Install the operator, or add this env file's namespaces to it (kubernetes only)
 
-Kubernetes: the PubSubPlusEventBroker custom resource. Docker and podman: this
-host's deploy artifact -- a compose file or a systemd quadlet unit -- which is
-per-host, so [role] selects which node's artifact to render.
+Installs the operator, or unions this env file's namespaces into an
+already-running one's watch list.
+
+Widening the watch to all namespaces, or installing an older version,
+needs an interactive confirmation with no unattended override.
 
 ```
-solace-util generate broker [role] [flags]
+solace-util operator deploy [flags]
 ```
 
-Arguments: `[role]` is one of `primary` (`p`), `backup` (`b`), `monitor` (`m`) -- see [Reading this reference](#reading-this-reference).
+Also available as: dp
 
-Also available as: br
-
-Renders to stdout and changes nothing: it runs no external command, so it needs no cluster or runtime, runs no preflight, and refuses `--allow-command` -- there is nothing here for it to approve.
+Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 
 
-### solace-util generate operator
+### solace-util operator generate
 
 Render the operator install bundle (kubernetes only)
 
-`deploy operator` applies this bundle's namespace first, then the
-image-pull secret `generate secrets operator` renders when one is
-configured, then the rest -- applying that secret before its
-namespace exists is what once failed a first install.
+Renders everything `operator deploy` would apply, in apply order, without
+applying it.
+
+The watch list shown is only this env file's; a real deploy unions it
+with whatever the running operator already watches.
 
 ```
-solace-util generate operator [flags]
+solace-util operator generate [flags]
 ```
 
-Also available as: op
+Also available as: gen
 
 Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
 
@@ -1029,425 +1132,49 @@ Renders to stdout and changes nothing: it runs no external command, so it needs 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--no-prompt` | `false` | answer yes to the --out overwrite question (no effect without --out) |
+| `-o`, `--out` | (none) | write the artifact to this file instead of stdout |
 
 
-### solace-util generate secrets
+### solace-util operator logs
 
-Render a secret artifact
+Read the operator's controller logs (kubernetes only)
 
-`generate secrets broker` renders what the broker deployment needs -- Secret
-manifests on Kubernetes, a shell script on a container host.
-
-`generate secrets operator` renders the operator's image-pull secret, the one
-part of the operator install that carries a credential. `generate operator`
-renders the rest of that install and carries no secret value, so the two
-together are exactly what `deploy operator` applies.
+Runs `kubectl logs` against the controller Deployment, showing
+reconciliation for every broker it watches, not just this env file's.
 
 ```
-solace-util generate secrets
+solace-util operator logs [flags]
 ```
-
-Runs nothing on its own. It names what `solace-util generate secrets` can act on -- `broker`, `operator` -- and given a word it does not know it fails rather than reporting success.
-
-
-### solace-util generate secrets broker
-
-Render the broker's secret-creation artifact (Kubernetes: Secret manifests; containers: a shell script)
-
-Kubernetes prints the same manifest `prepare secrets` applies -- admin secret
-always, TLS and image-pull secrets only when kubernetes.tlsServerSecret /
-kubernetes.imagePullSecret name one. Docker and podman print a shell script
-instead: `secret create --replace` lines for podman, `export` lines for
-docker to source before a manual `docker compose up` -- `deploy broker` sets
-those variables itself, so the script is for a hand-run compose only.
-
-Refuses to print an artifact for a secret whose value is still unset; on
-containers, a missing nodes.psk points you at `prepare host` to generate it.
-
-```
-solace-util generate secrets broker [flags]
-```
-
-Also available as: br
-
-Renders to stdout and changes nothing: it runs no external command, so it needs no cluster or runtime, runs no preflight, and refuses `--allow-command` -- there is nothing here for it to approve.
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-
-
-### solace-util generate secrets operator
-
-Render the operator's image-pull secret (kubernetes only)
-
-The rendered Secret is always named `regcred`, not the value of
-`kubernetes.imagePullSecret` -- that field only gates whether this renders
-at all (unset, it fails naming the setting), since the operator's own
-manifests reference that literal name.
-
-It resolves `kubernetes.operator.namespace`, falling back to the default
-operator namespace when that is unset -- there is no live cluster here to
-discover which one is actually running.
-
-```
-solace-util generate secrets operator [flags]
-```
-
-Also available as: op
-
-Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
-
-Renders to stdout and changes nothing: it runs no external command, so it needs no cluster or runtime, runs no preflight, and refuses `--allow-command` -- there is nothing here for it to approve.
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-
-
-### solace-util logs
-
-Tail broker or operator logs
-
-On Kubernetes, `broker` and `operator` both run a single `kubectl logs` and
-print whatever is already buffered there -- neither one follows the stream,
-so the command exits as soon as that snapshot is printed.
-
-```
-solace-util logs
-```
-
-Runs nothing on its own. It names what `solace-util logs` can act on -- `broker`, `operator` -- and given a word it does not know it fails rather than reporting success.
 
 Also available as: lg
 
-
-### solace-util logs broker
-
-Tail the broker's logs
-
-On Kubernetes this runs a single `kubectl logs` against the picked pod
-(default: primary) and returns; it does not follow new lines. On docker and
-podman it runs `<runtime> logs -f` against this host's one container
-instead, which streams continuously until you interrupt it.
-
---pod only applies on Kubernetes -- a container host has one broker per
-machine, so --pod there is refused rather than accepted and silently
-dropped.
-
-```
-solace-util logs broker [flags]
-```
-
-Also available as: br
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--pod` | (none) | pod role to target (p\|b\|m) (kubernetes only) |
-
-
-### solace-util logs operator
-
-Tail the operator's controller logs (kubernetes only)
-
-Runs `kubectl logs` against the operator's controller Deployment: one
-snapshot of what it has already written, not a live follow, so watching a
-rollout means calling this again rather than leaving it open.
-
-The namespace comes from kubernetes.operator.namespace when set, otherwise
-the built-in default `deploy operator` installs to -- a missing or
-unreachable operator just surfaces as kubectl's own error.
-
-```
-solace-util logs operator [flags]
-```
-
-Also available as: op
-
 Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `-f`, `--follow` | `false` | keep streaming new lines instead of exiting |
+| `--since` | (none) | read only lines newer than this duration (e.g. 30s, 5m, 2h) |
+| `--tail` | (none) | print only this many trailing lines (a count, or `all`) |
+| `--timestamps` | `false` | prefix each line with its timestamp |
 
 
-### solace-util prepare
+### solace-util operator remove
 
-Prepare the prerequisites a broker deployment needs
+Release this env file's claim on the operator (kubernetes only)
 
-Everything a broker needs to exist before it is deployed.
+Removes this env file's namespaces from the operator's watch list,
+deleting the operator itself only when nothing else is left watching.
 
-`prepare all` runs the steps that are needed every time and need no input --
-the namespace and its secrets on Kubernetes, the host on docker and podman --
-so it is safe to script. `deploy all` runs the same steps for you.
-
-Two things are deliberately outside it. The operator is cluster-scoped and
-shared between brokers, so it is installed and removed on its own
-(`deploy operator`). And `prepare labels` cannot be scripted at all: the env
-file names the label each broker role wants, but only you can say which
-machine should carry it, so it prompts -- run it once when provisioning the
-cluster, not on every deployment.
+--delete-crd additionally deletes every PubSubPlusEventBroker in the
+cluster, and is refused while any broker resource still exists.
 
 ```
-solace-util prepare
+solace-util operator remove [flags]
 ```
-
-Runs nothing on its own. It names what `solace-util prepare` can act on -- `all`, `host`, `labels`, `namespace`, `secrets` -- and given a word it does not know it fails rather than reporting success.
-
-Also available as: pre
-
-
-### solace-util prepare all
-
-Run every applicable prepare step, in order
-
-On Kubernetes this creates the namespace, then applies the admin/monitor
-credentials secret plus -- if configured -- the TLS server and image-pull
-secrets, via `kubectl apply`; idempotent, so a namespace failure stops
-before any secret is touched.
-
-Docker and podman: identical to `prepare host` -- data directory, DNS
-check, registry login when both image.user and image.pass are set (one
-alone aborts the run), and the redundancy PSK (HA only) generated once;
-once nodes.psk is set, later runs just remind you to keep it identical.
-
-```
-solace-util prepare all [flags]
-```
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-
-
-### solace-util prepare host
-
-Create/own the data dir, verify DNS, generate the redundancy PSK (docker/podman only)
-
-Resolves the redundancy hostnames first (a miss fails loud in HA, but
-standalone just continues), then logs in to the image registry when image.user
-and image.pass are both set (a loud error if only one is). Outside standalone
-mode it also generates nodes.psk when empty and writes it back to the env file
--- either way, copy the same value onto the other two hosts by hand.
-
-On rootless podman it first warns if this process is running as root (prep
-must run as the target rootless user), then chowns through `podman unshare`
-and checks this user's hard nofile limit against ulimits.nofile, stopping with
-the exact fix when it falls short.
-
-```
-solace-util prepare host [flags]
-```
-
-Applies to: docker, podman. On any other platform this command fails rather than doing nothing.
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-
-
-### solace-util prepare labels
-
-Label cluster nodes for primary/backup/monitor placement (interactive, one-off) (kubernetes only)
-
-With no placement labels configured (kubernetes.placement.labels*) this is
-a no-op that says so and exits cleanly. Otherwise it needs a real
-terminal: there is no flag for the node choice, so a non-interactive run
-refuses outright instead of failing deep inside the prompt.
-
-Per configured role it lists the cluster's nodes, asks you to pick one,
-then runs `kubectl label node --overwrite` for each configured key=value.
-Kubernetes-managed prefixes (kubernetes.io/, k8s.io/, and similar) are
-silently skipped, and a failed label is reported and skipped rather than
-aborting the rest.
-
-```
-solace-util prepare labels [flags]
-```
-
-Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-
-
-### solace-util prepare namespace
-
-Create the broker namespace (kubernetes only)
-
-Applies a bare Namespace object named for `kubernetes.namespace` -- no
-labels, quotas, or other content. `kubectl apply` makes this safe to
-re-run: an existing namespace is left as it is.
-
-Run this before `prepare secrets`, since a Secret cannot be applied into
-a namespace that does not exist yet; `prepare all` and `deploy all`
-already run the two in that order.
-
-```
-solace-util prepare namespace [flags]
-```
-
-Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-
-
-### solace-util prepare secrets
-
-Create admin/monitor, TLS, and image-pull secrets (kubernetes only)
-
-Always creates the admin/monitor secret. The TLS secret joins it only
-when kubernetes.tlsServerSecret is set; the image-pull secret only when
-kubernetes.imagePullSecret is set.
-
-Applied with `kubectl apply` on stdin -- no secret value reaches an argv
-or echoed command -- and the run is idempotent, safe to re-run after a
-change.
-
-The manifest names the namespace directly, so `prepare namespace` (or
-`prepare all`) must run first. `generate secrets broker` renders the
-same manifest without applying it, for review.
-
-```
-solace-util prepare secrets [flags]
-```
-
-Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-
-
-### solace-util remove
-
-Remove the broker, the operator, or the whole broker stack
-
-Every command here asks before it removes anything, and --no-prompt is the one
-flag that makes it silent -- a script switches off one thing, not one per
-question.
-
-Nothing here removes the layer that is expensive to get back unless you say so:
-the broker's persistent data and the operator's CRDs are kept by default, you
-are asked about them separately, and what happened is printed either way. The
-two flags compose, so an unattended removal that also drops the data is
-`--delete-data --no-prompt`: naming the data you are willing to lose is not the
-same as confirming the removal, so neither flag implies the other.
-
-`remove all` takes this broker and its namespace. It leaves the operator, which
-is cluster-scoped and may be serving brokers this env file does not describe.
-
-```
-solace-util remove
-```
-
-Runs nothing on its own. It names what `solace-util remove` can act on -- `all`, `broker`, `namespace`, `operator`, `secrets` -- and given a word it does not know it fails rather than reporting success.
 
 Also available as: rm
-
-
-### solace-util remove all
-
-Remove the broker, its secrets and its namespace (the operator is kept)
-
-On Kubernetes this deletes the broker, then its secrets, then the
-namespace -- exactly reversing the order `prepare all` creates them
-in. The namespace delete also takes anything else that happens to
-live in it, not just what this env file created.
-
-On docker and podman there is no separate namespace layer, and podman's
-secret store is removed with the container rather than as its own step,
-so this is exactly `remove broker`.
-
-```
-solace-util remove all [flags]
-```
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--delete-data` | `false` | delete the broker's persistent data too (Kubernetes PVCs / the container data directory). Without it the data is kept |
-| `--no-prompt` | `false` | do not ask anything: proceed with the removal, and keep whatever is kept by default unless a --delete-* flag says otherwise |
-
-
-### solace-util remove broker
-
-Remove the deployed broker
-
-On Kubernetes this deletes the PubSubPlusEventBroker custom resource with
-`--ignore-not-found`, so running it again after a successful removal is a
-no-op. On docker and podman it stops the broker container: docker via
-`compose down` when a compose file is on disk (a plain stop and rm by
-name otherwise) -- it never deletes the compose file; podman via
-`systemctl stop` followed by deleting the `.container` quadlet unit
-file and a daemon-reload.
-
-It keeps the broker's persistent data by default -- Kubernetes PVCs, or
-the container's data directory -- and reports that either way; pass
-`--delete-data` to remove it too. Beyond the broker and, if requested,
-its data, this command touches nothing else: secrets, namespace, and
-the operator all survive.
-
-```
-solace-util remove broker [flags]
-```
-
-Also available as: br
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--delete-data` | `false` | delete the broker's persistent data too (Kubernetes PVCs / the container data directory). Without it the data is kept |
-| `--no-prompt` | `false` | do not ask anything: proceed with the removal, and keep whatever is kept by default unless a --delete-* flag says otherwise |
-
-
-### solace-util remove namespace
-
-Delete the broker's namespace (kubernetes only)
-
-Deletes the whole namespace, not just what your env file describes -- every
-secret and PVC Kubernetes considers namespaced to it goes in the same
-cascade.
-
-A repeat run is a no-op rather than an error: the underlying delete already
-tolerates a missing namespace. You get the namespace back cheaply (`prepare
-namespace` recreates it from the env file), but whatever you stored on its
-volumes is gone for good.
-
-```
-solace-util remove namespace [flags]
-```
-
-Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--no-prompt` | `false` | do not ask anything: proceed with the removal, and keep whatever is kept by default unless a --delete-* flag says otherwise |
-
-
-### solace-util remove operator
-
-Remove the cluster-scoped EventBroker Operator (kubernetes only)
-
-Once confirmed, it deletes the operator's namespace, RBAC and controller
-Deployment outright. The CustomResourceDefinitions are the one piece kept
-by default, since deleting them cascades to every PubSubPlusEventBroker in
-the cluster, not just the broker this env file describes.
-
-This never runs as part of `remove broker` or `remove all`: run it on its
-own, once nothing else in the cluster still depends on it; `deploy
-operator` reinstalls it afterward.
-
-```
-solace-util remove operator [flags]
-```
-
-Also available as: op
 
 Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
 
@@ -1455,100 +1182,44 @@ Applies to: kubernetes. On any other platform this command fails rather than doi
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 | `--delete-crd` | `false` | delete the operator's CustomResourceDefinitions too. Without it they are kept, so existing brokers survive |
-| `--no-prompt` | `false` | do not ask anything: proceed with the removal, and keep whatever is kept by default unless a --delete-* flag says otherwise |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
 
 
-### solace-util remove secrets
+### solace-util operator restart
 
-Delete the broker's secrets (kubernetes only)
+Bounce the operator's controller (kubernetes only)
 
-Deletes the admin/monitor credentials secret, and -- if configured -- the
-TLS server secret and the image-pull secret: the same three `prepare
-secrets` creates. --ignore-not-found means an already-missing one is not
-an error, but a real failure stops before the rest are touched.
+Runs a rollout restart on the operator's controller Deployment; it does
+not change what is installed.
 
-Removes only the Secret objects -- the namespace, the broker's other
-resources, and the operator's CRDs are untouched, and `prepare secrets`
-(or `prepare all`) recreates every one from the env file, which is why
-there is no --delete-* flag here to keep one back.
+This briefly interrupts reconciliation for every broker the operator
+watches.
 
 ```
-solace-util remove secrets [flags]
+solace-util operator restart [flags]
 ```
-
-Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--no-prompt` | `false` | do not ask anything: proceed with the removal, and keep whatever is kept by default unless a --delete-* flag says otherwise |
-
-
-### solace-util restart
-
-Bounce a running broker or the operator
-
-Restarting applies nothing new. A changed deploy artifact needs
-`deploy broker` (containers: with --restart), which rewrites it first.
-
-```
-solace-util restart
-```
-
-Runs nothing on its own. It names what `solace-util restart` can act on -- `broker`, `operator` -- and given a word it does not know it fails rather than reporting success.
 
 Also available as: rs
 
-
-### solace-util restart broker
-
-Restart the broker (Kubernetes: delete pods so the statefulset recreates them)
-
-For kubernetes.updateStrategy=manualPodRestart: `deploy broker` updates the
-statefulset's pod template but the operator waits for a pod to be deleted before
-applying it.
-
-With no --pod, every pod is restarted in the safe order (monitor, backup, primary;
-standalone: just the primary), waiting for each to become ready before the next.
-The order is by configured role, not by which node is currently active -- after a
-failover they differ. Check `solace-util smoke redundancy` first, or pass --pod
-and restart them one at a time.
-
-On docker and podman there is one broker per host and no pod to pick: the
-container is restarted in place.
-
-```
-solace-util restart broker [flags]
-```
-
-Also available as: br
+Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--no-prompt` | `false` | do not ask anything: proceed with the removal, and keep whatever is kept by default unless a --delete-* flag says otherwise |
-| `--pod` | (none) | pod role to target (p\|b\|m) (kubernetes only) |
 
 
-### solace-util restart operator
+### solace-util operator start
 
-Restart the operator's controller deployment (kubernetes only)
+Start the operator's controller (kubernetes only)
 
-Runs `kubectl rollout restart deployment` on the operator's own
-controller deployment -- not the broker's statefulset -- in whatever
-namespace it resolves to, which need not be the broker's own namespace.
+Scales the controller Deployment back to one replica and waits for the
+rollout.
 
-Unlike `restart broker`, this asks nothing first: the controller carries
-no messaging traffic, so there is no traffic impact to confirm.
-
-It bounces the controller already installed; a changed bundle still
-needs `deploy operator`, which re-applies the manifest.
+Reconciliation resumes for every namespace the operator watches.
 
 ```
-solace-util restart operator [flags]
+solace-util operator start [flags]
 ```
-
-Also available as: op
 
 Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
 
@@ -1557,180 +1228,18 @@ Applies to: kubernetes. On any other platform this command fails rather than doi
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 
 
-### solace-util shell
+### solace-util operator status
 
-Open an interactive shell in the broker
+Report the operator's controller status (kubernetes only)
 
-Kubernetes execs `bash` into the --pod pod (`kubectl exec -it`, default
-primary); docker and podman exec into this host's one broker container
-instead (`<runtime> exec -it`). An explicit --pod there is refused
-rather than accepted -- the same flag scoping `cli` uses -- since there
-is only one container on the host to target.
-
-This is a plain OS shell inside the broker image, not the Solace CLI --
-use `cli` for the broker's own CLI, or its `--input` to run a script
-instead. Either way it targets the pod or container by name, so it must
-already exist and be running.
+Reads the controller Deployment and its pods to report the running
+version and the namespaces it watches.
 
 ```
-solace-util shell [flags]
+solace-util operator status [flags]
 ```
-
-Also available as: sh
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--pod` | (none) | pod role to target (p\|b\|m) (kubernetes only) |
-
-
-### solace-util smoke
-
-Run invasive checks that exercise the broker
-
-These checks prove the broker works by making it work, so they disturb it.
-Read-only questions live under `check`.
-
-```
-solace-util smoke
-```
-
-Runs nothing on its own. It names what `solace-util smoke` can act on -- `redundancy` -- and given a word it does not know it fails rather than reporting success.
-
-
-### solace-util smoke redundancy
-
-Exercise a real failover and fail back (HA only) (containers: run on the primary; [role] is this host, detected from its name when omitted)
-
-On a standalone deployment this is a no-op: a [SKIP] line, not a failure --
-there is no redundancy pair to exercise.
-
-It normally walks the group through release, un-release, then revert,
-confirming `show redundancy` after each step -- skipping straight to the
-revert if the Primary is not already active. On containers, the backup's
-one mutation rides SEMP to nodes.backup.ip, preflighted before release.
-
-A run that dies partway (Ctrl-C included) can leave the group released or
-failed over; re-run once you have fixed the cause.
-
-```
-solace-util smoke redundancy [role] [flags]
-```
-
-Arguments: `[role]` is one of `primary` (`p`), `backup` (`b`), `monitor` (`m`) -- see [Reading this reference](#reading-this-reference).
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-
-
-### solace-util start
-
-Start a broker that is deployed but not running
-
-The counterpart to `stop broker`: the deploy artifact and the persistent data
-are already on disk, so this only brings the broker back up. It applies
-nothing new -- a changed artifact needs `deploy broker` first.
-
-There is nothing to start until a broker has been deployed; on a host or
-cluster that has never had one, `deploy broker` is the command you want.
-
-```
-solace-util start
-```
-
-Runs nothing on its own. It names what `solace-util start` can act on -- `broker` -- and given a word it does not know it fails rather than reporting success.
-
-
-### solace-util start broker
-
-Start the broker (Kubernetes: scale the statefulset(s) to 1; containers: start the container)
-
-On kubernetes, a redundancy group comes up primary, backup, monitor -- the
-reverse of `restart broker`'s order -- waiting for each statefulset to report
-ready before scaling the next. Standalone scales just the primary.
-
-Docker runs `compose start` against the deployed compose file when one
-exists, falling back to a plain `docker start` on the container itself
-when it does not. Podman always starts the quadlet's systemd unit instead,
-since quadlet owns the container once deployed. Neither path creates a
-broker that was never deployed.
-
-```
-solace-util start broker [flags]
-```
-
-Also available as: br
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-
-
-### solace-util status
-
-Report on the broker or the operator
-
-By default this reports the RUNNING artifacts. --detail adds the static ones --
-the full description of what is deployed, load balancer included.
-
-```
-solace-util status
-```
-
-Runs nothing on its own. It names what `solace-util status` can act on -- `broker`, `operator` -- and given a word it does not know it fails rather than reporting success.
 
 Also available as: sts
-
-
-### solace-util status broker
-
-Show the broker's deployment status
-
-Kubernetes reports the operator's CR conditions, then pods, services, and
-statefulsets -- never the broker, so one unreachable over SEMP still reports
-up. Docker and podman check the systemd unit or compose state, then `ps`.
-
-`--detail` and `--all` compose instead of replacing each other. Alone, it
-describes the --pod pod (primary by default; --pod is Kubernetes-only) and
-the load balancer Service, or runs `inspect` on containers (podman: plus the
-installed unit). Under `--all` it instead adds an image column to the
-survey, or inspects every container found.
-
-```
-solace-util status broker [flags]
-```
-
-Also available as: br
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--all` | `false` | report every Solace broker found, not just the one this env file describes (Kubernetes: across all namespaces; docker/podman: every Solace container on this host) |
-| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--detail` | `false` | include the static artifacts, not just the running ones (Kubernetes: secrets, configmaps and PVCs; docker/podman: mounts, which is also where secrets appear) |
-| `--pod` | (none) | pod role to target (p\|b\|m) (kubernetes only) |
-
-
-### solace-util status operator
-
-Show the operator's controller status (kubernetes only)
-
-Reads the operator's controller Deployment (`pubsubplus-eventbroker-operator`)
-in whichever namespace `kubernetes.operator.namespace` names, or else the
-built-in default `pubsubplus-operator-system` that `deploy operator` installs
-to -- the same two rules everywhere, so this reads the operator this env file
-would deploy and never one belonging to someone else.
-
-Without --detail, a missing Deployment is reported as not installed
-rather than failing the command; with --detail, the follow-up `kubectl
-describe` fails on it instead. This checks the controller's own health,
-not any broker's -- see `status broker` for that.
-
-```
-solace-util status operator [flags]
-```
-
-Also available as: op
 
 Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
 
@@ -1740,37 +1249,65 @@ Applies to: kubernetes. On any other platform this command fails rather than doi
 | `--detail` | `false` | include the full description of the operator deployment |
 
 
-### solace-util stop
+### solace-util operator stop
 
-Stop a running broker without removing it
+Stop the operator's controller, freezing reconciliation (kubernetes only)
 
-The deployment, its persistent data and its configuration all survive --
-`start broker` brings it back. Use `remove broker` to delete it.
+Scales the controller Deployment to zero.
 
-```
-solace-util stop
-```
-
-Runs nothing on its own. It names what `solace-util stop` can act on -- `broker` -- and given a word it does not know it fails rather than reporting success.
-
-
-### solace-util stop broker
-
-Stop the broker (Kubernetes: scale the statefulset(s) to 0; containers: stop the container)
-
-On Kubernetes every role's StatefulSet scales to zero together in one
-command (all three in HA; just the primary standalone) -- there is no
-role argument. It returns as soon as the scale succeeds; unlike
-`start broker`, it does not wait for the pods to actually terminate.
-
-Unlike `restart broker` and every removal, this does not ask for
-confirmation before acting.
+This freezes reconciliation for every broker in every watched namespace,
+not just this env file's, until `operator start`.
 
 ```
-solace-util stop broker [flags]
+solace-util operator stop [flags]
 ```
 
-Also available as: br
+Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+
+
+### solace-util operator validate
+
+Check the operator's install state and watch scope (kubernetes only)
+
+Reports the operator's install state, running version versus this env
+file's, and the namespaces it watches.
+
+Every value is read live from the cluster, since the operator is shared
+and may already watch namespaces this env file never named.
+
+```
+solace-util operator validate [flags]
+```
+
+Also available as: vld
+
+Applies to: kubernetes. On any other platform this command fails rather than doing nothing.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+
+
+### solace-util validate
+
+Check the whole env file and what it needs
+
+Reports both the broker and operator halves of the env file together;
+`broker validate` and `operator validate` are the same rows, scoped.
+
+Read-only; a [WARN] (such as an operator not installed yet) does not
+fail it, only a [FAIL] does.
+
+```
+solace-util validate [flags]
+```
+
+Also available as: vld
 
 | Flag | Default | Meaning |
 | --- | --- | --- |

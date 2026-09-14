@@ -82,3 +82,51 @@ func TestPreflightIsPreviewableUnderEcho(t *testing.T) {
 		t.Errorf("dry-run should say the assertion was skipped:\n%s", got)
 	}
 }
+
+// TestCanIArgsScopesByResourceKind is the regression for a warning a real
+// `broker remove` printed on every run:
+//
+//	kubectl auth can-i delete namespaces
+//	Warning: resource 'namespaces' is not namespace scoped
+//
+// Omitting -n was already correct and was not enough. kubectl falls back to the
+// KUBECONFIG context's namespace when no -n is given, so the access review still
+// carried one -- which printed that warning and, worse, asked a subtly different
+// question: with a namespace in the review RBAC also evaluates namespaced Roles
+// there, so a RoleBinding granting `delete namespaces` in that one namespace would
+// answer YES for a cluster-scoped action the identity cannot actually perform.
+// --all-namespaces clears the namespace from the review.
+//
+// RISK if this regresses: the probe passes and the delete it guards fails, which is
+// exactly the half-done state Preflight exists to prevent.
+func TestCanIArgsScopesByResourceKind(t *testing.T) {
+	c := NewCluster(nil, loadK8s(t), nil, nil)
+
+	cases := []struct {
+		p    probe
+		want []string
+	}{
+		{probe{verb: "delete", resource: "namespaces"},
+			[]string{"auth", "can-i", "delete", "namespaces", "--all-namespaces"}},
+		{probe{verb: "create", resource: "customresourcedefinitions"},
+			[]string{"auth", "can-i", "create", "customresourcedefinitions", "--all-namespaces"}},
+		{probe{verb: "delete", resource: "secrets"},
+			[]string{"auth", "can-i", "delete", "secrets", "-n", "solace"}},
+		{probe{verb: "patch", resource: "deployments", ns: "solace-system"},
+			[]string{"auth", "can-i", "patch", "deployments", "-n", "solace-system"}},
+	}
+	for _, tc := range cases {
+		got := c.canIArgs(tc.p)
+		if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+			t.Errorf("canIArgs(%+v) = %v, want %v", tc.p, got, tc.want)
+		}
+		// Belt and braces: a cluster-scoped probe must never carry -n at all.
+		if clusterScoped[tc.p.resource] {
+			for _, a := range got {
+				if a == "-n" {
+					t.Errorf("cluster-scoped probe %+v carried -n: %v", tc.p, got)
+				}
+			}
+		}
+	}
+}

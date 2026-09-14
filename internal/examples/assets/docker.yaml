@@ -1,5 +1,5 @@
 # Minimal docker env file for the `solace-util` CLI -- only the keys the loader
-# cannot default. Run any command with `-e <file>`; `solace-util examples full`
+# cannot default. Run any command with `-e <file>`; a bare `solace-util examples`
 # prints every key the schema accepts, with the default each omitted one takes.
 #
 # Replace every CHANGE-ME before use. Each secret key has a sibling *Env key
@@ -7,20 +7,25 @@
 # (`passEnv: SOLACE_ADMIN_PASS`, never both); with that form this file carries no
 # secret and is safe to commit.
 
-redundancy: no                      # yes needs nodes.backup and nodes.monitor
-                                    # (name + ip) too, and this same file on
-                                    # each of the three hosts
+redundancy:
+  enabled: false                    # true needs backup and monitor (name + addr) too,
+                                    # a psk, and this same file on each of the three
+                                    # hosts
+  # primary:
+  #   name: solace-primary          # the broker's routername. Omitted, this host's own
+                                    # hostname is used -- which is what a single broker
+                                    # would call itself anyway. MANDATORY in HA, where
+                                    # all three names key a table every host renders
+  # psk: ...                        # MANDATORY in HA on docker/podman: generate with
+                                    # `openssl rand -base64 32` and use the SAME value
+                                    # on all three hosts
 
 image:
   repo: solace-pubsub-standard      # mandatory
   tag: "10.26.0.8755"               # mandatory
 
-admin:
-  pass: CHANGE-ME-admin             # secret, mandatory
-
-nodes:
-  primary:
-    name: solace-primary            # mandatory: the broker's routername
+semp:
+  adminPass: CHANGE-ME-admin        # secret, mandatory
 
 docker:
   container:

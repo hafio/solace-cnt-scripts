@@ -10,8 +10,6 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-
-	"solace/internal/examples"
 )
 
 // runComplete drives cobra's hidden __complete endpoint -- the same request a
@@ -124,7 +122,7 @@ func TestEnvFlagCompletesEnvFiles(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatalf("mkdir for %s: %v", rel, err)
 		}
-		if err := os.WriteFile(p, []byte("redundancy: no\n"), 0o600); err != nil {
+		if err := os.WriteFile(p, []byte("redundancy:\n  enabled: false\n"), 0o600); err != nil {
 			t.Fatalf("write %s: %v", rel, err)
 		}
 	}
@@ -133,7 +131,7 @@ func TestEnvFlagCompletesEnvFiles(t *testing.T) {
 	write("env/dev.yml")
 	write("notes.txt")
 
-	got, directive := runComplete(t, "status", "--base-dir", base, "-e", "")
+	got, directive := runComplete(t, "broker", "status", "--base-dir", base, "-e", "")
 	want := []string{"prod.yaml", "dev.yml"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("-e completions = %v, want %v (base dir first, deduped, YAML only)", got, want)
@@ -148,11 +146,11 @@ func TestEnvFlagCompletesEnvFiles(t *testing.T) {
 func TestEnvFlagPrefixFilters(t *testing.T) {
 	base := t.TempDir()
 	for _, name := range []string{"prod.yaml", "preprod.yaml", "dev.yaml"} {
-		if err := os.WriteFile(filepath.Join(base, name), []byte("redundancy: no\n"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(base, name), []byte("redundancy:\n  enabled: false\n"), 0o600); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
-	got, _ := runComplete(t, "status", "--base-dir", base, "-e", "pr")
+	got, _ := runComplete(t, "broker", "status", "--base-dir", base, "-e", "pr")
 	want := []string{"preprod.yaml", "prod.yaml"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("-e pr completions = %v, want %v", got, want)
@@ -164,10 +162,10 @@ func TestEnvFlagPrefixFilters(t *testing.T) {
 // instead of offering bare names that would resolve somewhere else.
 func TestEnvFlagWithPathDefersToShell(t *testing.T) {
 	base := t.TempDir()
-	if err := os.WriteFile(filepath.Join(base, "prod.yaml"), []byte("redundancy: no\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(base, "prod.yaml"), []byte("redundancy:\n  enabled: false\n"), 0o600); err != nil {
 		t.Fatalf("write prod.yaml: %v", err)
 	}
-	got, directive := runComplete(t, "status", "--base-dir", base, "-e", "env/")
+	got, directive := runComplete(t, "broker", "status", "--base-dir", base, "-e", "env/")
 	if len(got) != 0 {
 		t.Errorf("-e env/ completions = %v, want none", got)
 	}
@@ -176,62 +174,17 @@ func TestEnvFlagWithPathDefersToShell(t *testing.T) {
 	}
 }
 
-// TestRoleArgsComplete: every command that still takes a genuine [role]
-// positional offers the three role names -- deploy broker/all (the role is which
-// identity THIS container host deploys as), generate broker (which host's
-// artifact to render), and config leader / smoke redundancy (roleOnContainerLeaf:
-// the role is again this host's own identity, not a pod selector). The tree is
-// flat, so one case per verb covers every platform it applies to; completion
-// never reads the env file, so it cannot tell here whether a given run will land
-// on Kubernetes (which rejects the role) or a container host (which uses it) --
-// see TestUnusableRoleFailsLoud (platform_test.go) for that refusal.
+// TestRoleArgsComplete is gone: no command takes a [role] positional any more.
 //
-// The six commands where [role] used to pick a Kubernetes POD (cli, shell, logs
-// broker, check semp-login, status broker, restart broker) lost that positional
-// in favor of --pod (H2: one way to pick a pod) -- see
-// TestPodFlagCompletesRoles for their half of this convention.
-func TestRoleArgsComplete(t *testing.T) {
-	for _, path := range [][]string{
-		{"deploy", "broker"},
-		{"deploy", "all"},
-		{"config", "leader"},
-		{"smoke", "redundancy"},
-		{"generate", "broker"},
-	} {
-		t.Run(strings.Join(path, " "), func(t *testing.T) {
-			got, directive := runComplete(t, append(path, "")...)
-			want := []string{"primary", "backup", "monitor"}
-			if strings.Join(got, ",") != strings.Join(want, ",") {
-				t.Errorf("completions = %v, want %v", got, want)
-			}
-			if directive != wantDirective(cobra.ShellCompDirectiveNoFileComp) {
-				t.Errorf("directive = %s, want no-file-completion", directive)
-			}
-		})
-	}
-}
+// The role is --pod everywhere now, on both readings -- which pod to act on for a
+// Kubernetes command, which node this host is for a container one -- so the completion
+// that used to teach the positional lives in TestPodFlagCompletesRoles below. That is the
+// whole convention: one flag, one completer, registered next to where the flag is declared.
 
-// TestExampleArgsComplete: `examples` takes a template name, not a path, so it
-// completes to the names it knows. It offers only the canonical spellings even
-// though the command also accepts the platform abbreviations -- a completion is
-// already the thing that saves the typing, so it teaches the full word.
-func TestExampleArgsComplete(t *testing.T) {
-	got, directive := runComplete(t, "examples", "")
-	want := examples.Names()
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("completions = %v, want %v", got, want)
-	}
-	if directive != wantDirective(cobra.ShellCompDirectiveNoFileComp) {
-		t.Errorf("directive = %s, want no-file-completion", directive)
-	}
-	for _, short := range []string{"kube", "dk", "pm"} {
-		for _, c := range got {
-			if c == short {
-				t.Errorf("completion offered the abbreviation %q; completion teaches the canonical name", short)
-			}
-		}
-	}
-}
+// TestExampleArgsComplete is gone with the positional it completed. `examples` selects its
+// template with --platform now, and TestPlatformFlagCompletes already pins that completer --
+// including the part this test was really protecting, that the abbreviations are accepted
+// but never offered.
 
 // TestPodFlagCompletesRoles: --pod names the same roles as the positionals, so it
 // completes to the same set rather than to filenames. copy from/into always named
@@ -241,14 +194,14 @@ func TestExampleArgsComplete(t *testing.T) {
 // comment for the commands that kept a real positional.
 func TestPodFlagCompletesRoles(t *testing.T) {
 	for _, path := range [][]string{
-		{"copy", "into"},
-		{"copy", "from"},
-		{"cli"},
-		{"shell"},
-		{"logs", "broker"},
-		{"check", "semp-login"},
-		{"status", "broker"},
-		{"restart", "broker"},
+		{"broker", "copy", "into"},
+		{"broker", "copy", "from"},
+		{"broker", "cli"},
+		{"broker", "shell"},
+		{"broker", "logs"},
+		{"broker", "perform", "semp-login-check"},
+		{"broker", "status"},
+		{"broker", "restart"},
 	} {
 		t.Run(strings.Join(path, " "), func(t *testing.T) {
 			got, directive := runComplete(t, append(append([]string{}, path...), "--pod", "")...)
@@ -274,8 +227,12 @@ func TestPodFlagCompletesRoles(t *testing.T) {
 // in front of the user.
 func TestPlatformFlagCompletes(t *testing.T) {
 	for _, path := range [][]string{
-		{"status"},
+		{"broker", "status"},
 		{"convert", "old-env"},
+		// examples reads --platform too, and resolves it WITHOUT an env file. The completer
+		// is the root one either way, which is the point: one flag, one vocabulary, whether
+		// or not there is a file to check the answer against.
+		{"examples"},
 	} {
 		t.Run(strings.Join(path, " "), func(t *testing.T) {
 			got, directive := runComplete(t, append(path, "--platform", "")...)
@@ -302,7 +259,7 @@ func TestPlatformFlagCompletes(t *testing.T) {
 // so `copy into` is one command shared by every platform rather than a separate
 // copy per platform subtree.
 func TestDirFlagCompletesDirectories(t *testing.T) {
-	_, directive := runComplete(t, "copy", "into", "--dir", "")
+	_, directive := runComplete(t, "broker", "copy", "into", "--dir", "")
 	if directive != wantDirective(cobra.ShellCompDirectiveFilterDirs) {
 		t.Errorf("--dir directive = %s, want directory filtering", directive)
 	}
@@ -328,14 +285,12 @@ func TestDirFlagCompletesDirectories(t *testing.T) {
 // uses it).
 func TestNoArgsLeafOffersNoFiles(t *testing.T) {
 	for _, path := range [][]string{
-		{"check", "deploy"},
-		{"status", "operator"},
-		{"remove", "broker"},
-		{"remove", "all"},
-		{"diagnostics"},
-		{"prepare", "namespace"},
-		{"logs", "operator"},
-		{"config", "delete", "domain-certs"},
+		{"validate"},
+		{"operator", "status"},
+		{"broker", "remove"},
+		{"broker", "perform", "gather-diagnostics"},
+		{"operator", "logs"},
+		{"broker", "configure", "domain-certs", "--remove"},
 		{"version"},
 	} {
 		t.Run(strings.Join(path, " "), func(t *testing.T) {
@@ -356,7 +311,7 @@ func TestNoArgsLeafOffersNoFiles(t *testing.T) {
 // case built through leaf (check) and one built inline (deploy) are enough to
 // prove the registration, rather than enumerating every runnable command.
 func TestAllowCommandOffersNoFiles(t *testing.T) {
-	for _, path := range [][]string{{"check", "deploy"}, {"deploy", "broker"}} {
+	for _, path := range [][]string{{"validate"}, {"broker", "deploy"}} {
 		t.Run(strings.Join(path, " "), func(t *testing.T) {
 			got, directive := runComplete(t, append(path, "--allow-command", "")...)
 			if len(got) != 0 {
@@ -381,13 +336,17 @@ func TestFlagCompletionsRegistered(t *testing.T) {
 		{nil, "env"},
 		{nil, "base-dir"},
 		{nil, "platform"},
-		{[]string{"status", "broker"}, "allow-command"},
-		{[]string{"deploy", "broker"}, "allow-command"},
-		{[]string{"cli"}, "pod"},
-		{[]string{"copy", "from"}, "pod"},
-		{[]string{"copy", "into"}, "pod"},
-		{[]string{"copy", "into"}, "dir"},
-		{[]string{"diagnostics"}, "days"},
+		{[]string{"broker", "status"}, "allow-command"},
+		{[]string{"broker", "deploy"}, "allow-command"},
+		{[]string{"broker", "cli"}, "pod"},
+		{[]string{"broker", "copy", "from"}, "pod"},
+		{[]string{"broker", "copy", "into"}, "pod"},
+		{[]string{"broker", "copy", "into"}, "dir"},
+		{[]string{"broker", "perform", "gather-diagnostics"}, "days"},
+		{[]string{"broker", "logs"}, "tail"},
+		{[]string{"broker", "logs"}, "since"},
+		{[]string{"operator", "logs"}, "tail"},
+		{[]string{"operator", "logs"}, "since"},
 	}
 	for _, tc := range cases {
 		cmd := findCmd(t, root, tc.path...)

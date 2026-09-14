@@ -85,7 +85,7 @@ func platformSuffix(ps []config.Platform) string {
 // not apply to the platform this env file selected. It names the platforms that
 // do have it, so the message is a pointer rather than a dead end.
 func unsupportedErr(cmd *cobra.Command, p config.Platform) error {
-	return fmt.Errorf("%q is not supported on %s: it applies to %s",
+	return usagef("%q is not supported on %s: it applies to %s",
 		cmd.CommandPath(), p, config.JoinPlatforms(commandPlatforms(cmd)))
 }
 
@@ -122,25 +122,21 @@ func checkFlagPlatforms(cmd *cobra.Command, p config.Platform) error {
 		}
 		allowed := parsePlatformList(vals[0])
 		if !supportsPlatform(allowed, p) {
-			bad = fmt.Errorf("--%s is not supported on %s: it applies to %s",
+			bad = usagef("--%s is not supported on %s: it applies to %s",
 				f.Name, p, config.JoinPlatforms(allowed))
 		}
 	})
 	return bad
 }
 
-// rejectRole refuses a [role] positional on a platform that does not act on it.
-// Accepting and ignoring it is the dangerous alternative: on a container host
-// there is one broker per machine and the transport ignores the role entirely,
-// so `logs backup` would print the local broker's logs and look like it had
-// reached the backup.
-func rejectRole(p config.Platform, arg string, actOn ...config.Platform) error {
-	if arg == "" || supportsPlatform(actOn, p) {
-		return nil
-	}
-	return fmt.Errorf("a [role] argument is not supported on %s: it applies to %s",
-		p, config.JoinPlatforms(actOn))
-}
+// rejectRole is gone, and nothing replaced it.
+//
+// It refused a [role] POSITIONAL on a platform that ignored it -- which only existed
+// because four commands (deploy, generate, and the two HA actions) took their node
+// identity as an argument. They take --pod now, so the refusal is a flag refusal:
+// addPodFlag scopes --pod per call site and checkFlagPlatforms below refuses it by name.
+// One mechanism instead of two, and the message names the flag the operator actually
+// typed.
 
 // wireExec installs the shared pre-run on a runnable command and gives it the
 // --allow-command escape hatch.
@@ -164,13 +160,20 @@ func wireExec(app *App, c *cobra.Command) *cobra.Command {
 // first, so a plain misuse is reported as itself rather than behind whatever the
 // env file happens to be wrong about -- `--allow-command` on a render-only command
 // is a usage error whether or not an env file even exists.
+//
+// EVERY failure here exits 2 (exit.go), which is why the two calls that reach other
+// packages are marked in one place rather than at each of their own return
+// statements. Nothing in this function has touched the cluster or the engine yet:
+// the env file could not be found, could not be parsed, named no platform or named
+// several, or the command line disagreed with what it does say. In each case a
+// different invocation is what fixes it, and retrying the same one cannot.
 func prepare(app *App, cmd *cobra.Command) error {
 	if err := checkAllowCommand(cmd, app); err != nil {
 		return err
 	}
 	p, err := resolvePlatform(app)
 	if err != nil {
-		return err
+		return asUsage(err)
 	}
 	app.Platform = p
 	if !supportsPlatform(commandPlatforms(cmd), p) {
@@ -179,7 +182,7 @@ func prepare(app *App, cmd *cobra.Command) error {
 	if err := checkFlagPlatforms(cmd, p); err != nil {
 		return err
 	}
-	return app.load(cmd)
+	return asUsage(app.load(cmd))
 }
 
 // resolvePlatform settles which platform this invocation drives. --platform wins
@@ -249,7 +252,10 @@ func promptPlatform(a *App, found []config.Platform) (config.Platform, error) {
 	for i, p := range found {
 		fmt.Fprintf(os.Stderr, "  %d) %s\n", i+1, p)
 	}
-	answer := promptLine(promptSource(a), os.Stderr,
+	// An unanswered question falls through as "", which Atoi rejects below -- the same
+	// loud error a garbage answer gets. A platform guessed on the operator's behalf is
+	// exactly the decision that must not be silent, so there is nothing to special-case.
+	answer, _ := promptLine(promptSource(a), os.Stderr,
 		fmt.Sprintf("Which platform? [1-%d] ", len(found)))
 	n, err := strconv.Atoi(strings.TrimSpace(answer))
 	if err != nil || n < 1 || n > len(found) {

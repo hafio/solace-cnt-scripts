@@ -5,16 +5,21 @@ Kubernetes, Docker, or Podman. You describe the broker once in a YAML env file a
 the whole lifecycle through one standardized command tree:
 
 ```
-check deploy -> prepare all -> deploy all     build it
-config ...                                    post-deployment, over the broker CLI
-check semp-login / smoke redundancy           prove it works
-stop broker / start broker                    pause it without removing it
-remove all                                    tear it down
+validate                        check the env file and the platform
+operator deploy                 install the cluster-scoped operator (kubernetes)
+broker deploy                   prerequisites and the broker, in one idempotent step
+broker configure ...            post-deployment settings, over the broker CLI
+broker perform ...              one-shot actions: leader, failover test, diagnostics,
+                                config export/import, DR role switch
+broker stop / broker start      pause it without removing it
+broker remove                   tear it down
 ```
 
-Every verb that owns more than one kind of object names the object it acts on --
-`deploy broker`, `remove operator`, `status broker` -- and the bare verb prints what it
-can act on rather than doing something implicit; `remove` on its own removes nothing.
+The tree is **noun first**: you name the thing, then what to do to it. `broker` and
+`operator` own their verbs and run nothing themselves, so a bare `broker` prints what it
+can do rather than doing something implicit -- which is what makes `br` and `op` safe to
+type. Prerequisites are not a separate step: `broker deploy` creates whatever the broker
+needs and is safe to re-run.
 
 **Platform status**
 
@@ -32,10 +37,10 @@ can act on rather than doing something implicit; `remove` on its own removes not
 | This file | Install, quick start, the commands you type most |
 | [docs/commands.md](docs/commands.md) | Every command and every flag, generated from the command tree |
 | [docs/abbreviation.md](docs/abbreviation.md) | Every short form -- commands, roles, `--platform`, flag shorthands -- and how each is resolved |
-| [docs/configuration.md](docs/configuration.md) | The env file: keys, platform detection, scaling, secrets, the command allowlist, `convert` |
-| [docs/operations.md](docs/operations.md) | Day-2: preflight, config order, HA mechanics, re-deploying, removal, upgrades, troubleshooting |
+| [docs/configuration.md](docs/configuration.md) | The env file: keys, platform detection, scaling, secrets, replication, the command allowlist, `convert` |
+| [docs/operations.md](docs/operations.md) | Day-2: preflight, config order, HA mechanics, re-deploying, removal, data replication, upgrades, troubleshooting |
 | [docs/developer.md](docs/developer.md) | Build, dev-script tasks, gates, goldens, releases, repo layout |
-| [env/sample.yaml](env/sample.yaml) | The annotated schema -- `solace-util examples full`, committed for reference |
+| [env/sample.yaml](env/sample.yaml) | The annotated schema -- what a bare `solace-util examples` prints, committed for reference |
 
 ## Requirements
 
@@ -86,8 +91,8 @@ For every session, write it where the shell looks -- `/etc/bash_completion.d/sol
 sourced from your `$PROFILE`.
 
 Beyond command and flag names it completes the values they take: the env files `-e`/`--env`
-would actually resolve, `primary`/`backup`/`monitor` for the `[role]` positionals and
-`--pod`, directories for `--base-dir` and `--dir`, and the platform names for `--platform`.
+would actually resolve, `primary`/`backup`/`monitor` for `--pod`, directories for
+`--base-dir` and `--dir`, and the platform names for `--platform`.
 Completion never reads your env file, so a TAB press cannot parse config, run a command, or
 print anything into the shell. Add `--no-descriptions` to drop the help text shown beside
 each suggestion.
@@ -98,15 +103,14 @@ Write yourself an env file to edit. `examples` (`eg`) carries the templates insi
 binary, so this works from a bare download:
 
 ```
-solace-util examples                             # list what it can write
-solace-util examples kubernetes -o env/dev.yaml  # or docker, or podman
+solace-util examples --platform kubernetes -o env/dev.yaml   # or docker, or podman
 ```
 
 Each of those is a minimal standalone file: only the keys that platform cannot default,
-and only its own section, so nothing else has to be pruned and no `--platform` is needed.
-Replace every `CHANGE-ME` before running anything against it.
+and only its own section, so nothing else has to be pruned and no `--platform` is needed
+when you later run against it. Replace every `CHANGE-ME` before you do.
 
-`solace-util examples full` prints the complete annotated schema instead -- every key the
+Bare `solace-util examples` prints the complete annotated schema instead -- every key the
 loader accepts, the default each omitted one takes, and all three platform sections at
 once. It is the same text as [env/sample.yaml](env/sample.yaml), so a checkout can also
 just `cp env/sample.yaml env/dev.yaml`; delete the platform sections you are not using,
@@ -119,41 +123,45 @@ finds `env/dev.yaml` here.
 
 ### Kubernetes
 
-At minimum set `image.repo`, `image.tag`, `admin.pass`, `kubernetes.name`,
-`kubernetes.namespace`, and `kubernetes.storage.msgNode`.
+At minimum set `image.repo`, `image.tag`, `semp.adminPass`, `kubernetes.name`,
+`kubernetes.namespace`, and `kubernetes.storage.msgNodeSize`.
 
 1. Render the broker manifest to see exactly what would be applied. This needs no cluster
    at all -- `generate` never contacts one and runs nothing:
 
    ```
-   solace-util generate broker -e dev.yaml
+   solace-util broker generate -e dev.yaml
    ```
 
 2. A fresh cluster needs the EventBroker operator once. It is cluster-scoped and shared
    between brokers, so it is installed on its own rather than as part of bringing up any one
-   broker -- and `remove all` never takes it away again:
+   broker -- and `broker remove` never takes it away again:
 
    ```
-   solace-util deploy operator -e dev.yaml
+   solace-util operator deploy -e dev.yaml
    ```
 
-3. Check prerequisites, then bring the broker up. `deploy all` runs
-   check -> prepare -> deploy -> assert the config-sync leader if HA:
+   Run it again from a second env file and the operator's watch list GROWS to cover both
+   namespaces rather than being replaced, so one operator can serve several brokers.
+
+3. Check the env file and the cluster, then bring the broker up. `broker deploy` creates
+   the namespace and the secrets as well, and is safe to re-run:
 
    ```
-   solace-util check deploy -e dev.yaml
-   solace-util deploy all -e dev.yaml
+   solace-util validate -e dev.yaml
+   solace-util broker deploy -e dev.yaml
    ```
 
-   If you pin the HA roles to particular machines, run `solace-util prepare labels` once
-   when provisioning the cluster. It is interactive -- only you can say which machine
-   carries which role -- which is why it sits outside `prepare all` and `deploy all`.
+   If you pin the HA roles to particular machines, label those nodes yourself and name the
+   labels under `kubernetes.placement`. This tool never labels your nodes -- it only writes
+   the selectors into the broker resource.
 
-4. Prove it works, and inspect:
+4. Prove it works, and inspect. On HA, assert the config-sync leader once the pods are up:
 
    ```
-   solace-util check semp-login -e dev.yaml
-   solace-util status broker -e dev.yaml
+   solace-util broker perform semp-login-check -e dev.yaml
+   solace-util broker status -e dev.yaml
+   solace-util broker perform assert-leader -e dev.yaml     # HA only
    ```
 
 5. Configure the running broker (TLS, hardening, product keys). These drive the Solace CLI
@@ -161,17 +169,21 @@ At minimum set `image.repo`, `image.tag`, `admin.pass`, `kubernetes.name`,
    the order under
    [Post-deployment configuration order](docs/operations.md#post-deployment-configuration-order).
 
-6. Tear it down. `remove all` keeps persistent data by default, asks before deleting it,
-   and leaves the operator installed:
+6. Tear it down. `broker remove` keeps persistent data unless you ask for it, prompts for
+   every step, and leaves the operator installed:
 
    ```
-   solace-util remove all -e dev.yaml                   # asks about the PVCs; keeps them if you decline
-   solace-util remove all -e dev.yaml --delete-data     # deletes them without asking (irreversible)
+   solace-util broker remove -e dev.yaml                   # PVCs kept; nothing is asked about them
+   solace-util broker remove -e dev.yaml --delete-data     # asks before deleting them (irreversible)
    ```
+
+   The namespace is only offered for deletion once nothing else is left in it. If anything
+   you did not deploy is still there, it is listed and the namespace is kept -- on every
+   path, `--no-prompt` included.
 
 ### Docker / Podman
 
-One container per host, no operator. At minimum set `image.repo`, `image.tag`, `admin.pass`,
+One container per host, no operator. At minimum set `image.repo`, `image.tag`, `semp.adminPass`,
 and a `docker: {}` or `podman: {}` section (write the empty section even when every setting
 under it defaults -- it is what marks the file's platform).
 
@@ -179,35 +191,43 @@ under it defaults -- it is what marks the file's platform).
    unit on Podman:
 
    ```
-   solace-util generate broker -e prod.yaml
+   solace-util broker generate -e prod.yaml
    ```
 
-2. Bring it up. On a standalone broker that is one command per host; in an HA group each
-   host names its own role, and `prepare host` generates the shared redundancy PSK:
+2. Bring it up. `broker deploy` prepares the host as well -- the data directory, DNS and
+   the registry login. It does NOT invent the shared redundancy PSK: generate one yourself
+   with `openssl rand -base64 32` and put the SAME value in the env file on all three
+   hosts. Nothing here edits the file you hand it.
+
+   In an HA group each host says which node it is, or leave `--pod` off and the host is
+   matched against your `redundancy.*` entries -- first by hostname against `name`, then
+   by this machine's own addresses against `addr`. A standalone broker needs no node
+   entry at all: it is named after the host it runs on unless
+   `redundancy.primary.name` says otherwise.
 
    ```
-   solace-util deploy all -e prod.yaml               # standalone
-   solace-util deploy all primary -e prod.yaml      # HA: on the primary host
-   solace-util deploy all backup  -e prod.yaml      # HA: on the backup host
-   solace-util deploy all monitor -e prod.yaml      # HA: on the monitor host
+   solace-util broker deploy -e prod.yaml                    # standalone, or role by hostname
+   solace-util broker deploy --pod primary -e prod.yaml      # HA: on the primary host
+   solace-util broker deploy --pod backup  -e prod.yaml      # HA: on the backup host
+   solace-util broker deploy --pod monitor -e prod.yaml      # HA: on the monitor host
    ```
 
 3. In an HA group, assert the config-sync leader and exercise a real failover -- both from
    the **primary host only**, which drives the whole group:
 
    ```
-   solace-util config leader -e prod.yaml
-   solace-util smoke redundancy -e prod.yaml
+   solace-util broker perform assert-leader -e prod.yaml
+   solace-util broker perform redundancy-test -e prod.yaml
    ```
 
 4. Inspect, then tear down:
 
    ```
-   solace-util status broker -e prod.yaml
-   solace-util remove broker -e prod.yaml           # keeps the data directory by default
+   solace-util broker status -e prod.yaml
+   solace-util broker remove -e prod.yaml           # keeps the data directory by default
    ```
 
-Re-running `deploy broker` is safe: it compares the rendered artifact with the one on disk
+Re-running `broker deploy` is safe: it compares the rendered artifact with the one on disk
 and only bounces a running broker with `--restart` or your consent. That is also how an
 image-tag bump and a rotated password are applied -- see
 [Docker and Podman mechanics](docs/operations.md#docker-and-podman-mechanics).
@@ -219,54 +239,62 @@ The full surface -- every command, argument, and flag with its default -- is
 
 | Command | Platform | What it does |
 | --- | --- | --- |
-| `check deploy` | all | Validate config and platform prerequisites before deploying |
-| `prepare all` | all | Namespace + secrets on Kubernetes; the data dir, DNS and PSK on docker/podman |
-| `prepare labels` | kubernetes | Label nodes for primary/backup/monitor placement. Interactive, once per cluster |
-| `deploy all [role]` | all | The whole bring-up: check -> prepare -> deploy -> leader (HA) |
-| `deploy operator` | kubernetes | Install the cluster-scoped operator, once per cluster |
-| `deploy broker [role]` | all | Deploy just the broker (`--restart` on docker/podman) |
-| `config leader [role]` | all | Assert the config-sync leader (HA only) |
-| `config apply server-cert` | all | Load or update the TLS server certificate |
-| `config disable default-vpn` | all | Shut down the default message-VPN (one-way) |
-| `status broker` | all | Pods/services/statefulset, or the local container. `--all`, `--detail`, `--pod` (kubernetes) |
-| `logs broker` | all | Tail the broker's logs (`--pod` picks the pod on kubernetes) |
-| `cli` | all | Open a Solace CLI in the broker (`-i <file>` runs a script instead; `--pod` picks the pod on kubernetes) |
-| `shell` | all | Open a shell in the broker (`--pod` picks the pod on kubernetes) |
-| `check semp-login` | all | Prove an authenticated SEMP request works (`--pod` picks the pod on kubernetes) |
-| `smoke redundancy [role]` | all | Exercise a real failover and fail back (HA only; **disturbs the broker**) |
-| `restart broker` | all | Bounce every pod, one at a time; `--pod <role>` restarts just one |
-| `stop broker` / `start broker` | all | Pause and resume without removing anything |
-| `diagnostics --days <n>` | all | Gather a support bundle into `broker.diagDir` |
-| `generate broker [role]` | all | Print the artifact `deploy broker` would apply, without applying it |
-| `remove all` | all | Remove the broker, its secrets and its namespace. Keeps the operator |
-| `remove broker` | all | Remove just the broker. Keeps persistent data unless `--delete-data` |
-| `examples [name]` | all | Write a starting env file (`-o <file>`). Bare, it lists them |
+| `validate` | all | Check the whole env file and the platform. `broker validate` / `operator validate` are the scoped halves |
+| `operator deploy` | kubernetes | Install the cluster-scoped operator. Re-run from another env file and its watch list grows |
+| `operator remove` | kubernetes | Remove it, or narrow its watch list if other namespaces still need it |
+| `broker deploy` | all | Prerequisites and the broker, idempotent (`--restart` on docker/podman, `--pod` names this host) |
+| `broker remove` | all | Remove the broker. Data kept unless `--delete-data`; the namespace only if nothing else is in it |
+| `broker generate` | all | Print what `broker deploy` would apply, without applying it |
+| `broker status` | all | Pods/services/statefulset, or the local container. `--all`, `--detail`, `--pod` |
+| `broker logs` | all | Read the broker's logs. `--follow`, `--tail`, `--since`, `--pod` |
+| `broker cli` / `broker shell` | all | Open an interactive Solace CLI or shell (`--pod` picks the pod) |
+| `broker copy from` / `into` | all | Copy files out of or into the broker |
+| `broker restart` | all | Bounce every pod, one at a time; `--pod <role>` restarts just one |
+| `broker stop` / `broker start` | all | Pause and resume without removing anything |
+| `broker configure server-certs` | all | Load or update the TLS server certificate |
+| `broker configure domain-certs` | all | Load the domain CAs (`--remove` deletes them) |
+| `broker configure product-keys` | all | Apply the configured product keys |
+| `broker configure default-vpn` | all | Shut the default message-VPN down (`--enable` brings it back) |
+| `broker configure default-users` | all | Shut the default client-usernames down (`--enable` brings them back) |
+| `broker configure data-replication` | all | Converge this broker to the `replication:` block -- mate addresses, which VPNs replicate, each one's role. Never contacts the mate |
+| `broker perform assert-leader` | all | Assert the config-sync leader (HA only) |
+| `broker perform redundancy-test` | all | Exercise a real failover and fail back (HA only; **disturbs the broker**) |
+| `broker perform gather-diagnostics` | all | Gather a support bundle into `broker.diagDir` (`--days`) |
+| `broker perform semp-login-check` | all | Prove an authenticated SEMP request works |
+| `broker perform export-config` | all | Capture the broker's configuration as one artifact (`--vpn`, `--broker-only`, `-o`) |
+| `broker perform import-config <file>` | all | Apply a captured configuration back; **tears down and rebuilds an existing VPN** |
+| `broker perform cli-script <file>` | all | Run a Solace CLI script in the broker |
+| `broker perform shell-script <file>` | all | Run a host shell script inside the broker |
+| `broker perform data-replication` | all | Move each message-VPN's replication role across the DR pair; **interrupts message flow for every VPN it moves** |
+| `examples` | all | Write a starting env file (`--platform <p>`, `-o <file>`). Bare, it writes the full schema |
 | `convert <bash-env-file>` | all | Turn a legacy bash env file into YAML |
 
 Two rules apply everywhere:
 
-- **No implicit actions.** A verb that owns more than one kind of object (`config`,
-  `status`, `remove`, ...) never acts when run bare -- it prints what it can act on, and you
-  name one. `remove` alone removes nothing.
-- **Abbreviations.** `check`=`ck`, `config`=`cfg`, `convert`=`cv`, `copy`=`cp`,
-  `deploy`=`dp`, `diagnostics`=`diag`, `examples`=`eg`, `generate`=`gen`, `logs`=`lg`,
-  `prepare`=`pre`,
-  `remove`=`rm`, `restart`=`rs`, `shell`=`sh`, `status`=`sts`, `version`=`ver`, and
-  `broker`/`operator` are `br`/`op` under whichever verb takes them. So `dp op`,
-  `sts br --all` and `rm all` all work. `start` and `stop` deliberately have none -- any
-  short form is ambiguous between them and `status`.
+- **No implicit actions.** `broker` and `operator` own their verbs and run nothing
+  themselves: run one bare and it prints what it can do. That is what makes the short
+  forms safe -- `br` and `op` on their own act on nothing.
+- **Abbreviations.** `broker`=`br`, `operator`=`op`, `configure`=`cfg`, `convert`=`cv`,
+  `copy`=`cp`, `data-replication`=`dr`, `deploy`=`dp`, `examples`=`eg`,
+  `gather-diagnostics`=`gd`, `generate`=`gen`, `logs`=`lg`, `perform`=`pf`, `remove`=`rm`,
+  `restart`=`rs`, `shell`=`sh`, `status`=`sts`,
+  `validate`=`vld`, `version`=`ver`. A word means the same thing at any depth, so `br dp`,
+  `op rm`, `br sts --all` and `br pf gd` all work. `start` and `stop` deliberately have
+  none -- any short form is ambiguous between them and `status`, and that is the one slip
+  that costs an outage.
 
-A role is `primary`, `backup` or `monitor` (or `p`/`b`/`m`), and appears two ways. `[role]`
-is a positional on `deploy broker`, `deploy all`, `generate broker`, `config leader` and
-`smoke redundancy` -- on docker/podman it says which node identity *this* container host
-deploys/renders/acts as (omit it in an HA group and the hostname is matched against
-`nodes.*` to detect it -- a host matching none is an error on the deploying commands, while
-`generate broker` renders the primary's artifact with a warning, since it changes nothing and
-names the node in its own output); on Kubernetes it means nothing there and is refused loud, since the
-cluster already knows every node. `--pod` is the only way to pick a Kubernetes **pod**:
-`cli`, `shell`, `logs broker`, `check semp-login`, `status broker` and `restart broker` all
-take it, and it is refused on docker/podman, where there is one container per host to target.
-Passing a role where it means nothing is refused with a named error rather than ignored.
+The role is always `--pod`, never a positional, and it reads two ways depending on the
+platform. On Kubernetes it picks the **pod** to act on and defaults to the primary:
+`broker cli`, `shell`, `logs`, `status`, `restart`, `copy`, the `configure` commands and
+most of `perform` take it. On docker and podman it says which node **this host** is, on
+`broker deploy` and `broker generate` -- omit it in an HA group and the host is matched
+against your `redundancy.*` entries, by hostname first and then by address (a host matching
+none is an error on deploy, while `generate` renders the primary's artifact with a warning,
+since it changes nothing). Passed, it is obeyed but still checked: disagreeing with what
+the host looks like warns and proceeds rather than prompting.
+
+Each command scopes the flag to the platform where it means something, so `--pod` on a
+command that cannot use it is refused by name rather than quietly ignored.
 
 ## Global flags
 

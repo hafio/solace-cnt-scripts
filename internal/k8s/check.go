@@ -10,7 +10,7 @@ import (
 
 // reportKeyWidth is the key column for the few standalone report lines that are
 // not part of the grouped `check deploy` report (checkreport.go owns that, with
-// its own width): Preflight when called on its own rather than through CheckDeploy.
+// its own width): Preflight when called on its own rather than through the report.
 const reportKeyWidth = 15
 
 // defaultSCJSONPath selects the name of the StorageClass annotated as cluster
@@ -27,10 +27,11 @@ func (c *Cluster) isEcho() bool {
 	return ok
 }
 
-// Check is the preflight run before a deploy and standalone as `check deploy`. It
-// is the container-side Manager.Check's counterpart, kept as the name the CLI
-// calls on both platforms; the report itself lives in checkreport.go.
-func (c *Cluster) Check(ctx context.Context) error { return c.CheckDeploy(ctx) }
+// Check is the whole-env-file validation, and is the container-side Manager.Check's
+// counterpart -- kept as the one name the CLI calls on both platforms, so the top-level
+// `validate` dispatches to a single method name whichever platform it lands on. The report
+// itself lives in checkreport.go, which also owns the two scoped views.
+func (c *Cluster) Check(ctx context.Context) error { return c.Validate(ctx) }
 
 // Reachable probes the API server (001's kubectl availability check, strengthened
 // to an actual server round-trip). The Echo runner returns no error, so a preview

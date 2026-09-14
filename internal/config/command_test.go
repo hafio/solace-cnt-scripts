@@ -136,7 +136,7 @@ func TestValidateRejectsBadRuntime(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := &Config{Redundancy: "yes"}
+			c := &Config{Redundancy: Redundancy{Enabled: "true"}}
 			c.ApplyDefaults(tc.p) // defaults first, so the override is what is tested
 			tc.setup(c)
 			err := c.Validate(tc.p)

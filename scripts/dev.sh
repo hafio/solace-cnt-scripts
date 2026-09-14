@@ -18,7 +18,6 @@ COV_DIR="${REPO_ROOT}/coverage"
 BIN_NAME="solace-util"
 # ITEST_NAME is the dev-only live-probe harness, named distinctly from BIN_NAME so
 # nothing in dist/ is ambiguous about which binary is shippable.
-ITEST_NAME="solace-itest"
 
 # Version stamp: on a tag push git describe is exactly the pushed tag, so
 # `solace-util version` matches the GitHub release. --always falls back to the
@@ -100,12 +99,20 @@ task_test() { cap go test "${RACE_FLAG[@]}" -count=1 ./...; }
 # ./internal/examples goes FIRST: it rewrites env/sample.yaml, which is the
 # fixture ./internal/render and ./internal/k8s render their own goldens from, so
 # the reverse order would leave those two a pass behind.
+#
+# Every package runs even after one fails, and the first failing exit code is what
+# regen returns. Regeneration is per-package -- each rewrites only its own goldens --
+# so stopping at the first failure just hides the other four packages' problems and
+# costs a round trip each time. The ordering above still holds for the packages that
+# DO succeed.
 task_regen() {
-  cap go test ./internal/examples -update &&
-    cap go test ./internal/cli -update &&
-    cap go test ./internal/convert -update &&
-    cap go test ./internal/render -update &&
-    cap go test ./internal/k8s -update
+  rc=0
+  for pkg in ./internal/examples ./internal/cli ./internal/convert ./internal/render ./internal/k8s ./internal/broker; do
+    cap go test "$pkg" -update
+    code=$?
+    if [ "$code" -ne 0 ] && [ "$rc" -eq 0 ]; then rc=$code; fi
+  done
+  return "$rc"
 }
 
 # build_one <os> <arch> -- compile the CLI for one target into dist/. The
@@ -132,27 +139,6 @@ task_dist() {
     build_one "${t%/*}" "${t#*/}" || return 1
   done
   ok "binaries in ${DIST_DIR}"
-}
-
-# task_itest builds the LIVE-environment probe harness (internal/tools/itest).
-# Build only: this script never runs it. The probes mutate real broker state, so
-# choosing to point one at a given environment is an operator's decision, and a
-# gate that made it automatically would be exactly the wrong tool.
-#
-# Deliberately NOT in all/full for the same reason, and absent from the release
-# workflow (it is not in BUILD_TARGETS), so nothing automated ever produces or
-# executes it.
-task_itest() {
-  local os="${TARGET_OS:-$(go env GOOS)}" arch="${TARGET_ARCH:-$(go env GOARCH)}"
-  local out="${DIST_DIR}/${ITEST_NAME}-${os}-${arch}"
-  [[ "${os}" == "windows" ]] && out="${out}.exe"
-  mkdir -p "${DIST_DIR}"
-  step "  ${os}/${arch}"
-  CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" \
-    cap go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "${out}" ./internal/tools/itest || return 1
-  ok "built ${out}"
-  ok "copy it and your env file to the target host, then run it THERE: ./${ITEST_NAME}-${os}-${arch} --list"
-  ok "see docs/itest.md -- operator-run only; these scripts never execute it"
 }
 
 task_cov() {
@@ -228,10 +214,6 @@ Tasks:
   scan     govulncheck (fatal on a fixable vulnerability this module calls;
            one with no released fix warns and passes)
   dist     cross-compile ${DIST_TARGETS[*]}
-  itest    compile the LIVE-environment probe harness -> dist/${ITEST_NAME}-<os>-<arch>[.exe]
-           (TARGET_OS/TARGET_ARCH as for build). Build ONLY -- this script never
-           runs it: its probes mutate real broker state. Operator-run, see
-           docs/itest.md. Deliberately not in all/full and not released
   graphify refresh graphify-out/ (local only; skipped when CI is set)
   all      ${ALL}   (what CI runs, as: all scan)
   full     ${FULL}   (pre-tag sweep)

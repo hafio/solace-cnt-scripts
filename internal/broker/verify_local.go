@@ -3,7 +3,9 @@ package broker
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"solace/internal/config"
@@ -21,47 +23,123 @@ import (
 // unchanged.
 
 // LocalRole resolves which redundancy role THIS host plays. An explicit roleArg
-// (primary|backup|monitor or p|b|m) wins; otherwise it detects the role by
-// matching the host's name against the configured node table (nodes.primary/
-// backup/monitor .name), tolerating both an FQDN-vs-short-name mismatch and a
-// case difference (DNS names are case-insensitive, so "Broker1-Primary" in the
-// env file matches a host reporting "broker1-primary"). It fails loud when
-// detection matches nothing, and fails loud -- naming the host and every role
-// it matched -- when detection matches more than one, so a mis-targeted HA
+// (primary|backup|monitor or p|b|m) wins; otherwise it detects the role in two
+// passes.
+//
+// FIRST by NAME: the host's own name against the configured node table
+// (redundancy.primary/backup/monitor .name), tolerating both an FQDN-vs-short-name
+// mismatch and a case difference (DNS names are case-insensitive, so
+// "Broker1-Primary" in the env file matches a host reporting "broker1-primary").
+//
+// THEN by ADDRESS, only if the name matched nothing: this machine's own interface
+// addresses against redundancy.*.addr. That is the case a name cannot cover -- a
+// cloud host reports something like "ip-10-0-0-11" while the env file names the
+// broker "sol-p", so the routername and the OS hostname are legitimately unrelated
+// and the address is the only thing both ends agree on.
+//
+// It fails loud when neither pass matches, and fails loud -- naming the host and
+// every role it matched -- when either matches more than one, so a mis-targeted HA
 // operation never runs silently against the wrong node.
 func (o *Ops) LocalRole(roleArg string) (config.Role, error) {
 	if roleArg != "" {
 		return config.ParseRole(roleArg)
 	}
+	role, _, err := o.DetectRole()
+	return role, err
+}
+
+// DetectRole is LocalRole's detection half, also used by the callers that want to
+// CHECK an explicit --pod against what the host looks like. It returns the role and
+// how it was found ("hostname" / "address") so the caller can say which.
+func (o *Ops) DetectRole() (config.Role, string, error) {
 	host, err := o.hostname()
 	if err != nil {
-		return "", fmt.Errorf("detect node role: read hostname: %w", err)
+		return "", "", fmt.Errorf("detect node role: read hostname: %w", err)
 	}
 	var matched []config.Role
 	for _, m := range []struct {
 		name string
 		role config.Role
 	}{
-		{o.Cfg.Nodes.Primary.Name, config.Primary},
-		{o.Cfg.Nodes.Backup.Name, config.Backup},
-		{o.Cfg.Nodes.Monitor.Name, config.Monitor},
+		{o.Cfg.Redundancy.Primary.Name, config.Primary},
+		{o.Cfg.Redundancy.Backup.Name, config.Backup},
+		{o.Cfg.Redundancy.Monitor.Name, config.Monitor},
 	} {
 		if m.name != "" && hostMatches(host, m.name) {
 			matched = append(matched, m.role)
 		}
 	}
+	how := "hostname " + strconv.Quote(host)
+	if len(matched) == 0 {
+		// Second pass. Only reached when the name matched nothing, so a configured
+		// name always wins over an address -- the name is what the broker is called,
+		// and an address can be shared by more than one interface or host.
+		addrs, aerr := o.localAddrs()
+		if aerr != nil {
+			return "", "", fmt.Errorf("cannot determine node role from hostname %q, and reading this "+
+				"machine's addresses failed: %w", host, aerr)
+		}
+		for _, m := range []struct {
+			addr string
+			role config.Role
+		}{
+			{o.Cfg.Redundancy.Primary.Addr, config.Primary},
+			{o.Cfg.Redundancy.Backup.Addr, config.Backup},
+			{o.Cfg.Redundancy.Monitor.Addr, config.Monitor},
+		} {
+			if m.addr != "" && addrs[m.addr] {
+				matched = append(matched, m.role)
+				how = "address " + strconv.Quote(m.addr)
+			}
+		}
+	}
 	switch len(matched) {
 	case 0:
-		return "", fmt.Errorf("cannot determine node role from hostname %q; pass primary|backup|monitor explicitly", host)
+		return "", "", fmt.Errorf("cannot determine node role: hostname %q matches no redundancy.*.name, "+
+			"and none of this machine's addresses matches a redundancy.*.addr; "+
+			"pass primary|backup|monitor explicitly", host)
 	case 1:
-		return matched[0], nil
+		return matched[0], how, nil
 	default:
 		names := make([]string, len(matched))
 		for i, r := range matched {
-			names[i] = roleName(r)
+			names[i] = r.Word()
 		}
-		return "", fmt.Errorf("hostname %q matches more than one configured node role (%s); pass primary|backup|monitor explicitly to disambiguate", host, strings.Join(names, ", "))
+		return "", "", fmt.Errorf("this host matches more than one configured node role (%s) by %s; "+
+			"pass primary|backup|monitor explicitly to disambiguate", strings.Join(names, ", "), how)
 	}
+}
+
+// localAddrs is the set of IP addresses on this machine's own interfaces, as the strings
+// an env file would carry. Loopback is included deliberately: a single-host test group
+// legitimately points every node at 127.0.0.1, and excluding it would make exactly that
+// setup undetectable.
+//
+// Behind a seam for the same reason Resolve and Geteuid are: enumerating interfaces is
+// machine state, and the detection rules have to be testable without any.
+func (o *Ops) localAddrs() (map[string]bool, error) {
+	if o.LocalAddrs != nil {
+		return o.LocalAddrs()
+	}
+	return defaultLocalAddrs()
+}
+
+// defaultLocalAddrs reads the real interface list.
+func defaultLocalAddrs() (map[string]bool, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(addrs))
+	for _, a := range addrs {
+		// Each entry is a CIDR (10.0.0.11/24); the env file carries the bare address.
+		if ipnet, ok := a.(*net.IPNet); ok {
+			out[ipnet.IP.String()] = true
+			continue
+		}
+		out[a.String()] = true
+	}
+	return out, nil
 }
 
 // LeaderLocal asserts the config-sync leader from THIS host, which must be the
@@ -69,7 +147,7 @@ func (o *Ops) LocalRole(roleArg string) (config.Role, error) {
 // primary node"). HA-only. It fails loud on the backup/monitor rather than
 // running, waits for local redundancy to be healthy, then runs assert-leader.
 func (o *Ops) LeaderLocal(ctx context.Context, roleArg string) error {
-	if o.skipIfStandalone("config leader") {
+	if o.skipIfStandalone("assert-leader") {
 		return nil
 	}
 	role, err := o.LocalRole(roleArg)
@@ -77,7 +155,7 @@ func (o *Ops) LeaderLocal(ctx context.Context, roleArg string) error {
 		return err
 	}
 	if role != config.Primary {
-		return fmt.Errorf("config leader must run on the primary node; this host is the %s node", roleName(role))
+		return fmt.Errorf("`broker perform assert-leader` must run on the primary node; this host is the %s node", role.Word())
 	}
 
 	// Parity with the k8s Leader: revert any released activity on the mate FIRST
@@ -99,7 +177,7 @@ func (o *Ops) LeaderLocal(ctx context.Context, roleArg string) error {
 		}
 		return primaryRedundancyUp(out), nil
 	}); err != nil {
-		if detail, dErr := o.RunCLI(ctx, role, "show-redundancy-detail", showRedundancyDetailScript()); dErr == nil {
+		if detail, dErr := o.runCLIRead(ctx, role, "show-redundancy-detail", showRedundancyDetailScript()); dErr == nil {
 			o.show(detail)
 		}
 		return err
@@ -125,7 +203,7 @@ func (o *Ops) LeaderLocal(ctx context.Context, roleArg string) error {
 // backup and monitor hosts are rejected loud. roleArg (empty -> detect from
 // hostname) is self-identification only, as in LeaderLocal.
 func (o *Ops) RedundancyCoordinated(ctx context.Context, roleArg string) error {
-	if o.skipIfStandalone("verify redundancy") {
+	if o.skipIfStandalone("redundancy-test") {
 		return nil
 	}
 	role, err := o.LocalRole(roleArg)
@@ -134,7 +212,7 @@ func (o *Ops) RedundancyCoordinated(ctx context.Context, roleArg string) error {
 	}
 	if role != config.Primary {
 		return fmt.Errorf("verify redundancy drives the whole redundancy group from the primary node; "+
-			"this host is the %s node -- run it on the primary host", roleName(role))
+			"this host is the %s node -- run it on the primary host", role.Word())
 	}
 
 	local, err := o.showRD(ctx, role)
@@ -256,16 +334,4 @@ func shortHost(h string) string {
 		return h[:i]
 	}
 	return h
-}
-
-// roleName is the long-form role name for actionable HA guard errors.
-func roleName(r config.Role) string {
-	switch r {
-	case config.Backup:
-		return "backup"
-	case config.Monitor:
-		return "monitor"
-	default:
-		return "primary"
-	}
 }

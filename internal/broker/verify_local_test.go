@@ -22,12 +22,12 @@ import (
 // detection, the mate addresses the SEMP channel needs, and admin credentials.
 func localCfg(redundancy string) *config.Config {
 	return &config.Config{
-		Redundancy: redundancy,
-		Admin:      config.Admin{User: "admin", Pass: "adminpw"},
-		Nodes: config.Nodes{
-			Primary: config.Node{Name: "pri-host", IP: "10.0.0.11"},
-			Backup:  config.Node{Name: "bkp-host", IP: "10.0.0.12"},
-			Monitor: config.Node{Name: "mon-host", IP: "10.0.0.13"},
+		SEMP: config.SEMP{AdminPass: "adminpw"},
+		Redundancy: config.Redundancy{
+			Enabled: redundancy,
+			Primary: config.Node{Name: "pri-host", Addr: "10.0.0.11"},
+			Backup:  config.Node{Name: "bkp-host", Addr: "10.0.0.12"},
+			Monitor: config.Node{Name: "mon-host", Addr: "10.0.0.13"},
 		},
 	}
 }
@@ -112,7 +112,7 @@ func TestLocalRole(t *testing.T) {
 		{"", "PRI-HOST", config.Primary, false},         // mixed case: host upper, config lower
 	}
 	for _, tc := range cases {
-		o, _ := newLocalOps(t, "yes", tc.host, &fakeTransport{})
+		o, _ := newLocalOps(t, "true", tc.host, &fakeTransport{})
 		got, err := o.LocalRole(tc.arg)
 		if tc.wantErr {
 			if err == nil {
@@ -131,8 +131,8 @@ func TestLocalRole(t *testing.T) {
 // (hostMatches folds both the full-string and short-name compares, not just
 // one side of one of them).
 func TestLocalRoleCaseInsensitiveConfigUpper(t *testing.T) {
-	cfg := localCfg("yes")
-	cfg.Nodes.Primary.Name = "PRI-HOST"
+	cfg := localCfg("true")
+	cfg.Redundancy.Primary.Name = "PRI-HOST"
 	o, _ := newTestOps(t, cfg, &fakeTransport{})
 	o.Hostname = func() (string, error) { return "pri-host", nil }
 	got, err := o.LocalRole("")
@@ -145,10 +145,10 @@ func TestLocalRoleCaseInsensitiveConfigUpper(t *testing.T) {
 // entries sharing the same configured name must fail loud, naming both matched
 // roles, rather than silently returning whichever the table lists first.
 func TestLocalRoleAmbiguousHostname(t *testing.T) {
-	cfg := localCfg("yes")
-	cfg.Nodes.Backup.Name = cfg.Nodes.Primary.Name // collision: same name configured for two roles
+	cfg := localCfg("true")
+	cfg.Redundancy.Backup.Name = cfg.Redundancy.Primary.Name // collision: same name configured for two roles
 	o, _ := newTestOps(t, cfg, &fakeTransport{})
-	o.Hostname = func() (string, error) { return cfg.Nodes.Primary.Name, nil }
+	o.Hostname = func() (string, error) { return cfg.Redundancy.Primary.Name, nil }
 	_, err := o.LocalRole("")
 	if err == nil {
 		t.Fatal("LocalRole should fail loud when the hostname matches more than one configured role")
@@ -162,13 +162,133 @@ func TestLocalRoleAmbiguousHostname(t *testing.T) {
 // role argument must win and skip detection entirely, even when the node table
 // is ambiguous enough that detection alone would fail.
 func TestLocalRoleExplicitArgSkipsAmbiguityCheck(t *testing.T) {
-	cfg := localCfg("yes")
-	cfg.Nodes.Backup.Name = cfg.Nodes.Primary.Name
+	cfg := localCfg("true")
+	cfg.Redundancy.Backup.Name = cfg.Redundancy.Primary.Name
 	o, _ := newTestOps(t, cfg, &fakeTransport{})
-	o.Hostname = func() (string, error) { return cfg.Nodes.Primary.Name, nil }
+	o.Hostname = func() (string, error) { return cfg.Redundancy.Primary.Name, nil }
 	got, err := o.LocalRole("backup")
 	if err != nil || got != config.Backup {
 		t.Errorf("LocalRole explicit arg over an ambiguous table = %q,%v want backup,nil", got, err)
+	}
+}
+
+// --- DetectRole: the address pass ------------------------------------------
+//
+// A name cannot cover every host. A cloud instance reports something like
+// "ip-10-0-0-12" while the env file names the broker "bkp-host", so the routername and
+// the OS hostname are legitimately unrelated and the address is the only thing both
+// ends agree on. These pin the second pass, and that it stays second.
+
+// withAddrs is an Ops whose hostname matches nothing in the node table, carrying the
+// given interface addresses.
+func withAddrs(t *testing.T, host string, addrs ...string) *Ops {
+	t.Helper()
+	o, _ := newLocalOps(t, "true", host, &fakeTransport{})
+	set := make(map[string]bool, len(addrs))
+	for _, a := range addrs {
+		set[a] = true
+	}
+	o.LocalAddrs = func() (map[string]bool, error) { return set, nil }
+	return o
+}
+
+func TestDetectRoleByAddress(t *testing.T) {
+	o := withAddrs(t, "ip-10-0-0-12", "127.0.0.1", "10.0.0.12")
+	role, how, err := o.DetectRole()
+	if err != nil || role != config.Backup {
+		t.Fatalf("DetectRole = %q,%v want backup,nil -- the address is the only match", role, err)
+	}
+	if !strings.Contains(how, "address") || !strings.Contains(how, "10.0.0.12") {
+		t.Errorf("how = %q, want it to say the match was by address, and which one", how)
+	}
+}
+
+// TestDetectRoleNameBeatsAddress: a configured name always wins. The name is what the
+// broker is called; an address can be shared by more than one interface, and a host
+// carrying the backup's address while named after the primary is a misconfiguration to
+// surface elsewhere -- not a reason to deploy the backup here.
+func TestDetectRoleNameBeatsAddress(t *testing.T) {
+	o := withAddrs(t, "pri-host", "10.0.0.12") // named primary, numbered backup
+	role, how, err := o.DetectRole()
+	if err != nil || role != config.Primary {
+		t.Fatalf("DetectRole = %q,%v want primary,nil -- the name pass runs first", role, err)
+	}
+	if !strings.Contains(how, "hostname") {
+		t.Errorf("how = %q, want it to say the match was by hostname", how)
+	}
+}
+
+// TestDetectRoleAmbiguousAddress is the address half of the ambiguity guard: two node
+// entries sharing an address must fail loud rather than return whichever comes first.
+func TestDetectRoleAmbiguousAddress(t *testing.T) {
+	o, _ := newLocalOps(t, "true", "stranger", &fakeTransport{})
+	o.Cfg.Redundancy.Backup.Addr = o.Cfg.Redundancy.Primary.Addr
+	o.LocalAddrs = func() (map[string]bool, error) {
+		return map[string]bool{o.Cfg.Redundancy.Primary.Addr: true}, nil
+	}
+	_, _, err := o.DetectRole()
+	if err == nil {
+		t.Fatal("an address configured for two roles must fail loud")
+	}
+	for _, want := range []string{"primary", "backup", "address"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("ambiguous-address error must name %q, got: %v", want, err)
+		}
+	}
+}
+
+// TestDetectRoleNoMatchNamesBothPasses: the error is the operator's whole instruction,
+// so it has to say that BOTH lookups were tried -- otherwise someone adds an addr to an
+// env file that already has one and wonders why nothing changed.
+func TestDetectRoleNoMatchNamesBothPasses(t *testing.T) {
+	o := withAddrs(t, "stranger", "192.168.1.5")
+	_, _, err := o.DetectRole()
+	if err == nil {
+		t.Fatal("a host matching neither a name nor an address must fail loud")
+	}
+	for _, want := range []string{"stranger", "redundancy.*.name", "redundancy.*.addr", "primary|backup|monitor"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("no-match error must contain %q, got: %v", want, err)
+		}
+	}
+}
+
+// TestDetectRoleAddrsError: the interface read can fail (a locked-down container, a
+// permission-restricted host). That must surface as its own error naming the hostname
+// that did not match, not as a bare "no match" that sends the operator looking at the
+// node table.
+func TestDetectRoleAddrsError(t *testing.T) {
+	o, _ := newLocalOps(t, "true", "stranger", &fakeTransport{})
+	o.LocalAddrs = func() (map[string]bool, error) { return nil, errors.New("no interfaces") }
+	_, _, err := o.DetectRole()
+	if err == nil || !strings.Contains(err.Error(), "no interfaces") || !strings.Contains(err.Error(), "stranger") {
+		t.Errorf("DetectRole addr-read error = %v, want it to carry both the cause and the hostname", err)
+	}
+}
+
+// TestDefaultLocalAddrs covers the unseamed path: the real interface list must come back
+// as BARE addresses, since that is what an env file carries. net.InterfaceAddrs returns
+// CIDRs ("10.0.0.11/24"), and leaving the mask on would make every addr match fail with
+// nothing to show for it.
+func TestDefaultLocalAddrs(t *testing.T) {
+	addrs, err := defaultLocalAddrs()
+	if err != nil {
+		t.Skipf("interface enumeration unavailable here: %v", err)
+	}
+	for a := range addrs {
+		if strings.Contains(a, "/") {
+			t.Errorf("defaultLocalAddrs returned %q, want the bare address without the prefix length", a)
+		}
+	}
+}
+
+// TestLocalAddrsFallsBackToTheDefault closes the seam's nil branch: an Ops built without
+// one still reads the machine, which is the production path.
+func TestLocalAddrsFallsBackToTheDefault(t *testing.T) {
+	o, _ := newTestOps(t, localCfg("true"), &fakeTransport{})
+	o.LocalAddrs = nil
+	if _, err := o.localAddrs(); err != nil {
+		t.Skipf("interface enumeration unavailable here: %v", err)
 	}
 }
 
@@ -176,7 +296,7 @@ func TestLocalRoleExplicitArgSkipsAmbiguityCheck(t *testing.T) {
 
 func TestLeaderLocalStandaloneSkips(t *testing.T) {
 	ft := &fakeTransport{}
-	o, _ := newLocalOps(t, "no", "pri-host", ft)
+	o, _ := newLocalOps(t, "false", "pri-host", ft)
 	if err := o.LeaderLocal(context.Background(), ""); err != nil {
 		t.Fatalf("LeaderLocal standalone error: %v", err)
 	}
@@ -188,7 +308,7 @@ func TestLeaderLocalStandaloneSkips(t *testing.T) {
 func TestLeaderLocalRejectsNonPrimary(t *testing.T) {
 	for _, host := range []string{"bkp-host", "mon-host"} {
 		ft := &fakeTransport{}
-		o, _ := newLocalOps(t, "yes", host, ft)
+		o, _ := newLocalOps(t, "true", host, ft)
 		if err := o.LeaderLocal(context.Background(), ""); err == nil {
 			t.Errorf("LeaderLocal on %q should fail loud", host)
 		}
@@ -198,7 +318,7 @@ func TestLeaderLocalRejectsNonPrimary(t *testing.T) {
 	}
 	// Explicit backup arg is rejected the same way.
 	ft := &fakeTransport{}
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	if err := o.LeaderLocal(context.Background(), "backup"); err == nil {
 		t.Error("LeaderLocal with explicit backup arg should fail loud")
 	}
@@ -217,7 +337,7 @@ func TestLeaderLocalSuccess(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, buf := newLocalOps(t, "yes", "pri-host", ft)
+	o, buf := newLocalOps(t, "true", "pri-host", ft)
 	if err := o.LeaderLocal(context.Background(), ""); err != nil {
 		t.Fatalf("LeaderLocal error: %v", err)
 	}
@@ -249,7 +369,7 @@ func TestLeaderLocalRevertsMateFirst(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	if err := o.LeaderLocal(context.Background(), ""); err != nil {
 		t.Fatalf("LeaderLocal error: %v", err)
 	}
@@ -284,7 +404,7 @@ func TestLeaderLocalMateUnreachableWarnsAndContinues(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	var logs []string
 	o.Log = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 	if err := o.LeaderLocal(context.Background(), ""); err != nil {
@@ -314,7 +434,7 @@ func TestLeaderLocalMateRPCErrorFails(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	err := o.LeaderLocal(context.Background(), "")
 	if err == nil || !strings.Contains(err.Error(), "rejected the revert-activity") {
 		t.Errorf("LeaderLocal mate-RPC-fail err = %v, want the rejected-RPC error", err)
@@ -339,7 +459,7 @@ func TestLeaderLocalTimeoutDumpsDetail(t *testing.T) {
 		}
 		return []byte(down), nil
 	}}
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	o.PollAttempts = 2
 	if err := o.LeaderLocal(context.Background(), ""); err == nil {
 		t.Error("LeaderLocal should time out when redundancy never recovers")
@@ -353,7 +473,7 @@ func TestLeaderLocalTimeoutDumpsDetail(t *testing.T) {
 
 func TestRedundancyCoordinatedStandaloneSkips(t *testing.T) {
 	ft := &fakeTransport{}
-	o, _ := newLocalOps(t, "no", "pri-host", ft)
+	o, _ := newLocalOps(t, "false", "pri-host", ft)
 	if err := o.RedundancyCoordinated(context.Background(), ""); err != nil {
 		t.Fatalf("RedundancyCoordinated standalone error: %v", err)
 	}
@@ -365,7 +485,7 @@ func TestRedundancyCoordinatedStandaloneSkips(t *testing.T) {
 func TestRedundancyCoordinatedRejectsNonPrimary(t *testing.T) {
 	for _, host := range []string{"bkp-host", "mon-host"} {
 		ft := &fakeTransport{}
-		o, _ := newLocalOps(t, "yes", host, ft)
+		o, _ := newLocalOps(t, "true", host, ft)
 		if err := o.RedundancyCoordinated(context.Background(), ""); err == nil {
 			t.Errorf("RedundancyCoordinated on %q should fail loud", host)
 		}
@@ -375,14 +495,14 @@ func TestRedundancyCoordinatedRejectsNonPrimary(t *testing.T) {
 	}
 	// Explicit backup arg is rejected the same way.
 	ft := &fakeTransport{}
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	if err := o.RedundancyCoordinated(context.Background(), "backup"); err == nil {
 		t.Error("RedundancyCoordinated with explicit backup arg should fail loud")
 	}
 }
 
 func TestRedundancyCoordinatedBadRoleArg(t *testing.T) {
-	o, _ := newLocalOps(t, "yes", "pri-host", &fakeTransport{})
+	o, _ := newLocalOps(t, "true", "pri-host", &fakeTransport{})
 	if err := o.RedundancyCoordinated(context.Background(), "nonsense"); err == nil {
 		t.Error("RedundancyCoordinated should propagate a bad explicit role arg")
 	}
@@ -395,7 +515,7 @@ func TestRedundancyCoordinatedInitialShowError(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	if err := o.RedundancyCoordinated(context.Background(), ""); err == nil {
 		t.Error("RedundancyCoordinated should propagate an initial show redundancy error")
 	}
@@ -404,7 +524,7 @@ func TestRedundancyCoordinatedInitialShowError(t *testing.T) {
 func TestRedundancyCoordinatedUnhealthyPrimary(t *testing.T) {
 	seq := []string{rd("Primary", "Enabled", "Down", "Local Active")} // active but redundancy Down
 	ft, _ := seqTransport(seq)
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	if err := o.RedundancyCoordinated(context.Background(), ""); err == nil {
 		t.Error("RedundancyCoordinated should fail loud when redundancy is not healthy")
 	}
@@ -417,16 +537,16 @@ func TestRedundancyCoordinatedUnhealthyPrimary(t *testing.T) {
 }
 
 // TestRedundancyCoordinatedMissingMateIP pins the loud refusal when the config
-// cannot address the mate: the error names nodes.backup.ip and nothing has been
+// cannot address the mate: the error names redundancy.backup.addr and nothing has been
 // released.
 func TestRedundancyCoordinatedMissingMateIP(t *testing.T) {
 	seq := []string{rd("Primary", "Enabled", "Up", "Local Active")}
 	ft, _ := seqTransport(seq)
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
-	o.Cfg.Nodes.Backup.IP = ""
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
+	o.Cfg.Redundancy.Backup.Addr = ""
 	err := o.RedundancyCoordinated(context.Background(), "")
-	if err == nil || !strings.Contains(err.Error(), "nodes.backup.ip") {
-		t.Errorf("RedundancyCoordinated missing-IP err = %v, want it to name nodes.backup.ip", err)
+	if err == nil || !strings.Contains(err.Error(), "redundancy.backup.addr") {
+		t.Errorf("RedundancyCoordinated missing-IP err = %v, want it to name redundancy.backup.addr", err)
 	}
 	if ft.hasUpload(cliScriptPath("release")) {
 		t.Error("RedundancyCoordinated must not release activity without a mate address")
@@ -447,7 +567,7 @@ func TestRedundancyCoordinatedPreflightUnreachable(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	err := o.RedundancyCoordinated(context.Background(), "")
 	if err == nil || !strings.Contains(err.Error(), "mate SEMP preflight") {
 		t.Errorf("RedundancyCoordinated preflight err = %v, want the preflight error", err)
@@ -468,7 +588,7 @@ func TestRedundancyCoordinatedSuccess(t *testing.T) {
 		rd("Primary", "Enabled", "Up", "Local Active"),           // reverted back
 	}
 	ft, consumed := seqTransport(seq)
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	// The mate channel prefers TLS only when the broker has a server certificate
 	// to serve it with, so this end-to-end flow states that precondition to assert
 	// the https URLs below; without it the same run is correctly plaintext.
@@ -519,7 +639,7 @@ func TestRedundancyCoordinatedStandbyPrimaryStillReverts(t *testing.T) {
 		rd("Primary", "Enabled", "Up", "Local Active"), // reverted back
 	}
 	ft, consumed := seqTransport(seq)
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	if err := o.RedundancyCoordinated(context.Background(), "primary"); err != nil {
 		t.Fatalf("RedundancyCoordinated standby-start error: %v", err)
 	}
@@ -550,7 +670,7 @@ func TestRedundancyCoordinatedNeverTargetsBackupRole(t *testing.T) {
 		rd("Primary", "Enabled", "Up", "Local Active"),
 	}
 	ft, _ := seqTransport(seq)
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	if err := o.RedundancyCoordinated(context.Background(), ""); err != nil {
 		t.Fatalf("RedundancyCoordinated error: %v", err)
 	}
@@ -574,7 +694,7 @@ func TestRedundancyCoordinatedNeverTargetsBackupRole(t *testing.T) {
 func TestRedundancyCoordinatedNeitherActive(t *testing.T) {
 	seq := []string{rd("Primary", "Enabled", "Up", "Nothing Active")} // healthy but nobody active
 	ft, _ := seqTransport(seq)
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	err := o.RedundancyCoordinated(context.Background(), "")
 	if err == nil || !strings.Contains(err.Error(), "appears to be active") {
 		t.Errorf("RedundancyCoordinated neither-active err = %v, want the neither-active error", err)
@@ -600,7 +720,7 @@ func TestRedundancyCoordinatedMateRPCNotOK(t *testing.T) {
 		}
 		return base(role, argv, in)
 	}
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	err := o.RedundancyCoordinated(context.Background(), "")
 	if err == nil || !strings.Contains(err.Error(), "rejected the revert-activity") {
 		t.Errorf("RedundancyCoordinated RPC-not-ok err = %v, want the rejected-RPC error", err)
@@ -616,7 +736,7 @@ func TestRedundancyCoordinatedRevertTimeout(t *testing.T) {
 		rd("Primary", "Enabled", "Up", "Mate Active"), // re-read; last entry repeats forever
 	}
 	ft, _ := seqTransport(seq)
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	o.PollAttempts = 2
 	if err := o.RedundancyCoordinated(context.Background(), ""); err == nil {
 		t.Error("RedundancyCoordinated should time out when activity never returns to the primary")
@@ -641,7 +761,7 @@ func TestRedundancyCoordinatedReleaseError(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	if err := o.RedundancyCoordinated(context.Background(), ""); err == nil {
 		t.Error("RedundancyCoordinated should return the release RunCLI error")
 	}
@@ -662,7 +782,7 @@ func TestRedundancyCoordinatedReleaseError(t *testing.T) {
 func TestRedundancyCoordinatedReleasedTimeout(t *testing.T) {
 	seq := []string{rd("Primary", "Enabled", "Up", "Local Active")} // never Enabled-Released
 	ft, _ := seqTransport(seq)
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	o.PollAttempts = 2
 	if err := o.RedundancyCoordinated(context.Background(), ""); err == nil {
 		t.Error("RedundancyCoordinated should time out waiting to be released")
@@ -688,7 +808,7 @@ func TestRedundancyCoordinatedNoReleaseError(t *testing.T) {
 		}
 		return base(role, argv, in)
 	}
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	if err := o.RedundancyCoordinated(context.Background(), ""); err == nil {
 		t.Error("RedundancyCoordinated should return the no-release RunCLI error")
 	}
@@ -703,7 +823,7 @@ func TestRedundancyCoordinatedUnreleasedTimeout(t *testing.T) {
 		rd("Primary", "Enabled-Released", "Down", "Mate Active"), // stays released forever
 	}
 	ft, _ := seqTransport(seq)
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	o.PollAttempts = 2
 	if err := o.RedundancyCoordinated(context.Background(), ""); err == nil {
 		t.Error("RedundancyCoordinated should time out waiting to be un-released")
@@ -717,21 +837,8 @@ func TestRedundancyCoordinatedUnreleasedTimeout(t *testing.T) {
 
 // --- pure / detection arms -------------------------------------------------
 
-func TestRoleName(t *testing.T) {
-	cases := map[config.Role]string{
-		config.Primary: "primary",
-		config.Backup:  "backup",
-		config.Monitor: "monitor",
-	}
-	for r, want := range cases {
-		if got := roleName(r); got != want {
-			t.Errorf("roleName(%v) = %q, want %q", r, got, want)
-		}
-	}
-}
-
 func TestLocalRoleDefaultHostname(t *testing.T) {
-	o, _ := newTestOps(t, localCfg("yes"), &fakeTransport{})
+	o, _ := newTestOps(t, localCfg("true"), &fakeTransport{})
 	o.Hostname = nil // force the os.Hostname default
 	// The real host name will not match the pri/bkp/mon table, so detection fails loud.
 	if _, err := o.LocalRole(""); err == nil {
@@ -746,7 +853,7 @@ func TestLocalRoleDefaultHostname(t *testing.T) {
 // rather than falling through to the node-table match against a garbage/empty
 // host.
 func TestLocalRoleHostnameError(t *testing.T) {
-	o, _ := newTestOps(t, localCfg("yes"), &fakeTransport{})
+	o, _ := newTestOps(t, localCfg("true"), &fakeTransport{})
 	o.Hostname = func() (string, error) { return "", errors.New("boom") }
 	_, err := o.LocalRole("")
 	if err == nil || !strings.Contains(err.Error(), "detect node role") {
@@ -761,7 +868,7 @@ func TestLocalRoleHostnameError(t *testing.T) {
 // even runs.
 func TestLeaderLocalBadRoleArg(t *testing.T) {
 	ft := &fakeTransport{}
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	if err := o.LeaderLocal(context.Background(), "nonsense"); err == nil {
 		t.Error("LeaderLocal should propagate a bad explicit role arg")
 	}
@@ -788,7 +895,7 @@ func TestLeaderLocalPollCondError(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newLocalOps(t, "yes", "pri-host", ft)
+	o, _ := newLocalOps(t, "true", "pri-host", ft)
 	if err := o.LeaderLocal(context.Background(), ""); err == nil {
 		t.Error("LeaderLocal should return the poll condition error")
 	}
@@ -813,7 +920,7 @@ func TestLeaderLocalAssertLeaderError(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, buf := newLocalOps(t, "yes", "pri-host", ft)
+	o, buf := newLocalOps(t, "true", "pri-host", ft)
 	if err := o.LeaderLocal(context.Background(), ""); err == nil {
 		t.Error("LeaderLocal should return the assert-leader error")
 	}
@@ -822,7 +929,7 @@ func TestLeaderLocalAssertLeaderError(t *testing.T) {
 	}
 }
 
-// --- exported-for-itest surface ----------------------------------------------
+// --- exported surface ---------------------------------------------------------
 
 // TestMateActivityStateReadsTheMateColumn covers the parser a live probe leans on
 // before it sends anything: MateActivityState must say "the mate holds activity"

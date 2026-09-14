@@ -10,49 +10,82 @@ import (
 
 // commandAbbrev is the approved short form of every command NAME.
 //
-// Keyed by name, not by path, and applied by a tree walk: a word means the same
-// thing wherever it appears, so `broker` is `br` under every verb that takes it and
-// `operator` is `op` under every verb that takes it. That is the property being
-// bought -- one abbreviation per concept, not one per command path. The charset,
-// the shorter-than rule and the one-claim-per-word rule are abbrev's, shared with
-// the role and --platform sets so a short form means the same kind of thing
-// whichever of the four the reader has met before.
+// Keyed by name, not by path, and applied by a tree walk: a word means the same thing
+// wherever it appears, so `deploy` is `dp` under both nouns and `validate` is `vld` at all
+// three places it appears. That is the property being bought -- one abbreviation per
+// concept, not one per command path. The charset, the shorter-than rule and the
+// one-claim-per-word rule are abbrev's, shared with the role and --platform sets so a short
+// form means the same kind of thing whichever of the four the reader has met before.
 //
-// `rollout`/`rollback` were considered as names and rejected; the verbs that
-// replaced them (`deploy all`, `remove all`) inherit `dp`/`rm` from their verb, so
-// `dp all` and `rm all` already work. `delete` is deliberately NOT a short form of
-// `remove`: one removal word, everywhere.
+// The tree is noun-first, which is what makes the two-letter verbs safe: `broker` and
+// `operator` are groups that run nothing, so `br` and `op` alone destroy nothing and `rm`
+// only reaches a removal with a noun already spelled in front of it. `delete` is
+// deliberately NOT a short form of `remove`: one removal word, everywhere.
 //
-// `start` and `stop` are declared with no short form rather than left out, so the
-// absence is data -- it prints in docs/abbreviation.md and TestStartStopHaveNoAlias
-// pins it -- instead of something a reader has to notice is missing.
+// A word with NO short form is DECLARED rather than left out, so the absence is data -- it
+// prints in docs/abbreviation.md and a test can pin it -- instead of something a reader has
+// to notice is missing. There are two reasons a word has none: ambiguity (`start`/`stop`,
+// where any two-letter form collides with each other or with `status`, and that is the one
+// slip that costs an outage), or a name already short enough that an abbreviation would
+// only be a second thing to remember.
 var commandAbbrev = abbrev.New("command", []abbrev.Entry{
-	// verbs
-	{Canonical: "check", Short: []string{"ck"}},
-	{Canonical: "config", Short: []string{"cfg"}},
-	{Canonical: "convert", Short: []string{"cv"}},
-	{Canonical: "copy", Short: []string{"cp"}},
-	{Canonical: "deploy", Short: []string{"dp"}},
-	{Canonical: "diagnostics", Short: []string{"diag"}},
+	// nouns -- the top level, and the reason the verbs below are safe to shorten
+	{Canonical: "broker", Short: []string{"br"},
+		Note: "the noun runs nothing on its own, so `br` alone cannot act"},
+	{Canonical: "operator", Short: []string{"op"},
+		Note: "same: `op` alone prints what the operator can be asked to do"},
 	{Canonical: "examples", Short: []string{"eg"},
-		Note: "the one noun at the top level: it emits an env file rather than acting on a deployment"},
-	{Canonical: "generate", Short: []string{"gen"}},
-	{Canonical: "logs", Short: []string{"lg"}},
-	{Canonical: "prepare", Short: []string{"pre"}},
-	{Canonical: "remove", Short: []string{"rm"},
-		Note: "safe to hand out because `remove` takes a noun before it does anything: `rm` alone prints help"},
-	{Canonical: "restart", Short: []string{"rs"}},
-	{Canonical: "shell", Short: []string{"sh"}},
-	{Canonical: "start",
-		Note: "no short form: any two-letter form is ambiguous with `stop` and `status`, and that is the one slip that costs an outage"},
-	{Canonical: "status", Short: []string{"sts"}},
-	{Canonical: "stop",
-		Note: "no short form, for the same reason as `start`"},
+		Note: "emits an env file rather than acting on a deployment, so it sits at the top level"},
+	{Canonical: "convert", Short: []string{"cv"}},
 	{Canonical: "version", Short: []string{"ver"}},
 
-	// nouns -- these ride along under every verb that takes them
-	{Canonical: "broker", Short: []string{"br"}, Note: "works under every verb that takes a broker"},
-	{Canonical: "operator", Short: []string{"op"}, Note: "works under every verb that takes the operator"},
+	// verbs -- these ride under whichever noun takes them
+	{Canonical: "validate", Short: []string{"vld"},
+		Note: "works at the top level and under both nouns: the whole env file, or either half"},
+	{Canonical: "deploy", Short: []string{"dp"}},
+	{Canonical: "remove", Short: []string{"rm"},
+		Note: "safe because the noun comes first: `rm` alone is not a command"},
+	{Canonical: "generate", Short: []string{"gen"}},
+	{Canonical: "restart", Short: []string{"rs"}},
+	{Canonical: "status", Short: []string{"sts"}},
+	{Canonical: "logs", Short: []string{"lg"}},
+	{Canonical: "shell", Short: []string{"sh"}},
+	{Canonical: "copy", Short: []string{"cp"}},
+	{Canonical: "configure", Short: []string{"cfg"}},
+	{Canonical: "perform", Short: []string{"pf"}},
+	{Canonical: "start",
+		Note: "no short form: any two-letter form is ambiguous with `stop` and `status`, and that is the one slip that costs an outage"},
+	{Canonical: "stop",
+		Note: "no short form, for the same reason as `start`"},
+	{Canonical: "cli",
+		Note: "no short form: three letters already, and `cl` would not read as anything"},
+
+	// the two leaves short enough to earn a form of their own
+	{Canonical: "gather-diagnostics", Short: []string{"gd"}},
+	// `dr` is an INITIALISM of a hyphenated leaf, the same shape as gd, not a synonym
+	// for a different word -- which is why `replication` is not the canonical name here.
+	// It is also what the operator calls the feature.
+	{Canonical: "data-replication", Short: []string{"dr"}},
+
+	// the remaining leaves are spelled out. Each is rare enough that a short form would
+	// be a second name to learn rather than a saving, and completion already types them.
+	{Canonical: "server-certs", Note: "no short form: completion types it, and `sc` reads as nothing"},
+	{Canonical: "domain-certs", Note: "no short form, for the same reason as server-certs"},
+	{Canonical: "product-keys", Note: "no short form, for the same reason as server-certs"},
+	{Canonical: "default-vpn", Note: "no short form: `dv` would not distinguish it from default-users"},
+	{Canonical: "default-users", Note: "no short form, for the same reason as default-vpn"},
+	{Canonical: "assert-leader", Note: "no short form: rare, and run deliberately"},
+	{Canonical: "redundancy-test", Note: "no short form: invasive, so spelling it out is a feature"},
+	{Canonical: "semp-login-check", Note: "no short form: rare, and run deliberately"},
+	{Canonical: "cli-script", Note: "no short form: `cs` would not distinguish it from shell-script"},
+	{Canonical: "shell-script", Note: "no short form: `sh` is already claimed by `shell`"},
+	{Canonical: "export-config", Note: "no short form: completion types it, and `ec` reads as nothing"},
+	{Canonical: "import-config",
+		Note: "no short form: it tears down and rebuilds a message-VPN, losing the messages " +
+			"spooled in its queues, so spelling it out is a feature -- the same reason " +
+			"redundancy-test has none"},
+	{Canonical: "from", Note: "no short form: it is already one syllable and reads as a direction"},
+	{Canonical: "into", Note: "no short form, for the same reason as from"},
 })
 
 // applyAliases attaches every approved short form to the tree, and panics if one

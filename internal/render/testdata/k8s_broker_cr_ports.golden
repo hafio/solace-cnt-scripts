@@ -15,6 +15,7 @@ spec:
   adminCredentialsSecret: solace-admin-secret
   monitoringCredentialsSecret: solace-admin-secret
   redundancy: true
+  preSharedAuthKeySecret: solace-admin-secret
   updateStrategy: automatedRolling
   podDisruptionBudgetForHA: true
   systemScaling:

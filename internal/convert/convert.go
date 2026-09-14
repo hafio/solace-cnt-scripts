@@ -185,10 +185,39 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 	// The warning has to be appended outside the emit branch: the case worth
 	// telling the user about is precisely the one that emits nothing.
 	r, redWarns := redundancy(v, p)
-	if r != "" {
-		d.kv("redundancy", r)
-	}
 	warns = append(warns, redWarns...)
+	// One block: the on/off switch, the node table, and the key the group authenticates
+	// with. Emitted here rather than split across the document because that is the order
+	// the schema reads in, and a converted file should look like one somebody wrote.
+	nodeVars := []string{
+		"SOLBK_NODE_PRI_NAME", "SOLBK_NODE_PRI_IP", "SOLBK_NODE_BKP_NAME", "SOLBK_NODE_BKP_IP",
+		"SOLBK_NODE_MON_NAME", "SOLBK_NODE_MON_IP", "SOLBK_REDUNDANCY_PSK",
+	}
+	anyNode := false
+	for _, name := range nodeVars {
+		if v.s(name) != "" {
+			anyNode = true
+			break
+		}
+	}
+	if r != "" || anyNode {
+		d.section("redundancy", func(d *doc) {
+			d.kv("enabled", r)
+			d.block("primary", func(d *doc) {
+				d.kv("name", v.s("SOLBK_NODE_PRI_NAME"))
+				d.kv("addr", v.s("SOLBK_NODE_PRI_IP"))
+			})
+			d.block("backup", func(d *doc) {
+				d.kv("name", v.s("SOLBK_NODE_BKP_NAME"))
+				d.kv("addr", v.s("SOLBK_NODE_BKP_IP"))
+			})
+			d.block("monitor", func(d *doc) {
+				d.kv("name", v.s("SOLBK_NODE_MON_NAME"))
+				d.kv("addr", v.s("SOLBK_NODE_MON_IP"))
+			})
+			d.kv("psk", v.s("SOLBK_REDUNDANCY_PSK"))
+		})
+	}
 	// SOLBK_TZ was the container timezone; the YAML schema has one cross-platform
 	// key, so it lands at the top level for every platform.
 	d.kv("timezone", v.s("SOLBK_TZ"))
@@ -206,20 +235,18 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 	// the schema requires the level explicitly, and guessing "admin" here would hand
 	// out rights the source never granted.
 	converted := 0
-	d.section("admin", func(d *doc) {
-		// SOLBK_ADM_USER is read on every platform so it counts as mapped rather than
-		// resurfacing in the unmapped list, but it is emitted only for the container
-		// platforms: on Kubernetes the operator reads the fixed username_admin_password
-		// key, so validateK8s refuses any other admin.user and carrying the value over
-		// would convert a working bash file into YAML that will not load.
-		if u := v.s("SOLBK_ADM_USER"); p.IsContainer() {
-			d.kv("user", u)
-		} else if u != "" && u != "admin" {
-			warns = append(warns, `SOLBK_ADM_USER="`+u+`" was dropped: on Kubernetes the operator reads the `+
-				`fixed username_admin_password key out of the credentials Secret, so the broker admin user `+
-				`is always "admin"`)
+	d.section("semp", func(d *doc) {
+		// SOLBK_ADM_USER is read so it counts as mapped rather than resurfacing in the
+		// unmapped list, but it is never emitted: the schema has no username field. The
+		// broker's admin user is `admin` on every platform -- Kubernetes always required
+		// it, since the operator reads the fixed username_admin_password key, and the
+		// container platforms no longer diverge. A source that named something else gets
+		// told, because that IS a behaviour change for the deployment it describes.
+		if u := v.s("SOLBK_ADM_USER"); u != "" && u != "admin" {
+			warns = append(warns, `SOLBK_ADM_USER="`+u+`" was dropped: the broker admin user is now `+
+				`always "admin". Any script or client logging in as "`+u+`" must be updated`)
 		}
-		d.kv("pass", v.s("SOLBK_ADM_PASS"))
+		d.kv("adminPass", v.s("SOLBK_ADM_PASS"))
 		d.kv("monitorPass", v.s("SOLBK_MON_PASS"))
 		d.block("additionalUsers", func(d *doc) {
 			for i, entry := range v.l("SOLBK_USR_PASS") {
@@ -277,19 +304,24 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 		num(d, "maxGuaranteedMsgMB", "SOLBK_SCALING_MAXGMSSIZE")
 	})
 
-	// The schema keeps this block, but nothing in the binary reads it yet -- so a
-	// source that configured replication would otherwise convert into something that
-	// looks supported and silently does nothing.
-	if v.s("REPL_MATE") != "" || len(v.l("REPL_CONN_SSL")) > 0 || v.s("REPL_PSK") != "" {
-		warns = append(warns, "REPL_MATE/REPL_CONN_SSL/REPL_PSK were converted into the replication: block, "+
-			"but no command in this binary reads it yet -- configure data replication with "+
-			"solace-replication-generator.html or a `config exec-cli` script")
+	// The replication: block was rebuilt from scratch for `broker configure
+	// data-replication` and describes BOTH sites of a DR pair -- two sites keyed by
+	// virtual-router-name, their endpoints, how to reach each one, and which site each
+	// VPN is active at. None of that is derivable from three bash variables describing
+	// one mate, so carrying them over would emit a block that cannot validate.
+	//
+	// All three are read into locals FIRST, unconditionally. Reading is what marks a
+	// variable as mapped, and folding the reads into the `||` below would short-circuit
+	// past the last two whenever REPL_MATE is set -- landing them in the generic
+	// "no YAML equivalent, dropped" list instead of the warning that explains them.
+	// The warning names all three, since dropping a configured mate silently is exactly
+	// the case an operator must not miss.
+	replMate, replConnSSL, replPSK := v.s("REPL_MATE"), v.l("REPL_CONN_SSL"), v.s("REPL_PSK")
+	if replMate != "" || len(replConnSSL) > 0 || replPSK != "" {
+		warns = append(warns, "REPL_MATE/REPL_CONN_SSL/REPL_PSK were NOT carried over: the replication: "+
+			"block now describes both sites of the pair and needs values this file does not hold. "+
+			"Write it by hand -- see the replication: section of `solace-util examples --platform full`")
 	}
-	d.section("replication", func(d *doc) {
-		d.kv("mate", v.s("REPL_MATE"))
-		d.list("connSsl", v.l("REPL_CONN_SSL"))
-		d.kv("psk", v.s("REPL_PSK"))
-	})
 
 	// The broker section is platform-neutral: every platform applies these over
 	// the broker CLI after deployment, so it is written whatever the target is.
@@ -337,8 +369,8 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 			d.kv("serviceAccount", v.s("SOLBK_SVC_ACCOUNT"))
 			d.block("storage", func(d *doc) {
 				d.kv("class", v.s("SOLBK_STORAGECLASS"))
-				d.kv("msgNode", v.s("SOLBK_STORAGE_MSGNODE"))
-				d.kv("monNode", v.s("SOLBK_STORAGE_MONNODE"))
+				d.kv("msgNodeSize", v.s("SOLBK_STORAGE_MSGNODE"))
+				d.kv("monNodeSize", v.s("SOLBK_STORAGE_MONNODE"))
 			})
 			d.block("msgNode", func(d *doc) {
 				// cpu was removed, so carrying the value over would only fail
@@ -411,6 +443,17 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 			} else {
 				boolean(d, "rootless", "PODMAN_ROOTLESS")
 				d.kv("quadletDir", v.s("QUADLET_DIR"))
+				// podman.baseDir is mandatory in the YAML schema and has NO legacy
+				// equivalent -- the bash scripts had nowhere to put a tool-written
+				// file, because they never built the server-certificate bundle. So a
+				// value is emitted rather than left out: a converted file that cannot
+				// load would make `convert` produce something the operator then has to
+				// debug, which is not what a migration aid is for. It is called out in
+				// the warnings so the choice is visible rather than inherited.
+				d.kv("baseDir", "/opt/solace")
+				warns = append(warns, "podman.baseDir was set to /opt/solace: it is mandatory, it has no legacy "+
+					"equivalent, and it is where the server-certificate bundle (which contains the PRIVATE KEY) "+
+					"is written. Change it if that is not where you want a private key on this host")
 			}
 			d.block("network", func(d *doc) {
 				d.kv("mode", v.s("SOLBK_NETWORK_MODE"))
@@ -429,21 +472,6 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 			})
 		})
 
-		d.section("nodes", func(d *doc) {
-			d.block("primary", func(d *doc) {
-				d.kv("name", v.s("SOLBK_NODE_PRI_NAME"))
-				d.kv("ip", v.s("SOLBK_NODE_PRI_IP"))
-			})
-			d.block("backup", func(d *doc) {
-				d.kv("name", v.s("SOLBK_NODE_BKP_NAME"))
-				d.kv("ip", v.s("SOLBK_NODE_BKP_IP"))
-			})
-			d.block("monitor", func(d *doc) {
-				d.kv("name", v.s("SOLBK_NODE_MON_NAME"))
-				d.kv("ip", v.s("SOLBK_NODE_MON_IP"))
-			})
-			d.kv("psk", v.s("SOLBK_REDUNDANCY_PSK"))
-		})
 	}
 	return d.b.String(), warns
 }
@@ -486,13 +514,13 @@ func redundancy(v *vars, p config.Platform) (string, []string) {
 	case "":
 		if p.IsContainer() {
 			return "", []string{"SOLBK_REDUNDANCY is unset: the container bootstrap defaulted it to yes (HA), " +
-				"but this CLI defaults to standalone -- set `redundancy: yes` in the output if this host is part of a redundancy group"}
+				"but this CLI defaults to standalone -- set `redundancy.enabled: true` in the output if this host is part of a redundancy group"}
 		}
 		return "", nil
 	case "yes", "true":
-		return "yes", nil
+		return "true", nil
 	case "no", "false":
-		return "no", nil
+		return "false", nil
 	}
 	return raw, []string{fmt.Sprintf("SOLBK_REDUNDANCY=%q is neither yes/true nor no/false; copied as-is", raw)}
 }

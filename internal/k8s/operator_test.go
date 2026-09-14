@@ -72,7 +72,7 @@ func TestOperatorImage(t *testing.T) {
 func TestRenderOperatorSubstitutions(t *testing.T) {
 	t.Run("registry prefix, pull secret, broker-ns watch", func(t *testing.T) {
 		cfg := loadK8s(t) // sample: registry set, pullSecret set, watch defaults on
-		out, err := RenderOperator(cfg, "op-ns")
+		out, err := RenderOperator(cfg, "op-ns", watchNamespace(cfg))
 		if err != nil {
 			t.Fatalf("RenderOperator: %v", err)
 		}
@@ -80,7 +80,7 @@ func TestRenderOperatorSubstitutions(t *testing.T) {
 		mustContain(t, s, "  name: op-ns\n")
 		mustContain(t, s, "  namespace: op-ns\n")
 		mustContain(t, s, `value: "solace"`) // WATCH_NAMESPACE = broker ns
-		mustContain(t, s, "image: registry.example.com/docker.io/solace/pubsubplus-eventbroker-operator:1.4.0")
+		mustContain(t, s, "image: registry.example.com/solace/pubsubplus-eventbroker-operator:1.4.2")
 		mustContain(t, s, "cpu: 500m")
 		mustContain(t, s, "memory: 512Mi")
 		mustContain(t, s, "imagePullSecrets:")
@@ -101,12 +101,12 @@ func TestRenderOperatorSubstitutions(t *testing.T) {
 		cfg.K8s.ImagePullSecret = ""
 		cfg.K8s.Operator.WatchNamespaces = "team-a"
 		cfg.K8s.Operator.WatchBrokerNS = boolPtr(false)
-		out, err := RenderOperator(cfg, "op-ns")
+		out, err := RenderOperator(cfg, "op-ns", watchNamespace(cfg))
 		if err != nil {
 			t.Fatalf("RenderOperator: %v", err)
 		}
 		s := string(out)
-		mustContain(t, s, "image: docker.io/solace/pubsubplus-eventbroker-operator:1.4.0")
+		mustContain(t, s, "image: solace/pubsubplus-eventbroker-operator:1.4.2")
 		mustContain(t, s, `value: "team-a"`)
 		if strings.Contains(s, "imagePullSecrets:") {
 			t.Error("imagePullSecrets block must be omitted when no pull secret is configured")
@@ -115,6 +115,34 @@ func TestRenderOperatorSubstitutions(t *testing.T) {
 			t.Error("regcred reference must be omitted when no pull secret is configured")
 		}
 	})
+}
+
+// TestRenderOperatorHonoursThePassedWatchList is why the watch list is a PARAMETER rather
+// than something RenderOperator derives from the config itself.
+//
+// `operator deploy` reconciles what this env file asks for against what the installed
+// operator already watches, and applies the UNION -- so a second env file adding its own
+// namespace does not silently stop the first broker from being reconciled. That union is
+// computed by the caller and cannot be recovered from the config, so a renderer that
+// recomputed the list would quietly discard it and re-narrow the operator on every deploy.
+//
+// The list passed here is deliberately unrelated to what the config would produce, so the
+// test fails if the parameter is ignored.
+func TestRenderOperatorHonoursThePassedWatchList(t *testing.T) {
+	cfg := loadK8s(t)
+	fromConfig := watchNamespace(cfg)
+	union := fromConfig + ",team-a,team-b"
+
+	out, err := RenderOperator(cfg, "op-ns", union)
+	if err != nil {
+		t.Fatalf("RenderOperator: %v", err)
+	}
+	s := string(out)
+	mustContain(t, s, `value: "`+union+`"`)
+	if fromConfig != "" && strings.Contains(s, `value: "`+fromConfig+`"`) {
+		t.Errorf("the rendered WATCH_NAMESPACE is the config's own list, not the one passed: " +
+			"a reconciled union would be discarded")
+	}
 }
 
 // TestGenOperator covers the render-only path (`generate operator`): it uses the
@@ -154,16 +182,21 @@ func TestOperatorApply(t *testing.T) {
 	if err := c.OperatorApply(context.Background()); err != nil {
 		t.Fatalf("OperatorApply: %v", err)
 	}
-	calls := rr.afterPreflight(t, "create", "customresourcedefinitions")
-	if len(calls) != 4 {
-		t.Fatalf("OperatorApply made %d calls after the probe, want 4 (version read + namespace + regcred + bundle)", len(calls))
+	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
+	if len(calls) != 5 {
+		t.Fatalf("OperatorApply made %d calls after the probe, want 5 "+
+			"(version read + watch-list read + namespace + regcred + bundle)", len(calls))
 	}
-	versionRead := calls[0]
-	if versionRead.method != "Output" || !eqArgs(versionRead.args,
-		[]string{"get", "deployment", "--all-namespaces", "-o", "json"}) {
-		t.Errorf("first call = %+v, want the cluster-wide installed-version read", versionRead)
+	// Both reads are cluster-wide `get deployment`: one resolves the installed version
+	// for the downgrade check, the other the installed WATCH_NAMESPACE so the applied
+	// value can be the union rather than this env file's list alone.
+	for i, read := range []rrCall{calls[0], calls[1]} {
+		if read.method != "Output" || !eqArgs(read.args,
+			[]string{"get", "deployment", "--all-namespaces", "-o", "json"}) {
+			t.Errorf("read %d = %+v, want the cluster-wide deployment read", i+1, read)
+		}
 	}
-	ns, regcred, bundle := calls[1], calls[2], calls[3]
+	ns, regcred, bundle := calls[2], calls[3], calls[4]
 	for i, call := range []rrCall{ns, regcred, bundle} {
 		if call.method != "RunInput" || call.name != "kubectl" || !eqArgs(call.args, []string{"apply", "-f", "-"}) {
 			t.Errorf("apply call %d = %+v, want RunInput kubectl [apply -f -]", i+1, call)
@@ -209,64 +242,25 @@ func TestOperatorApplyNoPullSecret(t *testing.T) {
 	if err := c.OperatorApply(context.Background()); err != nil {
 		t.Fatalf("OperatorApply: %v", err)
 	}
-	calls := rr.afterPreflight(t, "create", "customresourcedefinitions")
-	if len(calls) != 3 {
-		t.Fatalf("OperatorApply without pull secret made %d calls after the probe, want 3 (version read + namespace + bundle)", len(calls))
+	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
+	if len(calls) != 4 {
+		t.Fatalf("OperatorApply without pull secret made %d calls after the probe, want 4 "+
+			"(version read + watch-list read + namespace + bundle)", len(calls))
 	}
-	if !strings.Contains(calls[1].stdin, "kind: Namespace") {
-		t.Errorf("the namespace must still be applied first:\n%s", calls[1].stdin)
+	// calls[0] and calls[1] are the two cluster-wide reads (installed version, installed
+	// watch list); the applies start at calls[2].
+	applies := calls[2:]
+	if !strings.Contains(applies[0].stdin, "kind: Namespace") {
+		t.Errorf("the namespace must still be applied first:\n%s", applies[0].stdin)
 	}
-	for _, call := range calls[1:] {
+	for _, call := range applies {
 		if strings.Contains(call.stdin, "regcred") {
 			t.Errorf("no pull secret configured, so nothing applied may mention regcred:\n%s", call.stdin)
 		}
 	}
-	if !strings.Contains(calls[2].stdin, "kind: Deployment") {
-		t.Errorf("the bundle must still carry the controller Deployment:\n%s", calls[2].stdin)
+	if !strings.Contains(applies[1].stdin, "kind: Deployment") {
+		t.Errorf("the bundle must still carry the controller Deployment:\n%s", applies[1].stdin)
 	}
-}
-
-// TestGenOperatorSecrets covers `generate secrets operator`: the operator's regcred
-// on its own, in the resolved operator namespace, and a loud refusal when no pull
-// secret is configured (there is then nothing to render, and silently printing an
-// empty artifact would read as "no credentials needed").
-func TestGenOperatorSecrets(t *testing.T) {
-	t.Run("renders the regcred in the configured namespace", func(t *testing.T) {
-		cfg := loadK8s(t)
-		cfg.K8s.Operator.Namespace = "my-op-ns"
-		out, err := GenOperatorSecrets(cfg)
-		if err != nil {
-			t.Fatalf("GenOperatorSecrets: %v", err)
-		}
-		s := string(out)
-		for _, want := range []string{"kind: Secret", "name: regcred", "namespace: my-op-ns",
-			"type: kubernetes.io/dockerconfigjson", ".dockerconfigjson"} {
-			mustContain(t, s, want)
-		}
-		if strings.Contains(s, "kind: Deployment") {
-			t.Errorf("only the secret belongs here, not the bundle:\n%s", s)
-		}
-	})
-	t.Run("falls back to the default namespace", func(t *testing.T) {
-		cfg := loadK8s(t)
-		cfg.K8s.Operator.Namespace = ""
-		out, err := GenOperatorSecrets(cfg)
-		if err != nil {
-			t.Fatalf("GenOperatorSecrets: %v", err)
-		}
-		mustContain(t, string(out), "namespace: "+defaultOperatorNS)
-	})
-	t.Run("refuses loud without an image-pull secret", func(t *testing.T) {
-		cfg := loadK8s(t)
-		cfg.K8s.ImagePullSecret = ""
-		_, err := GenOperatorSecrets(cfg)
-		if err == nil {
-			t.Fatal("GenOperatorSecrets must fail when kubernetes.imagePullSecret is unset")
-		}
-		if !strings.Contains(err.Error(), "kubernetes.imagePullSecret") {
-			t.Errorf("error = %v, want it to name the field to set", err)
-		}
-	})
 }
 
 // TestOperatorDelete asserts teardown with deleteCRDs=false deletes only the
@@ -282,7 +276,7 @@ func TestOperatorDelete(t *testing.T) {
 	if err := c.OperatorDelete(context.Background(), false); err != nil {
 		t.Fatalf("OperatorDelete: %v", err)
 	}
-	calls := rr.afterPreflight(t, "delete", "customresourcedefinitions")
+	calls := rr.afterPreflights(t, probe{verb: "delete", resource: "customresourcedefinitions"})
 	if len(calls) != 1 {
 		t.Fatalf("OperatorDelete(deleteCRDs=false) made %d call(s) after the probe, want 1 (the non-CRD documents)", len(calls))
 	}
@@ -313,7 +307,7 @@ func TestOperatorDeleteWithCRDs(t *testing.T) {
 	if err := c.OperatorDelete(context.Background(), true); err != nil {
 		t.Fatalf("OperatorDelete: %v", err)
 	}
-	calls := rr.afterPreflight(t, "delete", "customresourcedefinitions")
+	calls := rr.afterPreflights(t, probe{verb: "delete", resource: "customresourcedefinitions"})
 	if len(calls) != 3 {
 		t.Fatalf("OperatorDelete(deleteCRDs=true) made %d call(s) after the probe, want 3 (non-CRD documents, "+
 			"the broker CR listing, then CRDs)", len(calls))
@@ -364,7 +358,7 @@ func TestOperatorDeleteRefusesCRDWhenBrokersExist(t *testing.T) {
 			t.Errorf("warning output missing %q:\n%s", want, buf.String())
 		}
 	}
-	calls := rr.afterPreflight(t, "delete", "customresourcedefinitions")
+	calls := rr.afterPreflights(t, probe{verb: "delete", resource: "customresourcedefinitions"})
 	if len(calls) != 2 {
 		t.Fatalf("OperatorDelete made %d call(s) after the probe, want 2 (the operator bundle delete, then the "+
 			"broker CR listing) -- no CRD delete may be issued", len(calls))
@@ -393,7 +387,7 @@ func TestOperatorDeleteSkipsBrokerCheckWithoutDeleteCRDs(t *testing.T) {
 	if err := c.OperatorDelete(context.Background(), false); err != nil {
 		t.Fatalf("OperatorDelete: %v", err)
 	}
-	calls := rr.afterPreflight(t, "delete", "customresourcedefinitions")
+	calls := rr.afterPreflights(t, probe{verb: "delete", resource: "customresourcedefinitions"})
 	if len(calls) != 1 {
 		t.Fatalf("OperatorDelete(deleteCRDs=false) made %d call(s) after the probe, want 1 (the operator bundle "+
 			"delete only -- no broker CR listing belongs on this path)", len(calls))
@@ -419,7 +413,7 @@ func TestOperatorDeleteRefusesCRDWhenListingFails(t *testing.T) {
 	if !errors.Is(err, errFake) {
 		t.Errorf("refusal error must preserve the listing failure via %%w: %v", err)
 	}
-	calls := rr.afterPreflight(t, "delete", "customresourcedefinitions")
+	calls := rr.afterPreflights(t, probe{verb: "delete", resource: "customresourcedefinitions"})
 	for _, call := range calls {
 		if strings.Contains(strings.Join(call.args, " "), "CustomResourceDefinition") {
 			t.Errorf("no call may touch the CRDs when the listing failed: %+v", call)
@@ -521,7 +515,7 @@ func TestSplitOperatorBundle(t *testing.T) {
 				"apiVersion: apiextensions.k8s.io/v1\n" +
 				"kind: CustomResourceDefinition\n" +
 				"metadata:\n  name: real-crd.example.com\n")
-		crds, rest := splitOperatorBundle(manifest)
+		crds, _, rest := splitOperatorBundle(manifest)
 		if !strings.Contains(string(rest), "kind: ConfigMap") {
 			t.Errorf("the ConfigMap document should land in rest:\n%s", rest)
 		}
@@ -536,14 +530,14 @@ func TestSplitOperatorBundle(t *testing.T) {
 		}
 	})
 	t.Run("empty input", func(t *testing.T) {
-		crds, rest := splitOperatorBundle([]byte(""))
+		crds, _, rest := splitOperatorBundle([]byte(""))
 		if crds != nil || rest != nil {
 			t.Errorf("splitOperatorBundle(\"\") = (%q, %q), want (nil, nil)", crds, rest)
 		}
 	})
 	t.Run("no CRD documents", func(t *testing.T) {
 		manifest := []byte("kind: ConfigMap\n---\nkind: Secret\n")
-		crds, rest := splitOperatorBundle(manifest)
+		crds, _, rest := splitOperatorBundle(manifest)
 		if crds != nil {
 			t.Errorf("crds = %q, want nil when the bundle has no CustomResourceDefinition", crds)
 		}
@@ -553,7 +547,7 @@ func TestSplitOperatorBundle(t *testing.T) {
 	})
 	t.Run("CRD-only input", func(t *testing.T) {
 		manifest := []byte("kind: CustomResourceDefinition\nmetadata:\n  name: widgets.example.com\n")
-		crds, rest := splitOperatorBundle(manifest)
+		crds, _, rest := splitOperatorBundle(manifest)
 		if rest != nil {
 			t.Errorf("rest = %q, want nil when every document is a CRD", rest)
 		}
@@ -573,7 +567,7 @@ func TestOperatorRestart(t *testing.T) {
 	if err := c.OperatorRestart(context.Background()); err != nil {
 		t.Fatalf("OperatorRestart: %v", err)
 	}
-	calls := rr.afterPreflight(t, "patch", "deployments")
+	calls := rr.afterPreflights(t, probe{verb: "patch", resource: "deployments"})
 	if len(calls) != 1 {
 		t.Fatalf("OperatorRestart made %d call(s) after the probe, want 1", len(calls))
 	}
@@ -642,3 +636,149 @@ func mustContain(t *testing.T, haystack, needle string) {
 		t.Errorf("rendered output missing %q", needle)
 	}
 }
+
+// TestOperatorNamespaceIsNotInTheDeleteStream is the safety property this split
+// exists for. The Namespace document used to sit in `rest`, so `remove operator`
+// deleted it in the same `delete -f -` stream as the Deployment -- cascading to
+// everything else in that namespace, with none of the occupancy checks
+// `remove namespace` applies to the broker's own namespace.
+func TestOperatorNamespaceIsNotInTheDeleteStream(t *testing.T) {
+	manifest := []byte("kind: Namespace\nmetadata:\n  name: solace-operator\n" +
+		"---\nkind: Deployment\nmetadata:\n  name: pubsubplus-eventbroker-operator\n" +
+		"---\nkind: CustomResourceDefinition\nmetadata:\n  name: brokers.example.com\n")
+
+	crds, ns, rest := splitOperatorBundle(manifest)
+	if !strings.Contains(string(ns), "kind: Namespace") {
+		t.Errorf("the Namespace document must be split out on its own:\n%s", ns)
+	}
+	if strings.Contains(string(rest), "kind: Namespace") {
+		t.Errorf("the Namespace must NOT ride the delete stream: deleting it cascades to everything in it:\n%s", rest)
+	}
+	if !strings.Contains(string(rest), "kind: Deployment") {
+		t.Errorf("the Deployment belongs in rest:\n%s", rest)
+	}
+	if !strings.Contains(string(crds), "brokers.example.com") {
+		t.Errorf("the CRD stays its own layer:\n%s", crds)
+	}
+}
+
+// TestOperatorDeleteKeepsTheNamespaceAndRemovesTheRegcred covers the consequence of
+// keeping the namespace: the image-pull Secret used to be reaped as namespace content,
+// so it now needs deleting by name or a registry credential outlives every teardown.
+func TestOperatorDeleteKeepsTheNamespaceAndRemovesTheRegcred(t *testing.T) {
+	cfg := loadK8s(t) // the sample sets an image-pull secret, so a regcred was applied
+	cfg.K8s.Operator.Namespace = "op-ns"
+	rr := &recRunner{}
+	c := NewCluster(rr, cfg, nil, nil)
+
+	if err := c.OperatorDelete(context.Background(), false); err != nil {
+		t.Fatalf("OperatorDelete: %v", err)
+	}
+
+	var sawRegcred, sawNamespaceDelete bool
+	for _, call := range rr.calls {
+		if strings.Contains(strings.Join(call.args, " "), "delete namespace") {
+			sawNamespaceDelete = true
+		}
+		// The namespace must not reach kubectl on stdin either, which is how it used
+		// to be deleted -- as one document among the Deployment and RBAC.
+		if strings.Contains(call.stdin, "kind: Namespace") {
+			t.Errorf("a Namespace document reached `delete -f -`:\n%s", call.stdin)
+		}
+		if strings.Contains(call.stdin, "name: "+operatorRegcredName) {
+			sawRegcred = true
+		}
+	}
+	if !sawRegcred {
+		t.Error("the operator's image-pull secret must be in the delete stream: the namespace that used to " +
+			"take it with it is now kept, so without this a registry credential outlives every teardown")
+	}
+	if sawNamespaceDelete {
+		t.Error("`remove operator` must not delete the namespace: it may hold objects this tool never created")
+	}
+}
+
+// TestOperatorProbesEveryKindItTouches is the fix for a check that passed and then
+// failed halfway through the work. Probing only the CRD meant an identity allowed to
+// create custom resource definitions but not ClusterRoleBindings got past the
+// preflight and died mid-apply -- the exact state Preflight exists to prevent.
+func TestOperatorProbesEveryKindItTouches(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		verb string
+		run  func(*Cluster) error
+	}{
+		{"apply", "create", func(c *Cluster) error { return c.OperatorApply(context.Background()) }},
+		{"delete", "delete", func(c *Cluster) error { return c.OperatorDelete(context.Background(), false) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := loadK8s(t) // pull secret set -> the regcred is in play
+			cfg.K8s.Operator.Namespace = "op-ns"
+			rr := &recRunner{}
+			c := NewCluster(rr, cfg, nil, nil)
+			if err := tc.run(c); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			want := []probe{
+				{verb: tc.verb, resource: "customresourcedefinitions"},
+				{verb: tc.verb, resource: "clusterroles"},
+				{verb: tc.verb, resource: "clusterrolebindings"},
+				{verb: tc.verb, resource: "serviceaccounts"},
+				{verb: tc.verb, resource: "roles"},
+				{verb: tc.verb, resource: "rolebindings"},
+				{verb: tc.verb, resource: "deployments"},
+				{verb: tc.verb, resource: "secrets"},
+			}
+			rr.afterPreflights(t, want...)
+
+			// The namespaced kinds must ask about the OPERATOR's namespace, not the
+			// broker's. A probe aimed at the wrong namespace still answers -- it just
+			// answers a question nobody asked.
+			for _, res := range []string{"serviceaccounts", "roles", "rolebindings", "deployments", "secrets"} {
+				ns, found := rr.probedNamespace(tc.verb, res)
+				if !found {
+					continue // reported by afterPreflights above
+				}
+				if ns != "op-ns" {
+					t.Errorf("%s %s probed namespace %q, want the operator's own (op-ns)", tc.verb, res, ns)
+				}
+			}
+			// Cluster-scoped kinds must carry no namespace at all.
+			for _, res := range []string{"customresourcedefinitions", "clusterroles", "clusterrolebindings"} {
+				if ns, found := rr.probedNamespace(tc.verb, res); found && ns != "" {
+					t.Errorf("%s %s is cluster-scoped but was probed with -n %q", tc.verb, res, ns)
+				}
+			}
+		})
+	}
+}
+
+// TestOperatorRestartProbesTheOperatorNamespace pins a silent defect: the restart
+// happens in the operator's namespace while its permission check asked about the
+// broker's, so an identity permitted in one and not the other passed and then failed.
+func TestOperatorRestartProbesTheOperatorNamespace(t *testing.T) {
+	cfg := loadK8s(t)
+	cfg.K8s.Operator.Namespace = "op-ns"
+	rr := &recRunner{}
+	c := NewCluster(rr, cfg, nil, nil)
+	if err := c.OperatorRestart(context.Background()); err != nil {
+		t.Fatalf("OperatorRestart: %v", err)
+	}
+	ns, found := rr.probedNamespace("patch", "deployments")
+	if !found {
+		t.Fatal("OperatorRestart must probe `patch deployments`")
+	}
+	if ns != "op-ns" {
+		t.Errorf("probed namespace = %q, want op-ns -- the restart acts there, so asking about the broker's "+
+			"namespace answers the wrong question", ns)
+	}
+}
+
+// TestGenOperatorSecrets is gone: `generate secrets operator` is gone.
+//
+// GenOperator now emits the whole install stream in APPLY ORDER -- the namespace
+// document, the image-pull Secret when one is configured, then the bundle -- so the
+// regcred is tested as part of that stream rather than on its own. Splitting it out
+// meant the two halves had to be applied in the right order by hand, and the ordering
+// is the part that is easy to get wrong: the Secret is namespaced and its namespace
+// only exists inside the bundle.

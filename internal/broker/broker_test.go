@@ -3,6 +3,7 @@ package broker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,9 +79,61 @@ func (f *fakeTransport) Download(_ context.Context, role config.Role, remote, lo
 	return nil
 }
 
-// matchCLI reports whether argv is a `cli -Apes .<name>.cli` invocation.
+// matchCLI reports whether argv ran name through the CLI, in either of the two
+// shapes this package now issues. The first is runCLIRead's unwrapped
+// `cli -Apes .<name>.cli`, used by every `show`-style read. The second is RunCLI's
+// stop-on-error wrapper: `sh -c <skeleton>`, recognised by the skeleton containing
+// both `-Apes` and name's own baked-in body filename (cliRunNames) -- the skeleton
+// text itself, not a literal argv slot, is what carries name for a wrapped call.
 func matchCLI(argv []string, name string) bool {
-	return len(argv) == 3 && argv[0] == CLIBinary && argv[1] == "-Apes" && argv[2] == cliArg(name)
+	if len(argv) == 3 && argv[0] == CLIBinary && argv[1] == "-Apes" && argv[2] == cliArg(name) {
+		return true
+	}
+	if len(argv) == 3 && argv[0] == "sh" && argv[1] == "-c" {
+		bodyName, _, _ := cliRunNames(name)
+		return strings.Contains(argv[2], "-Apes") && strings.Contains(argv[2], bodyName)
+	}
+	return false
+}
+
+// wrappedCall returns the recorded call that ran name through RunCLI's
+// stop-on-error wrapper (matchCLI's "sh -c" shape), failing the test if none did.
+// Its stdin is the CLI script body for a RunCLI write (ExecCLI's body instead
+// travels through UploadFile, so its stdin is empty); its argv[2] is the whole
+// generated skeleton, which is what a test checks for the cleanup trap.
+func (f *fakeTransport) wrappedCall(t *testing.T, name string) recOutput {
+	t.Helper()
+	for i := len(f.outputs) - 1; i >= 0; i-- {
+		o := f.outputs[i]
+		if len(o.argv) == 3 && o.argv[0] == "sh" && matchCLI(o.argv, name) {
+			return o
+		}
+	}
+	t.Fatalf("no wrapped cli call for %q; outputs=%v", name, f.outputs)
+	return recOutput{}
+}
+
+// outputForRole reports whether name was run against role, through either CLI
+// shape matchCLI recognises.
+func outputForRole(ft *fakeTransport, role config.Role, name string) bool {
+	for _, o := range ft.outputs {
+		if o.role == role && matchCLI(o.argv, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasCall reports whether name was run at all, through either CLI shape matchCLI
+// recognises -- the non-fatal counterpart to wrappedCall, for a test asserting
+// something did NOT run.
+func hasCall(ft *fakeTransport, name string) bool {
+	for _, o := range ft.outputs {
+		if matchCLI(o.argv, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // uploadBody returns the last body uploaded to dest, or "" (and fails) if none.
@@ -117,13 +170,41 @@ func (f *fakeTransport) hasUpload(dest string) bool {
 			return true
 		}
 	}
+	// A write once reached here via Transport.Upload to cliScriptPath(name); it now
+	// rides RunCLI's wrapped "sh -c" call instead, with no Upload at all. Recognising
+	// that shape too is what keeps every existing caller of this helper -- written
+	// against the old cliScriptPath(name) dest, including verify_ops.go/verify_local.go's
+	// own tests -- meaningful rather than vacuously true or false either way.
+	if name := cliScriptNameFromDest(dest); name != "" {
+		return hasCall(f, name)
+	}
 	return false
+}
+
+// cliScriptNameFromDest reverses cliScriptPath: given
+// "<CLIScriptsDir>/.<name>.cli" it returns name, or "" if dest is not that shape.
+func cliScriptNameFromDest(dest string) string {
+	const prefix, suffix = CLIScriptsDir + "/.", ".cli"
+	if !strings.HasPrefix(dest, prefix) || !strings.HasSuffix(dest, suffix) {
+		return ""
+	}
+	name := dest[len(prefix) : len(dest)-len(suffix)]
+	if name == "" {
+		return ""
+	}
+	return name
 }
 
 func newTestOps(t *testing.T, cfg *config.Config, ft *fakeTransport) (*Ops, *bytes.Buffer) {
 	t.Helper()
 	buf := &bytes.Buffer{}
 	o := &Ops{T: ft, Cfg: cfg, Out: buf, PollInterval: 0, PollAttempts: 3}
+	// No interface addresses by default. DetectRole falls back to matching
+	// redundancy.*.addr when no name matches, and reading the real interfaces here
+	// would make every "this host matches nothing" case depend on how the machine
+	// running the suite happens to be numbered. A test that wants that pass injects
+	// its own set.
+	o.LocalAddrs = func() (map[string]bool, error) { return map[string]bool{}, nil }
 	return o, buf
 }
 
@@ -151,25 +232,6 @@ func TestCountContains(t *testing.T) {
 	}
 	if got := countContains(out, "Activity Status", "Mate Active"); got != 1 {
 		t.Errorf("countContains Mate Active = %d, want 1", got)
-	}
-}
-
-func TestContainsAnyFold(t *testing.T) {
-	if !containsAnyFold("Command FAILED to run", "error", "fail") {
-		t.Error("containsAnyFold should match FAILED case-insensitively")
-	}
-	if containsAnyFold("all good", "error", "fail") {
-		t.Error("containsAnyFold matched clean output")
-	}
-}
-
-func TestCountAnyFold(t *testing.T) {
-	out := "line one OK\r\nInvalid command\r\nline three OK\r\nBUSY, try again\r\n"
-	if got := countAnyFold(out, "invalid", "error", "busy"); got != 2 {
-		t.Errorf("countAnyFold = %d, want 2", got)
-	}
-	if got := countAnyFold("all clean\r\n", "invalid", "error", "busy"); got != 0 {
-		t.Errorf("countAnyFold clean output = %d, want 0", got)
 	}
 }
 
@@ -236,7 +298,12 @@ func TestPrimaryRedundancyUp(t *testing.T) {
 
 // --- RunCLI primitive ------------------------------------------------------
 
-func TestRunCLIUploadsThenExecs(t *testing.T) {
+// TestRunCLIWrapsWithStopOnError pins the shape RunCLI now issues: ONE
+// Transport.OutputInput call, body on stdin (never Upload, so it never touches
+// argv or a log), a generated `sh -c` skeleton that sources it through the
+// broker's own `stop-on-error`, and a cleanup trap -- so there is no separate
+// removeCLI call.
+func TestRunCLIWrapsWithStopOnError(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		if matchCLI(argv, "probe") {
 			return []byte("output\n"), nil
@@ -251,11 +318,21 @@ func TestRunCLIUploadsThenExecs(t *testing.T) {
 	if string(out) != "output\n" {
 		t.Errorf("RunCLI output = %q", out)
 	}
-	if body := ft.uploadBody(t, cliScriptPath("probe")); body != "show version\n" {
-		t.Errorf("uploaded body = %q", body)
+	call := ft.wrappedCall(t, "probe")
+	if call.stdin != "show version\n" {
+		t.Errorf("RunCLI body on stdin = %q, want the script body", call.stdin)
 	}
-	if len(ft.outputs) != 1 || !matchCLI(ft.outputs[0].argv, "probe") {
-		t.Errorf("RunCLI exec argv = %v", ft.outputs)
+	if !strings.Contains(call.argv[2], "-Apes") || !strings.Contains(call.argv[2], "stop-on-error") {
+		t.Errorf("RunCLI skeleton = %q, want a stop-on-error `-Apes` invocation", call.argv[2])
+	}
+	if !strings.Contains(call.argv[2], "trap cleanup") {
+		t.Error("RunCLI skeleton must clean up its own broker-side files on exit")
+	}
+	if len(ft.uploads) != 0 {
+		t.Error("RunCLI must not use Transport.Upload -- the body rides OutputInput's stdin")
+	}
+	if len(ft.runs) != 0 {
+		t.Errorf("RunCLI must not issue a separate cleanup call, the skeleton's own trap does it: %v", ft.runs)
 	}
 }
 
@@ -265,17 +342,83 @@ func TestRunCLIRejectsBadName(t *testing.T) {
 	if _, err := o.RunCLI(context.Background(), config.Primary, "../evil", "body"); err == nil {
 		t.Error("RunCLI should reject an invalid name")
 	}
-	if len(ft.uploads) != 0 {
-		t.Error("RunCLI must not upload when the name is invalid")
+	if len(ft.outputs) != 0 {
+		t.Error("RunCLI must not exec when the name is invalid")
+	}
+}
+
+// TestRunCLIDetectsRejection pins the reason the wrapper exists: `cli -Apes` exits
+// 0 even when the broker refuses a line, so RunCLI's own scan of the transcript
+// tail (rejectionIn, the same failKeywords list driver.go's chunks use) is the
+// only thing that turns that into a Go error. The error must never quote the
+// rejected line itself -- a CLI transcript can carry passwords.
+func TestRunCLIDetectsRejection(t *testing.T) {
+	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
+		if matchCLI(argv, "probe") {
+			return []byte("line one OK\nInvalid command at line 2\n"), nil
+		}
+		return nil, nil
+	}}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	_, err := o.RunCLI(context.Background(), config.Primary, "probe", "body\n")
+	if err == nil {
+		t.Fatal("RunCLI should fail when the broker rejected a line")
+	}
+	if strings.Contains(err.Error(), "Invalid command at line 2") {
+		t.Errorf("RunCLI error must not quote the rejected line, got %v", err)
+	}
+	// The sentinel, not the sentence. A caller that has to tell "the broker refused a
+	// line" from "the broker could not be reached" -- ConfigureReplication's two phases
+	// are the one that does -- reads this with errors.Is. It matched a phrase in the
+	// message first, so rewording the message would have silently reclassified every
+	// rejection as unreachable, downgrading a report that names what landed into one
+	// that says it cannot be known. Nothing pinned that coupling until this line.
+	if !errors.Is(err, ErrCLIRejected) {
+		t.Errorf("RunCLI rejection must wrap ErrCLIRejected so callers can classify it, got %v", err)
+	}
+}
+
+// TestRunCLITransportErrorIsNotARejection is the other half of that classification: a
+// call that never reached the broker must NOT satisfy errors.Is(err, ErrCLIRejected).
+// The two leave the broker in different states -- a rejection stopped it at a known
+// line, an unreachable broker may have applied all, some or none of the script, since
+// the sourced script keeps running inside it -- so a caller that conflated them would
+// tell the operator the wrong thing about what is live right now.
+func TestRunCLITransportErrorIsNotARejection(t *testing.T) {
+	ft := &fakeTransport{responder: func(config.Role, []string, []byte) ([]byte, error) {
+		return nil, errors.New("connection lost")
+	}}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	_, err := o.RunCLI(context.Background(), config.Primary, "probe", "body\n")
+	if err == nil {
+		t.Fatal("RunCLI should fail when the transport does")
+	}
+	if errors.Is(err, ErrCLIRejected) {
+		t.Errorf("a transport failure must not classify as a broker rejection, got %v", err)
+	}
+}
+
+// TestRunCLICleanRunNoError is TestRunCLIDetectsRejection's mirror: output with
+// none of failKeywords in its tail must not fail the call.
+func TestRunCLICleanRunNoError(t *testing.T) {
+	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
+		if matchCLI(argv, "probe") {
+			return []byte("line one OK\nline two OK\n"), nil
+		}
+		return nil, nil
+	}}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	if _, err := o.RunCLI(context.Background(), config.Primary, "probe", "body\n"); err != nil {
+		t.Errorf("RunCLI should not fail on clean output: %v", err)
 	}
 }
 
 func TestSkipIfStandalone(t *testing.T) {
-	ha, _ := newTestOps(t, &config.Config{Redundancy: "yes"}, &fakeTransport{})
+	ha, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, &fakeTransport{})
 	if ha.skipIfStandalone("x") {
 		t.Error("skipIfStandalone should be false in HA")
 	}
-	sa, _ := newTestOps(t, &config.Config{Redundancy: "no"}, &fakeTransport{})
+	sa, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "false"}}, &fakeTransport{})
 	if !sa.skipIfStandalone("x") {
 		t.Error("skipIfStandalone should be true for standalone")
 	}
@@ -302,7 +445,10 @@ func TestServerCert(t *testing.T) {
 	if body := ft.uploadBody(t, dest); body != "KEY\nCERT\nCA\n" {
 		t.Errorf("cert bundle = %q, want key+cert+ca", body)
 	}
-	if body := ft.uploadBody(t, cliScriptPath("apply-server-certs")); body != serverCertScript("2026-07-31") {
+	// The CLI script itself now rides RunCLI's wrapped call, so its body is on the
+	// OutputInput stdin rather than a Transport.Upload -- ft.uploadBody would find
+	// nothing.
+	if body := ft.wrappedCall(t, "apply-server-certs").stdin; body != serverCertScript("2026-07-31") {
 		t.Errorf("apply-server-certs body = %q", body)
 	}
 }
@@ -326,7 +472,7 @@ func TestDomainCerts(t *testing.T) {
 		ft.uploadFiles[0].dest != certPath("myca.pem") {
 		t.Errorf("DomainCerts uploadFiles = %v", ft.uploadFiles)
 	}
-	if body := ft.uploadBody(t, cliScriptPath("load-domain-certs")); body != domainCertsScript(files) {
+	if body := ft.wrappedCall(t, "load-domain-certs").stdin; body != domainCertsScript(files) {
 		t.Errorf("load-domain-certs body = %q", body)
 	}
 }
@@ -364,12 +510,13 @@ func TestDisableDefaultVPN(t *testing.T) {
 	if err := o.DisableDefaultVPN(context.Background(), config.Primary); err != nil {
 		t.Fatalf("DisableDefaultVPN error: %v", err)
 	}
-	if body := ft.uploadBody(t, cliScriptPath("disable-default-vpn")); body != disableDefaultVPNScript() {
+	if body := ft.wrappedCall(t, "disable-default-vpn").stdin; body != disableDefaultVPNScript() {
 		t.Errorf("disable-default-vpn body mismatch")
 	}
-	// The two uploaded scripts are cleaned up with a single rm -f.
+	// The write half cleans itself up via its skeleton's own trap; the read half
+	// (show-vpn) still goes through removeCLI's `rm -f`.
 	if !ranContains(ft, "rm", "-f") {
-		t.Error("DisableDefaultVPN should clean up its cli scripts")
+		t.Error("DisableDefaultVPN should clean up its show-vpn read")
 	}
 }
 
@@ -390,7 +537,7 @@ func TestDisableDefaultUsers(t *testing.T) {
 	if err := o.DisableDefaultUsers(context.Background(), config.Primary); err != nil {
 		t.Fatalf("DisableDefaultUsers error: %v", err)
 	}
-	body := ft.uploadBody(t, cliScriptPath("disable-default-usernames"))
+	body := ft.wrappedCall(t, "disable-default-usernames").stdin
 	for _, want := range []string{
 		`client-username default message-vpn "default"`,
 		`client-username default message-vpn "myvpn"`,
@@ -409,7 +556,7 @@ func TestDisableDefaultUsersNoVPNs(t *testing.T) {
 	if err := o.DisableDefaultUsers(context.Background(), config.Primary); err != nil {
 		t.Fatalf("DisableDefaultUsers error: %v", err)
 	}
-	if ft.hasUpload(cliScriptPath("disable-default-usernames")) {
+	if hasCall(ft, "disable-default-usernames") {
 		t.Error("DisableDefaultUsers should not run when no VPNs are parsed")
 	}
 }
@@ -425,14 +572,18 @@ func TestProductKeys(t *testing.T) {
 	if err := o.ProductKeys(context.Background(), []string{"KEY-1"}, config.Primary); err != nil {
 		t.Fatalf("ProductKeys error: %v", err)
 	}
-	if body := ft.uploadBody(t, cliScriptPath("product-keys")); body != productKeysScript([]string{"KEY-1"}) {
+	if body := ft.wrappedCall(t, "product-keys").stdin; body != productKeysScript([]string{"KEY-1"}) {
 		t.Errorf("product-keys body = %q", body)
 	}
 }
 
+// TestProductKeysDetectsError used to trigger on a bare "fail" via containsAnyFold;
+// that scanner is gone, converged onto RunCLI's own failKeywords tail scan (the
+// vetted list, not a bare "error"/"fail" that false-positives on e.g.
+// "error-events"), so the canned transcript now carries one of those phrases.
 func TestProductKeysDetectsError(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, _ []string, _ []byte) ([]byte, error) {
-		return []byte("Command failed: invalid key\n"), nil
+		return []byte("Error: invalid key\n"), nil
 	}}
 	o, _ := newTestOps(t, &config.Config{}, ft)
 	if err := o.ProductKeys(context.Background(), []string{"BAD"}, config.Primary); err == nil {
@@ -478,117 +629,6 @@ func TestProductKeysRejectsMultilineKey(t *testing.T) {
 
 // --- additional CLI users (k8s only) ----------------------------------------
 
-func appUsers() []config.AdditionalUser {
-	return []config.AdditionalUser{{Username: "appuser", AccessLevel: "read-write", Password: "app-pass"}}
-}
-
-func TestAdditionalUsers(t *testing.T) {
-	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
-		if matchCLI(argv, "additional-users") {
-			return []byte("Username created.\n"), nil
-		}
-		return nil, nil
-	}}
-	o, out := newTestOps(t, &config.Config{}, ft)
-	if err := o.AdditionalUsers(context.Background(), config.Primary, appUsers()); err != nil {
-		t.Fatalf("AdditionalUsers error: %v", err)
-	}
-	body := ft.uploadBody(t, cliScriptPath("additional-users"))
-	if body != additionalUsersScript(appUsers()) {
-		t.Errorf("additional-users body = %q", body)
-	}
-	// The password rides the upload body (stdin), and must not appear anywhere the
-	// operator can see: not in the shown output, and not in an argv.
-	if strings.Contains(out.String(), "app-pass") {
-		t.Errorf("the CLI transcript must never be shown -- it repeats the password:\n%s", out.String())
-	}
-	for _, c := range ft.outputs {
-		if strings.Contains(strings.Join(c.argv, " "), "app-pass") {
-			t.Errorf("password reached an argv: %v", c.argv)
-		}
-	}
-	// The uploaded script carries every password, so it must be deleted afterwards.
-	if !ft.removed(cliScriptPath("additional-users")) {
-		t.Errorf("the uploaded script must be removed; it contains the passwords: %v", ft.runs)
-	}
-}
-
-// TestAdditionalUsersReportsExistingUser pins the deliberate non-idempotency:
-// `create username` fails when the user exists, and that is reported rather than
-// reconciled, because silently re-setting a password an operator rotated on the
-// broker is worse than refusing. The message must not carry the withheld transcript.
-func TestAdditionalUsersReportsExistingUser(t *testing.T) {
-	ft := &fakeTransport{responder: func(_ config.Role, _ []string, _ []byte) ([]byte, error) {
-		return []byte("Error: Username already exists\n"), nil
-	}}
-	o, _ := newTestOps(t, &config.Config{}, ft)
-	err := o.AdditionalUsers(context.Background(), config.Primary, appUsers())
-	if err == nil {
-		t.Fatal("AdditionalUsers should fail loud when the broker reports an error")
-	}
-	if !strings.Contains(err.Error(), "already exists") {
-		t.Errorf("the error should name the likeliest cause, got: %v", err)
-	}
-	if strings.Contains(err.Error(), "app-pass") {
-		t.Errorf("the error must not carry the transcript: %v", err)
-	}
-	// Even on failure the script must be gone.
-	if !ft.removed(cliScriptPath("additional-users")) {
-		t.Errorf("a failed run must still remove the uploaded script: %v", ft.runs)
-	}
-}
-
-func TestAdditionalUsersEmpty(t *testing.T) {
-	o, _ := newTestOps(t, &config.Config{}, &fakeTransport{})
-	if err := o.AdditionalUsers(context.Background(), config.Primary, nil); err == nil {
-		t.Error("AdditionalUsers should error with no users")
-	}
-}
-
-// TestAdditionalUsersRejectsBadValues closes the injection path: every value lands
-// on a line of a script running in configure mode, so a newline would append
-// commands, and the characters the broker CLI rejects inside a quoted password would
-// break out of the quoting. Nothing may be uploaded before the check, and no error
-// may echo a password.
-func TestAdditionalUsersRejectsBadValues(t *testing.T) {
-	cases := []struct {
-		name string
-		user config.AdditionalUser
-	}{
-		{"username with a space", config.AdditionalUser{Username: "app user", AccessLevel: "admin", Password: "p"}},
-		{"multiline access level", config.AdditionalUser{Username: "appuser", AccessLevel: "admin\nshutdown", Password: "p"}},
-		{"empty password", config.AdditionalUser{Username: "appuser", AccessLevel: "admin"}},
-		{"newline in password", config.AdditionalUser{Username: "appuser", AccessLevel: "admin", Password: "UNIQUE\nshow"}},
-		{"quote in password", config.AdditionalUser{Username: "appuser", AccessLevel: "admin", Password: `UNIQUE"x`}},
-		{"semicolon in password", config.AdditionalUser{Username: "appuser", AccessLevel: "admin", Password: "UNIQUE;x"}},
-		{"backslash in password", config.AdditionalUser{Username: "appuser", AccessLevel: "admin", Password: `UNIQUE\x`}},
-		{"pipe in password", config.AdditionalUser{Username: "appuser", AccessLevel: "admin", Password: "UNIQUE|x"}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ft := &fakeTransport{}
-			o, _ := newTestOps(t, &config.Config{}, ft)
-			err := o.AdditionalUsers(context.Background(), config.Primary, []config.AdditionalUser{tc.user})
-			if err == nil {
-				t.Fatalf("AdditionalUsers should reject %s", tc.name)
-			}
-			if strings.Contains(err.Error(), "UNIQUE") {
-				t.Errorf("the error must name the user and the character, never the password: %v", err)
-			}
-			if len(ft.uploads) != 0 || len(ft.outputs) != 0 {
-				t.Errorf("validation must happen before anything runs, got uploads=%v runs=%v", ft.uploads, ft.outputs)
-			}
-		})
-	}
-	// A password with punctuation the CLI does accept must still pass.
-	ft := &fakeTransport{}
-	o, _ := newTestOps(t, &config.Config{}, ft)
-	ok := config.AdditionalUser{Username: "appuser", AccessLevel: "mesh-manager", Password: "P@ss w0rd!#%^-_=+[]{}"}
-	if err := o.AdditionalUsers(context.Background(), config.Primary, []config.AdditionalUser{ok}); err != nil {
-		t.Errorf("a password using accepted punctuation must work: %v", err)
-	}
-}
-
 // TestRemoveDomainCerts covers the removal half of the domain-CA pair, which had
 // no coverage at all before the container tree gained its own teardown path.
 func TestRemoveDomainCerts(t *testing.T) {
@@ -597,7 +637,7 @@ func TestRemoveDomainCerts(t *testing.T) {
 	if err := o.RemoveDomainCerts(context.Background(), config.Primary, []string{"myca"}); err != nil {
 		t.Fatalf("RemoveDomainCerts error: %v", err)
 	}
-	if body := ft.uploadBody(t, cliScriptPath("remove-domain-certs")); !strings.Contains(body, "myca") {
+	if body := ft.wrappedCall(t, "remove-domain-certs").stdin; !strings.Contains(body, "myca") {
 		t.Errorf("remove-domain-certs body should name the CA: %q", body)
 	}
 }
@@ -624,6 +664,124 @@ func TestRemoveDomainCertsEmptySkips(t *testing.T) {
 	}
 }
 
+// TestRemoveServerCerts pins the removal against the CLI form confirmed on a live
+// broker. The script is compared WHOLE rather than by substring: a `no ssl
+// server-certificate` reached without `enable`/`configure` first is rejected by the
+// broker, and a substring match would not notice.
+func TestRemoveServerCerts(t *testing.T) {
+	ft := &fakeTransport{}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	if err := o.RemoveServerCerts(context.Background(), config.Primary); err != nil {
+		t.Fatalf("RemoveServerCerts error: %v", err)
+	}
+	const want = "home\nno paging\nenable\nconfigure\nno ssl server-certificate\n"
+	if body := ft.wrappedCall(t, "remove-server-certs").stdin; body != want {
+		t.Errorf("remove-server-certs body = %q, want %q", body, want)
+	}
+}
+
+// TestRemoveServerCertsSpansEveryRole: the apply path loads the certificate onto every
+// node of the group, so the removal has to reach every node too. A certificate gone from
+// the primary and still loaded on the backup is a half state that survives a failover.
+func TestRemoveServerCertsSpansEveryRole(t *testing.T) {
+	ft := &fakeTransport{}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	roles := []config.Role{config.Primary, config.Backup, config.Monitor}
+	if err := o.RemoveServerCerts(context.Background(), roles...); err != nil {
+		t.Fatalf("RemoveServerCerts error: %v", err)
+	}
+	for _, r := range roles {
+		if !outputForRole(ft, r, "remove-server-certs") {
+			t.Errorf("no remove-server-certs run for the %q node", r)
+		}
+	}
+}
+
+// TestRemoveServerCertsRunCLIError: a failure on one node aborts rather than carrying on
+// through the group. Half a removal reported as success is the outcome worth preventing.
+func TestRemoveServerCertsRunCLIError(t *testing.T) {
+	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
+		if matchCLI(argv, "remove-server-certs") {
+			return nil, errors.New("boom")
+		}
+		return nil, nil
+	}}
+	o, buf := newTestOps(t, &config.Config{}, ft)
+	err := o.RemoveServerCerts(context.Background(), config.Primary, config.Backup)
+	if err == nil {
+		t.Fatal("RemoveServerCerts should return the CLI failure")
+	}
+	if buf.String() != "" {
+		t.Errorf("nothing should be shown when the removal fails, got %q", buf)
+	}
+}
+
+// TestRemoveProductKeys covers the revocation half, which was a loud placeholder until
+// `no product-key <key>` was confirmed on a live broker. It is ProductKeys' mirror image
+// by design, so the same three properties are asserted of it.
+func TestRemoveProductKeys(t *testing.T) {
+	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
+		if matchCLI(argv, "remove-product-keys") {
+			return []byte("Product key removed.\n"), nil
+		}
+		return nil, nil
+	}}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	if err := o.RemoveProductKeys(context.Background(), []string{"KEY-1"}, config.Primary); err != nil {
+		t.Fatalf("RemoveProductKeys error: %v", err)
+	}
+	if body := ft.wrappedCall(t, "remove-product-keys").stdin; body != removeProductKeysScript([]string{"KEY-1"}) {
+		t.Errorf("remove-product-keys body = %q", body)
+	}
+}
+
+// TestRemoveProductKeysRefusesAnEmptyList: with nothing configured there is nothing to
+// revoke, and reporting success for having done nothing is what the apply path already
+// refuses to do.
+func TestRemoveProductKeysRefusesAnEmptyList(t *testing.T) {
+	ft := &fakeTransport{}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	if err := o.RemoveProductKeys(context.Background(), nil, config.Primary); err == nil {
+		t.Error("an empty key list must be refused, not reported as a successful removal")
+	}
+	if len(ft.uploads) != 0 {
+		t.Error("nothing should be uploaded when there is nothing to revoke")
+	}
+}
+
+// TestRemoveProductKeysValidatesBeforeUploading: each key is interpolated into a CLI line
+// that runs with admin already enabled, so it is checked before anything reaches the
+// broker -- the same order ProductKeys and DomainCerts use.
+func TestRemoveProductKeysValidatesBeforeUploading(t *testing.T) {
+	ft := &fakeTransport{}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	if err := o.RemoveProductKeys(context.Background(), []string{"KEY-1\nshutdown"}, config.Primary); err == nil {
+		t.Error("a product key carrying a second CLI line must be rejected")
+	}
+	if len(ft.uploads) != 0 {
+		t.Error("RemoveProductKeys must validate before it uploads")
+	}
+}
+
+// TestRemoveProductKeysScansTheOutput is the property that matters most here. Revoking a
+// key the broker does not hold is the kind of thing a CLI reports in prose and returns
+// zero for -- so without this scan the command would report success and the operator
+// would believe an entitlement was gone when it is not. The scan itself is now RunCLI's
+// own (failKeywords via rejectionIn), not a local containsAnyFold("error","fail").
+func TestRemoveProductKeysScansTheOutput(t *testing.T) {
+	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
+		if matchCLI(argv, "remove-product-keys") {
+			return []byte("Error: product key not found.\n"), nil
+		}
+		return nil, nil
+	}}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	err := o.RemoveProductKeys(context.Background(), []string{"KEY-1"}, config.Primary)
+	if err == nil || !strings.Contains(err.Error(), "rejected") {
+		t.Errorf("err = %v, want the output scan to fail the command", err)
+	}
+}
+
 func TestExecCLI(t *testing.T) {
 	local := filepath.Join(t.TempDir(), "myscript.cli")
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
@@ -636,11 +794,16 @@ func TestExecCLI(t *testing.T) {
 	if err := o.ExecCLI(context.Background(), config.Primary, local); err != nil {
 		t.Fatalf("ExecCLI error: %v", err)
 	}
-	if len(ft.uploadFiles) != 1 || ft.uploadFiles[0].dest != cliScriptPath("myscript.cli") || ft.uploadFiles[0].local != local {
-		t.Errorf("ExecCLI uploadFiles = %v", ft.uploadFiles)
+	// ExecCLI now uploads to the BARE path `source script` runs, not the old
+	// dot-and-.cli form -- cliRunNames is the same convention RunCLI's own writes use.
+	bodyName, _, _ := cliRunNames("myscript.cli")
+	dest := CLIScriptsDir + "/" + bodyName
+	if len(ft.uploadFiles) != 1 || ft.uploadFiles[0].dest != dest || ft.uploadFiles[0].local != local {
+		t.Errorf("ExecCLI uploadFiles = %v, want dest %q", ft.uploadFiles, dest)
 	}
-	if !ranContains(ft, "rm", "-f") {
-		t.Error("ExecCLI should clean up the uploaded script")
+	call := ft.wrappedCall(t, "myscript.cli")
+	if !strings.Contains(call.argv[2], "trap cleanup") {
+		t.Error("ExecCLI should clean up the uploaded script via its skeleton's trap")
 	}
 }
 
@@ -655,12 +818,13 @@ func TestExecCLIRejectsBadName(t *testing.T) {
 	}
 }
 
-// TestExecCLIReportsRejectedLines closes the half-applied-script branch: a
-// Solace CLI script is a sequence of independent commands, so the whole thing
-// still runs and its output is still shown even when a line is rejected -- but
-// unlike the ported bash, the run is no longer reported as a success. The
-// error must not quote the rejected line itself, since a CLI transcript can
-// carry passwords (the same reason AdditionalUsers withholds its own).
+// TestExecCLIReportsRejectedLines closes the rejected-line branch: ExecCLI now
+// runs through RunCLI's stop-on-error wrapper (see ExecCLI's own doc comment), so
+// a rejected line is caught by the transcript tail scan rather than the old
+// whole-transcript countAnyFold. The transcript is still shown in full either way,
+// and the error must not quote the rejected line itself, since a CLI transcript
+// can carry passwords (the same reason the removed additional-users op withheld
+// its own).
 func TestExecCLIReportsRejectedLines(t *testing.T) {
 	local := filepath.Join(t.TempDir(), "myscript.cli")
 	const out = "line one OK\nInvalid command at line 2\nline three OK\n"
@@ -678,7 +842,7 @@ func TestExecCLIReportsRejectedLines(t *testing.T) {
 	if strings.Contains(err.Error(), "Invalid command at line 2") {
 		t.Errorf("ExecCLI error must not quote the rejected line, got %v", err)
 	}
-	if !ft.removed(cliScriptPath("myscript.cli")) {
+	if !strings.Contains(ft.wrappedCall(t, "myscript.cli").argv[2], "trap cleanup") {
 		t.Error("ExecCLI must still clean up the uploaded script when the run was partly rejected")
 	}
 	if !strings.Contains(buf.String(), out) {
@@ -736,7 +900,7 @@ func TestLoginNoResponse(t *testing.T) {
 
 func TestLeaderStandaloneSkips(t *testing.T) {
 	ft := &fakeTransport{}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "no"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "false"}}, ft)
 	if err := o.Leader(context.Background()); err != nil {
 		t.Fatalf("Leader standalone error: %v", err)
 	}
@@ -756,15 +920,17 @@ func TestLeaderSuccess(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, buf := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, buf := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	if err := o.Leader(context.Background()); err != nil {
 		t.Fatalf("Leader error: %v", err)
 	}
 	// revert-activity is run against the Backup, assert-leader against the Primary.
-	if !uploadedForRole(ft, config.Backup, cliScriptPath("revert-activity")) {
+	// Both now go through RunCLI's wrapped call rather than a plain Upload, so
+	// outputForRole (which recognises either CLI shape) is what checks them.
+	if !outputForRole(ft, config.Backup, "revert-activity") {
 		t.Error("Leader should revert activity on the Backup")
 	}
-	if !uploadedForRole(ft, config.Primary, cliScriptPath("assert-leader")) {
+	if !outputForRole(ft, config.Primary, "assert-leader") {
 		t.Error("Leader should assert leadership on the Primary")
 	}
 	if !strings.Contains(buf.String(), "Sync Complete") {
@@ -782,7 +948,7 @@ func TestLeaderTimeout(t *testing.T) {
 		}
 		return []byte(down), nil
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	o.PollAttempts = 2
 	if err := o.Leader(context.Background()); err == nil {
 		t.Error("Leader should time out when redundancy never recovers")
@@ -823,7 +989,7 @@ func TestRedundancySuccess(t *testing.T) {
 		bk++
 		return []byte(out), nil
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	if err := o.Redundancy(context.Background()); err != nil {
 		t.Fatalf("Redundancy error: %v", err)
 	}
@@ -834,7 +1000,7 @@ func TestRedundancySuccess(t *testing.T) {
 
 func TestRedundancyStandaloneSkips(t *testing.T) {
 	ft := &fakeTransport{}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "no"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "false"}}, ft)
 	if err := o.Redundancy(context.Background()); err != nil {
 		t.Fatalf("Redundancy standalone error: %v", err)
 	}
@@ -911,5 +1077,143 @@ func uploadedForRole(ft *fakeTransport, role config.Role, dest string) bool {
 			return true
 		}
 	}
+	// See hasUpload: a write against dest may now be a RunCLI wrapped call instead
+	// of a plain Upload, so recognise that shape too rather than leave every
+	// existing caller of this helper silently meaningless.
+	if name := cliScriptNameFromDest(dest); name != "" {
+		return outputForRole(ft, role, name)
+	}
 	return false
+}
+
+// TestServerCertBundleOrder pins what the bundle CONTAINS and in what order, with no
+// transport involved -- so the container platforms and the CLI path can be compared
+// against one definition rather than against each other's behaviour.
+//
+// Key before certificate is the order the CLI path has always written (hence
+// serverCertFile's .crt.key extension and the bash ancestor's `cat CERTKEY CERT`).
+// The CAs are deliberately absent: trusted CAs are installed into the broker's own
+// trust store by `config apply domain-certs`, and are not part of the certificate
+// the broker presents.
+func TestServerCertBundleOrder(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cfg := &config.Config{}
+	cfg.TLS.CertKey = write("tls.key", "KEYBYTES\n")
+	cfg.TLS.Cert = write("tls.crt", "CERTBYTES\n")
+	cfg.TLS.CAs = []string{write("ca.pem", "CABYTES\n")}
+
+	got, err := ServerCertBundle(cfg)
+	if err != nil {
+		t.Fatalf("ServerCertBundle: %v", err)
+	}
+	if want := "KEYBYTES\nCERTBYTES\n"; string(got) != want {
+		t.Errorf("bundle = %q, want %q (key then certificate)", got, want)
+	}
+	if strings.Contains(string(got), "CABYTES") {
+		t.Error("the bundle must not carry tls.cas: CAs go into the broker's trust store via " +
+			"`config apply domain-certs`, not into the certificate it presents")
+	}
+}
+
+// TestServerCertBundleRequiresBothHalves covers the guard, including the asymmetric
+// cases: a certificate with no key cannot produce a usable bundle, and neither can a
+// key with no certificate.
+func TestServerCertBundleRequiresBothHalves(t *testing.T) {
+	for _, tc := range []struct{ name, cert, key string }{
+		{"neither", "", ""},
+		{"cert without key", "certs/tls.crt", ""},
+		{"key without cert", "", "certs/tls.key"},
+	} {
+		cfg := &config.Config{}
+		cfg.TLS.Cert, cfg.TLS.CertKey = tc.cert, tc.key
+		if _, err := ServerCertBundle(cfg); err == nil {
+			t.Errorf("%s: ServerCertBundle must refuse, since the broker needs both halves in one file", tc.name)
+		}
+	}
+}
+
+// TestServerCertBundleReportsAnUnreadableFile makes sure the error names the path.
+// Once the container platforms build this bundle at deploy time, a mistyped path is
+// the most likely failure, and it has to point at the file rather than at TLS in
+// general.
+func TestServerCertBundleReportsAnUnreadableFile(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "present.pem")
+	if err := os.WriteFile(real, []byte("BYTES\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// One case per half, so whichever file is missing is the one named. A single
+	// case with both missing would only ever prove whichever happens to be read
+	// first, and would silently stop covering the other half if that order changed.
+	for _, tc := range []struct{ name, cert, key, want string }{
+		{"certificate missing", filepath.Join(dir, "missing.crt"), real, "missing.crt"},
+		{"key missing", real, filepath.Join(dir, "missing.key"), "missing.key"},
+	} {
+		cfg := &config.Config{}
+		cfg.TLS.Cert, cfg.TLS.CertKey = tc.cert, tc.key
+		_, err := ServerCertBundle(cfg)
+		if err == nil {
+			t.Errorf("%s: ServerCertBundle must fail when a file cannot be read", tc.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error %q must name the unreadable path %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+// TestServerCertBundleRefusesAKeyBearingCert covers the misconfiguration this
+// concatenation would otherwise turn into a silently wrong file: a tls.cert that
+// already carries its private key, alongside a tls.certKey, yields a bundle with the
+// key twice. A deployment predating this tool is exactly where a pre-chained file
+// turns up, so the message has to say which of the two fields to change.
+func TestServerCertBundleRefusesAKeyBearingCert(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	key := write("tls.key", "-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n")
+	// Every spelling openssl and its relatives emit, since the check exists to catch
+	// a real operator's file rather than a canonical one.
+	for _, header := range []string{
+		"-----BEGIN PRIVATE KEY-----",
+		"-----BEGIN RSA PRIVATE KEY-----",
+		"-----BEGIN EC PRIVATE KEY-----",
+		"-----BEGIN ENCRYPTED PRIVATE KEY-----",
+	} {
+		cfg := &config.Config{}
+		cfg.TLS.CertKey = key
+		cfg.TLS.Cert = write("chained.pem",
+			header+"\nk\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----\n")
+		_, err := ServerCertBundle(cfg)
+		if err == nil {
+			t.Errorf("%s: a cert file carrying a private key must be refused, or the bundle holds the key twice",
+				header)
+			continue
+		}
+		for _, want := range []string{"tls.cert", "tls.certKey", "twice"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: error %q must mention %q so the operator knows which field to change",
+					header, err, want)
+			}
+		}
+	}
+	// A certificate-only file is the normal case and must still be accepted.
+	cfg := &config.Config{}
+	cfg.TLS.CertKey = key
+	cfg.TLS.Cert = write("plain.crt", "-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----\n")
+	if _, err := ServerCertBundle(cfg); err != nil {
+		t.Errorf("a certificate-only file must be accepted: %v", err)
+	}
 }

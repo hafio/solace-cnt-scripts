@@ -21,7 +21,7 @@ import (
 // privilege-escalation wrapper -- --allow-command can never approve one of those
 // (config.neverAllowed), which TestAllowCommandsRejectsEscalation covers.
 func wrappedCtrCfg() *config.Config {
-	cfg := ctrCfg(config.Docker, "yes")
+	cfg := ctrCfg(config.Docker, "true")
 	cfg.Docker.Runtime = config.Command{"lima", "nerdctl"}
 	cfg.Docker.Compose = nil // let compose derive from the wrapped runtime
 	if err := cfg.AllowCommands([]string{"lima"}); err != nil {
@@ -33,7 +33,7 @@ func wrappedCtrCfg() *config.Config {
 // unapprovedCtrCfg is wrappedCtrCfg WITHOUT the operator's approval -- an env file
 // that tried to elevate on its own.
 func unapprovedCtrCfg(p config.Platform) *config.Config {
-	cfg := ctrCfg(p, "yes")
+	cfg := ctrCfg(p, "true")
 	cmd := config.Command{"lima", string(p)}
 	if p == config.Podman {
 		cfg.Podman.Runtime = cmd
@@ -149,7 +149,7 @@ func TestManagerHonoursRuntime(t *testing.T) {
 			name:       "run",
 			call:       func(m *Manager) error { return m.Logs(context.Background()) },
 			wantMethod: "Run",
-			wantArgs:   withWrapper("logs", "-f", "solace"),
+			wantArgs:   withWrapper("logs", "solace"),
 		},
 		{
 			// Reachable probes the engine then the compose command, so the compose
@@ -253,7 +253,7 @@ func TestCtrTransportHonoursRuntime(t *testing.T) {
 // `+ docker ...` / `+ podman ...` assertion shifts.
 func TestCtrRuntimeDefaultArgvUnchanged(t *testing.T) {
 	for _, p := range []config.Platform{config.Docker, config.Podman} {
-		m, rr, _ := newCapMgr(ctrCfg(p, "yes"), p)
+		m, rr, _ := newCapMgr(ctrCfg(p, "true"), p)
 		if err := m.Logs(context.Background()); err != nil {
 			t.Fatalf("%s Logs: %v", p, err)
 		}
@@ -265,8 +265,8 @@ func TestCtrRuntimeDefaultArgvUnchanged(t *testing.T) {
 		if p == config.Podman {
 			wantName = "sol-pod"
 		}
-		if !eqArgs(got.args, []string{"logs", "-f", wantName}) {
-			t.Errorf("%s args = %v, want [logs -f %s] with no prefix", p, got.args, wantName)
+		if !eqArgs(got.args, []string{"logs", wantName}) {
+			t.Errorf("%s args = %v, want [logs %s] with no prefix", p, got.args, wantName)
 		}
 	}
 }

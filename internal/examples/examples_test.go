@@ -155,8 +155,8 @@ func TestExamplesCarryNoRealSecret(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			if !strings.Contains(cfg.Admin.Pass, "CHANGE-ME") {
-				t.Errorf("admin.pass = %q, want a CHANGE-ME placeholder", cfg.Admin.Pass)
+			if !strings.Contains(cfg.SEMP.AdminPass, "CHANGE-ME") {
+				t.Errorf("admin.pass = %q, want a CHANGE-ME placeholder", cfg.SEMP.AdminPass)
 			}
 		})
 	}

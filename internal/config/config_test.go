@@ -54,15 +54,16 @@ func TestRedundancyEnabled(t *testing.T) {
 		redundancy string
 		want       bool
 	}{
-		{"yes", true},
-		{"no", false},
+		{"true", true},
+		{"false", false},
 		{"", false},
 		{"maybe", false},
+		{"yes", false}, // the old spelling is not silently honoured; Validate refuses it
 	}
 	for _, tc := range tests {
-		c := &Config{Redundancy: tc.redundancy}
+		c := &Config{Redundancy: Redundancy{Enabled: tc.redundancy}}
 		if got := c.RedundancyEnabled(); got != tc.want {
-			t.Errorf("Redundancy=%q RedundancyEnabled() = %v, want %v", tc.redundancy, got, tc.want)
+			t.Errorf("redundancy.enabled=%q RedundancyEnabled() = %v, want %v", tc.redundancy, got, tc.want)
 		}
 	}
 }
@@ -198,17 +199,17 @@ func TestRoleLetter(t *testing.T) {
 
 func haNodesConfig(redundancy string) *Config {
 	return &Config{
-		Redundancy: redundancy,
-		Nodes: Nodes{
-			Primary: Node{Name: "solace-p", IP: "10.0.0.1"},
-			Backup:  Node{Name: "solace-b", IP: "10.0.0.2"},
-			Monitor: Node{Name: "solace-m", IP: "10.0.0.3"},
+		Redundancy: Redundancy{
+			Enabled: redundancy,
+			Primary: Node{Name: "solace-p", Addr: "10.0.0.1"},
+			Backup:  Node{Name: "solace-b", Addr: "10.0.0.2"},
+			Monitor: Node{Name: "solace-m", Addr: "10.0.0.3"},
 		},
 	}
 }
 
 func TestResolveNodeStandalone(t *testing.T) {
-	c := haNodesConfig("no")
+	c := haNodesConfig("false")
 	// Role is ignored in standalone; always the primary as a message_routing node.
 	for _, r := range []Role{Primary, Backup, Monitor} {
 		got := c.ResolveNode(r)
@@ -220,7 +221,7 @@ func TestResolveNodeStandalone(t *testing.T) {
 }
 
 func TestResolveNodeHA(t *testing.T) {
-	c := haNodesConfig("yes")
+	c := haNodesConfig("true")
 	tests := []struct {
 		role Role
 		want NodeIdentity
@@ -290,8 +291,8 @@ func TestApplyDefaultsK8s(t *testing.T) {
 
 	// Unset redundancy means standalone: HA provisions three brokers, so it is the
 	// choice that must be explicit.
-	if c.Redundancy != "no" {
-		t.Errorf("Redundancy default = %q, want %q", c.Redundancy, "no")
+	if c.Redundancy.Enabled != "false" {
+		t.Errorf("redundancy.enabled default = %q, want %q", c.Redundancy.Enabled, "false")
 	}
 	if c.K8s.UpdateStrategy != "automatedRolling" {
 		t.Errorf("UpdateStrategy = %q, want automatedRolling", c.K8s.UpdateStrategy)
@@ -305,8 +306,8 @@ func TestApplyDefaultsK8s(t *testing.T) {
 	if c.Broker.CLIScriptsFolder != "cli" {
 		t.Errorf("CLIScriptsFolder = %q", c.Broker.CLIScriptsFolder)
 	}
-	if c.K8s.Storage.MonNode != "5Gi" {
-		t.Errorf("Storage.MonNode = %q", c.K8s.Storage.MonNode)
+	if c.K8s.Storage.MonNodeSize != "5Gi" {
+		t.Errorf("Storage.MonNodeSize = %q", c.K8s.Storage.MonNodeSize)
 	}
 	// CPU is never defaulted into the msgNode block any more: it is fixed by the
 	// scaling tier and lands on Scaling.CPU, leaving MsgNode.CPU as the sentinel
@@ -320,7 +321,7 @@ func TestApplyDefaultsK8s(t *testing.T) {
 	if c.Scaling.CPU != "2" {
 		t.Errorf("Scaling.CPU = %q, want 2", c.Scaling.CPU)
 	}
-	if c.K8s.Operator.Image != "docker.io/solace/pubsubplus-eventbroker-operator:1.4.0" {
+	if c.K8s.Operator.Image != "solace/pubsubplus-eventbroker-operator:1.4.2" {
 		t.Errorf("Operator.Image = %q", c.K8s.Operator.Image)
 	}
 	if c.K8s.Operator.CPU != "500m" || c.K8s.Operator.Mem != "512Mi" {
@@ -340,23 +341,6 @@ func TestApplyDefaultsK8s(t *testing.T) {
 	}
 	if c.K8s.Placement.AntiAffinityWeight != 100 {
 		t.Errorf("AntiAffinityWeight = %d, want 100", c.K8s.Placement.AntiAffinityWeight)
-	}
-}
-
-func TestApplyDefaultsK8sTLS(t *testing.T) {
-	// Without a server secret, cert/key are left empty.
-	c := &Config{}
-	c.ApplyDefaults(K8s)
-	if c.TLS.Cert != "" || c.TLS.CertKey != "" {
-		t.Errorf("TLS defaulted without TLSServerSecret: cert=%q key=%q", c.TLS.Cert, c.TLS.CertKey)
-	}
-
-	// With a server secret, cert/key default.
-	c2 := &Config{}
-	c2.K8s.TLSServerSecret = "solace-tls"
-	c2.ApplyDefaults(K8s)
-	if c2.TLS.Cert != "certs/tls.crt" || c2.TLS.CertKey != "certs/tls.key" {
-		t.Errorf("TLS defaults with TLSServerSecret: cert=%q key=%q", c2.TLS.Cert, c2.TLS.CertKey)
 	}
 }
 
@@ -430,9 +414,6 @@ func TestApplyDefaultsDocker(t *testing.T) {
 	}
 	if c.Docker.Network.Mode != "host" {
 		t.Errorf("Docker.Network.Mode = %q, want host", c.Docker.Network.Mode)
-	}
-	if c.Admin.User != "admin" {
-		t.Errorf("Admin.User = %q, want admin", c.Admin.User)
 	}
 	if c.Docker.Container.Name != "solace" {
 		t.Errorf("Docker.Container.Name = %q, want solace", c.Docker.Container.Name)
@@ -522,10 +503,10 @@ func validK8sConfig() *Config {
 	c := &Config{}
 	c.Image.Repo = "solace/broker"
 	c.Image.Tag = "latest"
-	c.Admin.Pass = "s3cret"
+	c.SEMP.AdminPass = "s3cret"
 	c.K8s.Name = "mybroker"
 	c.K8s.Namespace = "sol-ns"
-	c.K8s.Storage.MsgNode = "30Gi"
+	c.K8s.Storage.MsgNodeSize = "30Gi"
 	c.ApplyDefaults(K8s)
 	return c
 }
@@ -537,7 +518,7 @@ func TestValidateK8sValid(t *testing.T) {
 }
 
 func TestValidateK8sMissingMandatory(t *testing.T) {
-	c := &Config{Redundancy: "yes"} // no defaults applied; all mandatory empty
+	c := &Config{Redundancy: Redundancy{Enabled: "true"}} // no defaults applied; all mandatory empty
 	// The scaling tier is checked ahead of the platform switch, so a hand-built
 	// config has to name one to reach the mandatory-field message under test.
 	c.Scaling.MaxConnections = 100
@@ -545,7 +526,7 @@ func TestValidateK8sMissingMandatory(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing mandatory k8s fields")
 	}
-	want := "these fields must not be empty: admin.pass, image.repo, image.tag, kubernetes.name, kubernetes.namespace, kubernetes.storage.msgNode"
+	want := "these fields must not be empty: image.repo, image.tag, kubernetes.name, kubernetes.namespace, kubernetes.storage.msgNodeSize, semp.adminPass"
 	if err.Error() != want {
 		t.Errorf("missing-fields message =\n  %q\nwant\n  %q", err.Error(), want)
 	}
@@ -560,70 +541,77 @@ func TestValidateK8sBadUpdateStrategy(t *testing.T) {
 	}
 }
 
-// TestValidateK8sAdminUserFixed mirrors TestValidateK8sMsgNodeCPURemoved: admin.user is a
-// container knob, and on Kubernetes the operator reads the fixed username_admin_password
-// key out of the credentials Secret, so any other value was silently ignored -- the same
-// "a value the operator believes is in effect has to be seen" case. The default and the
-// unset field must both stay legal, or every k8s env file would fail to load.
-func TestValidateK8sAdminUserFixed(t *testing.T) {
-	c := validK8sConfig()
-	c.Admin.User = "ops"
-	err := c.Validate(K8s)
-	if err == nil || !strings.Contains(err.Error(), "admin.user") {
-		t.Fatalf("expected the admin.user rejection, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "username_admin_password") {
-		t.Errorf("the error should name the key the operator actually reads, got: %v", err)
-	}
-	for _, user := range []string{"admin", ""} {
-		c := validK8sConfig()
-		c.Admin.User = user
-		if err := c.Validate(K8s); err != nil {
-			t.Errorf("admin.user %q must validate (unset means ApplyDefaults fills it): %v", user, err)
-		}
-	}
-	// Containers own the username: it names their globalaccesslevel setting, their
-	// password file and their SEMP login, so the rejection must be k8s-only.
-	ctr := validContainerConfig(Docker, "yes")
-	ctr.Admin.User = "ops"
-	if err := ctr.Validate(Docker); err != nil {
-		t.Errorf("admin.user is a docker/podman knob and must still validate there: %v", err)
-	}
-}
+// TestValidateK8sAdminUserFixed is GONE with the admin.user key it pinned. It rejected a
+// non-default username on Kubernetes, where the operator reads the fixed
+// username_admin_password key. That is now true on EVERY platform -- the schema has no
+// username field at all -- so there is no disagreement left to reject.
 
 func validContainerConfig(p Platform, redundancy string) *Config {
 	c := haNodesConfig(redundancy)
 	c.Image.Repo = "solace/broker"
 	c.Image.Tag = "latest"
-	c.Admin.Pass = "s3cret"
+	c.SEMP.AdminPass = "s3cret"
+	// Mandatory on containers in HA and optional on Kubernetes: nothing distributes a
+	// key across three container hosts, so each env file must carry the same one.
+	c.Redundancy.PSK = "psk-shared-by-all-three-hosts"
+	// Mandatory on podman and deliberately not defaulted: it receives the
+	// server-certificate bundle, which holds a private key, so the schema will not
+	// choose a location. Set here so a fixture meant to be VALID stays valid, and so
+	// the tests below fail for the reason they are actually about.
+	c.Podman.BaseDir = "/opt/solace"
 	c.ApplyDefaults(p)
 	return c
 }
 
 func TestValidateContainerHA(t *testing.T) {
 	for _, p := range []Platform{Docker, Podman} {
-		c := validContainerConfig(p, "yes")
+		c := validContainerConfig(p, "true")
 		if err := c.Validate(p); err != nil {
 			t.Errorf("valid HA %q config Validate returned error: %v", p, err)
 		}
 	}
 }
 
+// TestValidateContainerStandalone: standalone requires NO node field at all. There is one
+// node, it is always this host, and an omitted redundancy.primary.name is answered by the
+// host's own hostname (FillStandaloneNodeName, applied at load by the CLI) -- so demanding
+// one would reject a file this tool can complete itself. A configured name still wins.
 func TestValidateContainerStandalone(t *testing.T) {
-	// Standalone (redundancy no): only nodes.primary.name mandatory among nodes.
-	c := &Config{Redundancy: "no"}
-	c.Image.Repo = "solace/broker"
-	c.Image.Tag = "latest"
-	c.Admin.Pass = "s3cret"
-	c.Nodes.Primary.Name = "solace-only"
-	c.ApplyDefaults(Docker)
-	if err := c.Validate(Docker); err != nil {
-		t.Errorf("valid standalone config Validate returned error: %v", err)
+	base := func() *Config {
+		c := &Config{Redundancy: Redundancy{Enabled: "false"}}
+		c.Image.Repo = "solace/broker"
+		c.Image.Tag = "latest"
+		c.SEMP.AdminPass = "s3cret"
+		return c
 	}
+	t.Run("with a routername", func(t *testing.T) {
+		c := base()
+		c.Redundancy.Primary.Name = "solace-only"
+		c.ApplyDefaults(Docker)
+		if err := c.Validate(Docker); err != nil {
+			t.Errorf("valid standalone config Validate returned error: %v", err)
+		}
+	})
+	t.Run("without one", func(t *testing.T) {
+		c := base()
+		c.ApplyDefaults(Docker)
+		if err := c.Validate(Docker); err != nil {
+			t.Errorf("standalone must not require redundancy.primary.name: %v", err)
+		}
+	})
 }
 
+// TestValidateContainerMissingMandatory covers the BULK missing-fields message: one run
+// names every empty mandatory field rather than making the operator fix them one at a time.
+//
+// redundancy.psk is deliberately not in that list and is set here so it does not fire. It
+// gets its own error ahead of this one (validateContainerPSK) because it is the single
+// field nothing else will fill in -- no default, no generator, and a value that has to match
+// on two other machines -- so it needs the openssl command rather than a place in a list.
+// TestPSKIsMandatoryOnContainers is what pins that message.
 func TestValidateContainerMissingMandatory(t *testing.T) {
-	c := &Config{Redundancy: "yes"}
+	c := &Config{Redundancy: Redundancy{Enabled: "true"}}
+	c.Redundancy.PSK = "supplied-so-the-bulk-check-is-what-fires"
 	c.ApplyDefaults(Docker) // DataDir defaults, but image/admin/nodes stay empty
 	err := c.Validate(Docker)
 	if err == nil {
@@ -633,8 +621,9 @@ func TestValidateContainerMissingMandatory(t *testing.T) {
 	if !strings.HasPrefix(msg, "these fields must not be empty:") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	for _, want := range []string{"image.repo", "image.tag", "admin.pass", "nodes.primary.name",
-		"nodes.primary.ip", "nodes.backup.name", "nodes.backup.ip", "nodes.monitor.name", "nodes.monitor.ip"} {
+	for _, want := range []string{"image.repo", "image.tag", "semp.adminPass", "redundancy.primary.name",
+		"redundancy.primary.addr", "redundancy.backup.name", "redundancy.backup.addr", "redundancy.monitor.name",
+		"redundancy.monitor.addr"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("missing-fields message %q does not name %q", msg, want)
 		}
@@ -730,7 +719,7 @@ func TestImageTagVersion(t *testing.T) {
 // and skips the gate.
 func TestValidateHealthCheck(t *testing.T) {
 	enabled := func(p Platform, tag string) *Config {
-		c := validContainerConfig(p, "yes")
+		c := validContainerConfig(p, "true")
 		c.Image.Tag = tag
 		block := &c.Docker.Container
 		if p == Podman {
@@ -784,7 +773,7 @@ func TestValidateHealthCheck(t *testing.T) {
 	})
 
 	t.Run("disabled is the default and stays legal on any tag", func(t *testing.T) {
-		c := validContainerConfig(Podman, "no") // tag "latest", health check off
+		c := validContainerConfig(Podman, "false") // tag "latest", health check off
 		if err := c.Validate(Podman); err != nil {
 			t.Errorf("a disabled health check must validate: %v", err)
 		}
@@ -793,7 +782,7 @@ func TestValidateHealthCheck(t *testing.T) {
 
 func TestValidateContainerBridge(t *testing.T) {
 	// Bridge without ports -> error.
-	c := validContainerConfig(Docker, "yes")
+	c := validContainerConfig(Docker, "true")
 	c.Docker.Network.Mode = "bridge"
 	c.Docker.Network.Ports = nil
 	if err := c.Validate(Docker); err == nil || !strings.Contains(err.Error(), "network.mode=bridge requires") {
@@ -801,7 +790,7 @@ func TestValidateContainerBridge(t *testing.T) {
 	}
 
 	// Bridge with ports -> ok.
-	c2 := validContainerConfig(Docker, "yes")
+	c2 := validContainerConfig(Docker, "true")
 	c2.Docker.Network.Mode = "bridge"
 	c2.Docker.Network.Ports = []string{"55555:55555"}
 	if err := c2.Validate(Docker); err != nil {
@@ -817,24 +806,24 @@ func TestValidateContainerIdentifiers(t *testing.T) {
 	bad := []string{"sol ace", "sol:ace", "sol=ace", "sol\nace", "sol/ace"}
 	for _, name := range bad {
 		t.Run("container.name "+name, func(t *testing.T) {
-			c := validContainerConfig(Docker, "yes")
+			c := validContainerConfig(Docker, "true")
 			c.Docker.Container.Name = name
 			if err := c.Validate(Docker); err == nil || !strings.Contains(err.Error(), "docker.container.name") {
 				t.Errorf("expected a container.name format error for %q, got: %v", name, err)
 			}
 		})
-		t.Run("nodes.backup.name "+name, func(t *testing.T) {
-			c := validContainerConfig(Podman, "yes")
-			c.Nodes.Backup.Name = name
-			if err := c.Validate(Podman); err == nil || !strings.Contains(err.Error(), "nodes.backup.name") {
-				t.Errorf("expected a nodes.backup.name format error for %q, got: %v", name, err)
+		t.Run("redundancy.backup.name "+name, func(t *testing.T) {
+			c := validContainerConfig(Podman, "true")
+			c.Redundancy.Backup.Name = name
+			if err := c.Validate(Podman); err == nil || !strings.Contains(err.Error(), "redundancy.backup.name") {
+				t.Errorf("expected a redundancy.backup.name format error for %q, got: %v", name, err)
 			}
 		})
 	}
 	// Standalone leaves the backup/monitor rows empty, which must stay legal: the
 	// format check skips empty values, since emptiness is requireAll's job.
-	c := validContainerConfig(Docker, "no")
-	c.Nodes.Backup.Name, c.Nodes.Monitor.Name = "", ""
+	c := validContainerConfig(Docker, "false")
+	c.Redundancy.Backup.Name, c.Redundancy.Monitor.Name = "", ""
 	if err := c.Validate(Docker); err != nil {
 		t.Errorf("standalone with empty backup/monitor names must validate: %v", err)
 	}
@@ -844,14 +833,14 @@ func TestValidateContainerIdentifiers(t *testing.T) {
 // colon, so the identifier check cannot be reused verbatim here.
 func TestValidateContainerRunUser(t *testing.T) {
 	for _, ok := range []string{"0:0", "1000", "1000:1000", "solace:solace"} {
-		c := validContainerConfig(Docker, "yes")
+		c := validContainerConfig(Docker, "true")
 		c.Docker.Container.RunUser = ok
 		if err := c.Validate(Docker); err != nil {
 			t.Errorf("runUser %q must be accepted: %v", ok, err)
 		}
 	}
 	for _, bad := range []string{"1000 1000", "1000:", "root:root:root", "root\n"} {
-		c := validContainerConfig(Docker, "yes")
+		c := validContainerConfig(Docker, "true")
 		c.Docker.Container.RunUser = bad
 		if err := c.Validate(Docker); err == nil || !strings.Contains(err.Error(), "runUser") {
 			t.Errorf("expected a runUser format error for %q, got: %v", bad, err)
@@ -1139,7 +1128,7 @@ func TestValidateK8sPorts(t *testing.T) {
 }
 
 func TestValidateContainerBadNetworkMode(t *testing.T) {
-	c := validContainerConfig(Podman, "yes")
+	c := validContainerConfig(Podman, "true")
 	c.Podman.Network.Mode = "sidecar"
 	if err := c.Validate(Podman); err == nil || !strings.Contains(err.Error(), "network.mode must be") {
 		t.Errorf("expected bad network mode error, got: %v", err)
@@ -1149,7 +1138,7 @@ func TestValidateContainerBadNetworkMode(t *testing.T) {
 // TestValidateDockerComposeCommand covers the compose command as an exec-bound
 // Command, the same boundary check kubernetes.runtime and docker.runtime get.
 func TestValidateDockerComposeCommand(t *testing.T) {
-	c := validContainerConfig(Docker, "yes")
+	c := validContainerConfig(Docker, "true")
 	c.Docker.Compose = Command{"docker", ""}
 	if err := c.Validate(Docker); err == nil || !strings.Contains(err.Error(), "docker.compose[1]") {
 		t.Errorf("expected an empty-argument error for docker.compose, got: %v", err)
@@ -1157,7 +1146,7 @@ func TestValidateDockerComposeCommand(t *testing.T) {
 }
 
 func TestValidateUnknownPlatform(t *testing.T) {
-	c := &Config{Redundancy: "yes"}
+	c := &Config{Redundancy: Redundancy{Enabled: "true"}}
 	c.Scaling.MaxConnections = 100 // reach the platform switch, not the tier check
 	err := c.Validate(Platform("nope"))
 	if err == nil || !strings.Contains(err.Error(), "unknown platform") {
@@ -1166,9 +1155,9 @@ func TestValidateUnknownPlatform(t *testing.T) {
 }
 
 func TestValidateBadRedundancy(t *testing.T) {
-	c := &Config{Redundancy: "sometimes"}
+	c := &Config{Redundancy: Redundancy{Enabled: "sometimes"}}
 	err := c.Validate(K8s)
-	if err == nil || !strings.Contains(err.Error(), "redundancy must be") {
+	if err == nil || !strings.Contains(err.Error(), "redundancy.enabled must be") {
 		t.Errorf("expected redundancy enum error, got: %v", err)
 	}
 }
@@ -1194,7 +1183,7 @@ func envTree(t *testing.T) string {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatalf("MkdirAll %s: %v", p, err)
 		}
-		if err := os.WriteFile(p, []byte("redundancy: \"no\"\n"), 0o600); err != nil {
+		if err := os.WriteFile(p, []byte("redundancy:\n  enabled: \"false\"\n"), 0o600); err != nil {
 			t.Fatalf("WriteFile %s: %v", p, err)
 		}
 	}
@@ -1297,7 +1286,7 @@ func TestResolveEnvPathEmptyBaseDir(t *testing.T) {
 func TestResolveEnvPathDefaultInBaseDir(t *testing.T) {
 	root := t.TempDir()
 	want := filepath.Join(root, EnvFileDefault)
-	if err := os.WriteFile(want, []byte("redundancy: \"no\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(want, []byte("redundancy:\n  enabled: \"false\"\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	got, err := ResolveEnvPath(root, "")
@@ -1320,17 +1309,18 @@ func writeTempYAML(t *testing.T, content string) string {
 }
 
 func TestLoadSuccess(t *testing.T) {
-	yaml := `redundancy: "no"
+	yaml := `redundancy:
+  enabled: "false"
 image:
   repo: solace/broker
   tag: latest
-admin:
-  pass: s3cret
+semp:
+  adminPass: s3cret
 kubernetes:
   name: mybroker
   namespace: sol-ns
   storage:
-    msgNode: 30Gi
+    msgNodeSize: 30Gi
 `
 	path := writeTempYAML(t, yaml)
 	c, err := Load(path, K8s)
@@ -1438,7 +1428,7 @@ func TestLoadUnknownFieldHasNoConvertHint(t *testing.T) {
 
 func TestLoadValidationError(t *testing.T) {
 	// Parses fine, but mandatory fields are missing -> Validate fails.
-	path := writeTempYAML(t, "redundancy: \"no\"\n")
+	path := writeTempYAML(t, "redundancy:\n  enabled: \"false\"\n")
 	_, err := Load(path, K8s)
 	if err == nil || !strings.Contains(err.Error(), "these fields must not be empty:") {
 		t.Errorf("expected validation error, got: %v", err)
@@ -1451,9 +1441,9 @@ func TestLoadValidationError(t *testing.T) {
 // -reference test can assert on resolution rather than on unrelated mandatory
 // fields.
 func minimalK8s(body string) string {
-	return "redundancy: \"no\"\n" +
+	return "redundancy:\n  enabled: \"false\"\n" +
 		"image:\n  repo: solace/broker\n  tag: \"10.26.0\"\n" +
-		"kubernetes:\n  name: b\n  namespace: ns\n  storage:\n    msgNode: 10Gi\n" +
+		"kubernetes:\n  name: b\n  namespace: ns\n  storage:\n    msgNodeSize: 10Gi\n" +
 		body
 }
 
@@ -1463,17 +1453,17 @@ func TestLoadResolvesSecretRefs(t *testing.T) {
 	t.Setenv("SOLACE_TEST_ADMIN", "from-env")
 	t.Setenv("SOLACE_TEST_APPUSER", "app-from-env")
 	path := writeTempYAML(t, minimalK8s(
-		"admin:\n  passEnv: SOLACE_TEST_ADMIN\n"+
+		"semp:\n  adminPassEnv: SOLACE_TEST_ADMIN\n"+
 			"  additionalUsers:\n    - username: appuser\n      accessLevel: read-only\n      passwordEnv: SOLACE_TEST_APPUSER\n"))
 	c, err := Load(path, K8s)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.Admin.Pass != "from-env" {
-		t.Errorf("admin.pass = %q, want the value of SOLACE_TEST_ADMIN", c.Admin.Pass)
+	if c.SEMP.AdminPass != "from-env" {
+		t.Errorf("semp.adminPass = %q, want the value of SOLACE_TEST_ADMIN", c.SEMP.AdminPass)
 	}
-	if len(c.Admin.AdditionalUsers) != 1 || c.Admin.AdditionalUsers[0].Password != "app-from-env" {
-		t.Errorf("additionalUsers = %+v", c.Admin.AdditionalUsers)
+	if len(c.SEMP.AdditionalUsers) != 1 || c.SEMP.AdditionalUsers[0].Password != "app-from-env" {
+		t.Errorf("additionalUsers = %+v", c.SEMP.AdditionalUsers)
 	}
 }
 
@@ -1487,31 +1477,31 @@ func TestLoadSecretRefErrors(t *testing.T) {
 	}{
 		{
 			"unset variable",
-			"admin:\n  passEnv: SOLACE_TEST_MISSING\n",
-			[]string{"admin.passEnv", "SOLACE_TEST_MISSING", "not set"},
+			"semp:\n  adminPassEnv: SOLACE_TEST_MISSING\n",
+			[]string{"semp.adminPassEnv", "SOLACE_TEST_MISSING", "not set"},
 		},
 		{
 			// An exported-but-empty variable is the likelier operator mistake, and it
 			// would otherwise deploy a broker with a blank password.
 			"empty variable",
-			"admin:\n  passEnv: SOLACE_TEST_EMPTY\n",
-			[]string{"admin.passEnv", "set but empty"},
+			"semp:\n  adminPassEnv: SOLACE_TEST_EMPTY\n",
+			[]string{"semp.adminPassEnv", "set but empty"},
 		},
 		{
 			"both keys set",
-			"admin:\n  pass: UNIQUE-LITERAL-VALUE\n  passEnv: SOLACE_TEST_SET\n",
-			[]string{"admin.pass", "admin.passEnv", "both set"},
+			"semp:\n  adminPass: UNIQUE-LITERAL-VALUE\n  adminPassEnv: SOLACE_TEST_SET\n",
+			[]string{"semp.adminPass", "semp.adminPassEnv", "both set"},
 		},
 		{
 			// The reference key takes a NAME; ${...} is the way that goes wrong.
 			"value where a name belongs",
-			"admin:\n  passEnv: ${SOLACE_TEST_SET}\n",
-			[]string{"admin.passEnv", "environment variable name"},
+			"semp:\n  adminPassEnv: ${SOLACE_TEST_SET}\n",
+			[]string{"semp.adminPassEnv", "environment variable name"},
 		},
 		{
 			"per-user reference",
-			"admin:\n  pass: p\n  additionalUsers:\n    - username: appuser\n      accessLevel: none\n      passwordEnv: SOLACE_TEST_MISSING\n",
-			[]string{"admin.additionalUsers[0].passwordEnv", "SOLACE_TEST_MISSING"},
+			"semp:\n  adminPass: p\n  additionalUsers:\n    - username: appuser\n      accessLevel: none\n      passwordEnv: SOLACE_TEST_MISSING\n",
+			[]string{"semp.additionalUsers[0].passwordEnv", "SOLACE_TEST_MISSING"},
 		},
 	}
 	for _, tc := range cases {
@@ -1540,17 +1530,88 @@ func TestLoadSecretRefErrors(t *testing.T) {
 // dedicated *Env key resolves anything.
 func TestSecretRefsLeaveLiteralsAlone(t *testing.T) {
 	t.Setenv("SOLACE_TEST_ADMIN", "from-env")
-	path := writeTempYAML(t, minimalK8s("admin:\n  pass: ${SOLACE_TEST_ADMIN}\n"))
+	path := writeTempYAML(t, minimalK8s("semp:\n  adminPass: ${SOLACE_TEST_ADMIN}\n"))
 	c, err := Load(path, K8s)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.Admin.Pass != "${SOLACE_TEST_ADMIN}" {
-		t.Errorf("admin.pass = %q; a literal must never be expanded", c.Admin.Pass)
+	if c.SEMP.AdminPass != "${SOLACE_TEST_ADMIN}" {
+		t.Errorf("semp.adminPass = %q; a literal must never be expanded", c.SEMP.AdminPass)
 	}
 }
 
 // --- additional users --------------------------------------------------------
+
+// TestAdditionalUserNameFollowsTheBrokerRule covers the broker's OWN grammar, which
+// applies wherever the user is created and so is checked on every platform: start with a
+// letter or '_', 1-32 characters. Checked at load because the broker would otherwise reject
+// it at CREATE time -- on a running deployment, after everything else has been applied.
+func TestAdditionalUserNameFollowsTheBrokerRule(t *testing.T) {
+	bad := []struct{ name, why string }{
+		{"1user", "starts with a digit"},
+		{"-user", "starts with a hyphen"},
+		{".user", "starts with a dot"},
+		{strings.Repeat("u", 33), "33 characters, one over the limit"},
+		{"", "empty"},
+	}
+	for _, tc := range bad {
+		c := validContainerConfig(Docker, "false")
+		c.SEMP.AdditionalUsers = []AdditionalUser{{Username: tc.name, AccessLevel: "read-only", Password: "p"}}
+		if err := c.Validate(Docker); err == nil {
+			t.Errorf("username %q (%s) must be refused", tc.name, tc.why)
+		}
+	}
+	// The boundaries themselves are legal: a leading underscore, and exactly 32 characters.
+	for _, ok := range []string{"_user", strings.Repeat("u", 32)} {
+		c := validContainerConfig(Docker, "false")
+		c.SEMP.AdditionalUsers = []AdditionalUser{{Username: ok, AccessLevel: "read-only", Password: "p"}}
+		if err := c.Validate(Docker); err != nil {
+			t.Errorf("username %q is within the broker's rule: %v", ok, err)
+		}
+	}
+}
+
+// TestAdditionalUserNameIsStricterOnKubernetes covers the one rule that differs by
+// platform. The users reach a Kubernetes broker through spec.extraEnvVarsSecret, which is
+// projected with envFrom -- and the kubelet SILENTLY DROPS keys that are not valid
+// environment variable names. A username carrying '.' or '-' would produce a user with no
+// password, or no user at all, with nothing in the deploy to say so. Containers mount the
+// password as a FILE, so the wider rule still holds there.
+func TestAdditionalUserNameIsStricterOnKubernetes(t *testing.T) {
+	for _, name := range []string{"app.user", "app-user"} {
+		k := validK8sConfig()
+		k.SEMP.AdditionalUsers = []AdditionalUser{{Username: name, AccessLevel: "read-only", Password: "p"}}
+		err := k.Validate(K8s)
+		if err == nil {
+			t.Fatalf("username %q must be refused on Kubernetes: envFrom would drop it", name)
+		}
+		if !strings.Contains(err.Error(), "DROPS") {
+			t.Errorf("error %q should say the variable is dropped, which is why it fails silently", err)
+		}
+
+		// The same name is fine on a container platform.
+		c := validContainerConfig(Docker, "false")
+		c.SEMP.AdditionalUsers = []AdditionalUser{{Username: name, AccessLevel: "read-only", Password: "p"}}
+		if err := c.Validate(Docker); err != nil {
+			t.Errorf("username %q mounts as a file on docker and must stay legal: %v", name, err)
+		}
+	}
+}
+
+// TestAdditionalUserPasswordCharsAreFreeOnKubernetes pins a restriction this change
+// LIFTED. Kubernetes used to create these users over the broker CLI, so their passwords
+// could not contain the characters the CLI rejects in a quoted value. They go into a Secret
+// now, base64-encoded, and are never interpolated into a CLI line -- so the restriction is
+// gone, and a password that was refused before must load.
+func TestAdditionalUserPasswordCharsAreFreeOnKubernetes(t *testing.T) {
+	c := validK8sConfig()
+	c.SEMP.AdditionalUsers = []AdditionalUser{
+		{Username: "appuser", AccessLevel: "read-only", Password: `a:b(c)"d;e'f<g>h,i*j&k|l`},
+	}
+	if err := c.Validate(K8s); err != nil {
+		t.Errorf("the CLI's quoting rules no longer apply to these passwords: %v", err)
+	}
+}
 
 func TestValidateAdditionalUsers(t *testing.T) {
 	valid := AdditionalUser{Username: "appuser", AccessLevel: "read-write", Password: "pw"}
@@ -1565,15 +1626,6 @@ func TestValidateAdditionalUsers(t *testing.T) {
 		{"builtin admin", []AdditionalUser{{Username: "admin", AccessLevel: "none", Password: "pw"}}, "built-in user"},
 		{"builtin monitor", []AdditionalUser{{Username: "monitor", AccessLevel: "none", Password: "pw"}}, "built-in user"},
 		{"duplicate", []AdditionalUser{valid, valid}, "listed twice"},
-		{
-			// Distinct to the broker, but one host variable name on docker.
-			"separator-only difference",
-			[]AdditionalUser{
-				{Username: "svc-a", AccessLevel: "none", Password: "pw"},
-				{Username: "svc_a", AccessLevel: "none", Password: "pw"},
-			},
-			"collides with",
-		},
 		{"bad access level", []AdditionalUser{{Username: "appuser", AccessLevel: "root", Password: "pw"}}, "accessLevel must be"},
 		{"no access level", []AdditionalUser{{Username: "appuser", Password: "pw"}}, "accessLevel must be"},
 		{"mesh-manager is a level", []AdditionalUser{{Username: "appuser", AccessLevel: "mesh-manager", Password: "pw"}}, ""},
@@ -1588,9 +1640,9 @@ func TestValidateAdditionalUsers(t *testing.T) {
 				if p == K8s {
 					c = validK8sConfig()
 				} else {
-					c = validContainerConfig(p, "no")
+					c = validContainerConfig(p, "false")
 				}
-				c.Admin.AdditionalUsers = tc.users
+				c.SEMP.AdditionalUsers = tc.users
 				err := c.Validate(p)
 				if tc.want == "" {
 					if err != nil {
@@ -1606,55 +1658,61 @@ func TestValidateAdditionalUsers(t *testing.T) {
 	}
 }
 
-// TestValidateAdditionalUserPasswordCharsetIsK8sOnly pins the one platform-specific
-// rule: k8s creates the user with `create username "<u>" password "<p>"`, and the
-// broker CLI rejects a set of characters inside that quoted value. Containers write
-// the password to a mounted file instead, so the same env file must stay valid there
-// -- refusing it everywhere would be a restriction the container path does not have.
-func TestValidateAdditionalUserPasswordCharsetIsK8sOnly(t *testing.T) {
-	for _, bad := range []string{`p"w`, "p;w", "p|w", `p\w`, "p&w", "p*w", "p(w", "p)w", "p<w", "p>w", "p,w", "p'w", "p:w", "p`w"} {
-		user := AdditionalUser{Username: "appuser", AccessLevel: "read-only", Password: bad}
-
-		k := validK8sConfig()
-		k.Admin.AdditionalUsers = []AdditionalUser{user}
-		err := k.Validate(K8s)
-		if err == nil {
-			t.Errorf("k8s should refuse the password containing %q: the CLI cannot express it", bad[1:2])
-			continue
-		}
-		if !strings.Contains(err.Error(), "broker CLI rejects") {
-			t.Errorf("error for %q should explain why, got: %v", bad[1:2], err)
-		}
-		if strings.Contains(err.Error(), bad) {
-			t.Errorf("the error must not echo the password: %v", err)
-		}
-
-		d := validContainerConfig(Docker, "no")
-		d.Admin.AdditionalUsers = []AdditionalUser{user}
-		if err := d.Validate(Docker); err != nil {
-			t.Errorf("containers deliver the password as a file, so %q must be accepted: %v", bad[1:2], err)
-		}
+// TestAdditionalUserNamesCollideOnDocker pins the fold-collision rule where it applies.
+//
+// Two usernames differing only in '.', '_' or '-' are distinct to the broker but fold to
+// ONE docker host variable name (render's ContainerSecret.EnvVar maps every non-alphanumeric
+// to '_'), which would feed one user's password to both. It is checked here rather than at
+// deploy time so both offending fields can be named.
+//
+// It is docker-specific for a reason worth stating: on Kubernetes the stricter username
+// rule rejects a '-' or '.' outright, so the pair can never be formed there in the first
+// place. This used to live in the shared table and stopped meaning anything on the k8s half.
+func TestAdditionalUserNamesCollideOnDocker(t *testing.T) {
+	c := validContainerConfig(Docker, "false")
+	c.SEMP.AdditionalUsers = []AdditionalUser{
+		{Username: "svc-a", AccessLevel: "none", Password: "pw"},
+		{Username: "svc_a", AccessLevel: "none", Password: "pw"},
 	}
-	// Punctuation the CLI does accept must pass on k8s too.
-	k := validK8sConfig()
-	k.Admin.AdditionalUsers = []AdditionalUser{
-		{Username: "appuser", AccessLevel: "admin", Password: "P@ss w0rd!#%^-_=+[]{}/?.~"},
+	err := c.Validate(Docker)
+	if err == nil {
+		t.Fatal("two usernames folding to one host variable must be refused")
 	}
-	if err := k.Validate(K8s); err != nil {
-		t.Errorf("an accepted-punctuation password must validate on k8s: %v", err)
+	if !strings.Contains(err.Error(), "collides with") {
+		t.Errorf("error %q should name the collision and both usernames", err)
 	}
 }
 
-// TestValidateAdditionalUserClashesWithAdminUser covers the container-only clash:
-// admin.user is configurable there, so a listed user matching it would produce two
-// secrets feeding one broker setting.
-func TestValidateAdditionalUserClashesWithAdminUser(t *testing.T) {
-	c := validContainerConfig(Docker, "no")
-	c.Admin.User = "operator"
-	c.Admin.AdditionalUsers = []AdditionalUser{{Username: "operator", AccessLevel: "none", Password: "pw"}}
-	err := c.Validate(Docker)
-	if err == nil || !strings.Contains(err.Error(), "built-in user") {
-		t.Errorf("error = %v, want the admin-user clash to be refused", err)
+// TestValidateAdditionalUserPasswordCharsetIsK8sOnly is GONE, and its replacement is
+// TestAdditionalUserPasswordCharsAreFreeOnKubernetes above.
+//
+// It pinned the opposite of what is now true: Kubernetes used to create these users over
+// the broker CLI, so their passwords could not carry the characters the CLI rejects inside
+// a quoted value. They go into a Secret now, base64-encoded and never interpolated into a
+// CLI line, so that restriction was lifted rather than moved -- and a test asserting a
+// removed rule is worse than no test, because it blocks the change that removed it.
+
+// TestValidateAdditionalUserClashesWithABuiltIn: `admin` and `monitor` are the broker's
+// own accounts, with their own keys (semp.adminPass, semp.monitorPass), so listing one
+// under additionalUsers would produce two secrets feeding a single broker setting.
+//
+// It used to test a name matching a CONFIGURED admin.user. That key is gone -- the admin
+// user is `admin` everywhere now -- so the clash is against a fixed pair, and a name like
+// `operator` that once collided is simply a legal username.
+func TestValidateAdditionalUserClashesWithABuiltIn(t *testing.T) {
+	for _, name := range []string{AdminUser, MonitorUser} {
+		c := validContainerConfig(Docker, "false")
+		c.SEMP.AdditionalUsers = []AdditionalUser{{Username: name, AccessLevel: "none", Password: "pw"}}
+		err := c.Validate(Docker)
+		if err == nil || !strings.Contains(err.Error(), "built-in user") {
+			t.Errorf("%q is built in and must be refused, got: %v", name, err)
+		}
+	}
+	// A name that only collided because admin.user could be set to it is now fine.
+	c := validContainerConfig(Docker, "false")
+	c.SEMP.AdditionalUsers = []AdditionalUser{{Username: "operator", AccessLevel: "none", Password: "pw"}}
+	if err := c.Validate(Docker); err != nil {
+		t.Errorf("`operator` is an ordinary username now that admin.user is gone: %v", err)
 	}
 }
 
@@ -1669,8 +1727,8 @@ var controlCharCases = []struct{ name, value string }{
 	{"nul", "sec\x00ret"},
 }
 
-// TestValidateCredentialControlChars covers M12: admin.pass, admin.monitorPass,
-// nodes.psk (the redundancy PSK) and tls.certPassphrase are rejected outright
+// TestValidateCredentialControlChars covers M12: semp.adminPass, semp.monitorPass,
+// redundancy.psk (the redundancy PSK) and tls.certPassphrase are rejected outright
 // on a control character rather than escaped harder, and the error must never
 // echo the secret value.
 func TestValidateCredentialControlChars(t *testing.T) {
@@ -1678,9 +1736,9 @@ func TestValidateCredentialControlChars(t *testing.T) {
 		field string
 		set   func(*Config, string)
 	}{
-		{"admin.pass", func(c *Config, v string) { c.Admin.Pass = v }},
-		{"admin.monitorPass", func(c *Config, v string) { c.Admin.MonitorPass = v }},
-		{"nodes.psk", func(c *Config, v string) { c.Nodes.PSK = v }},
+		{"semp.adminPass", func(c *Config, v string) { c.SEMP.AdminPass = v }},
+		{"semp.monitorPass", func(c *Config, v string) { c.SEMP.MonitorPass = v }},
+		{"redundancy.psk", func(c *Config, v string) { c.Redundancy.PSK = v }},
 		{"tls.certPassphrase", func(c *Config, v string) { c.TLS.CertPassphrase = v }},
 	}
 	for _, f := range fields {
@@ -1701,20 +1759,39 @@ func TestValidateCredentialControlChars(t *testing.T) {
 }
 
 // TestValidateAdditionalUserControlChars covers the same M12 rule for
-// admin.additionalUsers[].password, which the k8s path also puts on a broker
+// semp.additionalUsers[].password, which reaches a mounted file on containers and a
 // CLI line (broker/scripts.go's `create username ... password ...`).
 func TestValidateAdditionalUserControlChars(t *testing.T) {
 	for _, bc := range controlCharCases {
 		t.Run(bc.name, func(t *testing.T) {
 			c := validK8sConfig()
-			c.Admin.AdditionalUsers = []AdditionalUser{{Username: "appuser", AccessLevel: "read-only", Password: bc.value}}
+			c.SEMP.AdditionalUsers = []AdditionalUser{{Username: "appuser", AccessLevel: "read-only", Password: bc.value}}
 			err := c.Validate(K8s)
-			if err == nil || !strings.Contains(err.Error(), "admin.additionalUsers[0].password") {
+			if err == nil || !strings.Contains(err.Error(), "semp.additionalUsers[0].password") {
 				t.Errorf("expected an additionalUsers[0].password control-character error, got: %v", err)
 			}
 			if err != nil && strings.Contains(err.Error(), bc.value) {
 				t.Errorf("the error must not echo the secret value: %v", err)
 			}
 		})
+	}
+}
+
+// TestLegacyAdminSectionIsRejectedByName covers the rename's own migration path. An env
+// file still carrying `admin:` would otherwise fail with yaml's bare "field admin not
+// found in type config.Config", which names the problem and nothing else -- so the section
+// is decoded into a map purely to be refused with the new name, the two keys that were
+// also renamed, and the one that was removed.
+func TestLegacyAdminSectionIsRejectedByName(t *testing.T) {
+	c := validK8sConfig()
+	c.LegacyAdmin = map[string]any{"pass": "s3cret"}
+	err := c.Validate(K8s)
+	if err == nil {
+		t.Fatal("an env file still using `admin:` must be told about the rename")
+	}
+	for _, want := range []string{"admin:", "semp:", "adminPass", "adminPassEnv", "user:", "REMOVED"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error must mention %q so a mechanical rename is not left half-done, got:\n%s", want, err)
+		}
 	}
 }

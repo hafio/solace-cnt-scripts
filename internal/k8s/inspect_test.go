@@ -286,7 +286,8 @@ func TestPVCLevels(t *testing.T) {
 
 // TestDecodeOperatorFromLiveCapture reads the installed operator's own image,
 // which is what lets a report show the version actually running -- the captured
-// cluster ran 1.4.2 while this repo renders 1.4.0, exactly the drift worth saying.
+// capture is from a real cluster, so the decode is proven against the shape kubectl
+// actually returns rather than a hand-written one.
 func TestDecodeOperatorFromLiveCapture(t *testing.T) {
 	var list deploymentList
 	loadFixture(t, "operator-deploy.json", &list)

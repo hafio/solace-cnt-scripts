@@ -57,5 +57,22 @@ func cliScriptPath(name string) string { return CLIScriptsDir + "/." + name + ".
 // cliArg is the relative script name passed to the CLI binary (cwd = cliscripts).
 func cliArg(name string) string { return "." + name + ".cli" }
 
+// CLIScriptPath and CLIArg expose that pair to internal/k8s, whose replication mate
+// channel uploads and runs a script on a broker in ANOTHER cluster and so cannot go
+// through Ops.RunCLI. One definition of where a script lands and what the CLI is handed,
+// rather than a copy in the other package that can drift from this one.
+func CLIScriptPath(name string) string { return cliScriptPath(name) }
+
+// CLIArg is the relative form; see cliArg.
+func CLIArg(name string) string { return cliArg(name) }
+
 // certPath is the in-broker path a certificate file is uploaded to.
 func certPath(filename string) string { return CertsDir + "/" + filename }
+
+// shellScriptPath is the in-broker path ExecShellScript uploads a host shell script
+// to: a hidden file at the jail root, NOT in the cliscripts dir. Keeping the two apart
+// matters -- the CLI reads every `.*.cli` in cliscripts relative to its own working
+// directory, so a bash script parked there is one typo away from being fed to the
+// Solace CLI. The jail root is where the diagnostics helper (zip-configs.sh) already
+// lands, so this follows an existing convention rather than inventing a location.
+func shellScriptPath(name string) string { return JailRoot + "/." + name }

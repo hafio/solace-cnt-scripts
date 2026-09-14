@@ -46,7 +46,6 @@ build/test/scan command. The workflows call task names only, so local runs match
 | `cov` | Coverage profile -> `coverage/coverage.html` + `.out`, prints the total |
 | `scan` | `go tool govulncheck -format json` (version pinned in `go.mod`/`go.sum`), judged by [internal/tools/vulnjudge](../internal/tools/vulnjudge) -- **fatal** on a fixable vulnerability this module calls, **warns and passes** on one with no released fix. Raw stream kept at `scripts/logs/scan.json` |
 | `dist` | Local convenience: cross-compile all four release targets into `dist/` |
-| `itest` | Compile the LIVE-environment probe harness -> `dist/solace-itest-<os>-<arch>[.exe]`. **Build only** -- the scripts never run it; its probes mutate real broker state, so pointing one at an environment is an operator decision. Not in `all`/`full`, not released. See [itest.md](itest.md) |
 | `graphify` | Refresh `graphify-out/`. Local only; skipped when `CI` is set |
 | `all` | `build vet test` -- the fast inner loop; CI runs `all scan` |
 | `full` | `all` + `cov scan graphify` -- the pre-tag sweep |
@@ -58,11 +57,13 @@ Run the local gate with `scripts/dev.ps1 all scan` (or `./scripts/dev.sh all sca
 `<timestamp> | <task> | <duration>s | OK|FAILED` footer; coverage HTML in
 `coverage/coverage.html`.
 
-Current test coverage is 96.1%, recorded in `scripts/logs/cov.log`. **The previous total is
-the local floor**: if a change lands lower, either add the missing tests or say in the change
-which number moved and why (deleting dead code or a weak test can legitimately lower it).
-This is a local mechanism -- a CI runner is a fresh checkout with no prior cov log, so the
-pipeline cannot catch a coverage regression and is not expected to.
+Current test coverage is 94.5% as of 2026-09-11, recorded in `scripts/logs/cov.log`. **The
+previous total is the local floor**: if a change lands lower, either add the missing tests or
+say in the change which number moved and why (deleting dead code or a weak test can
+legitimately lower it). This is a local mechanism -- a CI runner is a fresh checkout with no
+prior cov log, so the pipeline cannot catch a coverage regression and is not expected to.
+[test.md](test.md) carries the per-package breakdown behind this total -- update both in the
+same change so they cannot drift apart.
 
 ## Goldens
 
@@ -73,10 +74,18 @@ while any of them is stale. `regen` is the one task that rewrites them:
 | --- | --- |
 | [commands.md](commands.md) | `TestCommandDocs` in [internal/cli/commanddoc_test.go](../internal/cli/commanddoc_test.go), from the live cobra tree |
 | [abbreviation.md](abbreviation.md) | `TestAbbreviationDocs` in [internal/cli/abbrevdoc_test.go](../internal/cli/abbrevdoc_test.go), from the three [abbrev](../internal/abbrev) sets plus pflag's shorthands. Shares the same `-update` flag, so one `regen` rewrites both |
+| [import.md](import.md) | `TestImportDocs` in [internal/broker/importdoc_test.go](../internal/broker/importdoc_test.go), from the section classification in [internal/broker/sections.go](../internal/broker/sections.go) |
 | `internal/render/testdata/*.golden` | the render package's manifest tests |
 | `internal/k8s/testdata/*.golden` | the k8s package's manifest tests |
 | `internal/convert/testdata/*.golden` | the convert package's conversion tests |
-| [../env/sample.yaml](../env/sample.yaml) | `TestSampleYAMLMatchesTheFullExample` in [internal/examples/examples_test.go](../internal/examples/examples_test.go), from `internal/examples/assets/full.yaml` -- the template `solace-util examples full` prints. `regen` runs this package **first**, because the render and k8s goldens are rendered from the sample it rewrites |
+| [../env/sample.yaml](../env/sample.yaml) | `TestSampleYAMLMatchesTheFullExample` in [internal/examples/examples_test.go](../internal/examples/examples_test.go), from `internal/examples/assets/full.yaml` -- the template a bare `solace-util examples` prints. `regen` runs this package **first**, because the render and k8s goldens are rendered from the sample it rewrites |
+
+`regen` walks `./internal/examples ./internal/cli ./internal/convert ./internal/render
+./internal/k8s ./internal/broker` in that order (both scripts' `task_regen`/`Task-regen`).
+Only the first position is load-bearing, for the reason in the row above; `./internal/broker`
+is last because it was added last, not because anything downstream depends on it -- unlike
+`env/sample.yaml`, `docs/import.md` is generated straight from `sections.go`, so nothing else's
+golden is rendered from it.
 
 Never hand-edit one. A stale-golden failure names the file and the first differing line;
 the fix is `regen`, then review the diff before committing it. Any command, flag, `Short`
@@ -89,11 +98,10 @@ per-package fixtures and doubles to reuse, and the injectable seams. Read it bef
 test, and update it in the same change when you add or remove one.
 
 That suite runs with no cluster, no container engine and no broker, which is what keeps it
-fast -- and also what leaves a handful of comments in the code marked `ASSUMED, NOT VERIFIED`.
-[itest.md](itest.md) describes `solace-itest`, the dev-only harness that settles them against
-real infrastructure. It is **operator-run**: build it with the `itest` task, copy it to the
-target host, and run it there. It mutates live broker state, so nothing automated ever
-invokes it.
+fast -- and also what leaves a handful of comments in the code marked `ASSUMED, NOT VERIFIED`
+or `NEEDS VERIFICATION`. Each one names what is assumed and what would settle it; they are
+checked by hand against real infrastructure, since the behaviour in question belongs to a
+container engine or a live broker rather than to this code.
 
 ## Toolchain pin
 
@@ -137,9 +145,8 @@ git tag v0.1.0 && git push origin v0.1.0
 | `internal/output` | The one package that owns every stdout/stderr shape (tags, sections, tables). |
 | `internal/cli` | Cobra command tree and handlers. |
 | `internal/tools/vulnjudge` | Dev-only judge the `scan` task pipes govulncheck JSON through. |
-| `internal/tools/itest` | Dev-only, never-shipped harness that verifies the code's `ASSUMED`/`NEEDS VERIFICATION` comments against a live environment. See [itest.md](itest.md). |
 | `internal/examples` | The embedded env-file templates `examples` prints, and the generator for `env/sample.yaml`. |
 | `env/` | Config files. `sample.yaml` is generated -- edit `internal/examples/assets/full.yaml`. |
-| `docs/` | [commands.md](commands.md) -- generated CLI reference; [abbreviation.md](abbreviation.md) -- generated glossary of every short form; [configuration.md](configuration.md) -- the env file; [operations.md](operations.md) -- day-2 procedures; [developer.md](developer.md) -- this file; [test.md](test.md) -- the catalogue of every test; [itest.md](itest.md) -- the live-environment probe harness. |
+| `docs/` | [commands.md](commands.md) -- generated CLI reference; [abbreviation.md](abbreviation.md) -- generated glossary of every short form; [configuration.md](configuration.md) -- the env file; [operations.md](operations.md) -- day-2 procedures; [developer.md](developer.md) -- this file; [test.md](test.md) -- the catalogue of every test. |
 | `scripts/` | `dev.ps1` / `dev.sh` developer tooling. |
 | `graphify-out/` | Persistent knowledge graph of the repo. Rebuild with the `graphify` task. |

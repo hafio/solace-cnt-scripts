@@ -23,22 +23,31 @@ import (
 // mandatory fields, hence the two bodies.
 func writePlatformEnv(t *testing.T, platforms ...config.Platform) string {
 	t.Helper()
-	body := "redundancy: no\n" +
-		"image:\n  repo: solace-pubsub-standard\n  tag: \"10.10.1.128\"\n" +
-		"admin:\n  pass: " + smokeAdminPass + "\n"
+	body := "redundancy:\n  enabled: false\n"
+	// A container env no longer NEEDS a primary name -- standalone falls back to the
+	// host's -- but naming one here keeps these fixtures independent of the machine
+	// running the suite. It rides in the same block as the switch.
+	for _, p := range platforms {
+		if p.IsContainer() {
+			body += "  primary:\n    name: pri-host\n"
+			break
+		}
+	}
+	body += "image:\n  repo: solace-pubsub-standard\n  tag: \"10.10.1.128\"\n" +
+		"semp:\n  adminPass: " + smokeAdminPass + "\n"
 	for _, p := range platforms {
 		switch p {
 		case config.K8s:
 			body += "kubernetes:\n  name: dev-broker\n  namespace: solace\n" +
-				"  storage:\n    class: standard\n    msgNode: 30Gi\n"
+				"  storage:\n    class: standard\n    msgNodeSize: 30Gi\n"
+		case config.Podman:
+			// A bare `podman: {}` no longer loads: baseDir is mandatory, because it
+			// receives the server-certificate bundle and the schema will not pick a
+			// location for a private key. Docker still needs no key of its own, which
+			// is why only this platform gets a body.
+			body += "podman:\n  baseDir: /opt/solace\n"
 		default:
 			body += string(p) + ": {}\n"
-		}
-	}
-	for _, p := range platforms {
-		if p.IsContainer() {
-			body += "nodes:\n  primary:\n    name: pri-host\n"
-			break
 		}
 	}
 	path := filepath.Join(t.TempDir(), "platforms.yaml")
@@ -53,7 +62,7 @@ func writePlatformEnv(t *testing.T, platforms ...config.Platform) string {
 // loading.
 func runPlatform(t *testing.T, path string, configure func(*App), args ...string) (string, error) {
 	t.Helper()
-	full := append(append([]string{"status", "broker"}, args...), "--env", path)
+	full := append(append([]string{"broker", "status"}, args...), "--env", path)
 	return runRootWith(t, full, func(a *App) {
 		if configure != nil {
 			configure(a)
@@ -90,8 +99,8 @@ func TestResolvesSinglePlatformSilently(t *testing.T) {
 // the tool would have to guess which system to deploy to.
 func TestNoPlatformSectionIsRefused(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "no-platform.yaml")
-	body := "redundancy: no\nimage:\n  repo: solace-pubsub-standard\n  tag: \"10.10.1.128\"\n" +
-		"admin:\n  pass: " + smokeAdminPass + "\n"
+	body := "redundancy:\n  enabled: false\nimage:\n  repo: solace-pubsub-standard\n  tag: \"10.10.1.128\"\n" +
+		"semp:\n  adminPass: " + smokeAdminPass + "\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write env: %v", err)
 	}
@@ -228,18 +237,20 @@ func TestUnsupportedCommandFailsLoud(t *testing.T) {
 		args     []string
 		applies  string
 	}{
-		{config.Docker, []string{"status", "operator"}, "kubernetes"},
-		{config.Docker, []string{"restart", "operator"}, "kubernetes"},
-		{config.Podman, []string{"prepare", "namespace"}, "kubernetes"},
-		{config.Docker, []string{"deploy", "operator"}, "kubernetes"},
-		{config.Docker, []string{"config", "apply", "additional-users"}, "kubernetes"},
-		{config.Docker, []string{"remove", "namespace"}, "kubernetes"},
-		{config.Docker, []string{"remove", "operator"}, "kubernetes"},
-		{config.Docker, []string{"generate", "operator"}, "kubernetes"},
-		{config.K8s, []string{"prepare", "host"}, "docker"},
-		// `generate broker` is deliberately absent: it is the one noun that means
-		// the same thing on both families -- what `deploy broker` would apply -- so
-		// it is refused nowhere. TestGenerateWired covers both renderings.
+		{config.Docker, []string{"operator", "status"}, "kubernetes"},
+		{config.Docker, []string{"operator", "restart"}, "kubernetes"},
+		{config.Docker, []string{"operator", "deploy"}, "kubernetes"},
+		{config.Docker, []string{"operator", "remove"}, "kubernetes"},
+		{config.Docker, []string{"operator", "generate"}, "kubernetes"},
+		// Every row is kubernetes-only, and that is now a property of the tree rather than a
+		// gap in the table: the whole `operator` noun is the kubernetes-only surface, and no
+		// COMMAND is container-only any more. `prepare host` was the last one, and its work
+		// folded into `broker deploy`, which applies everywhere. What stayed container-only is
+		// a flag (--restart) and a role reading (--pod), both covered by TestScopedFlagFailsLoud.
+		//
+		// `broker generate` is deliberately absent too: it is the one verb that means the same
+		// thing on both families -- what `broker deploy` would apply -- so it is refused
+		// nowhere. TestGenerateWired covers both renderings.
 	} {
 		t.Run(string(tc.platform)+" "+strings.Join(tc.args, " "), func(t *testing.T) {
 			path := writePlatformEnv(t, config.K8s, config.Docker, config.Podman)
@@ -268,9 +279,10 @@ func TestScopedFlagFailsLoud(t *testing.T) {
 		args     []string
 		flag     string
 	}{
-		{config.K8s, []string{"deploy", "broker", "--restart"}, "restart"},
-		{config.K8s, []string{"deploy", "all", "--restart"}, "restart"},
-		{config.Docker, []string{"cli", "--pod", "primary"}, "pod"},
+		{config.K8s, []string{"broker", "deploy", "--restart"}, "restart"},
+		{config.Docker, []string{"broker", "cli", "--pod", "primary"}, "pod"},
+		{config.Docker, []string{"broker", "logs", "--previous"}, "previous"},
+		{config.Podman, []string{"broker", "logs", "--previous"}, "previous"},
 		// --all is deliberately NOT here: it applies on every platform. On
 		// Kubernetes it surveys the cluster, on a container host every Solace
 		// container found by image -- the same question, asked of what that
@@ -311,16 +323,15 @@ func TestUnusableRoleFailsLoud(t *testing.T) {
 		platform config.Platform
 		args     []string
 	}{
-		{config.Docker, []string{"logs", "broker", "backup"}},
-		{config.Docker, []string{"cli", "backup"}},
-		{config.Docker, []string{"shell", "monitor"}},
-		{config.Docker, []string{"check", "semp-login", "backup"}},
-		{config.Docker, []string{"status", "broker", "backup"}},
-		{config.Docker, []string{"restart", "broker", "backup"}},
-		{config.K8s, []string{"deploy", "broker", "backup"}},
-		{config.K8s, []string{"deploy", "all", "backup"}},
-		{config.K8s, []string{"config", "leader", "backup"}},
-		{config.K8s, []string{"smoke", "redundancy", "backup"}},
+		{config.Docker, []string{"broker", "logs", "backup"}},
+		{config.Docker, []string{"broker", "cli", "backup"}},
+		{config.Docker, []string{"broker", "shell", "monitor"}},
+		{config.Docker, []string{"broker", "perform", "semp-login-check", "backup"}},
+		{config.Docker, []string{"broker", "status", "backup"}},
+		{config.Docker, []string{"broker", "restart", "backup"}},
+		{config.K8s, []string{"broker", "deploy", "backup"}},
+		{config.K8s, []string{"broker", "perform", "assert-leader", "backup"}},
+		{config.K8s, []string{"broker", "perform", "redundancy-test", "backup"}},
 	} {
 		t.Run(string(tc.platform)+" "+strings.Join(tc.args, " "), func(t *testing.T) {
 			path := writePlatformEnv(t, config.K8s, config.Docker, config.Podman)
@@ -347,12 +358,12 @@ func TestUnusableRoleFailsLoud(t *testing.T) {
 // A word that is NOT a role keeps cobra's own wording: a typo is not a migration.
 func TestRolePositionalTeachesPodFlag(t *testing.T) {
 	for _, args := range [][]string{
-		{"shell", "backup"},
-		{"logs", "broker", "monitor"},
-		{"cli", "primary"},
-		{"status", "broker", "backup"},
-		{"restart", "broker", "backup"},
-		{"check", "semp-login", "backup"},
+		{"broker", "shell", "backup"},
+		{"broker", "logs", "monitor"},
+		{"broker", "cli", "primary"},
+		{"broker", "status", "backup"},
+		{"broker", "restart", "backup"},
+		{"broker", "perform", "semp-login-check", "backup"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			path := writePlatformEnv(t, config.K8s, config.Docker, config.Podman)
@@ -374,7 +385,7 @@ func TestRolePositionalTeachesPodFlag(t *testing.T) {
 	}
 	t.Run("a non-role word is still just unknown", func(t *testing.T) {
 		path := writePlatformEnv(t, config.K8s, config.Docker, config.Podman)
-		_, err := runRootWith(t, []string{"shell", "typo", "--platform", "kubernetes", "--env", path},
+		_, err := runRootWith(t, []string{"broker", "shell", "typo", "--platform", "kubernetes", "--env", path},
 			func(a *App) { a.Interactive = func() bool { return false }; echoRunner(a) })
 		if err == nil {
 			t.Fatal("an unknown positional should still be refused")
@@ -409,8 +420,8 @@ func TestPlatformIsAnnouncedInThePreamble(t *testing.T) {
 func TestCompletionNeverReadsTheEnvFile(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist.yaml")
 	for _, args := range [][]string{
-		{"--env", missing, "logs", "broker", ""},
-		{"--env", missing, "status", "broker", "--allow-command", ""},
+		{"--env", missing, "broker", "logs", ""},
+		{"--env", missing, "broker", "status", "--allow-command", ""},
 		{"--env", missing, ""},
 	} {
 		if _, directive := runComplete(t, args...); directive == "" {
@@ -445,10 +456,9 @@ func TestScopedCommandsSaySoInHelp(t *testing.T) {
 		path []string
 		want string
 	}{
-		{[]string{"status", "operator"}, "kubernetes only"},
-		{[]string{"restart", "operator"}, "kubernetes only"},
-		{[]string{"prepare", "host"}, "docker/podman only"},
-		{[]string{"generate", "operator"}, "kubernetes only"},
+		{[]string{"operator", "status"}, "kubernetes only"},
+		{[]string{"operator", "restart"}, "kubernetes only"},
+		{[]string{"operator", "generate"}, "kubernetes only"},
 	} {
 		c := findCmd(t, root, tc.path...)
 		if !strings.Contains(c.Short, tc.want) {
@@ -456,8 +466,8 @@ func TestScopedCommandsSaySoInHelp(t *testing.T) {
 		}
 	}
 	// A command that applies everywhere carries no such tail.
-	if c := findCmd(t, root, "status"); strings.Contains(c.Short, "only)") {
-		t.Errorf("status applies everywhere, so its Short should carry no scope: %q", c.Short)
+	if c := findCmd(t, root, "broker", "status"); strings.Contains(c.Short, "only)") {
+		t.Errorf("broker status applies everywhere, so its Short should carry no scope: %q", c.Short)
 	}
 }
 
@@ -481,4 +491,89 @@ func TestPlatformAnnotationsMatchDispatch(t *testing.T) {
 		}
 	}
 	walk(root)
+}
+
+// TestPlatformOpsCoversEveryPlatform pins the builder against Platforms(). Every
+// other consumer of an ops map already walks Platforms() -- supported() does, and
+// so does the annotation it produces -- so platformOps is the one place a fourth
+// platform would be dropped silently: with both halves non-nil it would still
+// return three entries, supported() would omit the new name, onlyOn would tag the
+// command for three platforms, and the new one would refuse every command that has
+// a perfectly good container implementation. The refusal would look deliberate.
+func TestPlatformOpsCoversEveryPlatform(t *testing.T) {
+	stub := func(*App) error { return nil }
+	m := platformOps(stub, stub)
+	for _, p := range config.Platforms() {
+		if m[p] == nil {
+			t.Errorf("platformOps built with both halves non-nil has no implementation for %s: "+
+				"the builder names platforms literally and this one was missed", p)
+		}
+	}
+	if len(m) != len(config.Platforms()) {
+		t.Errorf("platformOps returned %d entries, want %d (one per platform)", len(m), len(config.Platforms()))
+	}
+	// The nil halves must still be honoured, or "this operation does not exist
+	// there" stops being expressible and every command becomes universal.
+	if got := platformOps(stub, nil); len(got) != 1 || got[config.K8s] == nil {
+		t.Errorf("platformOps(k8s, nil) = %v, want kubernetes only", supported(got))
+	}
+	if got := platformOps(nil, stub); got[config.K8s] != nil {
+		t.Errorf("platformOps(nil, container) must not implement kubernetes, got %v", supported(got))
+	}
+}
+
+// TestLogArgsBuildsOneSetForBothPlatforms pins the shared builder. The two argv
+// builders must not disagree about what a flag means, which is why the tokens are
+// produced once rather than assembled per platform.
+func TestLogArgsBuildsOneSetForBothPlatforms(t *testing.T) {
+	// Nothing set means nothing appended: `logs broker` prints a snapshot and exits,
+	// which is the behaviour change from the old hard-coded follow.
+	if got, err := logArgs(&App{}); err != nil || len(got) != 0 {
+		t.Errorf("logArgs with no flags = %v, %v; want no tokens at all", got, err)
+	}
+
+	a := &App{follow: true, tail: "100", since: "90m", timestamps: true}
+	got, err := logArgs(a)
+	if err != nil {
+		t.Fatalf("logArgs: %v", err)
+	}
+	want := []string{"-f", "--tail", "100", "--since", "1h30m0s", "--timestamps"}
+	if len(got) != len(want) {
+		t.Fatalf("logArgs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("logArgs[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// --since is canonicalised, not passed through: `90m` became `1h30m0s`, so what
+	// reaches an argv is a string time.Duration produced.
+	if got[4] == "90m" {
+		t.Error("--since must be canonicalised through the duration parser, not forwarded verbatim")
+	}
+
+	// A bad duration fails here, before any argv is built.
+	if _, err := logArgs(&App{since: "yesterday"}); err == nil {
+		t.Error("an unparseable --since must be refused rather than reaching the engine")
+	}
+
+	// --previous is deliberately NOT in the shared set: it is kubernetes-only and
+	// appended by the one handler that has it.
+	for _, tok := range logArgs2(t, &App{previous: true}) {
+		if tok == "-p" || tok == "--previous" {
+			t.Error("logArgs must not carry --previous: it is kubernetes-only, so the handler appends it")
+		}
+	}
+}
+
+// logArgs2 is logArgs with the error asserted away, for the cases that are about the
+// token list rather than the parsing.
+func logArgs2(t *testing.T, a *App) []string {
+	t.Helper()
+	got, err := logArgs(a)
+	if err != nil {
+		t.Fatalf("logArgs: %v", err)
+	}
+	return got
 }

@@ -278,9 +278,24 @@ func TestTransportEchoHidesUploadBody(t *testing.T) {
 	if !strings.Contains(out, "bytes on stdin") {
 		t.Errorf("Echo should show the upload as a byte count:\n%s", out)
 	}
-	// The CLI exec is echoed as a normal command against the container (no `--`).
-	if !strings.Contains(out, "sol-pod "+broker.CLIBinary+" -Apes .probe.cli") {
+	// The exec is still echoed as a normal command against the container (no `--`).
+	// RunCLI now sends one `sh -c <skeleton>` rather than a bare `cli -Apes`, so the
+	// anchors are the container and the shell it is handed -- the skeleton's own body
+	// is multi-line and shell-quoted, and matching a fragment of it would break on any
+	// whitespace change without protecting anything.
+	if !strings.Contains(out, "sol-pod sh -c ") {
 		t.Errorf("Echo missing the cli exec line:\n%s", out)
+	}
+	// The shell still runs the CLI, and runs THIS call's script: the broker-side
+	// filenames are derived from the script name RunCLI was given, and they are the
+	// only part of the traced line that is. Dropping this would leave the whole
+	// assertion satisfiable by constant skeleton text, so a RunCLI that stopped
+	// threading the name through would pass.
+	if !strings.Contains(out, broker.CLIBinary) || !strings.Contains(out, "-Apes") {
+		t.Errorf("Echo's exec line does not invoke the CLI:\n%s", out)
+	}
+	if !strings.Contains(out, "solace-util-cli-probe") {
+		t.Errorf("Echo's exec line does not name this script's own broker-side files:\n%s", out)
 	}
 }
 
@@ -293,9 +308,9 @@ func TestTransportEchoHidesUploadBody(t *testing.T) {
 func TestTransportEchoHidesSEMPConfig(t *testing.T) {
 	buf := &bytes.Buffer{}
 	cfg := podmanCfg()
-	cfg.Redundancy = "yes"
-	cfg.Admin = config.Admin{User: "admin", Pass: "SECRET-ADMIN-PW"}
-	cfg.Nodes.Backup.IP = "10.0.0.12"
+	cfg.Redundancy.Enabled = "true"
+	cfg.SEMP = config.SEMP{AdminPass: "SECRET-ADMIN-PW"}
+	cfg.Redundancy.Backup.Addr = "10.0.0.12"
 	tr := NewTransport(engine.Echo{W: buf}, cfg, config.Podman)
 	o := broker.New(tr, cfg, nil)
 	o.PollAttempts = 1

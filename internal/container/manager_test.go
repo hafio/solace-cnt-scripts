@@ -3,7 +3,6 @@ package container
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -26,15 +25,15 @@ import (
 // ctrCfg builds a container config for platform p with a full node table. TLS is
 // left unset (Check's "(not configured)" branch); tests that need it set it.
 func ctrCfg(p config.Platform, redundancy string) *config.Config {
-	c := &config.Config{Redundancy: redundancy}
+	c := &config.Config{}
 	c.Image.Repo = "solace/solace-pubsub-standard"
 	c.Image.Tag = "latest"
-	c.Admin.User = "admin"
-	c.Admin.Pass = "secret-pass"
-	c.Nodes = config.Nodes{
-		Primary: config.Node{Name: "pri-host", IP: "10.0.0.1"},
-		Backup:  config.Node{Name: "bkp-host", IP: "10.0.0.2"},
-		Monitor: config.Node{Name: "mon-host", IP: "10.0.0.3"},
+	c.SEMP.AdminPass = "secret-pass"
+	c.Redundancy = config.Redundancy{
+		Enabled: redundancy,
+		Primary: config.Node{Name: "pri-host", Addr: "10.0.0.1"},
+		Backup:  config.Node{Name: "bkp-host", Addr: "10.0.0.2"},
+		Monitor: config.Node{Name: "mon-host", Addr: "10.0.0.3"},
 	}
 	// The container default scaling tier and the CPU it fixes. Scaling.CPU is
 	// derived by ApplyDefaults, which this hand-built config deliberately skips
@@ -52,6 +51,11 @@ func ctrCfg(p config.Platform, redundancy string) *config.Config {
 		c.Podman.Container.Mem = "6898m"
 		c.Podman.Container.DataDir = "/opt/solace/data"
 		c.Podman.QuadletDir = "/etc/containers/systemd"
+		// Set by hand for the same reason QuadletDir is: this fixture deliberately
+		// skips ApplyDefaults, and baseDir has no default anyway (it is mandatory).
+		// Leaving it empty would make ServerCertBundlePath resolve to the filesystem
+		// root, and a test that wrote there would be worse than one that failed.
+		c.Podman.BaseDir = "/opt/solace"
 		c.Podman.Network.Mode = "host"
 	default:
 		c.Docker.Runtime = config.Command{"docker"}
@@ -126,14 +130,14 @@ func TestManagerCheckDryRun(t *testing.T) {
 		redundancy string
 		mode       string
 	}{
-		{config.Docker, "yes", "HA redundancy group"},
-		{config.Docker, "no", "standalone (single broker)"},
-		{config.Podman, "yes", "HA redundancy group"},
-		{config.Podman, "no", "standalone (single broker)"},
+		{config.Docker, "true", "HA redundancy group"},
+		{config.Docker, "false", "standalone (single broker)"},
+		{config.Podman, "true", "HA redundancy group"},
+		{config.Podman, "false", "standalone (single broker)"},
 	}
 	for _, tc := range cases {
 		cfg := ctrCfg(tc.p, tc.redundancy)
-		if tc.redundancy == "yes" {
+		if tc.redundancy == "true" {
 			cfg.TLS.Cert, cfg.TLS.CertKey = "server.pem", "server.key" // exercise the tls-configured branch
 		}
 		m, buf := newEchoMgr(cfg, tc.p)
@@ -155,7 +159,7 @@ func TestManagerCheckDryRun(t *testing.T) {
 }
 
 func TestManagerCheckDNSFailsLoudInHA(t *testing.T) {
-	m, _, buf := newCapMgr(ctrCfg(config.Docker, "yes"), config.Docker)
+	m, _, buf := newCapMgr(ctrCfg(config.Docker, "true"), config.Docker)
 	m.Resolve = func(host string) bool { return host != "bkp-host" }
 	if err := m.Check(context.Background()); err == nil {
 		t.Fatal("Check must fail when a redundancy hostname does not resolve")
@@ -166,7 +170,7 @@ func TestManagerCheckDNSFailsLoudInHA(t *testing.T) {
 }
 
 func TestManagerCheckStandaloneDNSWarnsOnly(t *testing.T) {
-	m, _, _ := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+	m, _, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 	m.Resolve = func(string) bool { return false } // unresolved
 	if err := m.Check(context.Background()); err != nil {
 		t.Fatalf("standalone Check must not fail on an unresolved name: %v", err)
@@ -175,60 +179,8 @@ func TestManagerCheckStandaloneDNSWarnsOnly(t *testing.T) {
 
 // --- PrepHost ---------------------------------------------------------------
 
-func TestManagerPrepHostDryRunDoesNotWritePSK(t *testing.T) {
-	dir := t.TempDir()
-	envFile := filepath.Join(dir, "sample.yaml")
-	original := "redundancy: yes\nnodes:\n  primary:\n    name: pri-host\n  psk:\n"
-	if err := os.WriteFile(envFile, []byte(original), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	m, buf := newEchoMgr(ctrCfg(config.Docker, "yes"), config.Docker)
-	m.EnvPath = envFile
-	m.GenPSK = func() (string, error) { t.Fatal("GenPSK must not run under the Echo runner"); return "", nil }
-	if err := m.PrepHost(context.Background()); err != nil {
-		t.Fatalf("PrepHost: %v", err)
-	}
-	if got, _ := os.ReadFile(envFile); string(got) != original {
-		t.Errorf("env file must be unchanged under the Echo runner:\n%s", got)
-	}
-	out := buf.String()
-	for _, want := range []string{"+ mkdir -p /opt/solace/data", "+ chown 0:0 /opt/solace/data"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("PrepHost should echo %q:\n%s", want, out)
-		}
-	}
-}
-
-func TestManagerPrepHostWritesPSK(t *testing.T) {
-	dir := t.TempDir()
-	envFile := filepath.Join(dir, "sample.yaml")
-	original := "redundancy: yes\nreplication:\n  psk: KEEP-ME\nnodes:\n  primary:\n    name: pri-host\n  psk:\n"
-	if err := os.WriteFile(envFile, []byte(original), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "yes"), config.Docker)
-	m.EnvPath = envFile
-	m.GenPSK = func() (string, error) { return "TESTPSK123", nil }
-	if err := m.PrepHost(context.Background()); err != nil {
-		t.Fatalf("PrepHost: %v", err)
-	}
-	got, _ := os.ReadFile(envFile)
-	if !strings.Contains(string(got), `psk: "TESTPSK123"`) {
-		t.Errorf("PrepHost should write the generated PSK into nodes:\n%s", got)
-	}
-	if !strings.Contains(string(got), "psk: KEEP-ME") {
-		t.Errorf("PrepHost must not touch the replication psk:\n%s", got)
-	}
-	if !hasCall(rr, "mkdir", []string{"-p", "/opt/solace/data"}) {
-		t.Errorf("PrepHost should mkdir the data dir:\n%+v", rr.calls)
-	}
-	if !hasCall(rr, "chown", []string{"0:0", "/opt/solace/data"}) {
-		t.Errorf("PrepHost should chown the data dir:\n%+v", rr.calls)
-	}
-}
-
 func TestManagerPrepHostRootlessUsesUnshareChown(t *testing.T) {
-	cfg := ctrCfg(config.Podman, "no") // standalone -> PSK step is skipped
+	cfg := ctrCfg(config.Podman, "false") // standalone -> PSK step is skipped
 	cfg.Podman.Rootless = true
 	m, rr, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 1000 } // rootless as non-root: euid guard passes
@@ -255,7 +207,7 @@ func setNoFile(cfg *config.Config, p config.Platform, v string) {
 // which `podman info` also receives -- harmless, since Preflight reads only its
 // error.
 func rootlessNoFileMgr(want, hardLimit string) (*Manager, *capRunner, *bytes.Buffer) {
-	cfg := ctrCfg(config.Podman, "no") // standalone -> the PSK step is skipped
+	cfg := ctrCfg(config.Podman, "false") // standalone -> the PSK step is skipped
 	cfg.Podman.Rootless = true
 	setNoFile(cfg, config.Podman, want)
 	m, rr, buf := newCapMgr(cfg, config.Podman)
@@ -328,7 +280,7 @@ func TestPrepHostRootlessNoFileUnsetSkips(t *testing.T) {
 // the user's own hard limit does not bound the container.
 func TestPrepHostRootfulSkipsNoFile(t *testing.T) {
 	for _, p := range []config.Platform{config.Podman, config.Docker} {
-		cfg := ctrCfg(p, "no")
+		cfg := ctrCfg(p, "false")
 		cfg.Podman.Rootless = false
 		setNoFile(cfg, p, "2448:1048576")
 		m, rr, _ := newCapMgr(cfg, p)
@@ -346,7 +298,7 @@ func TestPrepHostRootfulSkipsNoFile(t *testing.T) {
 }
 
 func TestPrepHostRootlessNoFileDryRun(t *testing.T) {
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.Rootless = true
 	setNoFile(cfg, config.Podman, "2448:1048576")
 	m, buf := newEchoMgr(cfg, config.Podman)
@@ -388,7 +340,7 @@ func TestSplitLimit(t *testing.T) {
 
 func TestManagerDeployDockerComposeWritesFile(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	m, rr, _ := newCapMgr(cfg, config.Docker)
 	if err := m.Deploy(context.Background(), config.Primary); err != nil {
@@ -409,7 +361,7 @@ func TestManagerDeployDockerComposeWritesFile(t *testing.T) {
 // to go through it rather than the runtime.
 func TestManagerDockerComposeCommandOverride(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	cfg.Docker.Compose = config.Command{"docker-compose"}
 	m, rr, _ := newCapMgr(cfg, config.Docker)
@@ -425,7 +377,7 @@ func TestManagerDockerComposeCommandOverride(t *testing.T) {
 // separate install from the engine, so a reachable docker with no compose must
 // fail at check time rather than at deploy time.
 func TestManagerDockerCheckProbesCompose(t *testing.T) {
-	m, buf := newEchoMgr(ctrCfg(config.Docker, "no"), config.Docker)
+	m, buf := newEchoMgr(ctrCfg(config.Docker, "false"), config.Docker)
 	if err := m.Check(context.Background()); err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -435,7 +387,7 @@ func TestManagerDockerCheckProbesCompose(t *testing.T) {
 }
 
 func TestManagerDockerCheckFailsWhenComposeMissing(t *testing.T) {
-	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 	// Fail only the compose probe, so the engine still looks reachable and the
 	// error has to be the compose-specific one.
 	rr.outFail = failOn("compose")
@@ -455,7 +407,7 @@ func TestManagerDockerCheckFailsWhenComposeMissing(t *testing.T) {
 // unit's summary is already in Status, so `cat` answers a different question).
 func TestManagerDescribe(t *testing.T) {
 	t.Run("docker", func(t *testing.T) {
-		m, rr, _ := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+		m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 		if err := m.Describe(context.Background()); err != nil {
 			t.Fatalf("Describe: %v", err)
 		}
@@ -464,7 +416,7 @@ func TestManagerDescribe(t *testing.T) {
 		}
 	})
 	t.Run("podman also shows the unit", func(t *testing.T) {
-		cfg := ctrCfg(config.Podman, "no")
+		cfg := ctrCfg(config.Podman, "false")
 		m, rr, _ := newCapMgr(cfg, config.Podman)
 		if err := m.Describe(context.Background()); err != nil {
 			t.Fatalf("Describe: %v", err)
@@ -477,7 +429,7 @@ func TestManagerDescribe(t *testing.T) {
 		}
 	})
 	t.Run("a missing unit is tolerated", func(t *testing.T) {
-		m, rr, buf := newCapMgr(ctrCfg(config.Podman, "no"), config.Podman)
+		m, rr, buf := newCapMgr(ctrCfg(config.Podman, "false"), config.Podman)
 		rr.fail = failOn("cat")
 		if err := m.Describe(context.Background()); err != nil {
 			t.Fatalf("Describe should tolerate an uninstalled unit: %v", err)
@@ -492,7 +444,7 @@ func TestManagerDescribe(t *testing.T) {
 // per-file reporting and the non-zero exit on any failure mirror the k8s verbs.
 func TestManagerCopy(t *testing.T) {
 	t.Run("from", func(t *testing.T) {
-		m, rr, buf := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+		m, rr, buf := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 		if err := m.CopyFrom(context.Background(), []string{"/var/lib/solace/jail/logs/debug.log"}); err != nil {
 			t.Fatalf("CopyFrom: %v", err)
 		}
@@ -504,7 +456,7 @@ func TestManagerCopy(t *testing.T) {
 		}
 	})
 	t.Run("into", func(t *testing.T) {
-		m, rr, _ := newCapMgr(ctrCfg(config.Podman, "no"), config.Podman)
+		m, rr, _ := newCapMgr(ctrCfg(config.Podman, "false"), config.Podman)
 		if err := m.CopyInto(context.Background(), []string{"setup.cli"}, "/tmp"); err != nil {
 			t.Fatalf("CopyInto: %v", err)
 		}
@@ -513,7 +465,7 @@ func TestManagerCopy(t *testing.T) {
 		}
 	})
 	t.Run("no files is an error", func(t *testing.T) {
-		m, _, _ := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+		m, _, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 		if err := m.CopyFrom(context.Background(), nil); err == nil {
 			t.Error("CopyFrom with no files should error")
 		}
@@ -522,7 +474,7 @@ func TestManagerCopy(t *testing.T) {
 		}
 	})
 	t.Run("a failed file makes the command fail", func(t *testing.T) {
-		m, rr, buf := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+		m, rr, buf := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 		rr.fail = failOn("cp")
 		if err := m.CopyFrom(context.Background(), []string{"a.log", "b.log"}); err == nil {
 			t.Error("CopyFrom should fail when a file could not be copied")
@@ -539,7 +491,7 @@ func TestManagerCopy(t *testing.T) {
 // ignored on containers: prep now logs in, with the password on stdin so it never
 // reaches an argv or the dry-run echo.
 func TestManagerPrepHostRegistryLogin(t *testing.T) {
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Image.Registry = "registry.example.com"
 	cfg.Image.User = "repo-user"
 	cfg.Image.Pass = "repo-pass"
@@ -561,7 +513,7 @@ func TestManagerPrepHostRegistryLogin(t *testing.T) {
 }
 
 func TestManagerPrepHostNoLoginWithoutCreds(t *testing.T) {
-	m, rr, _ := newCapMgr(ctrCfg(config.Podman, "no"), config.Podman)
+	m, rr, _ := newCapMgr(ctrCfg(config.Podman, "false"), config.Podman)
 	m.Geteuid = func() int { return 0 } // rootful (the ctrCfg default) requires root
 	if err := m.PrepHost(context.Background()); err != nil {
 		t.Fatalf("PrepHost: %v", err)
@@ -574,7 +526,7 @@ func TestManagerPrepHostNoLoginWithoutCreds(t *testing.T) {
 }
 
 func TestManagerPrepHostRejectsHalfCredentials(t *testing.T) {
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Image.User = "repo-user" // pass left empty
 	m, _, _ := newCapMgr(cfg, config.Docker)
 	err := m.PrepHost(context.Background())
@@ -591,7 +543,7 @@ func TestManagerPrepHostRejectsHalfCredentials(t *testing.T) {
 func TestManagerRedeployUnchangedIsNoOp(t *testing.T) {
 	t.Run("podman", func(t *testing.T) {
 		dir := t.TempDir()
-		cfg := ctrCfg(config.Podman, "no")
+		cfg := ctrCfg(config.Podman, "false")
 		cfg.Podman.QuadletDir = dir
 		m, rr, buf := newCapMgr(cfg, config.Podman)
 		m.Geteuid = func() int { return -1 }
@@ -615,7 +567,7 @@ func TestManagerRedeployUnchangedIsNoOp(t *testing.T) {
 	})
 	t.Run("docker", func(t *testing.T) {
 		dir := t.TempDir()
-		cfg := ctrCfg(config.Docker, "no")
+		cfg := ctrCfg(config.Docker, "false")
 		cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 		if err := os.WriteFile(cfg.Docker.ComposeFile,
 			render.Compose(cfg, cfg.ResolveNode(config.Primary)), 0o600); err != nil {
@@ -646,12 +598,12 @@ func TestManagerRedeployChangedNeedsConsent(t *testing.T) {
 	setup := func(t *testing.T, p config.Platform) (*config.Config, string) {
 		t.Helper()
 		dir := t.TempDir()
-		cfg := ctrCfg(p, "no")
+		cfg := ctrCfg(p, "false")
 		if p == config.Podman {
 			cfg.Podman.QuadletDir = dir
 			// An artifact from an older image tag: the on-disk one differs from what
 			// this config now renders.
-			old := ctrCfg(p, "no")
+			old := ctrCfg(p, "false")
 			old.Image.Tag = "previous"
 			if err := os.WriteFile(filepath.Join(dir, "sol-pod.container"),
 				render.Quadlet(old, old.ResolveNode(config.Primary)), 0o600); err != nil {
@@ -660,7 +612,7 @@ func TestManagerRedeployChangedNeedsConsent(t *testing.T) {
 			return cfg, "sol-pod.service"
 		}
 		cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
-		old := ctrCfg(p, "no")
+		old := ctrCfg(p, "false")
 		old.Image.Tag = "previous"
 		old.Docker.ComposeFile = cfg.Docker.ComposeFile
 		if err := os.WriteFile(cfg.Docker.ComposeFile,
@@ -755,8 +707,8 @@ func TestManagerRedeployChangedNeedsConsent(t *testing.T) {
 // the child process environment, and the artifact carries variable names.
 func TestManagerDeployDockerPassesSecretsAsEnv(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "yes")
-	cfg.Nodes.PSK = "test-psk"
+	cfg := ctrCfg(config.Docker, "true")
+	cfg.Redundancy.PSK = "test-psk"
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	m, rr, _ := newCapMgr(cfg, config.Docker)
 	if err := m.Deploy(context.Background(), config.Primary); err != nil {
@@ -804,10 +756,18 @@ func TestManagerDeployDockerPassesSecretsAsEnv(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"source: solace-admin-password",
-		"target: username_admin_password",
+		// Quoted: the secret name derives from container.name, and a name YAML 1.1
+		// reads as a boolean or number (`yes`, `off`, `0123`) is legal to both
+		// engines, so every identifier scalar in the compose document is quoted.
+		`source: "solace-admin-password"`,
+		// The target is the ABSOLUTE in-container path, not a bare filename: compose
+		// resolves a bare one under its own /run/secrets, where the broker never
+		// looks (render.ContainerSecret.Target). It must match the *filepath value
+		// on the line below, which is the whole point of the two being one
+		// expression.
+		"target: /mnt/secrets/username_admin_password",
 		"environment: SOLACE_ADMIN_PASSWORD",
-		"username_admin_passwordfilepath: \"/run/secrets/username_admin_password\"",
+		"username_admin_passwordfilepath: \"/mnt/secrets/username_admin_password\"",
 	} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("compose file should contain %q:\n%s", want, body)
@@ -830,8 +790,8 @@ func containsStr(list []string, want string) bool {
 func maskedKeys(env []string) string { return engine.MaskEnv(env) }
 
 func TestManagerDeployPodmanCreatesSecrets(t *testing.T) {
-	cfg := ctrCfg(config.Podman, "yes")
-	cfg.Nodes.PSK = "test-psk"
+	cfg := ctrCfg(config.Podman, "true")
+	cfg.Redundancy.PSK = "test-psk"
 	cfg.Podman.QuadletDir = t.TempDir()
 	m, rr, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return -1 }
@@ -841,8 +801,21 @@ func TestManagerDeployPodmanCreatesSecrets(t *testing.T) {
 	// Names carry the container name, so two brokers on one host cannot overwrite
 	// each other's entries in the shared podman store.
 	for _, name := range []string{"sol-pod-admin-password", "sol-pod-redundancy-psk"} {
-		if !hasCall(rr, "podman", []string{"secret", "create", "--replace", name, "-"}) {
+		// Remove-then-create, not `create --replace`: --replace needs podman 4.7
+		// while the rest of the wiring needs 4.5, and `rm --ignore` makes the pair
+		// idempotent the same way.
+		if !hasCall(rr, "podman", []string{"secret", "rm", "--ignore", name}) {
+			t.Errorf("Deploy should remove any existing podman secret %s first:\n%+v", name, rr.calls)
+		}
+		if !hasCall(rr, "podman", []string{"secret", "create", name, "-"}) {
 			t.Errorf("Deploy should create podman secret %s:\n%+v", name, rr.calls)
+		}
+	}
+	// The floor is the point, so pin the flag's absence rather than only the new
+	// shape's presence: this is what stops --replace creeping back in.
+	for _, c := range rr.calls {
+		if strings.Contains(strings.Join(c.args, " "), "--replace") {
+			t.Errorf("no argv may carry --replace, which would raise the podman floor to 4.7: %v", c.args)
 		}
 	}
 	// The values ride stdin, so they must never appear in an argv (§3).
@@ -859,15 +832,15 @@ func TestManagerDeployPodmanCreatesSecrets(t *testing.T) {
 }
 
 func TestManagerDeployRejectsEmptySecret(t *testing.T) {
-	cfg := ctrCfg(config.Docker, "yes") // HA -> the PSK secret is required too
-	cfg.Nodes.PSK = ""
+	cfg := ctrCfg(config.Docker, "true") // HA -> the PSK secret is required too
+	cfg.Redundancy.PSK = ""
 	cfg.Docker.ComposeFile = filepath.Join(t.TempDir(), "compose.yml")
 	m, _, _ := newCapMgr(cfg, config.Docker)
 	err := m.Deploy(context.Background(), config.Primary)
 	if err == nil {
 		t.Fatal("Deploy must fail loud when a required secret is empty")
 	}
-	if !strings.Contains(err.Error(), "nodes.psk") || !strings.Contains(err.Error(), "prep host") {
+	if !strings.Contains(err.Error(), "redundancy.psk") || !strings.Contains(err.Error(), "env file") {
 		t.Errorf("error should name the field and the fix, got: %v", err)
 	}
 }
@@ -877,8 +850,8 @@ func TestManagerDeployRejectsEmptySecret(t *testing.T) {
 // given and prints none of their values.
 func TestManagerDeployDockerDryRunMasksSecretEnv(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "yes")
-	cfg.Nodes.PSK = "" // empty is fine here: prep host has not generated it yet
+	cfg := ctrCfg(config.Docker, "true")
+	cfg.Redundancy.PSK = "" // empty is fine here: prep host has not generated it yet
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	m, buf := newEchoMgr(cfg, config.Docker)
 	if err := m.Deploy(context.Background(), config.Primary); err != nil {
@@ -897,16 +870,19 @@ func TestManagerDeployDockerDryRunMasksSecretEnv(t *testing.T) {
 }
 
 func TestManagerDeployPodmanDryRunHidesSecretBytes(t *testing.T) {
-	cfg := ctrCfg(config.Podman, "yes")
-	cfg.Nodes.PSK = "test-psk"
+	cfg := ctrCfg(config.Podman, "true")
+	cfg.Redundancy.PSK = "test-psk"
 	cfg.Podman.QuadletDir = t.TempDir()
 	m, buf := newEchoMgr(cfg, config.Podman)
 	if err := m.Deploy(context.Background(), config.Primary); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "secret create --replace sol-pod-admin-password -") {
+	if !strings.Contains(out, "secret create sol-pod-admin-password -") {
 		t.Errorf("dry-run should echo the secret-create command:\n%s", out)
+	}
+	if !strings.Contains(out, "secret rm --ignore sol-pod-admin-password") {
+		t.Errorf("dry-run should echo the remove that precedes each create:\n%s", out)
 	}
 	if !strings.Contains(out, "bytes on stdin") {
 		t.Errorf("dry-run should report the value as stdin bytes, not print it:\n%s", out)
@@ -920,7 +896,7 @@ func TestManagerDeployPodmanDryRunHidesSecretBytes(t *testing.T) {
 
 func TestManagerDeployPodmanWritesUnit(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = dir
 	// Match this process's euid so the rootless/rootful guard passes on any host
 	// (on Windows Geteuid()<0 and the guard is skipped entirely).
@@ -945,7 +921,7 @@ func TestManagerDeployPodmanWritesUnit(t *testing.T) {
 
 func TestManagerDeployPodmanDryRunSkipsWrite(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = dir
 	m, buf := newEchoMgr(cfg, config.Podman)
 	if err := m.Deploy(context.Background(), config.Primary); err != nil {
@@ -963,7 +939,7 @@ func TestManagerDeployPodmanDryRunSkipsWrite(t *testing.T) {
 }
 
 func TestManagerPodmanEUIDGuardSkippedOnDryRun(t *testing.T) {
-	m, _ := newEchoMgr(ctrCfg(config.Podman, "no"), config.Podman)
+	m, _ := newEchoMgr(ctrCfg(config.Podman, "false"), config.Podman)
 	m.Cfg.Podman.Rootless = false // rootful would require root if the guard ran
 	if err := m.checkPodmanEUID(); err != nil {
 		t.Errorf("euid guard must be skipped under the Echo runner, got %v", err)
@@ -974,7 +950,7 @@ func TestManagerPodmanEUIDGuardSkippedOnDryRun(t *testing.T) {
 
 func TestManagerDeletePodmanRemovesUnit(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = dir
 	unit := filepath.Join(dir, "sol-pod.container")
 	if err := os.WriteFile(unit, []byte("[Unit]\n"), 0o600); err != nil {
@@ -1003,7 +979,7 @@ func TestManagerDeletePodmanRemovesUnit(t *testing.T) {
 // serving traffic.
 func TestManagerDeletePodmanStopFailsServiceActiveBlocksRemoval(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = dir
 	unit := filepath.Join(dir, "sol-pod.container")
 	if err := os.WriteFile(unit, []byte("[Unit]\n"), 0o600); err != nil {
@@ -1035,7 +1011,7 @@ func TestManagerDeletePodmanStopFailsServiceActiveBlocksRemoval(t *testing.T) {
 // "already stopped" case, which still proceeds exactly as before.
 func TestManagerDeletePodmanStopFailsServiceInactiveProceeds(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = dir
 	unit := filepath.Join(dir, "sol-pod.container")
 	if err := os.WriteFile(unit, []byte("[Unit]\n"), 0o600); err != nil {
@@ -1066,7 +1042,7 @@ func TestManagerDeletePodmanStopFailsServiceInactiveProceeds(t *testing.T) {
 // message spool, so it must refuse exactly as a confirmed-active unit does.
 func TestManagerDeletePodmanStopFailsStateUnknownBlocksRemoval(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = dir
 	unit := filepath.Join(dir, "sol-pod.container")
 	if err := os.WriteFile(unit, []byte("[Unit]\n"), 0o600); err != nil {
@@ -1097,7 +1073,7 @@ func TestManagerDeletePodmanStopFailsStateUnknownBlocksRemoval(t *testing.T) {
 // failing removal must warn rather than fail a teardown that otherwise
 // succeeded.
 func TestManagerDeletePodmanRemovesSecrets(t *testing.T) {
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = t.TempDir()
 	m, rr, buf := newCapMgr(cfg, config.Podman)
 	rr.fail = failOn("secret")
@@ -1105,17 +1081,24 @@ func TestManagerDeletePodmanRemovesSecrets(t *testing.T) {
 		t.Fatalf("Delete should tolerate a failing secret rm: %v", err)
 	}
 	for _, s := range render.ContainerSecrets(cfg, config.Podman) {
-		if !hasCall(rr, "podman", []string{"secret", "rm", s.Name}) {
+		// --ignore matches the create path, so one argv shape serves both.
+		if !hasCall(rr, "podman", []string{"secret", "rm", "--ignore", s.Name}) {
 			t.Errorf("Delete should remove podman secret %s:\n%+v", s.Name, rr.calls)
 		}
 	}
-	if !strings.Contains(buf.String(), "already removed?") {
+	// The warning no longer guesses "already removed?": --ignore makes a missing
+	// secret a success, so what reaches this branch is a real failure.
+	if !strings.Contains(buf.String(), "removing podman secret") {
 		t.Errorf("a failing secret rm should warn, not fail the removal:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "already removed") {
+		t.Errorf("the warning must not offer 'already removed' as a cause once --ignore absorbs it:\n%s",
+			buf.String())
 	}
 }
 
 func TestManagerDeletePodmanPurgeRootless(t *testing.T) {
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.Rootless = true
 	cfg.Podman.QuadletDir = t.TempDir()
 	m, buf := newEchoMgr(cfg, config.Podman)
@@ -1129,7 +1112,7 @@ func TestManagerDeletePodmanPurgeRootless(t *testing.T) {
 
 func TestManagerDeleteDockerComposeDownWhenFileExists(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	if err := os.WriteFile(cfg.Docker.ComposeFile, []byte("services:\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1145,7 +1128,7 @@ func TestManagerDeleteDockerComposeDownWhenFileExists(t *testing.T) {
 
 func TestManagerDeleteDockerPurgeRemovesDataDir(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	if err := os.WriteFile(cfg.Docker.ComposeFile, []byte("services:\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1164,7 +1147,7 @@ func TestManagerDeleteDockerPurgeRemovesDataDir(t *testing.T) {
 
 func TestManagerDeleteDockerComposeNoFileFallsBackToStopRm(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "absent.yml") // does not exist
 	m, rr, _ := newCapMgr(cfg, config.Docker)
 	rr.out = []byte("solace\n") // `ps -a` lists this container -> containerExists is true
@@ -1183,7 +1166,7 @@ func TestManagerDeleteDockerComposeNoFileFallsBackToStopRm(t *testing.T) {
 // fallback match them.
 func TestManagerStopAndRemoveContainerAbsentNoOp(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "absent.yml") // no compose file -> stopAndRemove fallback
 	m, rr, buf := newCapMgr(cfg, config.Docker)
 	rr.out = []byte("nginx\n") // `ps -a` lists an unrelated container, not this one
@@ -1204,7 +1187,7 @@ func TestManagerStopAndRemoveContainerAbsentNoOp(t *testing.T) {
 // while the broker is still up.
 func TestManagerStopAndRemoveStopFailsContainerRunningBlocks(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "absent.yml")
 	m, rr, _ := newCapMgr(cfg, config.Docker)
 	rr.fail = failOn("stop")
@@ -1229,7 +1212,7 @@ func TestManagerStopAndRemoveStopFailsContainerRunningBlocks(t *testing.T) {
 // stopAndRemove reads containerRunningKnown's second value instead.
 func TestManagerStopAndRemoveStopFailsProbeUnansweredBlocks(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "absent.yml")
 	m, rr, _ := newCapMgr(cfg, config.Docker)
 	rr.fail = failOn("stop")
@@ -1260,7 +1243,7 @@ func TestManagerLifecyclePodmanSystemctl(t *testing.T) {
 			label = "rootless"
 		}
 		t.Run(label, func(t *testing.T) {
-			cfg := ctrCfg(config.Podman, "no")
+			cfg := ctrCfg(config.Podman, "false")
 			if rootless {
 				cfg.Podman.SystemctlUser = "--user"
 			}
@@ -1296,7 +1279,7 @@ func TestStatusAllFindsBrokersByImage(t *testing.T) {
 	ps := "solace\tsolace/solace-pubsub-standard:10.10.1.128\tUp 3 days\n" +
 		"legacy-broker\tsolace/solace-pubsubplus-enterprise:10.9\tUp 1 hour\n" +
 		"nginx\tnginx:latest\tUp 2 days\n"
-	m, rr, out := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+	m, rr, out := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 	rr.out = []byte(ps)
 	if err := m.StatusAll(context.Background(), false); err != nil {
 		t.Fatalf("StatusAll: %v", err)
@@ -1316,7 +1299,7 @@ func TestStatusAllFindsBrokersByImage(t *testing.T) {
 // ordinary case on a host that has not been deployed to yet, and printing a bare
 // header there reads as though the command failed to look.
 func TestStatusAllReportsNothingFound(t *testing.T) {
-	m, rr, out := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+	m, rr, out := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 	rr.out = []byte("nginx\tnginx:latest\tUp 2 days\n")
 	if err := m.StatusAll(context.Background(), false); err != nil {
 		t.Fatalf("StatusAll: %v", err)
@@ -1334,7 +1317,7 @@ var errListFailed = errors.New("cannot connect to the docker daemon")
 // host instead would be a lie in exactly the situation an operator is trying to
 // diagnose.
 func TestStatusAllWrapsListError(t *testing.T) {
-	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 	rr.outErr = errListFailed
 	err := m.StatusAll(context.Background(), false)
 	if err == nil || !strings.Contains(err.Error(), "listing containers") {
@@ -1346,31 +1329,40 @@ func TestStatusAllWrapsListError(t *testing.T) {
 }
 
 // TestStatusAllDetailInspectsEachAndKeepsSecretsOut: --detail goes deeper on every
-// container it found, and the deeper view is deliberately mounts-only. A broker's
-// secrets are files under /run/secrets, so mounts name them without reading them --
-// while docker's compose secrets are environment-sourced, so dumping the
-// environment here would put passwords on the terminal and into scrollback.
+// container it found, and the deeper view names mounts and never the environment. A
+// broker's secrets are files under /mnt/secrets, so mounts name them without reading
+// them -- while docker's compose secrets are environment-sourced, so printing the
+// environment would put passwords on the terminal and into scrollback.
+//
+// The selection moved from the argv to the DECODER (inspect.go): `inspect` is now
+// asked for everything and this tool picks, because the field names differ between
+// docker and podman in ways a --format template gets silently wrong. So the argv
+// assertion here is that inspect is called plainly, and what is and is not printed is
+// asserted against the report.
 func TestStatusAllDetailInspectsEachAndKeepsSecretsOut(t *testing.T) {
-	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
-	rr.out = []byte("solace\tsolace/solace-pubsub-standard:10.10.1.128\tUp 3 days\n")
+	const inspected = `[{"Name": "/solace", "State": {"Status": "running", "Running": true},
+	  "Config": {"Image": "solace/solace-pubsub-standard:10.10.1.128",
+	             "Env": ["SOLACE_ADMIN_PASSWORD=must-not-be-printed"]},
+	  "Mounts": [{"Source": "/opt/solace/secrets/admin", "Destination": "/mnt/secrets/admin_password", "RW": false}]}]`
+	m, rr, out := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
+	rr.outFor = func(_ string, args []string) []byte {
+		if len(args) > 0 && args[0] == "inspect" {
+			return []byte(inspected)
+		}
+		return []byte("solace\tsolace/solace-pubsub-standard:10.10.1.128\tUp 3 days\n")
+	}
 	if err := m.StatusAll(context.Background(), true); err != nil {
 		t.Fatalf("StatusAll --detail: %v", err)
 	}
-	var inspected bool
-	for _, c := range rr.calls {
-		joined := strings.Join(c.args, " ")
-		if strings.Contains(joined, "inspect") {
-			inspected = true
-			if strings.Contains(joined, ".Config.Env") || strings.Contains(joined, "Env}}") {
-				t.Errorf("inspect format reads the environment, which carries secrets: %v", c.args)
-			}
-			if !strings.Contains(joined, "Mounts") {
-				t.Errorf("inspect format should report mounts: %v", c.args)
-			}
-		}
-	}
-	if !inspected {
+	if !hasCall(rr, "docker", []string{"inspect", "solace"}) {
 		t.Errorf("StatusAll --detail should inspect each container it found:\n%+v", rr.calls)
+	}
+	got := out.String()
+	if strings.Contains(got, "must-not-be-printed") || strings.Contains(got, "SOLACE_ADMIN_PASSWORD") {
+		t.Errorf("the container environment reached the report:\n%s", got)
+	}
+	if !strings.Contains(got, "/mnt/secrets/admin_password") {
+		t.Errorf("--detail should name each mounted path:\n%s", got)
 	}
 }
 
@@ -1379,7 +1371,7 @@ func TestStatusAllDetailInspectsEachAndKeepsSecretsOut(t *testing.T) {
 // artifact Deploy wrote, rather than the plain runtime verb.
 func TestManagerLifecycleDockerComposeFile(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	if err := os.WriteFile(cfg.Docker.ComposeFile, []byte("services:\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1410,7 +1402,7 @@ func TestManagerLifecycleDockerComposeFile(t *testing.T) {
 // container name instead, mirroring Delete's stop/rm fallback.
 func TestManagerLifecycleDockerNoComposeFile(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "absent.yml") // does not exist
 	cases := []struct {
 		name, verb string
@@ -1437,7 +1429,7 @@ func TestManagerLifecycleDockerNoComposeFile(t *testing.T) {
 // on disk to probe (the Echo runner never wrote one), so the preview always takes
 // the compose branch rather than guessing from a real deploy's artifact.
 func TestManagerLifecycleDockerDryRunUsesCompose(t *testing.T) {
-	m, buf := newEchoMgr(ctrCfg(config.Docker, "no"), config.Docker)
+	m, buf := newEchoMgr(ctrCfg(config.Docker, "false"), config.Docker)
 	if err := m.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1449,47 +1441,54 @@ func TestManagerLifecycleDockerDryRunUsesCompose(t *testing.T) {
 // --- Status / Logs / CLI / Shell --------------------------------------------
 
 func TestManagerStatusPodman(t *testing.T) {
-	m, rr, _ := newCapMgr(ctrCfg(config.Podman, "no"), config.Podman)
+	m, rr, _ := newCapMgr(ctrCfg(config.Podman, "false"), config.Podman)
 	if err := m.Status(context.Background()); err != nil {
 		t.Fatalf("Status: %v", err)
 	}
 	if !hasCall(rr, "systemctl", []string{"status", "sol-pod.service", "--no-pager"}) {
 		t.Errorf("podman Status should show the unit:\n%+v", rr.calls)
 	}
-	if !hasCall(rr, "podman", []string{"ps", "--all", "--filter", "name=^sol-pod$"}) {
+	if !hasCall(rr, "podman", []string{"ps", "--all", "--filter", "name=^sol-pod$", "--format", psTableFormat}) {
 		t.Errorf("podman Status should ps the container:\n%+v", rr.calls)
 	}
 }
 
-func TestManagerStatusDockerCompose(t *testing.T) {
-	m, buf := newEchoMgr(ctrCfg(config.Docker, "no"), config.Docker)
+// TestManagerStatusDocker covers docker Status over the echo seam, which is now ONE
+// listing: the narrowed `ps`. The format string is not spelled out here -- it carries real
+// tab characters, and Echo shell-quotes what it prints, so a literal would be asserting
+// Echo's quoting rather than this command's argv. The pieces that matter are.
+func TestManagerStatusDocker(t *testing.T) {
+	m, buf := newEchoMgr(ctrCfg(config.Docker, "false"), config.Docker)
 	if err := m.Status(context.Background()); err != nil {
 		t.Fatalf("Status: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{
-		"+ docker compose -f docker-compose.yml ps",
-		"+ docker ps --all --filter 'name=^solace$'",
-	} {
+	for _, want := range []string{"+ docker ps --all --filter 'name=^solace$'", "--format", "{{.Status}}"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("docker Status missing %q:\n%s", want, out)
+		}
+	}
+	// compose is gone, and so is the ports column it and the engine default both carried.
+	for _, unwanted := range []string{"compose", "Ports"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("docker Status should no longer mention %q:\n%s", unwanted, out)
 		}
 	}
 }
 
 func TestManagerLogsCLIShell(t *testing.T) {
 	t.Run("logs", func(t *testing.T) {
-		m, rr, _ := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+		m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 		if err := m.Logs(context.Background()); err != nil {
 			t.Fatalf("Logs: %v", err)
 		}
 		got := rr.last()
-		if got.method != "Run" || got.name != "docker" || !eqArgs(got.args, []string{"logs", "-f", "solace"}) {
+		if got.method != "Run" || got.name != "docker" || !eqArgs(got.args, []string{"logs", "solace"}) {
 			t.Errorf("Logs argv: %+v", got)
 		}
 	})
 	t.Run("cli", func(t *testing.T) {
-		m, rr, _ := newCapMgr(ctrCfg(config.Podman, "no"), config.Podman)
+		m, rr, _ := newCapMgr(ctrCfg(config.Podman, "false"), config.Podman)
 		if err := m.CLI(context.Background()); err != nil {
 			t.Fatalf("CLI: %v", err)
 		}
@@ -1499,7 +1498,7 @@ func TestManagerLogsCLIShell(t *testing.T) {
 		}
 	})
 	t.Run("shell", func(t *testing.T) {
-		m, rr, _ := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+		m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 		if err := m.Shell(context.Background()); err != nil {
 			t.Fatalf("Shell: %v", err)
 		}
@@ -1512,43 +1511,10 @@ func TestManagerLogsCLIShell(t *testing.T) {
 
 // --- pure helpers -----------------------------------------------------------
 
-func TestReplacePSKLine(t *testing.T) {
-	t.Run("replaces the nodes psk, not the replication psk", func(t *testing.T) {
-		in := "replication:\n  psk: OLD\nnodes:\n  primary:\n    name: p\n  psk: \n"
-		out, ok := replacePSKLine(in, "NEW")
-		if !ok {
-			t.Fatal("expected a replacement")
-		}
-		if !strings.Contains(out, `psk: "NEW"`) {
-			t.Errorf("nodes psk not replaced:\n%s", out)
-		}
-		if !strings.Contains(out, "psk: OLD") {
-			t.Errorf("replication psk must be untouched:\n%s", out)
-		}
-	})
-	t.Run("no nodes psk line -> not replaced", func(t *testing.T) {
-		in := "redundancy: yes\nnodes:\n  primary:\n    name: p\n"
-		if _, ok := replacePSKLine(in, "NEW"); ok {
-			t.Error("expected no replacement when there is no psk line under nodes")
-		}
-	})
-}
-
-func TestDefaultGenPSK(t *testing.T) {
-	psk, err := defaultGenPSK()
-	if err != nil {
-		t.Fatalf("defaultGenPSK: %v", err)
-	}
-	raw, err := base64.StdEncoding.DecodeString(psk)
-	if err != nil || len(raw) != 60 {
-		t.Errorf("defaultGenPSK = %q (decoded %d bytes, err %v); want 60 random bytes", psk, len(raw), err)
-	}
-}
-
 // --- error paths: the capRunner.fail hook drives each `err != nil` wrap branch ---
 
 func TestManagerCheckReachableError(t *testing.T) {
-	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 	rr.outErr = fmt.Errorf("no engine") // the `version` probe is the only Output call
 	if err := m.Check(context.Background()); err == nil {
 		t.Fatal("Check should fail when the runtime version probe errors")
@@ -1556,7 +1522,7 @@ func TestManagerCheckReachableError(t *testing.T) {
 }
 
 func TestManagerPrepHostMkdirError(t *testing.T) {
-	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 	rr.fail = failOn("mkdir")
 	if err := m.PrepHost(context.Background()); err == nil {
 		t.Fatal("PrepHost should propagate a mkdir failure")
@@ -1564,7 +1530,7 @@ func TestManagerPrepHostMkdirError(t *testing.T) {
 }
 
 func TestManagerPrepHostChownError(t *testing.T) {
-	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 	rr.fail = failOn("chown")
 	if err := m.PrepHost(context.Background()); err == nil {
 		t.Fatal("PrepHost should propagate a chown failure")
@@ -1572,7 +1538,7 @@ func TestManagerPrepHostChownError(t *testing.T) {
 }
 
 func TestManagerPrepHostRootlessUnshareChownError(t *testing.T) {
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.Rootless = true
 	m, rr, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 1000 } // avoid the rootless-as-root WARN noise
@@ -1582,82 +1548,13 @@ func TestManagerPrepHostRootlessUnshareChownError(t *testing.T) {
 	}
 }
 
-func TestManagerPrepHostGenPSKError(t *testing.T) {
-	m, _, _ := newCapMgr(ctrCfg(config.Docker, "yes"), config.Docker)
-	m.GenPSK = func() (string, error) { return "", fmt.Errorf("no entropy") }
-	if err := m.PrepHost(context.Background()); err == nil {
-		t.Fatal("PrepHost should propagate a GenPSK failure")
-	}
-}
-
-func TestManagerPrepHostWritePSKReadError(t *testing.T) {
-	m, _, _ := newCapMgr(ctrCfg(config.Docker, "yes"), config.Docker)
-	m.EnvPath = filepath.Join(t.TempDir(), "does-not-exist.yaml")
-	m.GenPSK = func() (string, error) { return "PSK", nil }
-	if err := m.PrepHost(context.Background()); err == nil {
-		t.Fatal("PrepHost should fail when the env file cannot be read to store the PSK")
-	}
-}
-
-func TestManagerPrepHostWritePSKWriteError(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses file permissions; the write-back-error branch is not reachable")
-	}
-	dir := t.TempDir()
-	envFile := filepath.Join(dir, "env.yaml")
-	// A nodes.psk line so replacePSKLine succeeds; 0o400 so the write-back fails.
-	body := "redundancy: yes\nnodes:\n  primary:\n    name: pri-host\n  psk:\n"
-	if err := os.WriteFile(envFile, []byte(body), 0o400); err != nil {
-		t.Fatal(err)
-	}
-	m, _, _ := newCapMgr(ctrCfg(config.Docker, "yes"), config.Docker)
-	m.EnvPath = envFile
-	m.GenPSK = func() (string, error) { return "PSK", nil }
-	if err := m.PrepHost(context.Background()); err == nil {
-		t.Fatal("PrepHost should fail when the PSK cannot be written back")
-	}
-}
-
-func TestManagerPrepHostPSKAlreadySet(t *testing.T) {
-	cfg := ctrCfg(config.Docker, "yes")
-	cfg.Nodes.PSK = "EXISTING"
-	m, _, buf := newCapMgr(cfg, config.Docker)
-	m.GenPSK = func() (string, error) { t.Fatal("GenPSK must not run when nodes.psk is already set"); return "", nil }
-	if err := m.PrepHost(context.Background()); err != nil {
-		t.Fatalf("PrepHost: %v", err)
-	}
-	if !strings.Contains(buf.String(), "already set") {
-		t.Errorf("PrepHost should note the PSK is already set:\n%s", buf.String())
-	}
-}
-
-func TestManagerPrepHostNoPSKLinePrintsValue(t *testing.T) {
-	dir := t.TempDir()
-	envFile := filepath.Join(dir, "env.yaml")
-	if err := os.WriteFile(envFile, []byte("redundancy: yes\nnodes:\n  primary:\n    name: pri-host\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	m, _, buf := newCapMgr(ctrCfg(config.Docker, "yes"), config.Docker)
-	m.EnvPath = envFile
-	m.GenPSK = func() (string, error) { return "GENPSK", nil }
-	if err := m.PrepHost(context.Background()); err != nil {
-		t.Fatalf("PrepHost: %v", err)
-	}
-	if !strings.Contains(buf.String(), "GENPSK") {
-		t.Errorf("PrepHost should print the PSK to place when no psk line exists:\n%s", buf.String())
-	}
-	if got, _ := os.ReadFile(envFile); strings.Contains(string(got), "GENPSK") {
-		t.Errorf("PrepHost must not write the PSK when there is no psk line to replace:\n%s", got)
-	}
-}
-
 func TestManagerDeployPodmanMkdirError(t *testing.T) {
 	dir := t.TempDir()
 	filePath := filepath.Join(dir, "not-a-dir")
 	if err := os.WriteFile(filePath, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = filePath // MkdirAll on a file -> error
 	m, _, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return -1 } // skip the euid guard portably
@@ -1668,7 +1565,7 @@ func TestManagerDeployPodmanMkdirError(t *testing.T) {
 
 func TestManagerDeployPodmanWriteUnitError(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = dir
 	if err := os.Mkdir(filepath.Join(dir, "sol-pod.container"), 0o755); err != nil {
 		t.Fatal(err) // unit path is a directory -> WriteFile fails
@@ -1681,7 +1578,7 @@ func TestManagerDeployPodmanWriteUnitError(t *testing.T) {
 }
 
 func TestManagerDeployPodmanDaemonReloadError(t *testing.T) {
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = t.TempDir()
 	m, rr, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return -1 }
@@ -1692,7 +1589,7 @@ func TestManagerDeployPodmanDaemonReloadError(t *testing.T) {
 }
 
 func TestManagerDeployPodmanStartError(t *testing.T) {
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = t.TempDir()
 	m, rr, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return -1 }
@@ -1703,7 +1600,7 @@ func TestManagerDeployPodmanStartError(t *testing.T) {
 }
 
 func TestManagerDeployPodmanEUIDGuardFails(t *testing.T) {
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.Rootless = true
 	cfg.Podman.QuadletDir = t.TempDir()
 	m, _, _ := newCapMgr(cfg, config.Podman)
@@ -1715,7 +1612,7 @@ func TestManagerDeployPodmanEUIDGuardFails(t *testing.T) {
 
 func TestManagerDeployDockerComposeWriteError(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	// A directory in the compose file's place makes WriteFile fail.
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	if err := os.Mkdir(cfg.Docker.ComposeFile, 0o755); err != nil {
@@ -1729,7 +1626,7 @@ func TestManagerDeployDockerComposeWriteError(t *testing.T) {
 
 func TestManagerDeployDockerComposeUpError(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	m, rr, _ := newCapMgr(cfg, config.Docker)
 	rr.fail = failOn("compose")
@@ -1738,18 +1635,37 @@ func TestManagerDeployDockerComposeUpError(t *testing.T) {
 	}
 }
 
-func TestManagerDeployPodmanSecretCreateError(t *testing.T) {
-	cfg := ctrCfg(config.Podman, "no")
-	cfg.Podman.QuadletDir = t.TempDir()
-	m, rr, _ := newCapMgr(cfg, config.Podman)
-	m.Geteuid = func() int { return -1 }
-	rr.fail = failOn("secret")
-	err := m.Deploy(context.Background(), config.Primary)
-	if err == nil {
-		t.Fatal("Deploy should propagate a secret-create failure")
-	}
-	if !strings.Contains(err.Error(), "admin.pass") {
-		t.Errorf("error should name the config key behind the secret, got: %v", err)
+// TestManagerDeployPodmanSecretError covers BOTH halves of the store write, because
+// loading a secret is now two commands rather than one: `secret rm --ignore` then
+// `secret create`. Either failing must stop the deploy and name the config key
+// behind the secret, so the operator learns which env-file field to look at rather
+// than which podman verb failed.
+//
+// The rm half is deliberately fatal. --ignore already absorbs the only benign case
+// (nothing in the store yet), so a failure that survives it is real -- an unwritable
+// store, say -- and creating a secret beside one that could not be removed would
+// leave the store in a state nobody chose.
+func TestManagerDeployPodmanSecretError(t *testing.T) {
+	// "--ignore" appears only in the remove argv, "create" only in the create argv,
+	// so each subtest fails exactly one half.
+	for _, tc := range []struct{ name, failOnToken string }{
+		{"remove half fails", "--ignore"},
+		{"create half fails", "create"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := ctrCfg(config.Podman, "false")
+			cfg.Podman.QuadletDir = t.TempDir()
+			m, rr, _ := newCapMgr(cfg, config.Podman)
+			m.Geteuid = func() int { return -1 }
+			rr.fail = failOn(tc.failOnToken)
+			err := m.Deploy(context.Background(), config.Primary)
+			if err == nil {
+				t.Fatalf("Deploy should propagate a failure of the %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), "semp.adminPass") {
+				t.Errorf("error should name the config key behind the secret, got: %v", err)
+			}
+		})
 	}
 }
 
@@ -1759,7 +1675,7 @@ func TestManagerDeployPodmanSecretCreateError(t *testing.T) {
 // forces the recreate that `compose up -d` would otherwise skip.
 func TestManagerRedeployUnchangedRestartsForRotation(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	if err := os.WriteFile(cfg.Docker.ComposeFile,
 		render.Compose(cfg, cfg.ResolveNode(config.Primary)), 0o600); err != nil {
@@ -1785,7 +1701,7 @@ func TestManagerRedeployUnchangedRestartsForRotation(t *testing.T) {
 // values and the unit is byte-identical, so --restart is what applies them.
 func TestManagerRedeployPodmanUnchangedRestartsForRotation(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = dir
 	if err := os.WriteFile(filepath.Join(dir, "sol-pod.container"),
 		render.Quadlet(cfg, cfg.ResolveNode(config.Primary)), 0o600); err != nil {
@@ -1828,7 +1744,7 @@ func TestContainerRunningMatchesNameExactly(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := ctrCfg(config.Docker, "no") // container.name is "solace"
+			cfg := ctrCfg(config.Docker, "false") // container.name is "solace"
 			m, rr, _ := newCapMgr(cfg, config.Docker)
 			rr.out = []byte(tc.listing)
 			if got := m.containerRunning(context.Background()); got != tc.want {
@@ -1841,7 +1757,7 @@ func TestContainerRunningMatchesNameExactly(t *testing.T) {
 	// that lossy shape is exactly why deployDocker (M4) no longer calls it and
 	// reads containerRunningKnown's answered flag directly instead.
 	t.Run("probe fails", func(t *testing.T) {
-		m, rr, _ := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+		m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 		rr.out = []byte("solace\n")
 		rr.outErr = fmt.Errorf("engine unreachable")
 		if m.containerRunning(context.Background()) {
@@ -1859,7 +1775,7 @@ func TestContainerRunningMatchesNameExactly(t *testing.T) {
 // create nor recreate may reach the runner.
 func TestManagerDeployDockerProbeUnansweredErrors(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	m, rr, _ := newCapMgr(cfg, config.Docker)
 	rr.outFail = failOn("status=running")
@@ -1888,7 +1804,7 @@ func TestManagerDeployDockerProbeUnansweredErrors(t *testing.T) {
 // what makes a deploy's result honest.
 func TestManagerRedeployStoppedContainerRecreates(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	if err := os.WriteFile(cfg.Docker.ComposeFile,
 		render.Compose(cfg, cfg.ResolveNode(config.Primary)), 0o600); err != nil {
@@ -1909,7 +1825,7 @@ func TestManagerRedeployStoppedContainerRecreates(t *testing.T) {
 // nothing happens, and the operator is told how to apply a rotation.
 func TestManagerRedeployUnchangedHintsRotation(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	if err := os.WriteFile(cfg.Docker.ComposeFile,
 		render.Compose(cfg, cfg.ResolveNode(config.Primary)), 0o600); err != nil {
@@ -1937,7 +1853,7 @@ func TestManagerRedeployUnchangedHintsRotation(t *testing.T) {
 // stopped" from "could not ask", which is the whole hazard.
 
 func TestManagerDeletePodmanDaemonReloadError(t *testing.T) {
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = t.TempDir()
 	m, rr, _ := newCapMgr(cfg, config.Podman)
 	rr.fail = failOn("daemon-reload")
@@ -1948,7 +1864,7 @@ func TestManagerDeletePodmanDaemonReloadError(t *testing.T) {
 
 func TestManagerDeletePodmanRemoveUnitError(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = dir
 	unit := filepath.Join(dir, "sol-pod.container")
 	if err := os.Mkdir(unit, 0o755); err != nil {
@@ -1965,7 +1881,7 @@ func TestManagerDeletePodmanRemoveUnitError(t *testing.T) {
 
 func TestManagerDeleteDockerComposeDownError(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	if err := os.WriteFile(cfg.Docker.ComposeFile, []byte("services:\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1987,7 +1903,7 @@ func TestManagerDeleteDockerComposeDownError(t *testing.T) {
 // as confirmed down.
 func TestManagerDeleteDockerStopTolerated(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "absent.yml") // no file -> stop/rm fallback
 	m, rr, buf := newCapMgr(cfg, config.Docker)
 	rr.fail = failOn("stop")
@@ -2010,7 +1926,7 @@ func TestManagerDeleteDockerStopTolerated(t *testing.T) {
 
 func TestManagerDeletePurgeError(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	if err := os.WriteFile(cfg.Docker.ComposeFile, []byte("services:\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -2029,13 +1945,13 @@ func TestManagerDeletePurgeError(t *testing.T) {
 // container listing runs.
 func TestManagerStatusDockerNoComposeFile(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "absent.yml")
 	m, rr, _ := newCapMgr(cfg, config.Docker)
 	if err := m.Status(context.Background()); err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if !hasCall(rr, "docker", []string{"ps", "--all", "--filter", "name=^solace$"}) {
+	if !hasCall(rr, "docker", []string{"ps", "--all", "--filter", "name=^solace$", "--format", psTableFormat}) {
 		t.Errorf("Status should ps the container:\n%+v", rr.calls)
 	}
 	for _, c := range rr.calls {
@@ -2046,7 +1962,7 @@ func TestManagerStatusDockerNoComposeFile(t *testing.T) {
 }
 
 func TestManagerStatusPodmanUnitInactiveTolerated(t *testing.T) {
-	m, rr, buf := newCapMgr(ctrCfg(config.Podman, "no"), config.Podman)
+	m, rr, buf := newCapMgr(ctrCfg(config.Podman, "false"), config.Podman)
 	rr.fail = failOn("status")
 	if err := m.Status(context.Background()); err != nil {
 		t.Fatalf("Status should tolerate an inactive unit: %v", err)
@@ -2054,28 +1970,49 @@ func TestManagerStatusPodmanUnitInactiveTolerated(t *testing.T) {
 	if !strings.Contains(buf.String(), "non-zero") {
 		t.Errorf("Status should warn when the unit is not active:\n%s", buf.String())
 	}
-	if !hasCall(rr, "podman", []string{"ps", "--all", "--filter", "name=^sol-pod$"}) {
+	if !hasCall(rr, "podman", []string{"ps", "--all", "--filter", "name=^sol-pod$", "--format", psTableFormat}) {
 		t.Errorf("Status should still ps the container:\n%+v", rr.calls)
 	}
 }
 
-func TestManagerStatusDockerComposePsTolerated(t *testing.T) {
+// TestManagerStatusDockerRunsNoComposePs replaces the test that used to assert a
+// tolerated `compose ps` failure. Status no longer runs compose at all, even WITH a
+// compose file on disk: compose listed the same single container and its PORTS column --
+// every published port with both host bindings -- was the widest thing in the report,
+// with no way to narrow it, since compose's --format takes only `table` or `json`.
+func TestManagerStatusDockerRunsNoComposePs(t *testing.T) {
 	dir := t.TempDir()
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 	if err := os.WriteFile(cfg.Docker.ComposeFile, []byte("services:\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	m, rr, buf := newCapMgr(cfg, config.Docker)
-	rr.fail = failOn("compose") // fails only `compose ps`, not the plain `ps`
+	m, rr, _ := newCapMgr(cfg, config.Docker)
 	if err := m.Status(context.Background()); err != nil {
-		t.Fatalf("Status should tolerate a compose ps failure: %v", err)
+		t.Fatalf("Status: %v", err)
 	}
-	if !strings.Contains(buf.String(), "compose ps failed") {
-		t.Errorf("Status should warn on a compose ps failure:\n%s", buf.String())
+	for _, c := range rr.calls {
+		if len(c.args) > 0 && c.args[0] == "compose" {
+			t.Errorf("Status must not run compose, even with a compose file present:\n%+v", rr.calls)
+		}
 	}
-	if !hasCall(rr, "docker", []string{"ps", "--all", "--filter", "name=^solace$"}) {
-		t.Errorf("Status should still ps the container:\n%+v", rr.calls)
+	if !hasCall(rr, "docker", []string{"ps", "--all", "--filter", "name=^solace$", "--format", psTableFormat}) {
+		t.Errorf("Status should ps the container:\n%+v", rr.calls)
+	}
+}
+
+// TestStatusListingCarriesNoPortsColumn is the property the format exists for, asserted
+// on the format itself rather than on engine output nothing here can produce. A broker
+// publishes a dozen or more ports, so the engine's default table wraps every other column
+// into illegibility -- on the one report whose job is to answer "is it up".
+func TestStatusListingCarriesNoPortsColumn(t *testing.T) {
+	if strings.Contains(psTableFormat, "Ports") {
+		t.Errorf("psTableFormat must not ask for the ports column: %q", psTableFormat)
+	}
+	for _, want := range []string{"table ", "{{.Names}}", "{{.Image}}", "{{.Status}}"} {
+		if !strings.Contains(psTableFormat, want) {
+			t.Errorf("psTableFormat = %q, want it to contain %q", psTableFormat, want)
+		}
 	}
 }
 
@@ -2096,7 +2033,7 @@ func TestManagerCheckPodmanEUID(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := ctrCfg(config.Podman, "no")
+			cfg := ctrCfg(config.Podman, "false")
 			cfg.Podman.Rootless = tc.rootless
 			m, _, _ := newCapMgr(cfg, config.Podman)
 			m.Geteuid = func() int { return tc.euid }
@@ -2114,7 +2051,7 @@ func TestManagerCheckPodmanEUID(t *testing.T) {
 // later rootless deploy cannot use. It now shares Deploy's checkPodmanEUID and
 // must stop before either, so the invariant has one definition and one message.
 func TestManagerPrepHostRootlessAsRootFailsHard(t *testing.T) {
-	cfg := ctrCfg(config.Podman, "no")
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.Rootless = true
 	m, rr, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 0 }
@@ -2136,7 +2073,7 @@ func TestManagerPrepHostRootlessAsRootFailsHard(t *testing.T) {
 // --- nil Log/Out sinks fall back to discard / os.Stdout ----------------------
 
 func TestManagerNilSinks(t *testing.T) {
-	m := NewManager(engine.Echo{}, ctrCfg(config.Docker, "no"), config.Docker, nil, nil)
+	m := NewManager(engine.Echo{}, ctrCfg(config.Docker, "false"), config.Docker, nil, nil)
 	m.Resolve = func(string) bool { return true }
 	if err := m.Check(context.Background()); err != nil {
 		t.Fatalf("Check with nil Log/Out should not error: %v", err)

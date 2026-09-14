@@ -44,27 +44,43 @@ Three consequences worth knowing:
 
 | Command | Short form | Notes |
 | --- | --- | --- |
-| `check` | `ck` |  |
-| `config` | `cfg` |  |
+| `broker` | `br` | the noun runs nothing on its own, so `br` alone cannot act |
+| `operator` | `op` | same: `op` alone prints what the operator can be asked to do |
+| `examples` | `eg` | emits an env file rather than acting on a deployment, so it sits at the top level |
 | `convert` | `cv` |  |
-| `copy` | `cp` |  |
-| `deploy` | `dp` |  |
-| `diagnostics` | `diag` |  |
-| `examples` | `eg` | the one noun at the top level: it emits an env file rather than acting on a deployment |
-| `generate` | `gen` |  |
-| `logs` | `lg` |  |
-| `prepare` | `pre` |  |
-| `remove` | `rm` | safe to hand out because `remove` takes a noun before it does anything: `rm` alone prints help |
-| `restart` | `rs` |  |
-| `shell` | `sh` |  |
-| `start` | none | no short form: any two-letter form is ambiguous with `stop` and `status`, and that is the one slip that costs an outage |
-| `status` | `sts` |  |
-| `stop` | none | no short form, for the same reason as `start` |
 | `version` | `ver` |  |
-| `broker` | `br` | works under every verb that takes a broker |
-| `operator` | `op` | works under every verb that takes the operator |
+| `validate` | `vld` | works at the top level and under both nouns: the whole env file, or either half |
+| `deploy` | `dp` |  |
+| `remove` | `rm` | safe because the noun comes first: `rm` alone is not a command |
+| `generate` | `gen` |  |
+| `restart` | `rs` |  |
+| `status` | `sts` |  |
+| `logs` | `lg` |  |
+| `shell` | `sh` |  |
+| `copy` | `cp` |  |
+| `configure` | `cfg` |  |
+| `perform` | `pf` |  |
+| `start` | none | no short form: any two-letter form is ambiguous with `stop` and `status`, and that is the one slip that costs an outage |
+| `stop` | none | no short form, for the same reason as `start` |
+| `cli` | none | no short form: three letters already, and `cl` would not read as anything |
+| `gather-diagnostics` | `gd` |  |
+| `data-replication` | `dr` |  |
+| `server-certs` | none | no short form: completion types it, and `sc` reads as nothing |
+| `domain-certs` | none | no short form, for the same reason as server-certs |
+| `product-keys` | none | no short form, for the same reason as server-certs |
+| `default-vpn` | none | no short form: `dv` would not distinguish it from default-users |
+| `default-users` | none | no short form, for the same reason as default-vpn |
+| `assert-leader` | none | no short form: rare, and run deliberately |
+| `redundancy-test` | none | no short form: invasive, so spelling it out is a feature |
+| `semp-login-check` | none | no short form: rare, and run deliberately |
+| `cli-script` | none | no short form: `cs` would not distinguish it from shell-script |
+| `shell-script` | none | no short form: `sh` is already claimed by `shell` |
+| `export-config` | none | no short form: completion types it, and `ec` reads as nothing |
+| `import-config` | none | no short form: it tears down and rebuilds a message-VPN, losing the messages spooled in its queues, so spelling it out is a feature -- the same reason redundancy-test has none |
+| `from` | none | no short form: it is already one syllable and reads as a direction |
+| `into` | none | no short form, for the same reason as from |
 
-Verbs with no short form and no recorded reason: `auto-complete`, `cli`, `smoke`.
+Verbs with no short form and no recorded reason: `auto-complete`.
 
 ## Node roles
 
@@ -95,8 +111,13 @@ the file, the error messages and the completions use. A short form is accepted o
 | Shorthand | Flag | Where | Meaning |
 | --- | --- | --- | --- |
 | `-e` | `--env` | every command | env file name, searched in the base dir then &lt;base-dir&gt;/env; a value with a directory is used as-is |
-| `-i` | `--input` | `solace-util cli` | run this Solace CLI script instead of opening an interactive session |
-| `-o` | `--out` | `solace-util convert` | write the YAML here instead of stdout |
-| `-o` | `--out` | `solace-util examples` | write the env file here instead of stdout |
+| `-f` | `--follow` | `solace-util broker logs` | keep streaming new lines instead of exiting |
+| `-f` | `--follow` | `solace-util operator logs` | keep streaming new lines instead of exiting |
+| `-o` | `--out` | `solace-util broker generate` | write the artifact to this file instead of stdout |
+| `-o` | `--out` | `solace-util broker perform export-config` | write the artifact to this file instead of stdout |
+| `-o` | `--out` | `solace-util convert` | write the artifact to this file instead of stdout |
+| `-o` | `--out` | `solace-util examples` | write the artifact to this file instead of stdout |
+| `-o` | `--out` | `solace-util operator generate` | write the artifact to this file instead of stdout |
+| `-p` | `--previous` | `solace-util broker logs` | read the PREVIOUS container's logs instead of the current one (kubernetes only) |
 | `-v` | `--verbose` | every command | announce every external command as it runs; by default the binaries this env file names are resolved and listed once, up front |
 

@@ -168,28 +168,56 @@ type brokerList struct {
 	} `json:"items"`
 }
 
+// containerSpec is one entry of a pod template's containers. It is a NAMED type rather
+// than an anonymous struct inline in deploymentList so the watch-scope reader can take a
+// slice of it as a parameter; the operator's WATCH_NAMESPACE is read out of here.
+type containerSpec struct {
+	Image string `json:"image"`
+	// Env is read for exactly one variable: the operator's own WATCH_NAMESPACE. It has
+	// to be READ rather than assumed -- this tool renders that value from an env file,
+	// but the operator is cluster-scoped and shared, so what is running may list
+	// namespaces no single env file knows about. Writing the rendered value blindly is
+	// what silently un-watched another broker's namespace.
+	//
+	// Only name/value are decoded. valueFrom is deliberately ignored: installedWatch
+	// treats a WATCH_NAMESPACE with no literal value the same as an absent one, which is
+	// the reading that errs toward "watches everything" and so toward leaving it alone.
+	Env []envVar `json:"env"`
+}
+
+// envVar is one container environment entry, literal values only.
+type envVar struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
 type deploymentList struct {
-	Items []struct {
-		Metadata objectMeta `json:"metadata"`
-		Spec     struct {
-			Replicas *int `json:"replicas"`
-			// The running image, so the report can say which operator version is
-			// actually installed. Worth reading rather than assuming: a cluster can
-			// easily be running a newer operator than this tool renders, and an
-			// operator debugging reconciliation needs to know which one answered.
-			Template struct {
-				Spec struct {
-					Containers []struct {
-						Image string `json:"image"`
-					} `json:"containers"`
-				} `json:"spec"`
-			} `json:"template"`
-		} `json:"spec"`
-		Status struct {
-			ReadyReplicas int `json:"readyReplicas"`
-			Replicas      int `json:"replicas"`
-		} `json:"status"`
-	} `json:"items"`
+	Items []deploymentItem `json:"items"`
+}
+
+// deploymentItem is one decoded Deployment. It is NAMED rather than anonymous so a
+// single fetched item can be passed between readers: `check deploy` needs two different
+// facts about the SAME operator Deployment -- its watch scope and its running image --
+// and each used to run its own cluster-wide `get deployment --all-namespaces`, paying a
+// full list twice on the healthy path of every `validate` and `check deploy`.
+type deploymentItem struct {
+	Metadata objectMeta `json:"metadata"`
+	Spec     struct {
+		Replicas *int `json:"replicas"`
+		// The running image, so the report can say which operator version is
+		// actually installed. Worth reading rather than assuming: a cluster can
+		// easily be running a newer operator than this tool renders, and an
+		// operator debugging reconciliation needs to know which one answered.
+		Template struct {
+			Spec struct {
+				Containers []containerSpec `json:"containers"`
+			} `json:"spec"`
+		} `json:"template"`
+	} `json:"spec"`
+	Status struct {
+		ReadyReplicas int `json:"readyReplicas"`
+		Replicas      int `json:"replicas"`
+	} `json:"status"`
 }
 
 type serviceList struct {

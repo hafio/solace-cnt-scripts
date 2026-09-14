@@ -3,7 +3,8 @@
 # bash bootstrap defaulted rather than the env file setting is absent here
 # (the Go defaults apply instead). See env/sample.yaml for the full schema.
 
-redundancy: "yes"
+redundancy:
+  enabled: "true"
 
 image:
   repo: solace-pubsub-standard
@@ -12,8 +13,8 @@ image:
   user: docker-user
   pass: docker-pass
 
-admin:
-  pass: adminpassword123
+semp:
+  adminPass: adminpassword123
   monitorPass: monitorpassword123
 
 tls:
@@ -31,14 +32,6 @@ scaling:
   maxBridges: 25
   maxSubscriptions: 50000
   maxGuaranteedMsgMB: 10
-
-replication:
-  mate: mate-virtual-router-name
-  connSsl:
-    - "host:port"
-    - "host1:port1"
-    - "host2:port2"
-  psk: "r$plPSK"
 
 broker:
   cliScriptsFolder: cliscripts
@@ -58,8 +51,8 @@ kubernetes:
   updateStrategy: automatedRolling
   storage:
     class: solace-storage-class
-    msgNode: "16100Mi"
-    monNode: "2300Mi"
+    msgNodeSize: "16100Mi"
+    monNodeSize: "2300Mi"
   msgNode:
     mem: "3410Mi"
   operator:

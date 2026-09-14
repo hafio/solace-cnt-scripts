@@ -125,18 +125,24 @@ func operatorVersionWarning(existingImage, newImage string) []string {
 // correctness: the operator may be running somewhere other than where this env
 // file expects, and that is precisely the case worth noticing before a deploy.
 func (c *Cluster) installedOperatorImage(ctx context.Context) string {
-	var list deploymentList
-	if err := c.getJSON(ctx, &list, "deployment", "--all-namespaces"); err != nil {
+	dep, err := c.findOperatorDeployment(ctx)
+	if err != nil {
 		return ""
 	}
-	for _, it := range list.Items {
-		if it.Metadata.Name != operatorDeployment {
-			continue
-		}
-		for _, ct := range it.Spec.Template.Spec.Containers {
-			if ct.Image != "" {
-				return ct.Image
-			}
+	return imageFromDeployment(dep)
+}
+
+// imageFromDeployment reads the running image off an already-fetched operator
+// Deployment, so a caller that already has one does not fetch it again. A nil dep, or
+// one whose containers name no image, is "" -- the same "nothing to read" this function
+// has always returned rather than an error.
+func imageFromDeployment(dep *deploymentItem) string {
+	if dep == nil {
+		return ""
+	}
+	for _, ct := range dep.Spec.Template.Spec.Containers {
+		if ct.Image != "" {
+			return ct.Image
 		}
 	}
 	return ""
@@ -163,7 +169,7 @@ func (c *Cluster) confirmNoDowngrade(ctx context.Context, opNS string) error {
 		return nil
 	}
 	c.progress().Warning("operator downgrade", body...)
-	if c.Confirm != nil && c.Confirm("Downgrade the operator?") {
+	if c.confirm("Downgrade the operator?") {
 		return nil
 	}
 	return fmt.Errorf("operator downgrade declined; nothing was applied. The operator already installed is " +

@@ -5,6 +5,8 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -20,12 +22,84 @@ var update = flag.Bool("update", false, "regenerate golden files in testdata/")
 // template doubles as the golden fixture (one fixture, all three platforms).
 const sampleFixture = "../../env/sample.yaml"
 
+// goldenCertPath and goldenCertKeyPath replace whatever config.Load resolved
+// tls.cert and tls.certKey to.
+//
+// They exist because Load now rebases a relative host path onto the env file's own
+// directory, so the real values are <checkout>/env/certs/tls.crt -- machine-specific
+// AND OS-specific, which a byte-compared golden can never hold. Without this the
+// same test writes C:\Users\...\env\certs\tls.crt here and /home/runner/... in CI.
+//
+// Absolute and posix-shaped on purpose: absolute is what the rebase produces for
+// every real deployment, and posix is the only shape that means anything in these
+// artifacts, which are read by a container engine on Linux.
+//
+// Set UNCONDITIONALLY, like goldenPodmanBaseDir below. They used to be applied only when
+// the fixture already set them, which stopped being safe once the sample shipped with TLS
+// commented out: the goldens would then have quietly stopped covering the server
+// certificate at all -- the quadlet `Volume=` mount, the compose secret, the CR tls block --
+// and a golden that covers less still passes.
+//
+// The fixture supplying TLS is the right way round anyway. What these goldens exist to pin
+// is what the RENDERERS emit for a TLS-configured broker, which should not depend on
+// whether the shipped starter file happens to opt into it.
+const (
+	goldenCertPath    = "/etc/solace/certs/tls.crt"
+	goldenCertKeyPath = "/etc/solace/certs/tls.key"
+
+	// goldenPodmanBaseDir pins podman.baseDir, which reaches the quadlet as the
+	// `Volume=` source of the server-certificate bundle. Set UNCONDITIONALLY, unlike
+	// the two above: the sample declares its own value, and pinning it here is what
+	// keeps the golden from depending on whatever an env file happens to say.
+	goldenPodmanBaseDir = "/etc/solace"
+
+	// goldenTLSSecret pins kubernetes.tlsServerSecret, whose presence is what puts the
+	// tls block in the rendered CR.
+	goldenTLSSecret = "solace-tls-secret"
+
+	// goldenCertBundle stands in for the bytes broker.ServerCertBundle would read.
+	// render is pure and cannot open a file, so the secret-script golden needs a
+	// fixed fake -- and a fixed one is also what keeps that golden machine-independent
+	// and free of a real private key.
+	goldenCertBundle = "-----BEGIN PRIVATE KEY-----\nGOLDENKEY\n-----END PRIVATE KEY-----\n" +
+		"-----BEGIN CERTIFICATE-----\nGOLDENCERT\n-----END CERTIFICATE-----\n"
+)
+
+// assertNoCheckoutPath fails when a rendered artifact carries the directory this
+// repository is checked out into, under either separator spelling.
+//
+// It is the guard for a whole class of mistake rather than one field: a golden that
+// held such a path would pass for whoever generated it and fail for everyone else,
+// including CI, and the failure would name a line rather than the cause.
+func assertNoCheckoutPath(t *testing.T, baseDir string, got []byte) {
+	t.Helper()
+	if baseDir == "" {
+		t.Fatal("the render fixture has no base directory: config.Load should have derived one, so either " +
+			"the rebase stopped running or the fixture stopped going through Load")
+	}
+	body := string(got)
+	for _, spelling := range []string{baseDir, filepath.ToSlash(baseDir)} {
+		if strings.Contains(body, spelling) {
+			t.Errorf("the rendered artifact carries this checkout's own directory %q.\n"+
+				"A golden cannot hold a machine-specific path. Pin the offending fixture field to a fixed "+
+				"absolute value, the way goldenCertPath pins tls.cert.", spelling)
+			return
+		}
+	}
+}
+
 func load(t *testing.T, p config.Platform) *config.Config {
 	t.Helper()
 	c, err := config.Load(sampleFixture, p)
 	if err != nil {
 		t.Fatalf("load %s under %s: %v", sampleFixture, p, err)
 	}
+	c.TLS.Cert = goldenCertPath
+	c.TLS.CertKey = goldenCertKeyPath
+	// The k8s CR emits its tls block off this name rather than off the file pair, so it
+	// has to be set here too or the CR golden loses that section.
+	c.K8s.TLSServerSecret = goldenTLSSecret
+	c.Podman.BaseDir = goldenPodmanBaseDir
 	return c
 }
 
@@ -221,7 +295,7 @@ func TestGolden(t *testing.T) {
 			file: "docker_compose_standalone.golden",
 			gen: func(t *testing.T) []byte {
 				c := load(t, config.Docker)
-				c.Redundancy = "no"
+				c.Redundancy.Enabled = "false"
 				return Compose(c, c.ResolveNode(config.Primary))
 			},
 		},
@@ -241,32 +315,33 @@ func TestGolden(t *testing.T) {
 			gen: func(t *testing.T) []byte {
 				c := load(t, config.Podman)
 				// Exercise the standalone and TZ-present branches without a second fixture.
-				c.Redundancy = "no"
+				c.Redundancy.Enabled = "false"
 				c.Timezone = "Asia/Singapore"
 				return envLines(EnvPairs(c, c.ResolveNode(config.Primary)))
 			},
 		},
-		{
-			name: "podman secret script HA",
-			file: "podman_secret_script.golden",
-			gen:  func(t *testing.T) []byte { return SecretScript(load(t, config.Podman), config.Podman) },
-		},
-		{
-			// Docker's script exports the variables compose reads instead, and a
-			// value carrying a quote proves shQuote keeps the line intact.
-			name: "docker secret script HA",
-			file: "docker_secret_script.golden",
-			gen: func(t *testing.T) []byte {
-				c := load(t, config.Docker)
-				c.Admin.Pass = `pa'ss "w" $ord`
-				return SecretScript(c, config.Docker)
-			},
-		},
+		// The two secret-script goldens are gone with SecretScript. No container
+		// artifact carries a secret VALUE now: `broker generate` renders the compose
+		// file or the quadlet and stops there, and `broker deploy` is the only thing
+		// that materialises the values -- podman into its secret store, docker into
+		// the compose child's environment. There is no longer a rendering to pin.
 	}
+
+	// The directory config.Load rebased this fixture's relative paths onto, resolved
+	// once rather than per case.
+	fixtureBase := load(t, config.Docker).BaseDir()
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tc.gen(t)
+			// Before it can be written OR compared: no artifact may carry the
+			// directory this checkout happens to live in. config.Load rebases every
+			// relative host path onto the env file's own directory, so any fixture
+			// field that reaches an artifact and is not pinned to a fixed absolute
+			// value (goldenCertPath and its sibling) leaks a machine-specific path
+			// into a byte-compared file. Checked here rather than in one case,
+			// because the next such field will arrive in a different one.
+			assertNoCheckoutPath(t, fixtureBase, got)
 			golden := filepath.Join("testdata", tc.file)
 			if *update {
 				if err := os.WriteFile(golden, got, 0o644); err != nil {
@@ -301,9 +376,9 @@ func TestArtifactsCarryNoSecrets(t *testing.T) {
 
 	for _, p := range []config.Platform{config.K8s, config.Docker, config.Podman} {
 		c := load(t, p)
-		c.Admin.Pass = pass
-		c.Nodes.PSK = psk
-		c.Admin.AdditionalUsers = []config.AdditionalUser{
+		c.SEMP.AdminPass = pass
+		c.Redundancy.PSK = psk
+		c.SEMP.AdditionalUsers = []config.AdditionalUser{
 			{Username: "appuser", AccessLevel: "read-only", Password: userPass},
 		}
 		id := c.ResolveNode(config.Primary)
@@ -322,17 +397,6 @@ func TestArtifactsCarryNoSecrets(t *testing.T) {
 				if bytes.Contains(body, []byte(secret)) {
 					t.Errorf("%s %s artifact carries the secret %q; it must reference it by name instead", p, name, secret)
 				}
-			}
-		}
-		if p == config.K8s {
-			continue
-		}
-		// SecretScript is the one renderer that must carry the values: it is what
-		// creates the secrets, and only --gen-secrets-only prints it.
-		script := SecretScript(c, p)
-		for _, secret := range secrets {
-			if !bytes.Contains(script, []byte(secret)) {
-				t.Errorf("%s secret script is missing %q; it is what creates the secrets", p, secret)
 			}
 		}
 	}
@@ -355,11 +419,11 @@ func TestContainerSecretsRedundancy(t *testing.T) {
 	}
 	// The mount is named after the setting, not the host-side secret, so the layout
 	// inside the container matches the k8s Secret's data keys.
-	if got := ha[0].MountPath(); got != "/run/secrets/username_admin_password" {
+	if got := ha[0].MountPath(); got != "/mnt/secrets/username_admin_password" {
 		t.Errorf("MountPath = %q", got)
 	}
 
-	c.Redundancy = "no"
+	c.Redundancy.Enabled = "false"
 	if standalone := ContainerSecrets(c, config.Podman); len(standalone) != 1 {
 		t.Errorf("standalone secrets = %d, want 1 (admin password only)", len(standalone))
 	}
@@ -396,8 +460,13 @@ func TestContainerSecretNamesAreHostScoped(t *testing.T) {
 	if s.Name != "edge-2.broker-admin-password" {
 		t.Errorf("secret name = %q, want it prefixed with the container name", s.Name)
 	}
-	if s.Target() != "username_admin_password" || s.MountPath() != "/run/secrets/username_admin_password" {
-		t.Errorf("the in-container name must not carry the host prefix: target=%q path=%q", s.Target(), s.MountPath())
+	// The in-container path must not carry the host-side prefix, and target must be
+	// the absolute path rather than a bare filename -- a bare one is resolved under
+	// the engine's own /run/secrets, where the broker never looks.
+	if s.Target() != "/mnt/secrets/username_admin_password" ||
+		s.MountPath() != "/mnt/secrets/username_admin_password" {
+		t.Errorf("the in-container name must not carry the host prefix, and target must be absolute: "+
+			"target=%q path=%q", s.Target(), s.MountPath())
 	}
 	// '.' and '-' cannot appear in a variable name; a leading digit cannot start one.
 	if got := s.EnvVar(); got != "EDGE_2_BROKER_ADMIN_PASSWORD" {
@@ -414,27 +483,30 @@ func TestContainerSecretNamesAreHostScoped(t *testing.T) {
 // level is not a secret and rides the artifact as an ordinary pair.
 func TestAdditionalUsersReachBothHalves(t *testing.T) {
 	c := load(t, config.Docker)
-	c.Redundancy = "no"
-	c.Admin.AdditionalUsers = []config.AdditionalUser{
+	c.Redundancy.Enabled = "false"
+	c.SEMP.AdditionalUsers = []config.AdditionalUser{
 		{Username: "appuser", AccessLevel: "read-write", Password: "app-secret"},
 	}
 
+	// Three on docker, not two: the sample sets tls.cert/certKey, so the
+	// server-certificate bundle is appended LAST. That ordering is what keeps
+	// secrets[1] the additional user rather than shifting every index.
 	secrets := ContainerSecrets(c, config.Docker)
-	if len(secrets) != 2 {
-		t.Fatalf("secrets = %d, want 2 (admin + appuser)", len(secrets))
+	if len(secrets) != 3 {
+		t.Fatalf("secrets = %d, want 3 (admin + appuser + server certificate)", len(secrets))
 	}
 	u := secrets[1]
 	if u.Name != "solace-user-appuser-password" || u.EnvKey != "username_appuser_password" {
 		t.Errorf("additional-user secret = %+v", u)
 	}
-	if u.ConfigKey != "admin.additionalUsers.appuser.password" {
+	if u.ConfigKey != "semp.additionalUsers.appuser.password" {
 		t.Errorf("ConfigKey = %q; it must name the env-file key for an actionable error", u.ConfigKey)
 	}
 
 	pairs := envLines(EnvPairs(c, c.ResolveNode(config.Primary)))
 	for _, want := range []string{
 		"username_appuser_globalaccesslevel=read-write",
-		"username_appuser_passwordfilepath=/run/secrets/username_appuser_password",
+		"username_appuser_passwordfilepath=/mnt/secrets/username_appuser_password",
 	} {
 		if !strings.Contains(string(pairs), want) {
 			t.Errorf("env pairs should contain %q:\n%s", want, pairs)
@@ -442,14 +514,6 @@ func TestAdditionalUsersReachBothHalves(t *testing.T) {
 	}
 	if strings.Contains(string(pairs), "app-secret") {
 		t.Errorf("env pairs must not carry the password:\n%s", pairs)
-	}
-}
-
-// TestShQuote guards the secret-script quoting: a value with a single quote must
-// survive as itself rather than ending the shell string.
-func TestShQuote(t *testing.T) {
-	if got := shQuote(`pa'ss`); got != `'pa'\''ss'` {
-		t.Errorf("shQuote = %q", got)
 	}
 }
 
@@ -503,7 +567,90 @@ func TestHealthCmdDefaultsToReadiness(t *testing.T) {
 	}
 }
 
-// TestSecretPreflight pins the precondition `deploy` and `--gen-secrets-only`
+// TestCustomVolumeMountRendersTheCRArray pins the translation at the boundary: the env
+// file keys on this tool's lowercase role word, the CRD constrains
+// customVolumeMount[].name to a capitalised enum, and the order is fixed rather than map
+// order -- a Go map iterates randomly, and this renders into a CR that is diffed and
+// re-applied, so an unstable order would look like a change on every deploy.
+func TestCustomVolumeMountRendersTheCRArray(t *testing.T) {
+	c := load(t, config.K8s)
+	c.K8s.Storage.Class = ""
+	c.K8s.Storage.CustomVolumeMount = map[string]string{
+		"monitor": "pvc-m", "primary": "pvc-p", "backup": "pvc-b",
+	}
+	got := string(BrokerCR(c))
+
+	want := "    customVolumeMount:\n" +
+		"    - name: Primary\n      persistentVolumeClaim:\n        claimName: pvc-p\n" +
+		"    - name: Backup\n      persistentVolumeClaim:\n        claimName: pvc-b\n" +
+		"    - name: Monitor\n      persistentVolumeClaim:\n        claimName: pvc-m\n"
+	if !strings.Contains(got, want) {
+		t.Errorf("CR storage block missing the custom mounts in redundancy order:\n%s", got)
+	}
+	if strings.Contains(got, "useStorageClass") {
+		t.Error("a custom-mounted deployment must not also name a StorageClass")
+	}
+}
+
+// TestNoCustomVolumeMountEmitsNothing: the block is absent, not empty. An empty array is a
+// different statement from an unset field, and the operator reads them differently.
+func TestNoCustomVolumeMountEmitsNothing(t *testing.T) {
+	c := load(t, config.K8s)
+	if got := string(BrokerCR(c)); strings.Contains(got, "customVolumeMount") {
+		t.Errorf("no custom mounts configured, so the key must not appear:\n%s", got)
+	}
+}
+
+// TestPreSharedAuthKeySecretFollowsTheKey pins the k8s half of the PSK asymmetry. The
+// field names a Secret, not a value, so emitting it unconditionally would point the
+// operator at a Secret carrying no `preshared_auth_key` entry -- breaking a deployment
+// the operator would otherwise have keyed itself. Absent means "generate your own".
+func TestPreSharedAuthKeySecretFollowsTheKey(t *testing.T) {
+	const field = "preSharedAuthKeySecret: solace-admin-secret"
+
+	c := load(t, config.K8s) // the sample carries a literal psk
+	if got := string(BrokerCR(c)); !strings.Contains(got, field) {
+		t.Errorf("a configured psk must point the CR at the admin Secret:\n%s", got)
+	}
+
+	// The reference form is equally "a key was configured": Load resolves pskEnv into
+	// PSK, but a config built by hand may carry only the variable name.
+	c.Redundancy.PSK = ""
+	c.Redundancy.PSKEnv = "SOLACE_REDUNDANCY_PSK"
+	if got := string(BrokerCR(c)); !strings.Contains(got, field) {
+		t.Errorf("pskEnv names a key too, so the field must still be emitted:\n%s", got)
+	}
+
+	c.Redundancy.PSKEnv = ""
+	if got := string(BrokerCR(c)); strings.Contains(got, "preSharedAuthKeySecret") {
+		t.Errorf("with no key configured the field must be absent, not empty:\n%s", got)
+	}
+}
+
+// TestExtraEnvVarsSecretFollowsTheUsers pins the CR half of admin.additionalUsers on
+// Kubernetes. The field names a Secret, so emitting it with no users would point the
+// operator at an object that does not exist and fail the pod on a mount the deployment
+// never needed -- the same rule preSharedAuthKeySecret follows.
+func TestExtraEnvVarsSecretFollowsTheUsers(t *testing.T) {
+	c := load(t, config.K8s)
+	if got := string(BrokerCR(c)); strings.Contains(got, "extraEnvVarsSecret") {
+		t.Errorf("no additional users configured, so the field must be absent:\n%s", got)
+	}
+
+	c.SEMP.AdditionalUsers = []config.AdditionalUser{
+		{Username: "appuser", AccessLevel: "read-only", Password: "app-pass"},
+	}
+	got := string(BrokerCR(c))
+	if !strings.Contains(got, "extraEnvVarsSecret: dev-broker-additional-users") {
+		t.Errorf("the CR must name the additional-users Secret:\n%s", got)
+	}
+	// The CR is not where a secret value belongs, whatever else changes.
+	if strings.Contains(got, "app-pass") {
+		t.Errorf("the CR carries a password:\n%s", got)
+	}
+}
+
+// TestSecretPreflight pins the precondition `broker deploy` and `broker generate`
 // share: creating a secret with an empty value leaves the broker with a blank
 // password or mate-link key that only fails later, so it is refused up front.
 func TestSecretPreflight(t *testing.T) {
@@ -512,23 +659,23 @@ func TestSecretPreflight(t *testing.T) {
 		t.Fatalf("a fully configured deployment must pass preflight: %v", err)
 	}
 
-	c.Nodes.PSK = ""
+	c.Redundancy.PSK = ""
 	err := SecretPreflight(c, config.Podman)
 	if err == nil {
 		t.Fatal("an empty PSK must be refused before a secret is created from it")
 	}
-	if !strings.Contains(err.Error(), "nodes.psk") || !strings.Contains(err.Error(), "prep host") {
+	if !strings.Contains(err.Error(), "redundancy.psk") || !strings.Contains(err.Error(), "env file") {
 		t.Errorf("the error should name the field and the fix, got: %v", err)
 	}
 
 	// Standalone has no mate link, so an empty PSK is not a secret at all there.
-	c.Redundancy = "no"
+	c.Redundancy.Enabled = "false"
 	if err := SecretPreflight(c, config.Podman); err != nil {
 		t.Errorf("standalone does not need a PSK: %v", err)
 	}
 
-	c.Admin.Pass = ""
-	if err := SecretPreflight(c, config.Podman); err == nil || !strings.Contains(err.Error(), "admin.pass") {
+	c.SEMP.AdminPass = ""
+	if err := SecretPreflight(c, config.Podman); err == nil || !strings.Contains(err.Error(), "semp.adminPass") {
 		t.Errorf("an empty admin password must be refused, got: %v", err)
 	}
 }
@@ -732,5 +879,127 @@ func TestUnresolvedTierOmitsLimits(t *testing.T) {
 	k.Scaling.CPU = ""
 	if cr := string(BrokerCR(k)); strings.Contains(cr, "messagingNodeCpu:") {
 		t.Errorf("broker CR emitted messagingNodeCpu with no tier resolved:\n%s", cr)
+	}
+}
+
+// TestSecretTargetsAreAbsolutePaths is the guard for the silent half of the
+// secrets-directory move.
+//
+// Both engines resolve a BARE `target=`/`target:` under their own /run/secrets. So
+// if Target ever went back to returning just the setting name, the file would be
+// created, the container would start, and the broker would look for it under
+// secretMount and find nothing -- with no error from the engine, the tool, or the
+// broker's own startup. Authentication would simply fail later, somewhere else.
+// Nothing about that failure points here, which is why it gets its own test rather
+// than relying on the goldens.
+func TestSecretTargetsAreAbsolutePaths(t *testing.T) {
+	c := load(t, config.Podman)
+	c.Redundancy.Enabled = "true"
+	c.TLS.CertPassphrase = "cert-pass"
+	c.SEMP.AdditionalUsers = []config.AdditionalUser{
+		{Username: "appuser", AccessLevel: "read-only", Password: "pw"},
+	}
+	secrets := ContainerSecrets(c, config.Podman)
+	if len(secrets) < 4 {
+		t.Fatalf("expected the admin password, an extra user, the PSK and the passphrase; got %d", len(secrets))
+	}
+	for _, s := range secrets {
+		if !strings.HasPrefix(s.Target(), "/") {
+			t.Errorf("secret %q target %q must be an absolute path: a bare name is resolved under the "+
+				"engine's own /run/secrets, where the broker never looks", s.Name, s.Target())
+		}
+		if s.Target() != s.MountPath() {
+			t.Errorf("secret %q target %q and mount path %q must be the same expression, or the engine "+
+				"mounts one path while the broker reads another", s.Name, s.Target(), s.MountPath())
+		}
+		if !strings.HasPrefix(s.MountPath(), secretMount+"/") {
+			t.Errorf("secret %q mount path %q must sit under %q", s.Name, s.MountPath(), secretMount)
+		}
+		// The *filepath setting the broker reads has to name that same file.
+		if want := s.MountPath(); !strings.HasSuffix(s.FilePathKey(), "filepath") {
+			t.Errorf("secret %q setting %q must be the *filepath variant naming %q", s.Name, s.FilePathKey(), want)
+		}
+	}
+}
+
+// TestSecretsAndCertDoNotNest pins that no secret's file can collide with the
+// server certificate's mount, which is the hazard the old layout carried: the cert
+// lived INSIDE the secrets directory (/run/secrets/tls.crt beside
+// /run/secrets/<setting>), so a setting named tls.crt would have been the same path.
+// They are now separate trees, and this asserts it rather than trusting it.
+func TestSecretsAndCertDoNotNest(t *testing.T) {
+	c := load(t, config.Podman)
+	c.Redundancy.Enabled = "true"
+	c.TLS.CertPassphrase = "cert-pass"
+	seen := map[string]string{}
+	for _, s := range ContainerSecrets(c, config.Podman) {
+		if other, dup := seen[s.MountPath()]; dup {
+			t.Errorf("secrets %q and %q mount at the same path %q", other, s.Name, s.MountPath())
+		}
+		seen[s.MountPath()] = s.Name
+		if s.MountPath() == certMount {
+			t.Errorf("secret %q mounts at the server certificate's path %q", s.Name, certMount)
+		}
+		if strings.HasPrefix(certMount, s.MountPath()+"/") || strings.HasPrefix(s.MountPath(), certMount+"/") {
+			t.Errorf("secret %q at %q nests with the certificate mount %q; a directory mount shadows "+
+				"anything under it", s.Name, s.MountPath(), certMount)
+		}
+	}
+}
+
+// TestComposeProjectIsDeclaredNotDerived. With no top-level `name:`, compose takes
+// the project name from the basename of the directory holding the file -- so it
+// changes when the artifact is generated somewhere else or the directory is renamed,
+// and the previous project's containers, network and volumes become orphans that
+// `down` no longer finds. Declaring it ties the project to the container name, which
+// is already unique on this host and already validated.
+func TestComposeProjectIsDeclaredNotDerived(t *testing.T) {
+	cfg := load(t, config.Docker)
+	got := Compose(cfg, cfg.ResolveNode(config.Primary))
+
+	want := "name: " + strconv.Quote(ComposeProject(cfg.Docker.Container.Name))
+	if !strings.Contains(string(got), want) {
+		t.Fatalf("the compose file should declare its project name (%s):\n%s", want, got)
+	}
+	// First line, so it is the first thing read in `generate broker` and cannot be
+	// mistaken for a field of the service below it.
+	if first := strings.SplitN(string(got), "\n", 2)[0]; first != want {
+		t.Errorf("project name should be the first line, got %q", first)
+	}
+}
+
+// TestComposeProjectFoldsToComposesGrammar. Compose's project-name grammar is
+// narrower than the container-name grammar config enforces: it lowercases and admits
+// only '_' and '-' as punctuation, while `My.Broker` is a container name both engines
+// accept. Folding is the right trade -- refusing a perfectly good container name over
+// a compose spelling rule would not be.
+func TestComposeProjectFoldsToComposesGrammar(t *testing.T) {
+	cases := map[string]string{
+		"solace":       "solace",
+		"My.Broker":    "my-broker",
+		"sol_pod-1":    "sol_pod-1",
+		"UPPER":        "upper",
+		"a.b.c":        "a-b-c",
+		"broker.prod2": "broker-prod2",
+		"":             "",
+	}
+	for in, want := range cases {
+		if got := ComposeProject(in); got != want {
+			t.Errorf("ComposeProject(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// Every fold result must be a legal compose project name: lowercase
+	// alphanumerics, '_' and '-', starting with an alphanumeric. config already
+	// guarantees the first character is a letter or a digit, and lowercasing keeps
+	// it one, so the fold cannot produce a leading '-'.
+	legal := regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+	for in := range cases {
+		got := ComposeProject(in)
+		if got == "" {
+			continue
+		}
+		if !legal.MatchString(got) {
+			t.Errorf("ComposeProject(%q) = %q, which compose would refuse", in, got)
+		}
 	}
 }

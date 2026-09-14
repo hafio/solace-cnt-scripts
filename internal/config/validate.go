@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -12,11 +13,22 @@ import (
 // the mandatory-vars and enum checks in the two bash bootstraps. It fails loud
 // with an actionable message listing every offending field at once.
 func (c *Config) Validate(p Platform) error {
-	// Redundancy is a shared enum on every platform.
-	switch c.Redundancy {
-	case "yes", "no":
+	// The section was renamed, so an env file carrying the old name gets told that rather
+	// than a bare "field admin not found in type config.Config". Two keys went with the
+	// rename and are named too, since a mechanical `admin:` -> `semp:` edit leaves them
+	// behind and the resulting error would otherwise be about the wrong thing.
+	if c.LegacyAdmin != nil {
+		return fmt.Errorf("the `admin:` section was renamed to `semp:` (it holds the broker's SEMP/CLI " +
+			"credentials). Rename it, and inside it: `pass:` -> `adminPass:`, `passEnv:` -> `adminPassEnv:`. " +
+			"`user:` was REMOVED -- the admin user is always 'admin' on every platform now, the way " +
+			"Kubernetes already required. monitorPass, monitorPassEnv and additionalUsers keep their names")
+	}
+
+	// redundancy.enabled is a shared enum on every platform.
+	switch c.Redundancy.Enabled {
+	case "true", "false":
 	default:
-		return fmt.Errorf("redundancy must be 'yes' or 'no' (got: %q)", c.Redundancy)
+		return fmt.Errorf("redundancy.enabled must be 'true' or 'false' (got: %q)", c.Redundancy.Enabled)
 	}
 
 	// The platform CLI is user-supplied and reaches os/exec, so it goes through the
@@ -37,10 +49,31 @@ func (c *Config) Validate(p Platform) error {
 	// These secrets are shared top-level fields (not platform-scoped), and each
 	// reaches a consumer that cannot tolerate a control character in the value:
 	// admin.pass and admin.monitorPass reach broker.sempCurl's curl config on
-	// stdin, nodes.psk and tls.certPassphrase travel the same way through the
+	// stdin, redundancy.psk and tls.certPassphrase travel the same way through the
 	// container config path. Checked once here rather than per platform, since
 	// the fields exist regardless of which platform ends up reading them.
 	if err := c.validateCredentialChars(); err != nil {
+		return err
+	}
+
+	// Replication is platform-neutral: the same DR pair is describable from a
+	// kubernetes, docker or podman env file, and which platform reads it changes
+	// nothing about whether the block is well formed. Checked once here, beside
+	// scaling, rather than inside each platform's validator.
+	if err := c.validateReplication(); err != nil {
+		return err
+	}
+
+	// Host paths are the OTHER charset (hostpath.go). A command token becomes argv;
+	// a host path becomes a value concatenated into a quadlet or compose line, so
+	// the two rules differ and the difference is derived rather than duplicated.
+	//
+	// This runs on the values AS WRITTEN. Load rebases relative paths onto the env
+	// file's directory only AFTER Validate returns, deliberately: the rule polices
+	// what the FILE says, which is the only thing this tool controls, and checking a
+	// rebased value would fail every load from a checkout whose own directory
+	// happens to contain a space.
+	if err := c.validateHostPaths(p); err != nil {
 		return err
 	}
 
@@ -52,6 +85,54 @@ func (c *Config) Validate(p Platform) error {
 	default:
 		return fmt.Errorf("unknown platform %q", p)
 	}
+}
+
+// validateHostPaths runs CheckHostPath over every field whose value is a path on
+// the machine running this tool. The list is per platform because the fields are:
+// only a container platform has a compose file or a data dir, and only kubernetes
+// reads the certificate files into a Secret -- but tls.* and broker.* are
+// platform-neutral and checked everywhere, since a container deployment reads the
+// same certificate and the same script folder.
+//
+// TestValidateHostPathsCoversEveryHostPathField pins the list against
+// rebaseHostPaths, so a field that gains a rebase without a check, or the reverse,
+// fails rather than quietly diverging.
+func (c *Config) validateHostPaths(p Platform) error {
+	fields := []struct{ field, value string }{
+		{"tls.cert", c.TLS.Cert},
+		{"tls.certKey", c.TLS.CertKey},
+		{"broker.cliScriptsFolder", c.Broker.CLIScriptsFolder},
+		{"broker.diagDir", c.Broker.DiagDir},
+		{"broker.domainCerts.folder", c.Broker.DomainCerts.Folder},
+	}
+	for i, ca := range c.TLS.CAs {
+		fields = append(fields, struct{ field, value string }{fmt.Sprintf("tls.cas[%d]", i), ca})
+	}
+	switch p {
+	case Docker:
+		fields = append(fields,
+			struct{ field, value string }{"docker.composeFile", c.Docker.ComposeFile},
+			struct{ field, value string }{"docker.container.dataDir", c.Docker.Container.DataDir},
+		)
+	case Podman:
+		fields = append(fields,
+			// The quadlet dir is checked but never rebased: the unit has to live
+			// where systemd scans, so a relative value is an operator error rather
+			// than something to resolve helpfully.
+			struct{ field, value string }{"podman.quadletDir", c.Podman.QuadletDir},
+			// Likewise checked but never rebased, and required absolute above: it is
+			// a `Volume=` source, and resolving a relative one would invent a
+			// location for a private key that the operator did not name.
+			struct{ field, value string }{"podman.baseDir", c.Podman.BaseDir},
+			struct{ field, value string }{"podman.container.dataDir", c.Podman.Container.DataDir},
+		)
+	}
+	for _, f := range fields {
+		if err := CheckHostPath(f.field, f.value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // validateProbeCommand checks the tokens of a command this tool does NOT execute:
@@ -95,6 +176,32 @@ func isCtrl(r rune) bool { return r < 0x20 || r == 0x7f }
 // the house convention is one small copy per package over a shared micro-package.
 var identRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
+// brokerUsernameRE is the broker's OWN grammar for a CLI username: it must start with a
+// letter or '_', and the whole name is 1-32 characters. The tail keeps identRE's charset,
+// which is what the derived secret names and broker settings are built from.
+//
+// Checked here rather than left to the broker, because the broker rejects it at CREATE
+// time -- on a running deployment, after everything else has already been applied.
+var brokerUsernameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9._-]{0,31}$`)
+
+// envVarNameRE is the C-identifier shape Kubernetes requires of an environment variable
+// name. It is NARROWER than identRE, which admits '.', '_' and '-': those are legal in a
+// Secret KEY but not in the variable envFrom projects it into, and the kubelet drops the
+// ones that do not match rather than failing the pod.
+var envVarNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// engineContainerNameRE is docker's and podman's own grammar for a container name:
+// identRE's charset, plus the requirement that the FIRST character be alphanumeric.
+// The same expression internal/container applies to a name the engine hands back
+// (engineNameRE) -- one grammar, checked on the way in and on the way out.
+var engineContainerNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// maxContainerNameLen bounds container.name. It is the stem of every derived name --
+// the podman unit and service, and the host-side secret names, which add up to about
+// twenty characters more -- so it is set well inside the engines' own limit rather
+// than at it.
+const maxContainerNameLen = 100
+
 // runUserRE allows the container runtime's `uid[:gid]` form, which identRE alone
 // would reject -- the default "0:0" contains a colon.
 var runUserRE = regexp.MustCompile(`^[A-Za-z0-9._-]+(:[A-Za-z0-9._-]+)?$`)
@@ -120,6 +227,23 @@ var dnsLabelBodyRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 // maxDNSLabelLen is the general Kubernetes object-name limit (a Secret,
 // namespace, or CR name).
 const maxDNSLabelLen = 63
+
+// brokerPodSuffixShape is the longest thing the operator appends to kubernetes.name
+// when deriving an object name: the pod's "-pubsubplus-<role letter>-0". Only its
+// LENGTH is used, so the letter here stands for any role.
+//
+// It is spelled out rather than imported because internal/config must not depend on
+// internal/k8s -- config is the leaf every platform package reads. The copy is the
+// smaller cost, and TestPodNameSuffixMatchesTheConfigBound in internal/k8s is what
+// stops the two drifting: it derives a real pod name and checks the length this
+// constant claims.
+const brokerPodSuffixShape = "-pubsubplus-p-0"
+
+// BrokerPodSuffixShape exposes that suffix so internal/k8s can assert its own
+// derivation still matches the bound applied here. An accessor rather than an exported
+// constant: nothing outside a test has any business reading it, and a function makes
+// that obvious at the call site.
+func BrokerPodSuffixShape() string { return brokerPodSuffixShape }
 
 // maxDNSSubdomainLen is the Kubernetes limit for a DNS-1123 SUBDOMAIN -- the rule
 // the API applies to most object names, Secrets included.
@@ -217,16 +341,24 @@ func requireKeyValue(groups []keyValueEntries) error {
 }
 
 func (c *Config) validateK8s() error {
-	missing := requireAll(map[string]string{
-		"kubernetes.name":            c.K8s.Name,
-		"kubernetes.namespace":       c.K8s.Namespace,
-		"image.repo":                 c.Image.Repo,
-		"image.tag":                  c.Image.Tag,
-		"kubernetes.storage.msgNode": c.K8s.Storage.MsgNode,
-		"admin.pass":                 c.Admin.Pass, // hardening: no hardcoded default password
-	})
-	if len(missing) > 0 {
+	required := map[string]string{
+		"kubernetes.name":      c.K8s.Name,
+		"kubernetes.namespace": c.K8s.Namespace,
+		"image.repo":           c.Image.Repo,
+		"image.tag":            c.Image.Tag,
+		"semp.adminPass":       c.SEMP.AdminPass, // hardening: no hardcoded default password
+	}
+	// A size is what the operator asks a StorageClass to provision. With custom volume
+	// mounts the volumes already exist at whatever size they were created, so demanding
+	// one would be demanding a number that changes nothing.
+	if !c.K8s.Storage.UsesCustomMounts() {
+		required["kubernetes.storage.msgNodeSize"] = c.K8s.Storage.MsgNodeSize
+	}
+	if missing := requireAll(required); len(missing) > 0 {
 		return missingErr(missing)
+	}
+	if err := c.validateStorage(); err != nil {
+		return err
 	}
 	// These reach a hand-built Secret/namespace manifest by string concatenation
 	// (k8s/secrets.go, k8s/prep.go) or the CR (render/render.go), so they are
@@ -246,6 +378,19 @@ func (c *Config) validateK8s() error {
 			return err
 		}
 	}
+	// The DERIVED names, not just the typed one. kubernetes.name is suffixed into
+	// every object the operator creates, and the longest of those is the pod:
+	// <name>-pubsubplus-<role>-0. Kubernetes stamps a pod's own name into the
+	// statefulset.kubernetes.io/pod-name LABEL, and a label VALUE is capped at 63 --
+	// so a name that passes the check above on its own can still produce a pod the
+	// cluster refuses, with an error naming a label nobody wrote.
+	if n := len(c.K8s.Name) + len(brokerPodSuffixShape); n > maxDNSLabelLen {
+		return fmt.Errorf("kubernetes.name %q is %d characters, which is too long once the operator's suffixes "+
+			"are added: the derived pod name would be %d characters (%q), and Kubernetes copies a pod's name into "+
+			"a label whose values stop at %d.\n  Use at most %d characters",
+			c.K8s.Name, len(c.K8s.Name), n, c.K8s.Name+brokerPodSuffixShape, maxDNSLabelLen,
+			maxDNSLabelLen-len(brokerPodSuffixShape))
+	}
 	// Secret names are the looser DNS-1123 SUBDOMAIN, which is what the Kubernetes
 	// API actually enforces for them: dots are legal, up to 253 characters. Holding
 	// them to the label rule would reject "prod.solace-admin-secret" -- a real
@@ -262,24 +407,28 @@ func (c *Config) validateK8s() error {
 			return err
 		}
 	}
+	// Both halves or neither. This was enforced only on docker and podman while
+	// applyK8sDefaults filled the pair together; now that naming the Secret no longer
+	// invents the paths, a lone cert here would build a Secret with no tls.key in it --
+	// which the operator mounts, and the broker then fails to start a listener over.
+	if (c.TLS.Cert == "") != (c.TLS.CertKey == "") {
+		return fmt.Errorf("tls.cert and tls.certKey must be set together (got cert=%q key=%q): "+
+			"the TLS Secret carries both, and one without the other builds a Secret the broker cannot use. "+
+			"To point at a Secret that already exists, set kubernetes.tlsServerSecret alone and leave both of these unset",
+			c.TLS.Cert, c.TLS.CertKey)
+	}
+	// Material with nowhere to put it. The Secret this tool would build has no name, and
+	// the CR would have no tls block, so the certificate would be silently unused.
+	if c.ManagesTLSSecret() && c.K8s.TLSServerSecret == "" {
+		return fmt.Errorf("tls.cert/tls.certKey are set but kubernetes.tlsServerSecret is not: " +
+			"the Secret built from them needs a name, and the broker CR references it by that name")
+	}
 	if c.K8s.MsgNode.CPU != "" {
 		// Removed rather than ignored: a stale cpu: in an env file is a sizing
 		// decision the operator believes is in effect, so it has to be seen.
 		return fmt.Errorf("kubernetes.msgNode.cpu was removed; broker CPU is fixed by the scaling tier and "+
 			"derived from scaling.maxConnections (one of %s) -- drop the key. "+
 			"kubernetes.msgNode.mem is unaffected: it still overrides the tier's default memory", scalingTierList)
-	}
-	if u := c.Admin.User; u != "" && u != "admin" {
-		// Rejected rather than ignored, for the same reason as msgNode.cpu above: this is
-		// the login an operator believes is in effect. The operator reads the fixed
-		// username_admin_password key out of the credentials Secret (k8s/secrets.go,
-		// verified against a live cluster), and creates the admin user itself, so nothing
-		// on this platform can honour another name. An unset value is skipped: ApplyDefaults
-		// fills "admin", so empty means "will be defaulted" as it does for every other
-		// setDefault field.
-		return fmt.Errorf("admin.user %q is not supported on Kubernetes: the operator reads the fixed "+
-			"username_admin_password key out of kubernetes.adminSecret, so the broker admin user is always "+
-			"'admin' -- drop the key (it applies to docker and podman, where the username is yours to choose)", u)
 	}
 	switch c.K8s.UpdateStrategy {
 	case "automatedRolling", "manualPodRestart":
@@ -307,6 +456,74 @@ func (c *Config) validateK8s() error {
 		return err
 	}
 	return validatePlacementAffinity(pl)
+}
+
+// validateStorage enforces the one-storage-story rule and checks the claims.
+//
+// A broker node gets its data volume one of two ways: provisioned by the operator from a
+// StorageClass, or mounted from a PersistentVolumeClaim that already exists. A file naming
+// both is describing two, and which one the operator honours is not something this tool
+// should guess on the operator's behalf -- so it is refused rather than resolved.
+func (c *Config) validateStorage() error {
+	st := c.K8s.Storage
+	if !st.UsesCustomMounts() {
+		return nil
+	}
+
+	if st.Class != "" {
+		return fmt.Errorf("kubernetes.storage.class and kubernetes.storage.customVolumeMount cannot both be set: "+
+			"a storage class asks the operator to PROVISION a volume, a custom mount hands it one that already "+
+			"exists, and the CRD does not say which wins.\n"+
+			"  Drop kubernetes.storage.class to use the custom claim(s), or drop customVolumeMount to provision "+
+			"from %q", st.Class)
+	}
+
+	// Keys are the canonical role words. An unknown key is a typo, and a typo here is the
+	// dangerous kind: the role it was meant for falls back to default provisioning,
+	// quietly, on a broker whose storage someone deliberately took control of.
+	known := map[string]bool{}
+	for _, r := range []Role{Primary, Backup, Monitor} {
+		known[r.Word()] = true
+	}
+	for key, claim := range st.CustomVolumeMount {
+		if !known[key] {
+			return fmt.Errorf("kubernetes.storage.customVolumeMount.%s is not a role: expected one of %s",
+				key, strings.Join(RoleNames(), ", "))
+		}
+		if strings.TrimSpace(claim) == "" {
+			return fmt.Errorf("kubernetes.storage.customVolumeMount.%s is empty: name the PersistentVolumeClaim "+
+				"to mount, or remove the key", key)
+		}
+	}
+
+	// Every role in the redundancy group, or none. A half-covered HA group is far more
+	// likely to be a mistyped key than a deliberate mix, and the failure mode is silent:
+	// the uncovered node provisions from the cluster default and nothing says so.
+	//
+	// Roles OUTSIDE the group are ignored rather than refused -- a backup entry in a
+	// standalone file describes a node that does not exist, which is harmless and is
+	// exactly what a file switched from HA to standalone looks like.
+	var missing []string
+	for _, r := range c.redundancyRoles() {
+		if _, ok := st.CustomMountFor(r); !ok {
+			missing = append(missing, "kubernetes.storage.customVolumeMount."+r.Word())
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("customVolumeMount must cover every node in the redundancy group or none of them; "+
+			"missing: %s.\n"+
+			"  A role left out is provisioned from the cluster's default StorageClass instead, which is not "+
+			"something a half-finished list should decide silently", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// redundancyRoles is the set of broker nodes this config actually deploys.
+func (c *Config) redundancyRoles() []Role {
+	if c.RedundancyEnabled() {
+		return []Role{Primary, Backup, Monitor}
+	}
+	return []Role{Primary}
 }
 
 // validateK8sPorts checks kubernetes.ports ("name=port[/proto]"), which
@@ -399,13 +616,6 @@ var accessLevels = map[string]bool{
 // accessLevelList is the enum for error messages, in the same order.
 const accessLevelList = "'none', 'read-only', 'mesh-manager', 'read-write' or 'admin'"
 
-// cliForbiddenPassword are the characters the broker's own CLI rejects in a
-// `create username ... password ...` value. They are refused here rather than at
-// config time on the cluster, so an env file that cannot be applied fails at load.
-// Only k8s delivers a password through the CLI: on containers it is written to a
-// mounted file, which has no such restriction, so this is checked per platform.
-const cliForbiddenPassword = ":()\";'<>,`\\*&|"
-
 // foldToEnvVar upper-cases a username and folds every character an environment
 // variable name cannot carry to '_' -- the same mapping render's
 // ContainerSecret.EnvVar applies to the whole secret name when docker sources a
@@ -451,9 +661,9 @@ func checkCredentialChars(field, value string) error {
 // validateAdditionalUsers, where the per-user field name is already at hand.
 func (c *Config) validateCredentialChars() error {
 	for _, f := range []struct{ field, value string }{
-		{"admin.pass", c.Admin.Pass},
-		{"admin.monitorPass", c.Admin.MonitorPass},
-		{"nodes.psk", c.Nodes.PSK},
+		{"semp.adminPass", c.SEMP.AdminPass},
+		{"semp.monitorPass", c.SEMP.MonitorPass},
+		{"redundancy.psk", c.Redundancy.PSK},
 		{"tls.certPassphrase", c.TLS.CertPassphrase},
 	} {
 		if err := checkCredentialChars(f.field, f.value); err != nil {
@@ -463,28 +673,270 @@ func (c *Config) validateCredentialChars() error {
 	return nil
 }
 
-// validateAdditionalUsers checks the extra CLI users, which every platform carries
-// but delivers differently: containers create them at boot from a mounted secret
-// file plus an access-level setting, while k8s creates them post-deployment through
-// the broker CLI (`config additional-users`). Access level is required rather than
-// defaulted -- silently choosing someone's permissions is not a default worth
-// having. p selects the platform-specific rules; only the k8s path constrains the
-// password, since only it puts the value on a CLI line.
+// replTransports is the transport vocabulary, and replTransportList is how an error
+// spells it. Three words: `encrypted` is the DMR name for ssl and is refused by name
+// rather than quietly accepted, so an env file cannot carry a fourth spelling the
+// renderer would have to decide about.
+var replTransports = map[string]bool{
+	TransportPlainText:  true,
+	TransportCompressed: true,
+	TransportSSL:        true,
+}
+
+const replTransportList = "plainText, compressed or ssl"
+
+// validateReplication checks the DR block. The whole section is optional -- most
+// deployments have no pair -- but a partially written one is an error rather than a
+// half-configured switchover waiting to happen.
+//
+// What is NOT checked here is a site's `via`: it says how to reach a site when it is
+// the MATE, and only the switch command ever needs it. Requiring it at load would
+// refuse a file that configures replication perfectly well for the local-only command,
+// so the switch checks both sites' blocks in its own preflight instead, before any
+// mutation. An EMPTY `via:` is accepted for the same reason and not as a preference: a
+// block with neither child decodes to the zero value, which is indistinguishable from an
+// absent key, so there is nothing here to tell the two apart (validateReplVia).
+func (c *Config) validateReplication() error {
+	r := c.Replication
+	if !r.Configured() {
+		return nil
+	}
+	if len(r.Sites) != 2 {
+		return fmt.Errorf("replication.sites must hold exactly 2 entries, one per site (got: %d). "+
+			"Replication is a pair; omit the whole replication: section if this broker has no DR mate",
+			len(r.Sites))
+	}
+
+	seenRouter := make(map[string]int, 4)
+	seenVRN := make(map[string]int, 2)
+	for i, s := range r.Sites {
+		field := fmt.Sprintf("replication.sites[%d]", i)
+		if strings.TrimSpace(s.VirtualRouterName) == "" {
+			return fmt.Errorf("%s.virtualRouterName must be set: it is the site's key, referenced by "+
+				"replication.vpns[].activeAt, and the operand the mate is given as "+
+				"`replication mate virtual-router-name`", field)
+		}
+		if j, dup := seenVRN[s.VirtualRouterName]; dup {
+			return fmt.Errorf("%s.virtualRouterName %q is the same as replication.sites[%d]'s: the two "+
+				"sites must be distinguishable", field, s.VirtualRouterName, j)
+		}
+		seenVRN[s.VirtualRouterName] = i
+
+		if len(s.RouterNames) == 0 {
+			return fmt.Errorf("%s.routerNames must list at least one name: it is matched against the "+
+				"broker's own `show router-name` so it can find itself in this file. List every node "+
+				"of the site's HA group, since the backup node reports its own name", field)
+		}
+		for k, n := range s.RouterNames {
+			if strings.TrimSpace(n) == "" {
+				return fmt.Errorf("%s.routerNames[%d] must not be empty", field, k)
+			}
+			if j, dup := seenRouter[n]; dup {
+				return fmt.Errorf("%s.routerNames[%d] %q is already declared by replication.sites[%d]: "+
+					"a router belongs to one site, and an overlap would leave a broker unable to tell "+
+					"which end of the pair it is", field, k, n, j)
+			}
+			seenRouter[n] = i
+		}
+
+		if err := validateReplEndpoints(field, s.Endpoints); err != nil {
+			return err
+		}
+		if err := validateReplVia(field, s.Via); err != nil {
+			return err
+		}
+	}
+
+	seenVPN := make(map[string]bool, len(r.VPNs))
+	for i, v := range r.VPNs {
+		field := fmt.Sprintf("replication.vpns[%d]", i)
+		if strings.TrimSpace(v.Name) == "" {
+			return fmt.Errorf("%s.name must be set", field)
+		}
+		if seenVPN[v.Name] {
+			return fmt.Errorf("%s.name %q is listed twice; each VPN appears once", field, v.Name)
+		}
+		seenVPN[v.Name] = true
+		if _, ok := seenVRN[v.ActiveAt]; !ok {
+			return fmt.Errorf("%s.activeAt %q names no site: it must be one of the declared "+
+				"virtualRouterName values (%s), not a router name", field, v.ActiveAt,
+				strings.Join(sortedKeys(seenVRN), ", "))
+		}
+	}
+	return nil
+}
+
+// validateReplEndpoints checks one site's mate addresses. The two-per-transport ceiling
+// is the software grammar's; an appliance takes only one, but which platform a site runs
+// is not in the file and must not be -- the broker knows, so the renderer refuses an
+// unrenderable set at apply time, when the CLI banner has said what the target is.
+func validateReplEndpoints(field string, eps []ReplEndpoint) error {
+	if len(eps) == 0 {
+		return fmt.Errorf("%s.endpoints must list at least one address: it is how the other broker "+
+			"dials this site, and a site with none is unreachable for replication", field)
+	}
+	perTransport := make(map[string]int, 3)
+	// seen keys the NORMALISED triple, so `plain-text` written out and left blank count
+	// as the same address rather than two. A duplicate is refused rather than quietly
+	// de-duplicated, because it is a typo in a file that is byte-identical at both sites
+	// and the operator should see it once instead of wondering later why a count differs.
+	//
+	// It matters more than a tidiness rule: `broker configure data-replication` decides
+	// whether the mate needs converging by comparing the file's endpoint set against what
+	// the broker reports, and the broker reports each address ONCE. A file listing one
+	// address twice therefore never compares equal, so every run would decide the mate
+	// differs, shut replication down on every VPN on the broker to rewrite identical mate
+	// lines, and do it again on the next run -- an outage per invocation, forever.
+	seen := make(map[string]int, len(eps))
+	for k, e := range eps {
+		ef := fmt.Sprintf("%s.endpoints[%d]", field, k)
+		if strings.TrimSpace(e.Host) == "" {
+			return fmt.Errorf("%s.host must be set", ef)
+		}
+		if e.Port < 1 || e.Port > 65535 {
+			return fmt.Errorf("%s.port must be between 1 and 65535 (got: %d)", ef, e.Port)
+		}
+		t := e.Transport
+		if t == "" {
+			t = TransportPlainText // the CLI's own default for an unqualified entry
+		}
+		if !replTransports[t] {
+			return fmt.Errorf("%s.transport must be %s (got: %q). `encrypted` is the routing name for "+
+				"the same thing; use ssl", ef, replTransportList, e.Transport)
+		}
+		key := fmt.Sprintf("%s|%d|%s", strings.TrimSpace(e.Host), e.Port, t)
+		if first, dup := seen[key]; dup {
+			return fmt.Errorf("%s repeats the address already given as %s.endpoints[%d] "+
+				"(%s:%d over %s). Each endpoint must be distinct: the broker reports an address "+
+				"once, so a repeated one makes `broker configure data-replication` read the mate "+
+				"as different on every run and shut replication down on every VPN to rewrite the "+
+				"same lines", ef, field, first, e.Host, e.Port, t)
+		}
+		seen[key] = k
+
+		perTransport[t]++
+		if perTransport[t] > 2 {
+			return fmt.Errorf("%s: replication accepts at most 2 addresses per transport, and %q has "+
+				"%d", field, t, perTransport[t])
+		}
+	}
+	return nil
+}
+
+// validateReplVia checks a site's access block when it has one. Exactly one mechanism,
+// because the key present IS the choice -- there is no separate name to disagree with it.
+func validateReplVia(field string, v ReplVia) error {
+	switch {
+	case v.Kubernetes != nil && v.SEMP != nil:
+		return fmt.Errorf("%s.via declares both kubernetes and semp: name one, since the key that is "+
+			"present is the mechanism", field)
+	case v.Kubernetes != nil:
+		k := v.Kubernetes
+		if len(k.Command) == 0 {
+			return fmt.Errorf("%s.via.kubernetes.command must be set: it is the cluster CLI this tool "+
+				"runs to reach that site (carry the cluster in it, e.g. `kubectl --context dr`)", field)
+		}
+		if strings.TrimSpace(k.Namespace) == "" {
+			return fmt.Errorf("%s.via.kubernetes.namespace must be set", field)
+		}
+		if strings.TrimSpace(k.Name) == "" {
+			return fmt.Errorf("%s.via.kubernetes.name must be set: the mate's PubSubPlusEventBroker "+
+				"name, which its pod is named after", field)
+		}
+	case v.SEMP != nil:
+		return validateReplViaSEMP(field, v.SEMP)
+	}
+	// A `via:` with neither child decodes to the zero value, indistinguishable from an
+	// absent key -- so an empty block is accepted here and the switch command's own
+	// preflight is what reports a site it cannot reach.
+	return nil
+}
+
+// validateReplViaSEMP checks the SEMP leg, including the credential. There is no stdin
+// prompt, so a missing source is a config error on every path rather than a question
+// nobody can answer under --no-prompt.
+func validateReplViaSEMP(field string, s *ReplViaSEMP) error {
+	if strings.TrimSpace(s.Host) == "" {
+		return fmt.Errorf("%s.via.semp.host must be set, and it is not derived from endpoints: "+
+			"replication runs over the message backbone, so a reachable replication endpoint proves "+
+			"nothing about SEMP reachability", field)
+	}
+	if s.Port < 1 || s.Port > 65535 {
+		return fmt.Errorf("%s.via.semp.port must be between 1 and 65535 (got: %d)", field, s.Port)
+	}
+	set := 0
+	if s.Pass != "" {
+		set++
+	}
+	if s.PassEnv != "" {
+		set++
+	}
+	if s.PassSecret != nil {
+		set++
+	}
+	if set == 0 {
+		return fmt.Errorf("%s.via.semp needs the mate's admin password: set pass, or point passEnv at "+
+			"an environment variable, or name a Kubernetes Secret in passSecret. There is no prompt for "+
+			"it", field)
+	}
+	if set > 1 {
+		return fmt.Errorf("%s.via.semp declares more than one of pass, passEnv and passSecret: use one, "+
+			"so which value reaches the mate is never a precedence question", field)
+	}
+	if s.PassSecret != nil {
+		for _, f := range []struct{ key, value string }{
+			{"namespace", s.PassSecret.Namespace},
+			{"name", s.PassSecret.Name},
+			{"key", s.PassSecret.Key},
+		} {
+			if strings.TrimSpace(f.value) == "" {
+				return fmt.Errorf("%s.via.semp.passSecret.%s must be set", field, f.key)
+			}
+		}
+	}
+	// Same reasoning as validateCredentialChars: this value reaches a curl config on
+	// stdin, where a newline breaks out of its line before the request is sent.
+	return checkCredentialChars(field+".via.semp.pass", s.Pass)
+}
+
+// sortedKeys renders a set as a stable, readable list for an error message.
+func sortedKeys(m map[string]int) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// validateAdditionalUsers checks the extra CLI users in semp.additionalUsers, which every
+// platform carries but delivers differently: containers mount each password as a file,
+// while Kubernetes puts both password and access level in the pod environment from a
+// dedicated Secret (<kubernetes.name>-additional-users, projected via
+// spec.extraEnvVarsSecret) -- so on both platforms the user exists from the broker's first
+// boot, with nothing to run afterwards. Access level is required rather than defaulted --
+// silently choosing someone's permissions is not a default worth having. p selects the
+// platform-specific rules; only the k8s path constrains the USERNAME, since the kubelet's
+// envFrom projection silently drops any Secret key that is not a valid environment
+// variable name.
 func (c *Config) validateAdditionalUsers(p Platform) error {
-	seen := make(map[string]bool, len(c.Admin.AdditionalUsers))
-	folded := make(map[string]string, len(c.Admin.AdditionalUsers))
-	for i, u := range c.Admin.AdditionalUsers {
-		field := fmt.Sprintf("admin.additionalUsers[%d]", i)
+	seen := make(map[string]bool, len(c.SEMP.AdditionalUsers))
+	folded := make(map[string]string, len(c.SEMP.AdditionalUsers))
+	for i, u := range c.SEMP.AdditionalUsers {
+		field := fmt.Sprintf("semp.additionalUsers[%d]", i)
 		if strings.TrimSpace(u.Username) == "" {
 			return fmt.Errorf("%s.username must be set", field)
 		}
-		if !identRE.MatchString(u.Username) {
-			return fmt.Errorf("%s.username %q is invalid: only letters, digits, '.', '_' and '-' are allowed "+
-				"(it becomes the secret name username_%s_password)", field, u.Username, u.Username)
+		if !brokerUsernameRE.MatchString(u.Username) {
+			return fmt.Errorf("%s.username %q is invalid: it must start with a letter or '_', then letters, "+
+				"digits, '.', '_' or '-', and be 1-32 characters. That is the broker's own rule, checked "+
+				"here because the broker would otherwise reject it at CREATE time, on a running "+
+				"deployment. The name also becomes the setting username_%s_password",
+				field, u.Username, u.Username)
 		}
-		if u.Username == "admin" || u.Username == "monitor" || u.Username == c.Admin.User {
+		if u.Username == AdminUser || u.Username == MonitorUser {
 			return fmt.Errorf("%s.username %q is a built-in user: admin has admin.pass and monitor has "+
-				"admin.monitorPass -- additionalUsers is for users beyond those", field, u.Username)
+				"semp.monitorPass -- additionalUsers is for users beyond those", field, u.Username)
 		}
 		if seen[u.Username] {
 			return fmt.Errorf("%s.username %q is listed twice; each user appears once", field, u.Username)
@@ -512,15 +964,25 @@ func (c *Config) validateAdditionalUsers(p Platform) error {
 		if err := checkCredentialChars(field+".password", u.Password); err != nil {
 			return err
 		}
-		// k8s creates the user with `create username "<u>" password "<p>"`, and the
-		// broker CLI rejects these characters in the value. The message names the
-		// offending character but never the password (§3).
-		if p == K8s {
-			if i := strings.IndexAny(u.Password, cliForbiddenPassword); i >= 0 {
-				return fmt.Errorf("%s.password contains %q, which the broker CLI rejects in a password; "+
-					"on Kubernetes the user is created over the CLI, so none of %s may appear "+
-					"(the value itself is not shown)", field, string(u.Password[i]), cliForbiddenPassword)
-			}
+		// Kubernetes delivers these users through a Secret that the CR names in
+		// spec.extraEnvVarsSecret, so every key in it becomes an environment variable in
+		// the broker container. The kubelet SKIPS keys that are not valid environment
+		// variable names -- silently, bar one pod event -- so a username carrying '.' or
+		// '-' would produce a user with no password, or no user at all, with nothing in
+		// the deploy to say so. The Secret key itself would be legal; it is the envFrom
+		// projection that drops it.
+		//
+		// Containers are unaffected: they mount the password as a FILE and only the
+		// access level rides the environment, so the wider identRE above still holds
+		// there. This is the one rule that differs by platform, which is why it is here
+		// rather than in the shared loop above.
+		if p == K8s && !envVarNameRE.MatchString(u.Username) {
+			return fmt.Errorf("%s.username %q cannot be used on Kubernetes: it becomes the environment "+
+				"variables username_%s_password and username_%s_globalaccesslevel, and Kubernetes "+
+				"silently DROPS environment variables whose names are not letters, digits and "+
+				"underscores (starting with a letter or underscore) -- the user would be created "+
+				"without a password, or not at all. Rename it, or drop the '.'/'-'", field,
+				u.Username, u.Username, u.Username)
 		}
 	}
 	return nil
@@ -578,20 +1040,72 @@ func validateMatchExprs(field string, exprs []NodeMatchExpr) error {
 	return nil
 }
 
+// pskValue is the pre-shared key however it was supplied -- literally, or through the
+// environment variable pskEnv names. Load resolves pskEnv into PSK before validation, so
+// this reads PSK first and falls back to the variable's NAME only to answer "was one
+// configured at all", which is what the container requirement actually asks.
+func (c *Config) pskValue() string {
+	if c.Redundancy.PSK != "" {
+		return c.Redundancy.PSK
+	}
+	return c.Redundancy.PSKEnv
+}
+
+// validateContainerPSK enforces the one credential this tool will not invent.
+//
+// The asymmetry with Kubernetes is the operator's rather than a preference: there the Solace
+// operator generates a key and distributes it to the pods it owns, so an empty one is a
+// legitimate deployment. Nothing does that for three container hosts -- each reads its own
+// env file -- so a key one host invented is a key the other two never see, and the group
+// fails to form with no obvious cause.
+//
+// This tool used to generate one on the first HA deploy and write it back into the env file.
+// That is gone: it only ever ran on one host, the value still had to be copied to the other
+// two by hand, and a deploy that edits the file it was handed is a surprise on a file that
+// may be version-controlled or templated. So the key is the operator's to make, and the
+// message has to hand them the command rather than just naming the field.
+func (c *Config) validateContainerPSK(p Platform) error {
+	if strings.TrimSpace(c.pskValue()) != "" {
+		return nil
+	}
+	return fmt.Errorf("redundancy.psk must be set when redundancy.enabled is true on %s.\n"+
+		"  Generate one:  openssl rand -base64 32\n"+
+		"  Then put the SAME value in the env file on all three hosts -- a group whose members "+
+		"hold different keys never forms.\n"+
+		"  (On Kubernetes this key is optional: the Solace operator generates and distributes "+
+		"its own when it is left empty.)", platformKey(p))
+}
+
 func (c *Config) validateContainer(p Platform) error {
 	req := map[string]string{
-		"image.repo":         c.Image.Repo,
-		"image.tag":          c.Image.Tag,
-		"admin.pass":         c.Admin.Pass,
-		"nodes.primary.name": c.Nodes.Primary.Name,
+		"image.repo":     c.Image.Repo,
+		"image.tag":      c.Image.Tag,
+		"semp.adminPass": c.SEMP.AdminPass,
 	}
-	// The backup/monitor rows + primary IP are required only for the HA group.
+	// redundancy.primary.name is NOT here. In standalone it is optional: there is one
+	// node, it is always this host, and FillStandaloneNodeName supplies the host's own
+	// hostname as the routername when the env file leaves it out. In HA it is mandatory,
+	// below, with the other two.
+	//
+	// The backup/monitor rows + the addresses are required only for the HA group.
 	if c.RedundancyEnabled() {
-		req["nodes.primary.ip"] = c.Nodes.Primary.IP
-		req["nodes.backup.name"] = c.Nodes.Backup.Name
-		req["nodes.backup.ip"] = c.Nodes.Backup.IP
-		req["nodes.monitor.name"] = c.Nodes.Monitor.Name
-		req["nodes.monitor.ip"] = c.Nodes.Monitor.IP
+		// The pre-shared key gets its own error rather than joining req below, because the
+		// generic "these fields must not be empty" tells an operator nothing about what to
+		// do, and this is the one field where nothing else will do it for them.
+		if err := c.validateContainerPSK(p); err != nil {
+			return err
+		}
+		// Every name is required in HA, and cannot be defaulted the way the standalone
+		// one is: each is the KEY of that node's entry in the group table EVERY host
+		// renders (redundancy_group_node_<name>_connectvia). A host knows its own
+		// hostname and no other machine's, so a guess here would build a table the other
+		// two hosts do not agree with, and the group would never form.
+		req["redundancy.primary.name"] = c.Redundancy.Primary.Name
+		req["redundancy.primary.addr"] = c.Redundancy.Primary.Addr
+		req["redundancy.backup.name"] = c.Redundancy.Backup.Name
+		req["redundancy.backup.addr"] = c.Redundancy.Backup.Addr
+		req["redundancy.monitor.name"] = c.Redundancy.Monitor.Name
+		req["redundancy.monitor.addr"] = c.Redundancy.Monitor.Addr
 	}
 	// Data dir lives in the platform's container block.
 	dataKey := "docker.container.dataDir"
@@ -599,22 +1113,106 @@ func (c *Config) validateContainer(p Platform) error {
 		dataKey = "podman.container.dataDir"
 	}
 	req[dataKey] = c.ContainerBlock(p).DataDir
+	if p == Podman {
+		// Mandatory, not defaulted: this directory receives the server-certificate
+		// bundle, which contains a PRIVATE KEY, and where a private key lands on the
+		// host is the operator's call rather than a path this tool picks for them.
+		// A quadlet unit cannot inline file content, which is why podman needs such a
+		// directory at all and docker does not.
+		req["podman.baseDir"] = c.Podman.BaseDir
+	}
 
 	if missing := requireAll(req); len(missing) > 0 {
 		return missingErr(missing)
 	}
 
+	if p == Podman && !IsAbsHostPath(c.Podman.BaseDir) {
+		return fmt.Errorf("podman.baseDir %q must be an absolute path: it is the source of a quadlet `Volume=` "+
+			"line, and podman reads a relative source as the name of a NAMED VOLUME -- so a relative value would "+
+			"mount an empty volume over the server certificate with no error at all (e.g. /opt/solace)",
+			c.Podman.BaseDir)
+	}
+
+	// The data dir must be ABSOLUTE, and it is the one host path that is required to
+	// be rather than being resolved against the env file's directory like the rest
+	// (hostpath.go, rebaseHostPaths).
+	//
+	// Two reasons, and the second is why it is a refusal instead of a rebase. It is
+	// the host side of a bind mount, so a bare relative value is read by podman as
+	// the name of a NAMED VOLUME and would mount an empty volume over the broker's
+	// data with no error. And it is the target of `rm -rf` on
+	// `remove broker --delete-data` (container.Manager.purgeData), so silently
+	// changing which directory a recursive delete points at is not a fix -- the
+	// operator has to be the one who says where their data lives.
+	//
+	// The default is /opt/solace/data, so nothing that works today is refused.
+	// A certificate with no key cannot produce the bundle a container mounts, and
+	// this is a deliberate TIGHTENING: an env file setting tls.cert alone loads
+	// today. It should not, and the reason is worth stating -- until now the
+	// container renderers mounted tls.cert ALONE, never reading tls.certKey, so a
+	// broker-owned TLS listener could only have worked if that one file already
+	// carried the key. Failing at load names the missing field; the old behaviour
+	// produced a broker whose TLS silently did not work.
+	//
+	// Both directions, not just cert-without-key. Every container site keys on TLS.Cert
+	// alone -- the compose secret, the quadlet Volume=, the configsync/matelink pairs --
+	// so a lone certKey produces no error, no warning and no TLS: exactly the silent
+	// failure this check exists to end, arrived at from the other side.
+	if (c.TLS.Cert == "") != (c.TLS.CertKey == "") {
+		return fmt.Errorf("tls.cert and tls.certKey must be set together (got cert=%q key=%q): on %s the "+
+			"server certificate is delivered as ONE file containing the private key followed by the "+
+			"certificate, so both halves are needed (set the missing one, or unset both to deploy "+
+			"without broker TLS)", c.TLS.Cert, c.TLS.CertKey, platformKey(p))
+	}
+
+	if dir := c.ContainerBlock(p).DataDir; !IsAbsHostPath(dir) {
+		return fmt.Errorf("%s %q must be an absolute path: it is the host side of a bind mount, and it is what "+
+			"`remove broker --delete-data` deletes recursively -- a relative value would be read by podman as a "+
+			"named volume and would leave a recursive delete pointing at whatever directory the command was run "+
+			"from (e.g. /opt/solace/data)", dataKey, dir)
+	}
+
 	// These reach the compose/quadlet artifact in structural positions, so they are
 	// format-checked here rather than being allowed to produce a broken artifact.
+	//
+	// admin.user is in the list because on a container platform it may be any string
+	// (only kubernetes pins it to "admin"), and it is not merely a value there: it is
+	// interpolated into the derived broker setting `username_<user>_globalaccesslevel`
+	// and into the secret key `username_<user>_password`, which is simultaneously a
+	// compose secret target and a podman `target=`. admin.additionalUsers usernames
+	// have always been held to this grammar for exactly that reason; the built-in
+	// admin reaches the same positions and was not.
 	cb := c.ContainerBlock(p)
 	for _, f := range []struct{ field, value string }{
 		{platformKey(p) + ".container.name", cb.Name},
-		{"nodes.primary.name", c.Nodes.Primary.Name},
-		{"nodes.backup.name", c.Nodes.Backup.Name},
-		{"nodes.monitor.name", c.Nodes.Monitor.Name},
+		{"redundancy.primary.name", c.Redundancy.Primary.Name},
+		{"redundancy.backup.name", c.Redundancy.Backup.Name},
+		{"redundancy.monitor.name", c.Redundancy.Monitor.Name},
 	} {
 		if err := validIdent(f.field, f.value); err != nil {
 			return err
+		}
+	}
+	// container.name additionally has to be a name the ENGINES accept, which is
+	// narrower than identIdent's charset in one way that matters: the first character
+	// must be alphanumeric. `-broker` passes the charset, and both docker and podman
+	// refuse it -- but not before this tool has written it into a compose file and a
+	// quadlet unit, and not before it has appeared in argument positions where a
+	// leading dash reads as a flag rather than a name.
+	//
+	// A bound too, because nothing else imposes one and the derived host-side secret
+	// names are longer still.
+	if n := cb.Name; n != "" {
+		if !engineContainerNameRE.MatchString(n) {
+			return fmt.Errorf("%s.container.name %q is invalid: it must start with a letter or digit, then "+
+				"letters, digits, '.', '_' or '-'. Both engines refuse a name starting with '-' or '.', and a "+
+				"leading dash also reads as a flag wherever the name reaches a command line",
+				platformKey(p), n)
+		}
+		if len(n) > maxContainerNameLen {
+			return fmt.Errorf("%s.container.name %q is %d characters, at most %d: it is the stem of every "+
+				"derived name, including the host-side secret names and the podman unit, which are longer still",
+				platformKey(p), n, len(n), maxContainerNameLen)
 		}
 	}
 	if u := cb.RunUser; u != "" && !runUserRE.MatchString(u) {
@@ -706,16 +1304,6 @@ func requireAll(fields map[string]string) []string {
 }
 
 func missingErr(missing []string) error {
-	sortStrings(missing)
+	sort.Strings(missing)
 	return fmt.Errorf("these fields must not be empty: %s", strings.Join(missing, ", "))
-}
-
-// sortStrings is a tiny insertion sort to keep the missing-fields message stable
-// without pulling in the sort package for a handful of items.
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j-1] > s[j]; j-- {
-			s[j-1], s[j] = s[j], s[j-1]
-		}
-	}
 }

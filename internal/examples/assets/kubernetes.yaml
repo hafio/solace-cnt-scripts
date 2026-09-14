@@ -1,26 +1,27 @@
 # Minimal Kubernetes env file for the `solace-util` CLI -- only the keys the
-# loader cannot default. Run any command with `-e <file>`; `solace-util examples
-# full` prints every key the schema accepts, with the default each omitted one
-# takes.
+# loader cannot default. Run any command with `-e <file>`; a bare
+# `solace-util examples` prints every key the schema accepts, with the default
+# each omitted one takes.
 #
 # Replace every CHANGE-ME before use. Each secret key has a sibling *Env key
 # holding the NAME of an environment variable to read the value from instead
 # (`passEnv: SOLACE_ADMIN_PASS`, never both); with that form this file carries no
 # secret and is safe to commit.
 
-redundancy: no                      # yes = a primary+backup+monitor group, and
+redundancy:
+  enabled: false                    # true = a primary+backup+monitor group, and
                                     # three PVCs instead of one
 
 image:
   repo: solace-pubsub-standard      # mandatory
   tag: "10.26.0.8755"               # mandatory
 
-admin:
-  pass: CHANGE-ME-admin             # secret, mandatory
+semp:
+  adminPass: CHANGE-ME-admin        # secret, mandatory
   monitorPass: CHANGE-ME-monitor    # secret; the operator's monitor user
 
 kubernetes:
   name: dev-broker                  # mandatory
   namespace: solace                 # mandatory
   storage:
-    msgNode: 30Gi                   # mandatory
+    msgNodeSize: 30Gi               # mandatory

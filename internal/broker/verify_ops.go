@@ -57,7 +57,7 @@ func (o *Ops) Login(ctx context.Context, role config.Role, user, pass string) (b
 // Leader restores redundancy and asserts the Primary as config-sync leader for
 // the router and all VPNs, porting 050. HA-only: it no-ops for standalone.
 func (o *Ops) Leader(ctx context.Context) error {
-	if o.skipIfStandalone("config leader") {
+	if o.skipIfStandalone("assert-leader") {
 		return nil
 	}
 
@@ -75,7 +75,7 @@ func (o *Ops) Leader(ctx context.Context) error {
 		return primaryRedundancyUp(out), nil
 	})
 	if err != nil {
-		if detail, dErr := o.RunCLI(ctx, config.Primary, "show-redundancy-detail", showRedundancyDetailScript()); dErr == nil {
+		if detail, dErr := o.runCLIRead(ctx, config.Primary, "show-redundancy-detail", showRedundancyDetailScript()); dErr == nil {
 			o.show(detail)
 		}
 		return err
@@ -93,7 +93,7 @@ func (o *Ops) Leader(ctx context.Context) error {
 // release activity to the Backup, un-release, then revert back to the Primary.
 // HA-only: it no-ops for standalone.
 func (o *Ops) Redundancy(ctx context.Context) error {
-	if o.skipIfStandalone("verify redundancy") {
+	if o.skipIfStandalone("redundancy-test") {
 		return nil
 	}
 
@@ -188,12 +188,21 @@ func (o *Ops) revertToPrimary(ctx context.Context) error {
 }
 
 // showRD runs `show redundancy` on role and returns its output as a string.
+//
+// runCLIRead, not RunCLI: this is a READ, and it is the poll condition of every
+// redundancy wait in this file and verify_local.go. RunCLI's stop-on-error
+// wrapper would add nothing (there is no later line a rejection could poison)
+// and its rejectionIn scan would turn a runtime-state word into a hard error --
+// failKeywords carries the bare word "busy", vetted against configuration-capture
+// text and never against `show redundancy`, so a mate reported busy mid-restore
+// would abort the whole verification instead of polling on. The field() and
+// countContains() scans below are also tuned against real unwrapped transcripts.
 func (o *Ops) showRD(ctx context.Context, role config.Role) (string, error) {
-	out, err := o.RunCLI(ctx, role, cliShowRD, showRedundancyScript())
+	out, err := o.runCLIRead(ctx, role, cliShowRD, showRedundancyScript())
 	return string(out), err
 }
 
-// ShowRedundancy is showRD exported for internal/tools/itest: a read-only
+// ShowRedundancy is showRD exported for callers outside this package: a read-only
 // `show redundancy` on one role. A live probe needs it to establish which node
 // currently holds activity BEFORE deciding whether a mutation is safe to send,
 // and MateActivityState parses the answer.

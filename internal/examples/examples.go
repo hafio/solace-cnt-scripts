@@ -22,8 +22,14 @@ import (
 //go:embed assets/kubernetes.yaml assets/docker.yaml assets/podman.yaml assets/full.yaml
 var assets embed.FS
 
-// Example is one template: the name `examples <name>` takes, the one line the
-// bare listing shows beside it, and the bytes it prints.
+// FullName is the annotated-schema template: what bare `solace-util examples` emits, and
+// the one name in this registry that is NOT a platform. Named rather than spelled at the
+// call site so the CLI's default and this registry cannot disagree about it.
+const FullName = "full"
+
+// Example is one template: its name, the one line the listing shows beside it, and the
+// bytes it prints. Every name but FullName is a platform's own section key, so a starter
+// and the `docker:` block it emits are the same word rather than two spellings of one.
 type Example struct {
 	Name  string
 	Short string
@@ -42,7 +48,7 @@ var all = []struct {
 	{"kubernetes", "minimal standalone Kubernetes env file", "assets/kubernetes.yaml"},
 	{"docker", "minimal standalone docker env file", "assets/docker.yaml"},
 	{"podman", "minimal standalone podman env file", "assets/podman.yaml"},
-	{"full", "every key the schema accepts, annotated with each default", "assets/full.yaml"},
+	{FullName, "every key the schema accepts, annotated with each default", "assets/full.yaml"},
 }
 
 // All returns every example in listing order.

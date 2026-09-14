@@ -16,27 +16,34 @@ import (
 // by running anything: cobra's Find is what dispatch itself uses, so proving both
 // paths land on the same *cobra.Command proves they behave identically without
 // needing a cluster, an env file, or a runner.
+//
+// Every row abbreviates BOTH halves (`br rm`, not `br remove`), which is the case worth
+// pinning: commandAbbrev is keyed by NAME and applied by a tree walk, so a word means the
+// same thing at whatever depth it appears. `rm` under `broker` and `rm` under `operator`
+// are two different commands reached by one abbreviation, and nothing in the table itself
+// says so -- the walk is what makes it true.
 func TestAliasesResolveToTheCanonicalCommand(t *testing.T) {
 	for _, tc := range []struct{ alias, canonical []string }{
-		{[]string{"rm", "br"}, []string{"remove", "broker"}},
-		{[]string{"rm", "op"}, []string{"remove", "operator"}},
-		{[]string{"rm", "all"}, []string{"remove", "all"}},
-		{[]string{"dp", "br"}, []string{"deploy", "broker"}},
-		{[]string{"dp", "op"}, []string{"deploy", "operator"}},
-		{[]string{"sts", "br"}, []string{"status", "broker"}},
-		{[]string{"sts", "op"}, []string{"status", "operator"}},
-		{[]string{"lg", "br"}, []string{"logs", "broker"}},
-		{[]string{"cfg", "leader"}, []string{"config", "leader"}},
-		{[]string{"cfg", "apply", "server-cert"}, []string{"config", "apply", "server-cert"}},
-		{[]string{"ck", "deploy"}, []string{"check", "deploy"}},
-		{[]string{"pre", "all"}, []string{"prepare", "all"}},
-		{[]string{"rs", "br"}, []string{"restart", "broker"}},
-		{[]string{"gen", "br"}, []string{"generate", "broker"}},
-		{[]string{"diag"}, []string{"diagnostics"}},
+		{[]string{"br", "rm"}, []string{"broker", "remove"}},
+		{[]string{"op", "rm"}, []string{"operator", "remove"}},
+		{[]string{"br", "dp"}, []string{"broker", "deploy"}},
+		{[]string{"op", "dp"}, []string{"operator", "deploy"}},
+		{[]string{"br", "sts"}, []string{"broker", "status"}},
+		{[]string{"op", "sts"}, []string{"operator", "status"}},
+		{[]string{"br", "lg"}, []string{"broker", "logs"}},
+		{[]string{"br", "vld"}, []string{"broker", "validate"}},
+		{[]string{"op", "vld"}, []string{"operator", "validate"}},
+		{[]string{"vld"}, []string{"validate"}},
+		{[]string{"br", "pf", "assert-leader"}, []string{"broker", "perform", "assert-leader"}},
+		{[]string{"br", "pf", "gd"}, []string{"broker", "perform", "gather-diagnostics"}},
+		{[]string{"br", "cfg", "server-certs"}, []string{"broker", "configure", "server-certs"}},
+		{[]string{"br", "rs"}, []string{"broker", "restart"}},
+		{[]string{"br", "gen"}, []string{"broker", "generate"}},
+		{[]string{"op", "gen"}, []string{"operator", "generate"}},
 		{[]string{"cv"}, []string{"convert"}},
 		{[]string{"ver"}, []string{"version"}},
-		{[]string{"sh"}, []string{"shell"}},
-		{[]string{"cp", "from"}, []string{"copy", "from"}},
+		{[]string{"br", "sh"}, []string{"broker", "shell"}},
+		{[]string{"br", "cp", "from"}, []string{"broker", "copy", "from"}},
 	} {
 		t.Run(strings.Join(tc.alias, " "), func(t *testing.T) {
 			root := newRootCmd(&App{})
@@ -101,41 +108,63 @@ func TestEveryAliasEntryIsLive(t *testing.T) {
 	}
 }
 
-// TestDangerousVerbsHaveNoBareAlias is the safety property behind giving the
-// removal verb a two-letter form at all: `rm` reaches a verb that acts on nothing
-// until it is given a noun. The check is that these verbs are GROUPS -- their RunE
-// exists only to print help or reject an unknown noun (group(), commands.go), so
-// no argument-less invocation can destroy anything. If one ever became a real
-// command, this fails, which is the moment to reconsider the abbreviation rather
-// than after someone loses a broker to a typo.
-func TestDangerousVerbsHaveNoBareAlias(t *testing.T) {
+// TestNounGroupsRunNothing is the inverted form of what TestDangerousVerbsHaveNoBareAlias
+// used to pin, and it is why the abbreviations stay safe to hand out.
+//
+// The tree used to be verb-first, so the danger was `rm` acting on its own and the guard was
+// "a verb that owns objects has no RunE". It is noun-first now: `rm` is not reachable at the
+// top level at all, and the two-token `br rm` IS the destructive command. What has to stay
+// true is the same shape one level up -- the NOUN runs nothing, so `br` and `op` alone act
+// on nothing, and the families beneath them (copy, configure, perform) are groups too.
+//
+// A RunE added to any of these later is what this catches. It also catches the subtler one:
+// a group that lost its last subcommand still passes "has no RunE" while being useless, so
+// HasSubCommands is checked as well.
+func TestNounGroupsRunNothing(t *testing.T) {
 	root := newRootCmd(&App{})
-	for _, name := range []string{"remove", "deploy", "config", "start", "stop", "restart"} {
-		c, _, err := root.Find([]string{name})
+	for _, path := range [][]string{
+		{"broker"},
+		{"operator"},
+		{"broker", "copy"},
+		{"broker", "configure"},
+		{"broker", "perform"},
+	} {
+		name := strings.Join(path, " ")
+		c, _, err := root.Find(path)
 		if err != nil {
 			t.Fatalf("finding %q: %v", name, err)
 		}
 		if c.Annotations[groupAnnotation] != "true" {
-			t.Errorf("%q is not a verb group; a verb that owns objects must not act on its own", name)
+			t.Errorf("%q is not a group; a noun that owns verbs must not act on its own", name)
+		}
+		if c.RunE != nil && !c.HasSubCommands() {
+			t.Errorf("%q runs something and owns nothing", name)
 		}
 		if !c.HasSubCommands() {
-			t.Errorf("%q has no subcommands, so there is no noun to name", name)
+			t.Errorf("%q has no subcommands, so there is no verb to name", name)
 		}
 	}
 }
 
-// TestGroupsRejectAnUnknownNoun pins the reason groups are runnable at all. Cobra
-// answers a NON-runnable command by printing help and exiting 0 whatever arguments
-// it got, so a mistyped noun on a destructive verb would report success having done
-// nothing. Bare still prints help and succeeds; a word the verb does not know fails.
-func TestGroupsRejectAnUnknownNoun(t *testing.T) {
-	for _, verb := range []string{"remove", "deploy", "generate", "config", "status"} {
-		t.Run(verb, func(t *testing.T) {
-			if _, err := runRoot(t, []string{verb}); err != nil {
-				t.Errorf("bare %q err = %v, want help and success", verb, err)
+// TestGroupsRejectAnUnknownVerb pins the reason groups are runnable at all. Cobra answers
+// a NON-runnable command by printing help and exiting 0 whatever arguments it got, so a
+// mistyped verb on a destructive noun would report success having done nothing. Bare still
+// prints help and succeeds; a word the noun does not know fails.
+//
+// The groups are the nouns now, so the mistyped word is the VERB: `broker remvoe` is the
+// slip this catches, and reporting success for it is exactly as bad as it was when the
+// mistyped word was the noun.
+func TestGroupsRejectAnUnknownVerb(t *testing.T) {
+	for _, group := range [][]string{
+		{"broker"}, {"operator"}, {"broker", "copy"}, {"broker", "configure"}, {"broker", "perform"},
+	} {
+		name := strings.Join(group, " ")
+		t.Run(name, func(t *testing.T) {
+			if _, err := runRoot(t, group); err != nil {
+				t.Errorf("bare %q err = %v, want help and success", name, err)
 			}
-			if _, err := runRoot(t, []string{verb, "bogus"}); err == nil {
-				t.Errorf("%q bogus err = nil, want a loud refusal naming the unknown word", verb)
+			if _, err := runRoot(t, append(append([]string{}, group...), "bogus")); err == nil {
+				t.Errorf("%q bogus err = nil, want a loud refusal naming the unknown word", name)
 			}
 		})
 	}
@@ -167,9 +196,15 @@ func TestStartStopHaveNoAlias(t *testing.T) {
 			t.Errorf("commandAbbrev entry for %q has no note saying why it has no short form", name)
 		}
 	}
+	// start/stop are verbs under each noun now, so the tree half of the check has to look
+	// under both -- an alias added to only one of them would otherwise slip through.
 	root := newRootCmd(&App{})
-	for _, name := range []string{"start", "stop"} {
-		c, _, err := root.Find([]string{name})
+	for _, path := range [][]string{
+		{"broker", "start"}, {"broker", "stop"},
+		{"operator", "start"}, {"operator", "stop"},
+	} {
+		name := strings.Join(path, " ")
+		c, _, err := root.Find(path)
 		if err != nil {
 			t.Fatalf("finding %q: %v", name, err)
 		}

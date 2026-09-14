@@ -12,11 +12,23 @@ import "solace/internal/config"
 // (StatefulSets, pods, PVCs, the LB service): <name>-pubsubplus[...].
 const brokerSuffix = "-pubsubplus"
 
-// podName returns the broker pod for a role: <name>-pubsubplus-<p|b|m>-0. The
-// operator names pods off the per-role StatefulSet's single replica (050:30,
-// enter-solace-cli.sh:18). Broker pods are single-container, so no `-c` is ever used.
+// podNameFor returns the broker pod for a role given the DEPLOYMENT NAME rather than a
+// whole config: <name>-pubsubplus-<p|b|m>-0. The operator names pods off the per-role
+// StatefulSet's single replica (050:30, enter-solace-cli.sh:18). Broker pods are
+// single-container, so no `-c` is ever used.
+//
+// It takes a bare name because a replication MATE is a different deployment in a
+// different cluster: it is described by its site's own `via.kubernetes` block, not by a
+// *config.Config, so matechannel.go could not call podName and spelled the rule out by
+// hand instead. Two spellings of one naming rule is how the rule drifts, and this is the
+// file that exists so it lives once.
+func podNameFor(name string, role config.Role) string {
+	return name + brokerSuffix + "-" + role.Letter() + "-0"
+}
+
+// podName is podNameFor for THIS deployment, which is what almost every caller wants.
 func podName(cfg *config.Config, role config.Role) string {
-	return cfg.K8s.Name + brokerSuffix + "-" + role.Letter() + "-0"
+	return podNameFor(cfg.K8s.Name, role)
 }
 
 // pvcName returns the PersistentVolumeClaim backing a role's pod:
@@ -70,4 +82,23 @@ func ProductKeyRoles(cfg *config.Config) []config.Role {
 		return []config.Role{config.Primary, config.Backup}
 	}
 	return []config.Role{config.Primary}
+}
+
+// roleName is the long-form role word used in this package's own progress lines --
+// "copying x from backup" reads where a bare letter would not. It lives beside the
+// other role helpers rather than in the file that happens to call it; it moved here
+// when the node-labelling prompt that first needed it was removed.
+//
+// It is a hand-rolled duplicate of config.Role.Word() and should be deleted in favour
+// of it, but its remaining call sites (ops.go) are outside this change's file scope,
+// so it stays until they move.
+func roleName(role config.Role) string {
+	switch role {
+	case config.Backup:
+		return "backup"
+	case config.Monitor:
+		return "monitor"
+	default:
+		return "primary"
+	}
 }

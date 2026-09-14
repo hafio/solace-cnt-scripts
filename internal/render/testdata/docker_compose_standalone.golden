@@ -1,8 +1,9 @@
+name: "solace"
 services:
-  solace:
+  "solace":
     image: registry.example.com/solace-pubsub-standard:10.26.0.8755
-    container_name: solace
-    hostname: solace-primary
+    container_name: "solace"
+    hostname: "solace-primary"
     user: "0:0"
     restart: always
     cpus: "2"
@@ -17,12 +18,11 @@ services:
     network_mode: host
     volumes:
       - "/opt/solace/data:/var/lib/solace:Z"
-      - "certs/tls.crt:/run/secrets/tls.crt:ro"
     environment:
       routername: "solace-primary"
       nodetype: "message_routing"
       redundancy_enable: "no"
-      tls_servercertificate_filepath: "/run/secrets/tls.crt"
+      tls_servercertificate_filepath: "/mnt/certs/server/tls.pem"
       system_scaling_maxconnectioncount: "1000"
       system_scaling_maxqueuemessagecount: "100"
       system_scaling_maxkafkabridgecount: "0"
@@ -32,10 +32,14 @@ services:
       system_scaling_maxguaranteedmessagesize: "10"
       messagespool_maxspoolusage: "100000"
       username_admin_globalaccesslevel: "admin"
-      username_admin_passwordfilepath: "/run/secrets/username_admin_password"
+      username_admin_passwordfilepath: "/mnt/secrets/username_admin_password"
     secrets:
-      - source: solace-admin-password
-        target: username_admin_password
+      - source: "solace-admin-password"
+        target: /mnt/secrets/username_admin_password
+      - source: "solace-tls-servercertificate"
+        target: /mnt/certs/server/tls.pem
 secrets:
-  solace-admin-password:
+  "solace-admin-password":
     environment: SOLACE_ADMIN_PASSWORD
+  "solace-tls-servercertificate":
+    environment: SOLACE_TLS_SERVERCERTIFICATE

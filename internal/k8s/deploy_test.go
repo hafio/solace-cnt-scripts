@@ -25,11 +25,13 @@ func TestDeployBrokerApply(t *testing.T) {
 	if err := c.DeployBroker(context.Background(), false); err != nil {
 		t.Fatalf("DeployBroker: %v", err)
 	}
-	calls := rr.afterPreflight(t, "create", brokerResource)
+	calls := rr.afterPreflights(t,
+		probe{verb: "create", resource: brokerResource},
+		probe{verb: "get", resource: brokerResource})
 	if len(calls) != 1 {
-		t.Fatalf("DeployBroker(keepYAML=false) made %d calls after the probe, want 1 apply", len(calls))
+		t.Fatalf("DeployBroker(keepYAML=false) made %d calls after the probes, want 1 apply", len(calls))
 	}
-	got := rr.last()
+	got := calls[0]
 	if got.method != "RunInput" || got.name != "kubectl" || !eqArgs(got.args, []string{"apply", "-f", "-"}) {
 		t.Fatalf("DeployBroker argv = %+v, want RunInput kubectl [apply -f -]", got)
 	}
@@ -73,9 +75,11 @@ func TestDeployBrokerKeepYAMLWriteError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), brokerYAMLFile) {
 		t.Fatalf("DeployBroker error = %v, want it to name %s", err, brokerYAMLFile)
 	}
-	// The probe ran (it precedes the write); nothing after it may have.
-	if calls := rr.afterPreflight(t, "create", brokerResource); len(calls) != 0 {
-		t.Errorf("DeployBroker should abort before applying when the write fails; got %d calls after the probe", len(calls))
+	// The probes ran (they precede the write); nothing after them may have.
+	if calls := rr.afterPreflights(t,
+		probe{verb: "create", resource: brokerResource},
+		probe{verb: "get", resource: brokerResource}); len(calls) != 0 {
+		t.Errorf("DeployBroker should abort before applying when the write fails; got %d calls after the probes", len(calls))
 	}
 }
 
@@ -150,13 +154,15 @@ func TestDeleteBrokerNoPurge(t *testing.T) {
 }
 
 func TestDeleteBrokerPurgeHA(t *testing.T) {
-	cfg := loadK8s(t) // redundancy: yes
+	cfg := loadK8s(t) // redundancy.enabled: true
 	rr := &recRunner{}
 	c := NewCluster(rr, cfg, nil, nil)
 	if err := c.DeleteBroker(context.Background(), true); err != nil {
 		t.Fatalf("DeleteBroker: %v", err)
 	}
-	calls := rr.afterPreflight(t, "delete", brokerResource)
+	calls := rr.afterPreflights(t,
+		probe{verb: "delete", resource: brokerResource},
+		probe{verb: "delete", resource: "persistentvolumeclaims"})
 	if len(calls) != 4 {
 		t.Fatalf("DeleteBroker(purge, HA) made %d calls after the probe, want 4 (CR + 3 PVCs)", len(calls))
 	}
@@ -176,13 +182,15 @@ func TestDeleteBrokerPurgeHA(t *testing.T) {
 
 func TestDeleteBrokerPurgeStandalone(t *testing.T) {
 	cfg := loadK8s(t)
-	cfg.Redundancy = "no"
+	cfg.Redundancy.Enabled = "false"
 	rr := &recRunner{}
 	c := NewCluster(rr, cfg, nil, nil)
 	if err := c.DeleteBroker(context.Background(), true); err != nil {
 		t.Fatalf("DeleteBroker: %v", err)
 	}
-	calls := rr.afterPreflight(t, "delete", brokerResource)
+	calls := rr.afterPreflights(t,
+		probe{verb: "delete", resource: brokerResource},
+		probe{verb: "delete", resource: "persistentvolumeclaims"})
 	if len(calls) != 2 {
 		t.Fatalf("DeleteBroker(purge, standalone) made %d calls after the probe, want 2 (CR + 1 PVC)", len(calls))
 	}
@@ -200,7 +208,7 @@ func TestDeleteBrokerPurgeStandalone(t *testing.T) {
 // role's failure must not stop the others from being deleted -- and the error
 // names every PVC that survived.
 func TestDeleteBrokerPurgeSwallowsPVCError(t *testing.T) {
-	cfg := loadK8s(t) // redundancy: yes
+	cfg := loadK8s(t) // redundancy.enabled: true
 	rr := &recRunner{runErr: errFake}
 	log, buf := logBuf()
 	c := NewCluster(rr, cfg, log, nil)
@@ -220,7 +228,9 @@ func TestDeleteBrokerPurgeSwallowsPVCError(t *testing.T) {
 	if !errors.Is(err, errFake) {
 		t.Errorf("DeleteBroker error = %v, want it to wrap the underlying cause", err)
 	}
-	if calls := rr.afterPreflight(t, "delete", brokerResource); len(calls) != 4 {
+	if calls := rr.afterPreflights(t,
+		probe{verb: "delete", resource: brokerResource},
+		probe{verb: "delete", resource: "persistentvolumeclaims"}); len(calls) != 4 {
 		t.Fatalf("all PVC deletes should still be attempted; got %d calls after the probe, want 4", len(calls))
 	}
 	if strings.Contains(buf.String(), "PVCs deleted") {
@@ -231,14 +241,16 @@ func TestDeleteBrokerPurgeSwallowsPVCError(t *testing.T) {
 // TestDeleteBrokerPurgeAllSucceed: when every PVC delete succeeds, DeleteBroker
 // issues one delete per HA role and returns nil with the success line logged.
 func TestDeleteBrokerPurgeAllSucceed(t *testing.T) {
-	cfg := loadK8s(t) // redundancy: yes -> 3 HA roles
+	cfg := loadK8s(t) // redundancy.enabled: true -> 3 HA roles
 	rr := &recRunner{}
 	log, buf := logBuf()
 	c := NewCluster(rr, cfg, log, nil)
 	if err := c.DeleteBroker(context.Background(), true); err != nil {
 		t.Fatalf("DeleteBroker: %v", err)
 	}
-	calls := rr.afterPreflight(t, "delete", brokerResource)
+	calls := rr.afterPreflights(t,
+		probe{verb: "delete", resource: brokerResource},
+		probe{verb: "delete", resource: "persistentvolumeclaims"})
 	if len(calls) != 4 {
 		t.Fatalf("DeleteBroker(purge, all succeed) made %d calls after the probe, want 4 (CR + 3 PVCs)", len(calls))
 	}
@@ -288,7 +300,7 @@ func TestDeleteBrokerLogsPVCOutcome(t *testing.T) {
 		}
 	})
 	t.Run("deleted", func(t *testing.T) {
-		cfg := loadK8s(t) // redundancy: yes -> three PVCs, three per-role log lines
+		cfg := loadK8s(t) // redundancy.enabled: true -> three PVCs, three per-role log lines
 		rr := &recRunner{}
 		log, buf := logBuf()
 		c := NewCluster(rr, cfg, log, nil)
@@ -310,4 +322,197 @@ func TestDeleteBrokerLogsPVCOutcome(t *testing.T) {
 			t.Errorf("DeleteBroker(purge=true) must not also log the kept-PVCs line:\n%s", out)
 		}
 	})
+}
+
+// TestDeleteBrokerProbesClaimsOnlyWhenPurging pins both halves: a removal that will
+// delete persistent volume claims asks permission to, and one that keeps them does
+// not demand a permission it never uses.
+func TestDeleteBrokerProbesClaimsOnlyWhenPurging(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		purge bool
+		want  bool
+	}{
+		{"purge asks about claims", true, true},
+		{"keeping data does not", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := &recRunner{}
+			c := NewCluster(rr, haCfg(), nil, nil)
+			if err := c.DeleteBroker(context.Background(), tc.purge); err != nil {
+				t.Fatalf("DeleteBroker: %v", err)
+			}
+			_, found := rr.probedNamespace("delete", "persistentvolumeclaims")
+			if found != tc.want {
+				t.Errorf("probed claims = %v, want %v", found, tc.want)
+			}
+		})
+	}
+}
+
+// The read-back is what makes "deployed" mean the object exists rather than that
+// `apply` exited 0. An admission webhook can reject or rewrite the CR, and a CRD that
+// is present but not yet established fails differently again -- both leave apply
+// reporting success. These cover each outcome, because a read-back that got any of
+// them wrong would be worse than not reading back at all.
+
+// brokerJSON is a `get pubsubpluseventbrokers <name> -o json` reply carrying one item
+// with the given name -- the shape ConfirmBrokerApplied decodes.
+func brokerJSON(name string) []byte {
+	return []byte(`{"apiVersion":"v1","kind":"List","items":[{"metadata":{"name":"` + name + `"}}]}`)
+}
+
+// TestConfirmBrokerAppliedAcceptsTheObjectItApplied is the happy path: the cluster
+// returns the CR under the configured name and the deploy reports it.
+func TestConfirmBrokerAppliedAcceptsTheObjectItApplied(t *testing.T) {
+	cfg := loadK8s(t)
+	log, buf := logBuf()
+	rr := &recRunner{out: brokerJSON(cfg.K8s.Name)}
+	c := NewCluster(rr, cfg, log, nil)
+	if err := c.ConfirmBrokerApplied(context.Background()); err != nil {
+		t.Fatalf("ConfirmBrokerApplied: %v", err)
+	}
+	if !strings.Contains(buf.String(), cfg.K8s.Name) {
+		t.Errorf("the confirmation should name the broker it read back:\n%s", buf.String())
+	}
+}
+
+// TestConfirmBrokerAppliedTreatsSilenceAsSkipped draws the distinction the whole
+// function rests on. A runner that answers with NOTHING has not said the broker is
+// absent -- it has said nothing, which is the preview case and every test seam. Turning
+// that into the alarming answer would fail ~200 wiring tests and every dry run.
+func TestConfirmBrokerAppliedTreatsSilenceAsSkipped(t *testing.T) {
+	out := &bytes.Buffer{}
+	c := NewCluster(&recRunner{}, loadK8s(t), nil, out)
+	if err := c.ConfirmBrokerApplied(context.Background()); err != nil {
+		t.Fatalf("an empty answer is not evidence of absence: %v", err)
+	}
+	if !strings.Contains(out.String(), "skipped") {
+		t.Errorf("a skipped read-back must say so rather than pass silently:\n%s", out.String())
+	}
+}
+
+// TestConfirmBrokerAppliedFailsWhenTheObjectIsNotThere is the case the read-back exists
+// for: the apply was accepted and the object is not in the cluster. The message has to
+// name both likely causes, because neither is visible from the apply's own output.
+func TestConfirmBrokerAppliedFailsWhenTheObjectIsNotThere(t *testing.T) {
+	rr := &recRunner{out: []byte(`{"items":[]}`)}
+	c := NewCluster(rr, loadK8s(t), nil, nil)
+	err := c.ConfirmBrokerApplied(context.Background())
+	if err == nil {
+		t.Fatal("an applied broker that does not exist must fail, not warn")
+	}
+	for _, want := range []string{"does not exist", "webhook", "operator validate"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+}
+
+// TestConfirmBrokerAppliedFailsOnADifferentObject: a reply carrying something else is
+// not the broker being confirmed, so it cannot stand in for it.
+func TestConfirmBrokerAppliedFailsOnADifferentObject(t *testing.T) {
+	rr := &recRunner{out: brokerJSON("someone-elses-broker")}
+	c := NewCluster(rr, loadK8s(t), nil, nil)
+	if err := c.ConfirmBrokerApplied(context.Background()); err == nil {
+		t.Fatal("a different object must not confirm this deploy")
+	}
+}
+
+// TestConfirmBrokerAppliedSurfacesReadFailures covers the two ways the read itself can
+// fail -- the cluster refusing it, and an answer that will not decode. Both name the
+// next step, because the deploy has already happened and the operator needs to know
+// what to check rather than what broke in here.
+func TestConfirmBrokerAppliedSurfacesReadFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rr   *recRunner
+	}{
+		{"the read is refused", &recRunner{outErr: errors.New("forbidden")}},
+		{"the answer will not decode", &recRunner{out: []byte("not json at all")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewCluster(tc.rr, loadK8s(t), nil, nil)
+			err := c.ConfirmBrokerApplied(context.Background())
+			if err == nil {
+				t.Fatal("a failed read-back must not report success")
+			}
+			if !strings.Contains(err.Error(), "broker validate") {
+				t.Errorf("error %q should name the command that diagnoses it", err)
+			}
+		})
+	}
+}
+
+// A custom volume mount names a claim this tool did not create, which may hold data
+// predating the broker entirely. --delete-data therefore skips it -- and says so, since
+// someone who passed the flag and got a surviving volume would otherwise assume the flag
+// failed. These pin both mixes.
+
+// TestDeleteDataKeepsEveryCustomMountedClaim: with all three nodes custom-mounted there
+// is nothing for --delete-data to delete, and the report has to say that outright rather
+// than printing the ordinary "data is gone" line over a full set of surviving volumes.
+func TestDeleteDataKeepsEveryCustomMountedClaim(t *testing.T) {
+	cfg := loadK8s(t)
+	cfg.K8s.Storage.Class = ""
+	cfg.K8s.Storage.CustomVolumeMount = map[string]string{
+		"primary": "pvc-p", "backup": "pvc-b", "monitor": "pvc-m",
+	}
+	log, buf := logBuf()
+	rr := &recRunner{}
+	c := NewCluster(rr, cfg, log, &bytes.Buffer{})
+	if err := c.DeleteBroker(context.Background(), true); err != nil {
+		t.Fatalf("DeleteBroker(purge): %v", err)
+	}
+	for _, call := range rr.calls {
+		for _, a := range call.args {
+			if a == "pvc" {
+				t.Fatalf("no PVC may be deleted when every node is custom-mounted: %+v", call)
+			}
+		}
+	}
+	out := buf.String()
+	if !strings.Contains(out, "no PVC was deleted") {
+		t.Errorf("the report must state that nothing was deleted:\n%s", out)
+	}
+	for _, claim := range []string{"pvc-p", "pvc-b", "pvc-m"} {
+		if !strings.Contains(out, claim) {
+			t.Errorf("the surviving claim %q must be named:\n%s", claim, out)
+		}
+	}
+}
+
+// TestDeleteDataDeletesOnlyTheProvisionedClaims is the mixed case: the operator's own
+// claims go, the custom-mounted one stays, and the closing line says which.
+func TestDeleteDataDeletesOnlyTheProvisionedClaims(t *testing.T) {
+	cfg := loadK8s(t)
+	// Class and customVolumeMount are mutually exclusive in a VALID env file, so the
+	// class goes too -- this fixture should model a state the loader would accept.
+	cfg.K8s.Storage.Class = ""
+	cfg.K8s.Storage.CustomVolumeMount = map[string]string{"monitor": "pvc-m"}
+	log, buf := logBuf()
+	rr := &recRunner{}
+	c := NewCluster(rr, cfg, log, &bytes.Buffer{})
+	if err := c.DeleteBroker(context.Background(), true); err != nil {
+		t.Fatalf("DeleteBroker(purge): %v", err)
+	}
+	var deleted []string
+	for _, call := range rr.calls {
+		for i, a := range call.args {
+			if a == "pvc" && i+1 < len(call.args) {
+				deleted = append(deleted, call.args[i+1])
+			}
+		}
+	}
+	if len(deleted) != 2 {
+		t.Fatalf("deleted PVCs = %v, want the two provisioned ones only", deleted)
+	}
+	for _, pvc := range deleted {
+		if strings.Contains(pvc, "-m-") {
+			t.Errorf("the custom-mounted monitor claim must not be deleted, got %q", pvc)
+		}
+	}
+	if out := buf.String(); !strings.Contains(out, "pvc-m") || !strings.Contains(out, "except the custom volume mount") {
+		t.Errorf("the report must name what was kept and why:\n%s", out)
+	}
 }

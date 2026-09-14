@@ -3,8 +3,6 @@ package broker
 import (
 	"strings"
 	"testing"
-
-	"solace/internal/config"
 )
 
 func TestFixedScripts(t *testing.T) {
@@ -18,8 +16,8 @@ func TestFixedScripts(t *testing.T) {
 		{"revert-activity", revertActivityScript(), "home\nno paging\nenable\nadmin\nredundancy revert-activity\n"},
 		{"release-activity", releaseActivityScript(), "home\nno paging\nenable\nconfigure\nredundancy release-activity\n"},
 		{"no-release-activity", noReleaseActivityScript(), "home\nno paging\nenable\nconfigure\nno redundancy release-activity\n"},
-		{"show-vpn", showVPNScript(), "home\nenable\nconfigure\nshow message-vpn *\n"},
-		{"show-vpn-bare", showVPNBareScript(), "show message-vpn *\n"},
+		{"show-vpn", showVPNScript(), "home\nno paging\nenable\nconfigure\nshow message-vpn *\n"},
+		{"show-vpn-bare", showVPNBareScript(), "home\nno paging\nshow message-vpn *\n"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -60,7 +58,7 @@ func TestServerCertScript(t *testing.T) {
 		t.Fatalf("serverCertFile = %q, want %q", got, want)
 	}
 	got := serverCertScript("2026-07-31")
-	if !strings.HasPrefix(got, "enable\nconfigure\n") {
+	if !strings.HasPrefix(got, cliHome+"enable\nconfigure\n") {
 		t.Errorf("serverCertScript prefix: %q", got)
 	}
 	if !strings.Contains(got, "ssl server-certificate tls-2026-07-31.crt.key\n") {
@@ -74,7 +72,7 @@ func TestServerCertScript(t *testing.T) {
 func TestDomainCertsScriptSorted(t *testing.T) {
 	// Unsorted map input must emit CAs in sorted order for deterministic output.
 	got := domainCertsScript(map[string]string{"zeta": "z.pem", "alpha": "a.pem"})
-	if !strings.HasPrefix(got, "no paging\nenable\nconfigure\nssl\n") {
+	if !strings.HasPrefix(got, "home\nno paging\nenable\nconfigure\nssl\n") {
 		t.Errorf("domainCertsScript prefix: %q", got)
 	}
 	if !strings.HasSuffix(got, "end\nshow domain-certificate-authority ca-name *\n") {
@@ -92,7 +90,7 @@ func TestDomainCertsScriptSorted(t *testing.T) {
 
 func TestDisableDefaultUsersScriptQuoting(t *testing.T) {
 	got := disableDefaultUsersScript([]string{"default", "my vpn"})
-	if !strings.HasPrefix(got, "home\nenable\nconfigure\n") {
+	if !strings.HasPrefix(got, cliHome+"enable\nconfigure\n") {
 		t.Errorf("disableDefaultUsersScript prefix: %q", got)
 	}
 	// VPN names must be shell-safe quoted; a name with a space must stay one token.
@@ -104,49 +102,90 @@ func TestDisableDefaultUsersScriptQuoting(t *testing.T) {
 	}
 }
 
+// TestProductKeysScript pins the apply form confirmed on a live broker, whole. Two
+// details it exists to hold: the context is `admin`, not `configure` (the same line under
+// configure is not a command), and `home` leads so the script does not depend on where a
+// session happened to be. `home` was missing until the form was confirmed, and `no paging`
+// beside it was missing until a paginated report was found parsing as data (cliHome).
 func TestProductKeysScript(t *testing.T) {
 	got := productKeysScript([]string{"KEY-1", "KEY-2"})
-	want := "enable\nadmin\nproduct-key KEY-1\nproduct-key KEY-2\nshow product-key\n"
+	want := cliHome + "enable\nadmin\nproduct-key KEY-1\nproduct-key KEY-2\nshow product-key\n"
 	if got != want {
 		t.Errorf("productKeysScript = %q, want %q", got, want)
 	}
 }
 
-func TestAdditionalUsersScript(t *testing.T) {
-	got := additionalUsersScript([]config.AdditionalUser{
-		{Username: "appuser", AccessLevel: "read-write", Password: "app-pass"},
-		{Username: "ro.user", AccessLevel: "read-only", Password: "ro pass"},
-	})
-	want := "home\nno paging\nenable\nconfigure\n" +
-		"create username \"appuser\" password \"app-pass\"\nglobal-access-level read-write\nexit\n" +
-		"create username \"ro.user\" password \"ro pass\"\nglobal-access-level read-only\nexit\n" +
-		"end\n"
+// TestRemoveProductKeysScript is the inverse, and TestProductKeyScriptsShareAPreamble is
+// what keeps the two from drifting: a removal that reached `no product-key` from a
+// different CLI context than the apply reached `product-key` from would fail in a way no
+// unit test comparing only its own literal would catch.
+func TestRemoveProductKeysScript(t *testing.T) {
+	got := removeProductKeysScript([]string{"KEY-1", "KEY-2"})
+	want := cliHome + "enable\nadmin\nno product-key KEY-1\nno product-key KEY-2\nshow product-key\n"
 	if got != want {
-		t.Errorf("additionalUsersScript =\n%q\nwant\n%q", got, want)
+		t.Errorf("removeProductKeysScript = %q, want %q", got, want)
 	}
-	// A space in a password survives because both values are quoted -- the character
-	// set that would break the quoting is rejected upstream, not escaped here.
-	if !strings.Contains(got, `password "ro pass"`) {
-		t.Errorf("a quoted password must survive intact: %q", got)
-	}
-	// No `show username *` tail: the caller never displays this script's output, and a
-	// trailing show would add broker state to a transcript that is already withheld.
-	if strings.Contains(got, "show username") {
-		t.Errorf("the script must not end with a show whose output is discarded anyway: %q", got)
+}
+
+func TestProductKeyScriptsShareAPreamble(t *testing.T) {
+	const preamble = cliHome + "enable\nadmin\n"
+	for name, got := range map[string]string{
+		"apply":  productKeysScript([]string{"KEY-1"}),
+		"remove": removeProductKeysScript([]string{"KEY-1"}),
+	} {
+		if !strings.HasPrefix(got, preamble) {
+			t.Errorf("%s script does not open with the confirmed preamble: %q", name, got)
+		}
+		if !strings.HasSuffix(got, "show product-key\n") {
+			t.Errorf("%s script does not end by showing what it left behind: %q", name, got)
+		}
 	}
 }
 
 func TestDisableDefaultVPNScript(t *testing.T) {
 	got := disableDefaultVPNScript()
-	for _, want := range []string{
-		`message-vpn "default"`,
-		`client-username "default" message-vpn "default"`,
-		"no ssl allow-downgrade-to-plain-text",
-		"service smf plain-text shutdown",
-	} {
+	for _, want := range []string{`message-vpn "default"`, "shutdown"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("disableDefaultVPNScript missing %q", want)
 		}
+	}
+	// The script shuts the VPN down and stops. It used to also shut down the default
+	// client-username, all twelve services, and basic/client-certificate auth, and to
+	// turn OFF ssl allow-downgrade-to-plain-text.
+	//
+	// Those are separate concerns and two of them were actively wrong here: the default
+	// client-username belongs to `configure default-users`, which shuts it down in EVERY
+	// VPN rather than only this one; and disabling the plaintext downgrade is a
+	// broker-wide TLS decision that has no business riding along with a VPN being taken
+	// out of service -- it also made the operation unreversible, since `--enable` could
+	// not know whether the downgrade had been on beforehand.
+	for _, unwanted := range []string{
+		`client-username "default"`,
+		"no ssl allow-downgrade-to-plain-text",
+		"service smf plain-text shutdown",
+		"authentication",
+	} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("disableDefaultVPNScript should shut the VPN down and nothing else, but carries %q:\n%s",
+				unwanted, got)
+		}
+	}
+}
+
+// TestEnableDefaultVPNScript is the inverse, and the reason the disable script was
+// narrowed: an operation that changed six things could not be undone by one that changes
+// one. `no shutdown` restores exactly what `shutdown` took away.
+func TestEnableDefaultVPNScript(t *testing.T) {
+	got := enableDefaultVPNScript()
+	for _, want := range []string{`message-vpn "default"`, "no shutdown"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("enableDefaultVPNScript missing %q", want)
+		}
+	}
+	// It must not re-open the plaintext downgrade: the disable script no longer closes
+	// it, so restoring it here would turn an enable into a security change.
+	if strings.Contains(got, "ssl allow-downgrade-to-plain-text") {
+		t.Errorf("enableDefaultVPNScript must not touch the plaintext downgrade:\n%s", got)
 	}
 }
 
@@ -212,5 +251,63 @@ func TestSortedKeys(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("sortedKeys = %v, want %v", got, want)
 		}
+	}
+}
+
+// TestEveryScriptTurnsPagingOffAfterHome is the invariant behind the parsers.
+//
+// A paginated report re-prints its column header and rule partway down, and the rule
+// then reads as a data row of all-dashes -- which is how `show message-vpn * replication`
+// grew a phantom VPN. The parsers tolerate a repeat as a backstop, but the fix is to stop
+// the broker paginating, and that means `no paging` immediately after every `home`.
+//
+// This walks every script generator rather than checking the ones that happened to be
+// remembered, because the gap it closes was exactly a set of scripts written with `home`
+// and without `no paging` (operator, 2026-09-13).
+func TestEveryScriptTurnsPagingOffAfterHome(t *testing.T) {
+	scripts := map[string]string{
+		"assertLeader":            assertLeaderScript(),
+		"revertActivity":          revertActivityScript(),
+		"releaseActivity":         releaseActivityScript(),
+		"noReleaseActivity":       noReleaseActivityScript(),
+		"revertActivityConfigure": revertActivityConfigureScript(),
+		"serverCert":              serverCertScript("2026-09-13"),
+		"removeServerCert":        removeServerCertScript(),
+		"domainCerts":             domainCertsScript(map[string]string{"ca": "ca.crt"}),
+		"removeDomainCerts":       removeDomainCertsScript([]string{"ca"}),
+		"disableDefaultVPN":       disableDefaultVPNScript(),
+		"enableDefaultVPN":        enableDefaultVPNScript(),
+		"showVPN":                 showVPNScript(),
+		"showVPNBare":             showVPNBareScript(),
+		"disableDefaultUsers":     disableDefaultUsersScript([]string{"default"}),
+		"enableDefaultUsers":      enableDefaultUsersScript([]string{"default"}),
+		"productKeys":             productKeysScript([]string{"key"}),
+		"removeProductKeys":       removeProductKeysScript([]string{"key"}),
+		"gatherConfigs":           gatherConfigsScript(1),
+		"currentConfigAll":        currentConfigScript("", false),
+		"currentConfigVPN":        currentConfigScript("default", true),
+	}
+	for name, body := range scripts {
+		t.Run(name, func(t *testing.T) {
+			lines := strings.Split(body, "\n")
+			homes := 0
+			for i, l := range lines {
+				if strings.TrimSpace(l) != "home" {
+					continue
+				}
+				homes++
+				if i+1 >= len(lines) || strings.TrimSpace(lines[i+1]) != "no paging" {
+					next := ""
+					if i+1 < len(lines) {
+						next = lines[i+1]
+					}
+					t.Errorf("line %d is `home` but the next line is %q, not `no paging`:\n%s",
+						i+1, next, body)
+				}
+			}
+			if homes == 0 {
+				t.Errorf("no `home` at all; every execution block opens at a known level:\n%s", body)
+			}
+		})
 	}
 }

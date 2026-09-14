@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"io"
 	"os"
 	"strings"
@@ -36,14 +37,19 @@ type App struct {
 	Platform config.Platform
 	Cfg      *config.Config
 	Runner   engine.Runner
-	envPath  string // resolved env-file path (container PrepHost writes the PSK back here)
 
-	// Prompt seams, in the spirit of Manager.Resolve/GenPSK/Geteuid: the confirm
+	// Prompt seams, in the spirit of Manager.Resolve/Geteuid: the confirm
 	// helpers gate destructive actions on an interactive terminal, and a test cannot
-	// supply one. Interactive nil means "ask isTTY(os.Stdin)" and PromptIn nil means
-	// os.Stdin, so production behaviour is unchanged and only tests set them.
+	// supply one. Interactive nil means stdinCanAnswer and PromptIn nil means
+	// os.Stdin. Nothing user-facing sets either field; only tests do.
 	Interactive func() bool
 	PromptIn    io.Reader
+
+	// The run's single buffered prompt reader, built on first use by promptSource.
+	// It must be shared across questions: a per-call reader discards whatever it
+	// buffered past the line it returned, which loses the answer to the NEXT
+	// question in the same run.
+	promptReader *bufio.Reader
 
 	// NewRunner builds the Runner every command executes through. It exists as a
 	// seam for the same reason Interactive/PromptIn do: a test cannot supply a
@@ -60,11 +66,32 @@ type App struct {
 	noPrompt    bool   // --no-prompt: ask nothing, and take the safe answer to each question
 	all         bool   // status broker --all (every broker in the cluster)
 	detail      bool   // status --detail (static artifacts, not just running ones)
-	pod         string // --pod role override for cli --input / copy
+	pod         string // --pod role selector for cli/shell/copy/cli-script
 	destDir     string // copy into --dir
-	inputFile   string // cli --input/-i: run this CLI script instead of an interactive session
 	days        int    // diagnostics --days
 	restart     bool   // deploy broker --restart (bounce a running broker)
+	out         string // --out/-o: write the rendered artifact here instead of stdout
+	follow      bool   // logs --follow/-f: keep streaming instead of printing a snapshot
+	tail        string // logs --tail: how many trailing lines (a count, or "all")
+	since       string // logs --since: how far back to read, canonicalised as a duration
+	timestamps  bool   // logs --timestamps: prefix each line with its time
+	previous    bool   // logs broker --previous: the PREVIOUS container's logs (kubernetes only)
+	vpns        []string // export-config --vpn: capture only these message-VPNs (repeatable)
+	brokerOnly  bool     // export-config --broker-only: broker-level configuration only
+
+	// The `broker configure` direction flags. Each leaf has a DEFAULT direction and a
+	// flag for the other one, so `configure domain-certs` applies and
+	// `configure domain-certs --remove` removes -- no sub-verb, and no flag whose
+	// absence has to be memorised. The default flag is registered too and is
+	// redundant by design: a script may prefer to say which way it is going, and
+	// refusing the obvious spelling would be a papercut for nothing.
+	//
+	// Both flags of a pair set at once is a usage error, checked by the pair's own
+	// helper rather than left to whichever the handler happened to read first.
+	flagApply   bool // configure ... --apply (the default for certs and keys)
+	flagRemove  bool // configure ... --remove
+	flagDisable bool // configure ... --disable (the default for the hardening pair)
+	flagEnable  bool // configure ... --enable
 
 	// Hostname resolves this host's name for the container node-role detection
 	// containerRole does (broker.Ops.LocalRole). Unset -- the production case --
@@ -72,6 +99,13 @@ type App struct {
 	// the only way to exercise a deploy that decides its own role. Same shape as
 	// NewRunner/Interactive/PromptIn.
 	Hostname func() (string, error)
+
+	// LocalAddrs is the second half of that detection: this machine's own interface
+	// addresses, matched against redundancy.*.addr when no configured name matches
+	// the hostname. Same seam, same reason -- a test can no more renumber the machine
+	// running the suite than rename it, and detection that read the real interfaces
+	// would pass or fail on what the CI host happens to be addressed as.
+	LocalAddrs func() (map[string]bool, error)
 
 	// kubeContext is the kubeconfig context announceKubeContext resolved at load,
 	// repeated by every destructive Kubernetes prompt (k8sWhat). Empty when it
@@ -91,7 +125,6 @@ func (a *App) load(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	a.envPath = path
 	// Echo the winner: a file in the base dir shadows the env/ copy of the same
 	// name, and that has to be visible rather than silent.
 	step("env file: %s", path)
@@ -103,6 +136,7 @@ func (a *App) load(cmd *cobra.Command) error {
 		return err
 	}
 	a.Cfg = cfg
+	a.fillStandaloneNodeName()
 	if a.NewRunner != nil {
 		// A test-supplied runner: it does not execute, so there are no binaries
 		// worth resolving and announcing.
@@ -115,6 +149,49 @@ func (a *App) load(cmd *cobra.Command) error {
 		a.announceKubeContext()
 	}
 	return nil
+}
+
+// fillStandaloneNodeName names a STANDALONE container broker after the host it runs
+// on when the env file left redundancy.primary.name empty. The name is the broker's
+// routername and the container's hostname, and with one node it is always THIS host --
+// which is what the broker would have called itself anyway.
+//
+// Here, at load, rather than where the role is decided: the routername is read by the
+// check report, the DNS check, the rendered artifact and `validate` alike, and a fill
+// that happened on only the deploying paths would have those four disagree about the
+// name of the same broker.
+//
+// Container-only and standalone-only. Kubernetes never reads redundancy.*.name (the
+// operator names the pods off kubernetes.name), and HA keeps all three names mandatory
+// at load, because each one keys a group-table entry every host renders and no host
+// knows another machine's name -- see config.FillStandaloneNodeName.
+func (a *App) fillStandaloneNodeName() {
+	if !a.Platform.IsContainer() {
+		return
+	}
+	name, err := a.hostname()
+	if err != nil {
+		// Not fatal on its own: validate does not require the name in standalone, and
+		// the render simply carries an empty routername. Say so rather than failing a
+		// command that may not need it.
+		warn("cannot read this host's name for the broker's routername: %v", err)
+		return
+	}
+	if a.Cfg.FillStandaloneNodeName(name) {
+		step("routername not configured; using this host's name: %s", name)
+	}
+}
+
+// hostname reads this host's name through the App's seam, defaulting to os.Hostname.
+// Same shape as broker.Ops.hostname, and the same reason: a test cannot rename the
+// machine running the suite.
+func (a *App) hostname() (string, error) {
+	fn := a.Hostname
+	if fn == nil {
+		fn = os.Hostname
+	}
+	h, err := fn()
+	return strings.TrimSpace(h), err
 }
 
 // announceKubeContext resolves and reports the kubeconfig context every kubectl

@@ -17,8 +17,8 @@ var envVarRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // secretRef pairs one secret field with the sibling *Env key that may supply it
 // from the process environment instead of the env file.
 type secretRef struct {
-	field  string  // "admin.pass" -- the literal key, for actionable errors
-	envKey string  // "admin.passEnv" -- the reference key
+	field  string  // "semp.adminPass" -- the literal key, for actionable errors
+	envKey string  // "semp.adminPassEnv" -- the reference key
 	envVar string  // the variable that key names ("" when it is unset)
 	value  *string // the secret field to fill
 }
@@ -26,22 +26,31 @@ type secretRef struct {
 // secretRefs lists every secret field of the schema beside its *Env sibling. One
 // list, so a secret added to the schema cannot silently miss out on environment
 // referencing, and so every error message about it reads the same.
-//
-// replication.psk is deliberately absent: it feeds the replication generator
-// tooling and reaches no broker through this binary, so a reference key there
-// would be dead surface.
 func (c *Config) secretRefs() []secretRef {
 	refs := []secretRef{
-		{"admin.pass", "admin.passEnv", c.Admin.PassEnv, &c.Admin.Pass},
-		{"admin.monitorPass", "admin.monitorPassEnv", c.Admin.MonitorPassEnv, &c.Admin.MonitorPass},
+		{"semp.adminPass", "semp.adminPassEnv", c.SEMP.AdminPassEnv, &c.SEMP.AdminPass},
+		{"semp.monitorPass", "semp.monitorPassEnv", c.SEMP.MonitorPassEnv, &c.SEMP.MonitorPass},
 		{"image.pass", "image.passEnv", c.Image.PassEnv, &c.Image.Pass},
 		{"tls.certPassphrase", "tls.certPassphraseEnv", c.TLS.CertPassphraseEnv, &c.TLS.CertPassphrase},
-		{"nodes.psk", "nodes.pskEnv", c.Nodes.PSKEnv, &c.Nodes.PSK},
+		{"redundancy.psk", "redundancy.pskEnv", c.Redundancy.PSKEnv, &c.Redundancy.PSK},
 	}
-	for i := range c.Admin.AdditionalUsers {
-		u := &c.Admin.AdditionalUsers[i]
-		base := fmt.Sprintf("admin.additionalUsers[%d]", i)
+	for i := range c.SEMP.AdditionalUsers {
+		u := &c.SEMP.AdditionalUsers[i]
+		base := fmt.Sprintf("semp.additionalUsers[%d]", i)
 		refs = append(refs, secretRef{base + ".password", base + ".passwordEnv", u.PasswordEnv, &u.Password})
+	}
+	// A replication site reached over SEMP carries the MATE's admin password, which is
+	// a different broker's credential and often a different value from this file's
+	// semp.adminPass. It belongs on this list for the ordinary reason: a secret the
+	// schema accepts as a literal must also be referable from the environment, or the
+	// only way to configure a DR pair is to write a password into a file that travels.
+	for i := range c.Replication.Sites {
+		s := c.Replication.Sites[i].Via.SEMP
+		if s == nil {
+			continue
+		}
+		base := fmt.Sprintf("replication.sites[%d].via.semp", i)
+		refs = append(refs, secretRef{base + ".pass", base + ".passEnv", s.PassEnv, &s.Pass})
 	}
 	return refs
 }

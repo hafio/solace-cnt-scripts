@@ -46,30 +46,85 @@ func (s secretManifest) render() []byte {
 	return []byte(b.String())
 }
 
+// pskSecretKey is the entry the operator reads a pre-shared key from. Fixed by the CRD
+// (spec.preSharedAuthKeySecret's description names it), so it is spelled once here rather
+// than derived from anything of ours.
+const pskSecretKey = "preshared_auth_key"
+
 // AdminSecret builds the Opaque secret holding broker credentials, porting the
 // user-secret of 012:26-32: username_admin_password (mandatory) and an optional
 // username_monitor_password. Fails loud on an empty admin password.
 //
-// admin.additionalUsers are deliberately NOT here. The operator reads only the two
-// keys above out of this Secret; extra username_<user>_password keys are ignored, so
-// including them wrote passwords into a Secret nothing ever read (verified against a
-// live cluster). The k8s route for those users is `config additional-users`, which
-// creates them over the broker CLI -- see broker.AdditionalUsers.
+// admin.additionalUsers are deliberately NOT here, and the reason is the operator's:
+// it reads only the two keys above out of this Secret, so extra username_<user>_password
+// keys are ignored and including them wrote passwords into a Secret nothing ever read
+// (verified against a live cluster). They get a Secret of their own instead --
+// AdditionalUsersSecret, named in the CR's spec.extraEnvVarsSecret.
+//
+// The split is not tidiness. extraEnvVarsSecret is projected with envFrom, which turns
+// EVERY key of the Secret it names into an environment variable: point it at this one and
+// the admin and monitor passwords land in the pod environment too, to get the extra users
+// in. A separate Secret puts exactly the additional users' material there and nothing else.
 func AdminSecret(cfg *config.Config) ([]byte, error) {
-	if cfg.Admin.Pass == "" {
+	if cfg.SEMP.AdminPass == "" {
 		return nil, fmt.Errorf("admin.pass must be set to build the admin secret")
 	}
 	if cfg.K8s.AdminSecret == "" {
 		return nil, fmt.Errorf("kubernetes.adminSecret (the secret name) must be set")
 	}
 	data := map[string][]byte{
-		"username_admin_password": []byte(cfg.Admin.Pass),
+		"username_admin_password": []byte(cfg.SEMP.AdminPass),
 	}
-	if cfg.Admin.MonitorPass != "" {
-		data["username_monitor_password"] = []byte(cfg.Admin.MonitorPass)
+	if cfg.SEMP.MonitorPass != "" {
+		data["username_monitor_password"] = []byte(cfg.SEMP.MonitorPass)
+	}
+	// The pre-shared key rides in the SAME Secret rather than one of its own: the CR
+	// references it through a separate field (preSharedAuthKeySecret), so one Secret
+	// object can serve both, and a second object would be another thing to create,
+	// name, and clean up for one extra key.
+	//
+	// `preshared_auth_key` is the CRD's spelling, not ours -- the operator looks for
+	// exactly that entry, so it is written as a constant rather than derived.
+	if psk := cfg.Redundancy.PSK; psk != "" {
+		data[pskSecretKey] = []byte(psk)
 	}
 	return secretManifest{
 		name:      cfg.K8s.AdminSecret,
+		namespace: cfg.K8s.Namespace,
+		typ:       "Opaque",
+		data:      data,
+	}.render(), nil
+}
+
+// AdditionalUsersSecret builds the Opaque Secret behind admin.additionalUsers, which the
+// broker CR names in spec.extraEnvVarsSecret. Returns nil when none are configured: the CR
+// then omits the field, and a Secret with no data is not worth applying.
+//
+// Both halves of each user ride the environment here, which is the one place this platform
+// departs from the container convention of mounting every secret as a file. The CRD has no
+// way to mount an arbitrary Secret -- its spec offers extraEnvVars, extraEnvVarsCM and
+// extraEnvVarsSecret, and no volume passthrough -- so username_<u>_passwordfilepath would
+// name a path nothing creates. The env-var form is the only one the operator can deliver,
+// and it is why config.validateAdditionalUsers holds these usernames to a stricter rule on
+// Kubernetes than elsewhere: envFrom silently DROPS keys that are not valid variable names.
+func AdditionalUsersSecret(cfg *config.Config) ([]byte, error) {
+	if len(cfg.SEMP.AdditionalUsers) == 0 {
+		return nil, nil
+	}
+	data := make(map[string][]byte, len(cfg.SEMP.AdditionalUsers)*2)
+	for _, u := range cfg.SEMP.AdditionalUsers {
+		if u.Password == "" {
+			return nil, fmt.Errorf("semp.additionalUsers %q has no password to build a secret from", u.Username)
+		}
+		// The access level is not a secret, but it rides the same Secret because it has
+		// to reach the broker as an environment variable too and extraEnvVarsSecret is
+		// the only channel the CRD gives us. The container platforms put it in the
+		// artifact instead, where it is not sensitive.
+		data["username_"+u.Username+"_globalaccesslevel"] = []byte(u.AccessLevel)
+		data["username_"+u.Username+"_password"] = []byte(u.Password)
+	}
+	return secretManifest{
+		name:      cfg.AdditionalUsersSecretName(),
 		namespace: cfg.K8s.Namespace,
 		typ:       "Opaque",
 		data:      data,
@@ -164,7 +219,13 @@ func DockerRegistrySecret(cfg *config.Config) ([]byte, error) {
 }
 
 // operatorRegcred builds the operator's image-pull secret under the fixed name
+// operatorRegcredName is the fixed name of the operator's image-pull Secret. Named
+// rather than inlined because OperatorDelete has to remove it BY NAME: it is applied
+// separately from the bundle and used to be reaped along with the operator namespace,
+// which is no longer deleted.
+const operatorRegcredName = "regcred"
+
 // "regcred" in the operator namespace opNS (010:29).
 func operatorRegcred(cfg *config.Config, opNS string) ([]byte, error) {
-	return dockerRegistrySecret("regcred", opNS, cfg)
+	return dockerRegistrySecret(operatorRegcredName, opNS, cfg)
 }

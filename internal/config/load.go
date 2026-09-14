@@ -43,6 +43,22 @@ func Load(path string, p Platform, allowCommands ...string) (*Config, error) {
 	if err := c.Validate(p); err != nil {
 		return nil, err
 	}
+	// Only now, once the file has been accepted as written. Validate's host-path
+	// gate polices what the FILE says; rebasing first would put the operator's own
+	// checkout directory through a charset check it never agreed to, and a path
+	// with a space in it would fail a load for a reason the env file did not cause.
+	//
+	// filepath.Abs so the result does not depend on the working directory a moment
+	// later, and so an absolutized `Volume=` source is genuinely absolute -- a
+	// base of "." would otherwise leave every path relative and reintroduce
+	// podman's named-volume trap. A failure here means the working directory is
+	// unreadable, which is worth reporting rather than silently skipping.
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve the directory of env file %q: %w", path, err)
+	}
+	c.baseDir = filepath.Dir(abs)
+	c.rebaseHostPaths()
 	return &c, nil
 }
 
@@ -120,8 +136,8 @@ func (c *Config) ApplyDefaults(p Platform) {
 	// brokers (and, on k8s, three PVCs), so it is the choice that has to be made
 	// explicitly -- the safe default is the smaller deployment. It also matches the
 	// legacy k8s bootstrap, whose SOLBK_REDUNDANCY defaulted to false.
-	if c.Redundancy == "" {
-		c.Redundancy = "no"
+	if c.Redundancy.Enabled == "" {
+		c.Redundancy.Enabled = "false"
 	}
 
 	// The cluster CLI (bash KUBE). Defaulted for every platform, not just k8s, so
@@ -129,11 +145,19 @@ func (c *Config) ApplyDefaults(p Platform) {
 	// k8s renderers and transport ever read it.
 	setDefaultCmd(&c.K8s.Runtime, "kubectl")
 
-	// The broker-ops folders apply to every platform: config exec-cli reads the
+	// The broker-ops folders apply to every platform: `broker perform cli-script` reads the
 	// one and verify diagnostics writes the other, on kubernetes and containers
 	// alike. Defaulted unconditionally so neither branch has to remember to.
 	setDefault(&c.Broker.DiagDir, "diag-configs")
 	setDefault(&c.Broker.CLIScriptsFolder, "cli")
+	// The sample env file has always shown `folder: certs` as this key's default,
+	// under a header stating that a commented-out key shows the value that applies
+	// when it is omitted -- but nothing ever set it, so an omitted folder made
+	// filepath.Join("", file) collapse to a bare filename resolved against whatever
+	// directory the command ran from. Defaulting it makes the documented promise
+	// true and puts the value under the same env-file-relative rule as every other
+	// host path (hostpath.go).
+	setDefault(&c.Broker.DomainCerts.Folder, "certs")
 
 	if p == K8s {
 		c.applyK8sDefaults()
@@ -151,12 +175,12 @@ func (c *Config) ApplyDefaults(p Platform) {
 func (c *Config) applyK8sDefaults() {
 	setDefault(&c.K8s.UpdateStrategy, "automatedRolling")
 	setDefault(&c.K8s.AdminSecret, "solace-admin-secret")
-	setDefault(&c.K8s.Storage.MonNode, "5Gi")
+	setDefault(&c.K8s.Storage.MonNodeSize, "5Gi")
 	// kubernetes.msgNode.cpu and .mem are not defaulted here: CPU is fixed by the
 	// scaling tier and memory defaults from it, both in applyScalingTierDefaults
 	// once maxConnections below has resolved (scaling.go).
 
-	setDefault(&c.K8s.Operator.Image, "docker.io/solace/pubsubplus-eventbroker-operator:1.4.0")
+	setDefault(&c.K8s.Operator.Image, "solace/pubsubplus-eventbroker-operator:1.4.2")
 	setDefault(&c.K8s.Operator.CPU, "500m")
 	setDefault(&c.K8s.Operator.Mem, "512Mi")
 
@@ -182,11 +206,12 @@ func (c *Config) applyK8sDefaults() {
 		c.K8s.Ports = defaultK8sPorts()
 	}
 
-	// TLS cert/key only default when a server secret is requested.
-	if c.K8s.TLSServerSecret != "" {
-		setDefault(&c.TLS.Cert, "certs/tls.crt")
-		setDefault(&c.TLS.CertKey, "certs/tls.key")
-	}
+	// tls.cert/tls.certKey are deliberately NOT defaulted from kubernetes.tlsServerSecret.
+	// The two answer different questions -- what the Secret is CALLED, and what it is built
+	// FROM -- and only the first is always this tool's business. Defaulting the paths made
+	// naming a Secret imply "and build it from certs/tls.crt", so an operator who had
+	// already created the Secret (by hand, or from cert-manager) got a read of a file they
+	// never mentioned. See Config.ManagesTLSSecret.
 }
 
 func (c *Config) applyContainerDefaults(p Platform) {
@@ -204,7 +229,6 @@ func (c *Config) applyContainerDefaults(p Platform) {
 	applyBridgePortDefaults(&c.Docker.Network)
 	applyBridgePortDefaults(&c.Podman.Network)
 
-	setDefault(&c.Admin.User, "admin")
 
 	// Scaling: the same knobs k8s takes, since every one of them now reaches the
 	// container as an environment variable. Only maxConnections and the spool

@@ -3,18 +3,16 @@ package container
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"solace/internal/broker"
 	"solace/internal/config"
 	"solace/internal/engine"
 	"solace/internal/output"
@@ -48,17 +46,10 @@ type Manager struct {
 	// Resolve reports whether a hostname resolves; a seam over net.LookupHost so
 	// Check/PrepHost DNS probes are testable. NewManager sets the default.
 	Resolve func(host string) bool
-	// GenPSK returns a freshly generated redundancy pre-shared key. NewManager sets
-	// a crypto/rand + base64 default; tests inject a fixed value.
-	GenPSK func() (string, error)
 	// Geteuid reports this process's effective uid; a seam over os.Geteuid so the
 	// podman rootless/rootful guard is testable off a POSIX host (Windows returns
 	// -1). NewManager sets the default.
 	Geteuid func() int
-	// EnvPath is the resolved env-file path, so PrepHost can write a generated PSK
-	// back into it (the analog of 002-host-prep.sh's sed rewrite).
-	EnvPath string
-
 	// RestartApproved pre-approves bouncing an already-running broker when the
 	// deploy artifact changed (the --restart flag on `deploy broker`). It is an
 	// approval, not an instruction: Restart() is the command that bounces one on
@@ -71,9 +62,13 @@ type Manager struct {
 }
 
 // NewManager builds a container host Manager over the given runner, config and
-// platform. It defaults Resolve to a net.LookupHost seam and GenPSK to a
-// crypto/rand + standard-base64 generator (matching 002-host-prep.sh's
-// `openssl rand -base64 60`). In and EnvPath are left for the caller to set.
+// platform. It defaults Resolve to a net.LookupHost seam and Geteuid to os.Geteuid.
+// In is left for the caller to set.
+//
+// There is deliberately no PSK generator here any more. This tool used to invent the
+// redundancy pre-shared key on a first HA deploy and rewrite the env file it was handed;
+// the key is the operator's to make now (config.validateContainerPSK refuses an empty one
+// and prints the openssl command), and nothing in this package writes to an env file.
 func NewManager(r engine.Runner, cfg *config.Config, p config.Platform, log func(string, ...any), out io.Writer) *Manager {
 	return &Manager{
 		R:       r,
@@ -82,7 +77,6 @@ func NewManager(r engine.Runner, cfg *config.Config, p config.Platform, log func
 		Log:     log,
 		Out:     out,
 		Resolve: func(host string) bool { _, err := net.LookupHost(host); return err == nil },
-		GenPSK:  defaultGenPSK,
 		Geteuid: os.Geteuid,
 	}
 }
@@ -154,19 +148,45 @@ func (m *Manager) compose(ctx context.Context, args ...string) error {
 	if err != nil {
 		return err
 	}
-	return m.R.RunEnv(ctx, m.composeSecretEnv(), c.Name(), c.Args(args...)...)
+	// preview here means "do not read the certificate from disk". It is true under
+	// the Echo runner, and ALSO true for every verb that does not need a secret's
+	// value: compose requires each declared secret to be DEFINED for `down`, `stop`,
+	// `restart` and `ps`, but never reads it, so a moved certificate must not block
+	// a teardown. Only `up` actually consumes the bytes.
+	env, err := m.composeSecretEnv(m.isEcho() || !composeNeedsSecretValues(args))
+	if err != nil {
+		return err
+	}
+	return m.R.RunEnv(ctx, env, c.Name(), c.Args(args...)...)
+}
+
+// composeNeedsSecretValues reports whether this compose invocation will actually
+// read a secret's contents. Only `up` creates containers and therefore materializes
+// secrets; `down`, `stop`, `start`, `restart` and `ps` operate on what already
+// exists. Keeping the list positive rather than negative means a new verb defaults
+// to NOT reading a private key from disk.
+func composeNeedsSecretValues(args []string) bool {
+	for _, a := range args {
+		if a == "up" {
+			return true
+		}
+	}
+	return false
 }
 
 // composeSecretEnv is the "VAR=value" list backing the compose file's
 // environment-sourced secrets. It is the only place a secret value enters a child
 // process, and it never reaches an argv.
-func (m *Manager) composeSecretEnv() []string {
-	secrets := render.ContainerSecrets(m.Cfg, m.P)
+func (m *Manager) composeSecretEnv(preview bool) ([]string, error) {
+	secrets, err := ResolveSecretValues(m.Cfg, m.P, preview)
+	if err != nil {
+		return nil, err
+	}
 	env := make([]string, 0, len(secrets))
 	for _, s := range secrets {
 		env = append(env, s.EnvVar()+"="+s.Value)
 	}
-	return env
+	return env, nil
 }
 
 // --- Check ------------------------------------------------------------------
@@ -219,12 +239,15 @@ func (m *Manager) CheckEnv() {
 		output.KV{Key: "data dir", Value: cb.DataDir},
 		output.KV{Key: "run user", Value: cb.RunUser},
 		output.KV{Key: "network", Value: network},
-		output.KV{Key: "admin", Value: fmt.Sprintf("user=%s password=%s", cfg.Admin.User, setOrMissing(cfg.Admin.Pass))},
+		output.KV{Key: "admin", Value: fmt.Sprintf("user=%s password=%s", config.AdminUser, setOrMissing(cfg.SEMP.AdminPass))},
 		output.KV{Key: "tls", Value: tls},
 	)
 	if m.P == config.Podman {
+		// baseDir is reported because it is where the broker's PRIVATE KEY lands on
+		// this host, which is the most consequential new fact about a podman deploy
+		// and the one thing an operator cannot infer from anywhere else.
 		rows = append(rows, output.KV{Key: "podman", Value: fmt.Sprintf(
-			"rootless=%t quadletDir=%s", cfg.Podman.Rootless, cfg.Podman.QuadletDir)})
+			"rootless=%t quadletDir=%s baseDir=%s", cfg.Podman.Rootless, cfg.Podman.QuadletDir, cfg.Podman.BaseDir)})
 	} else {
 		// The configured value, like the runtime line above -- CheckEnv reports what
 		// the env file says, and Reachable (next in Check) is what fails loud if the
@@ -234,15 +257,15 @@ func (m *Manager) CheckEnv() {
 	}
 	rows = append(rows, output.KV{Key: "secrets", Value: secretSummary(m.P, render.ContainerSecrets(cfg, m.P))})
 	if cfg.RedundancyEnabled() {
-		n := cfg.Nodes
+		n := cfg.Redundancy
 		rows = append(rows,
-			output.KV{Key: "primary", Value: fmt.Sprintf("%s (%s)", n.Primary.Name, orNone(n.Primary.IP))},
-			output.KV{Key: "backup", Value: fmt.Sprintf("%s (%s)", n.Backup.Name, orNone(n.Backup.IP))},
-			output.KV{Key: "monitor", Value: fmt.Sprintf("%s (%s)", n.Monitor.Name, orNone(n.Monitor.IP))},
+			output.KV{Key: "primary", Value: fmt.Sprintf("%s (%s)", n.Primary.Name, orNone(n.Primary.Addr))},
+			output.KV{Key: "backup", Value: fmt.Sprintf("%s (%s)", n.Backup.Name, orNone(n.Backup.Addr))},
+			output.KV{Key: "monitor", Value: fmt.Sprintf("%s (%s)", n.Monitor.Name, orNone(n.Monitor.Addr))},
 			output.KV{Key: "psk", Value: setOrMissing(n.PSK)},
 		)
 	} else {
-		rows = append(rows, output.KV{Key: "node", Value: orNone(cfg.Nodes.Primary.Name)})
+		rows = append(rows, output.KV{Key: "node", Value: orNone(cfg.Redundancy.Primary.Name)})
 	}
 	// KVRow at the report's shared width rather than KVBlock, for the same reason
 	// k8s.CheckEnv does it: the engine/nofile/dns lines are printed by their own
@@ -364,7 +387,7 @@ func (m *Manager) checkDNS(ctx context.Context) error {
 	}
 	r := m.report()
 	if !m.Cfg.RedundancyEnabled() {
-		name := m.Cfg.Nodes.Primary.Name
+		name := m.Cfg.Redundancy.Primary.Name
 		if name == "" || m.Resolve(name) {
 			r.OK("broker hostname resolves: %s", orNone(name))
 		} else {
@@ -374,9 +397,9 @@ func (m *Manager) checkDNS(ctx context.Context) error {
 	}
 	failed := 0
 	for _, n := range []struct{ role, name string }{
-		{"primary", m.Cfg.Nodes.Primary.Name},
-		{"backup", m.Cfg.Nodes.Backup.Name},
-		{"monitor", m.Cfg.Nodes.Monitor.Name},
+		{"primary", m.Cfg.Redundancy.Primary.Name},
+		{"backup", m.Cfg.Redundancy.Backup.Name},
+		{"monitor", m.Cfg.Redundancy.Monitor.Name},
 	} {
 		if m.Resolve(n.name) {
 			r.OK("%s hostname resolves: %s", n.role, n.name)
@@ -414,7 +437,7 @@ func (m *Manager) PrepHost(ctx context.Context) error {
 	}
 
 	cb := m.Cfg.ContainerBlock(m.P)
-	m.logf("Preparing data directory %s", cb.DataDir)
+	m.logf("preparing data directory %s", cb.DataDir)
 	if err := m.R.Run(ctx, "mkdir", "-p", cb.DataDir); err != nil {
 		return fmt.Errorf("create data dir %q: %w", cb.DataDir, err)
 	}
@@ -434,10 +457,7 @@ func (m *Manager) PrepHost(ctx context.Context) error {
 	if err := m.checkDNS(ctx); err != nil {
 		return err
 	}
-	if err := m.registryLogin(ctx); err != nil {
-		return err
-	}
-	return m.prepPSK()
+	return m.registryLogin(ctx)
 }
 
 // registryLogin authenticates this host to the image registry when credentials are
@@ -458,7 +478,7 @@ func (m *Manager) registryLogin(ctx context.Context) error {
 	if registry != "" {
 		args = append(args, registry)
 	}
-	m.logf("Logging in to registry %s as %s", orNone(registry), user)
+	m.logf("logging in to registry %s as %s", orNone(registry), user)
 	r, err := m.runtime()
 	if err != nil {
 		return err
@@ -466,57 +486,6 @@ func (m *Manager) registryLogin(ctx context.Context) error {
 	if err := m.R.RunInput(ctx, []byte(pass), r.Name(), r.Args(args...)...); err != nil {
 		return fmt.Errorf("%s login to registry %s failed: %w", platformTitle(m.P), orNone(registry), err)
 	}
-	return nil
-}
-
-// prepPSK ensures a redundancy PSK exists (HA only). If nodes.psk is already set
-// it is left unchanged (with a reminder to keep it identical across hosts). If
-// empty, a PSK is generated and written back into the env file -- but never
-// under the Echo runner, which must not write files or echo secret bytes.
-func (m *Manager) prepPSK() error {
-	if !m.Cfg.RedundancyEnabled() {
-		m.progress().Info("standalone mode -- no redundancy PSK needed; skipping.")
-		return nil
-	}
-	if m.Cfg.Nodes.PSK != "" {
-		m.progress().Info("nodes.psk is already set -- leaving it unchanged.")
-		m.progress().Warn("the SAME psk must be present in the env file on all three hosts.")
-		return nil
-	}
-	if m.isEcho() {
-		m.progress().Info("nodes.psk is empty -- a PSK would be generated and written to %s (skipped under dry-run).", m.EnvPath)
-		return nil
-	}
-	psk, err := m.GenPSK()
-	if err != nil {
-		return fmt.Errorf("generate redundancy PSK: %w", err)
-	}
-	return m.writePSK(psk)
-}
-
-// writePSK stores a generated PSK by rewriting the `psk:` line under the env
-// file's `nodes:` block, preserving everything else. If no such line exists it
-// prints the value for the operator to place rather than guessing where to
-// insert it. The env file now holds a secret, so it is written back mode 0600.
-func (m *Manager) writePSK(psk string) error {
-	if m.EnvPath == "" {
-		return fmt.Errorf("cannot store generated PSK: env-file path is unknown")
-	}
-	raw, err := os.ReadFile(m.EnvPath)
-	if err != nil {
-		return fmt.Errorf("read env file %q to store PSK: %w", m.EnvPath, err)
-	}
-	updated, replaced := replacePSKLine(string(raw), psk)
-	if !replaced {
-		m.progress().Warn("no nodes.psk line found in %s; add this line under nodes: and copy it to all three hosts:", m.EnvPath)
-		fmt.Fprintf(m.out(), "  psk: %q\n", psk)
-		return nil
-	}
-	if err := os.WriteFile(m.EnvPath, []byte(updated), 0o600); err != nil {
-		return fmt.Errorf("write PSK back to env file %q: %w", m.EnvPath, err)
-	}
-	m.progress().OK("generated a redundancy PSK and wrote it to %s", m.EnvPath)
-	m.progress().Warn("copy the SAME psk into the env file on the OTHER two hosts (it must match).")
 	return nil
 }
 
@@ -554,27 +523,48 @@ func (m *Manager) Deploy(ctx context.Context, role config.Role) error {
 // this deployment's values from the environment `compose` is given (see compose),
 // so no secret is ever written to this host's disk. An empty value fails loud here
 // rather than deploying a broker with no password -- except under the Echo runner, which
-// must stay previewable before `prep host` has generated the HA pre-shared key.
+// must stay previewable before `broker deploy` has generated the HA pre-shared key.
 func (m *Manager) prepareSecrets(ctx context.Context) error {
-	// Skipped under the Echo runner so a preview stays possible before `prep host` has
-	// generated the PSK; `--gen-secrets-only` runs the same check, since the script
-	// it prints is meant to be executed.
+	// Skipped under the Echo runner: a preview must not need secret values on disk, and
+	// `broker generate` renders name-level references only, so there is nothing to check.
 	if !m.isEcho() {
+		// Preflight FIRST, then resolve. The order matters for the message: an env
+		// file that is both pre-`broker deploy` (empty PSK) and missing its cert files
+		// should report the PSK and its `broker deploy` hint, not the certificate.
 		if err := render.SecretPreflight(m.Cfg, m.P); err != nil {
 			return err
 		}
 	}
+	// Resolve on BOTH platforms, and discard the result on docker. Docker needs no
+	// secret prepared -- its values ride the compose child's environment -- but
+	// reading the certificate HERE is what makes an unreadable one fail before
+	// deployDocker rewrites the compose file, so "nothing happened" stays true. That
+	// is the same invariant the podman side gets by writing the bundle before the unit.
+	secrets, err := ResolveSecretValues(m.Cfg, m.P, m.isEcho())
+	if err != nil {
+		return err
+	}
 	if m.P == config.Podman {
-		return m.CreatePodmanSecrets(ctx, render.ContainerSecrets(m.Cfg, m.P))
+		return m.CreatePodmanSecrets(ctx, secrets)
 	}
 	return nil
 }
 
 // CreatePodmanSecrets loads each secret into podman's secret store, feeding the
 // value on stdin so it never reaches an argv or the dry-run echo (§3).
-// --replace makes a redeploy with a rotated value idempotent.
 //
-// Exported for internal/tools/itest, which rotates ONE secret through this exact
+// Remove-then-create, rather than `create --replace`, and the reason is the version
+// floor. `--replace` needs podman 4.7, while the rest of this wiring needs only 4.5
+// -- so using it would raise the floor of the whole tool for one flag whose effect
+// two commands reproduce exactly. `rm --ignore` makes a missing secret a success, so
+// the pair is idempotent the same way --replace was: a redeploy with a rotated value
+// works, and a first deploy with nothing in the store works.
+//
+// A failure of the rm half is NOT warned away. --ignore already absorbs the only
+// benign case, so anything left is real -- a store this user cannot write, say --
+// and continuing would create a secret next to one that could not be removed.
+//
+// Exported so a caller can rotate ONE secret through this exact
 // path and then restarts the unit, to settle whether a quadlet re-reads the store
 // on start (deployPodman's ASSUMED, NOT VERIFIED branch). Going through Deploy
 // instead would exercise the branching rather than the question.
@@ -584,11 +574,82 @@ func (m *Manager) CreatePodmanSecrets(ctx context.Context, secrets []render.Cont
 		return err
 	}
 	for _, s := range secrets {
+		if err := m.R.Run(ctx, r.Name(), r.Args("secret", "rm", "--ignore", s.Name)...); err != nil {
+			return fmt.Errorf("remove the existing podman secret %q before recreating it (from %s): %w",
+				s.Name, s.ConfigKey, err)
+		}
 		if err := m.R.RunInput(ctx, []byte(s.Value), r.Name(),
-			r.Args("secret", "create", "--replace", s.Name, "-")...); err != nil {
+			r.Args("secret", "create", s.Name, "-")...); err != nil {
 			return fmt.Errorf("create podman secret %q from %s: %w", s.Name, s.ConfigKey, err)
 		}
 	}
+	return nil
+}
+
+// writeCertBundle writes podman's copy of the server-certificate bundle to the
+// host, returning whether it changed so deployPodman can fold that into the restart
+// decision. A deployment with no TLS configured writes nothing and reports no change.
+//
+// The Echo guard sits HERE rather than being inherited from writeArtifact, and that
+// is load-bearing: writeArtifact's body is an ordinary argument, so the caller has
+// already evaluated it: broker.ServerCertBundle would have read both files before
+// writeArtifact could decline. A dry-run must stay possible before the certificate
+// exists on this host.
+//
+// Mode 0600 in a 0700 directory, and the chmod is explicit because os.WriteFile
+// applies its permission only when CREATING a file -- an existing bundle left at
+// 0644 by anything else would be truncated and rewritten still 0644, which for a
+// file containing a private key is not a mode to inherit.
+func (m *Manager) writeCertBundle() (bool, error) {
+	if m.Cfg.TLS.Cert == "" || m.Cfg.TLS.CertKey == "" {
+		return false, nil
+	}
+	path := filepath.FromSlash(render.ServerCertBundlePath(m.Cfg))
+	if m.isEcho() {
+		m.progress().Info("would write server certificate bundle %s (skipped under dry-run).", path)
+		return true, nil
+	}
+	bundle, err := broker.ServerCertBundle(m.Cfg)
+	if err != nil {
+		return false, err
+	}
+	changed, err := m.writeArtifact(path, bundle, "server certificate bundle", 0o700)
+	if err != nil {
+		return false, err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return false, fmt.Errorf("restrict the server certificate bundle %q to 0600 (it holds the private key): %w",
+			path, err)
+	}
+	return changed, nil
+}
+
+// removeCertBundle deletes podman's copy of the bundle on teardown. It runs with the
+// other things the container consumes, after the unit is confirmed gone.
+//
+// The failure is FATAL, unlike a leftover store secret's warning, and the difference
+// is the contents: silently leaving a private key on the host is the outcome least
+// like the rest of this teardown's posture. A missing file is not a failure -- a
+// deployment that never had TLS, or whose tls.cert was unset since deploy, has
+// nothing to remove. Only the FILE goes; the directory may hold other brokers'
+// bundles.
+func (m *Manager) removeCertBundle() error {
+	if m.Cfg.TLS.Cert == "" || m.Cfg.TLS.CertKey == "" {
+		return nil
+	}
+	path := filepath.FromSlash(render.ServerCertBundlePath(m.Cfg))
+	if m.isEcho() {
+		m.progress().Info("would remove server certificate bundle %s (skipped under dry-run).", path)
+		return nil
+	}
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("remove the server certificate bundle %q: it holds the broker's PRIVATE KEY and must "+
+			"not be left on this host -- remove it by hand and re-run: %w", path, err)
+	}
+	m.progress().OK("removed server certificate bundle %s", path)
 	return nil
 }
 
@@ -643,12 +704,24 @@ func (m *Manager) staleWarning(what string) {
 }
 
 func (m *Manager) deployPodman(ctx context.Context, id config.NodeIdentity) error {
+	// The bundle FIRST, before the unit that bind-mounts it: the file has to exist
+	// before any `systemctl start`, and a failure to build it must abort before any
+	// host state changes at all.
+	certChanged, err := m.writeCertBundle()
+	if err != nil {
+		return err
+	}
 	unit := filepath.ToSlash(filepath.Join(m.Cfg.Podman.QuadletDir, m.name()+".container"))
 	svc := m.name() + ".service"
 	changed, err := m.writeArtifact(unit, render.Quadlet(m.Cfg, id), "quadlet unit", 0o755)
 	if err != nil {
 		return err
 	}
+	// A rotated certificate under a byte-identical unit must still bounce the broker.
+	// `changed` is the ONLY input to the restart decision below, so without this a
+	// renewed certificate would print "nothing to do" and the broker would keep
+	// serving the old one.
+	changed = changed || certChanged
 	// daemon-reload runs either way: a unit that was already correct may still be
 	// unknown to systemd (a fresh host, or a manual removal).
 	if err := m.systemctl(ctx, "daemon-reload"); err != nil {
@@ -660,7 +733,7 @@ func (m *Manager) deployPodman(ctx context.Context, id config.NodeIdentity) erro
 	// the credentials it was created with, which is why deployDocker force-recreates. If
 	// podman turns out to share that behaviour, this branch needs the same fix. To check:
 	// stop the unit, rotate a value, `systemctl start`, then read
-	// /run/secrets/username_admin_password inside the container.
+	// /mnt/secrets/username_admin_password inside the container.
 	// serviceActive is read in its LOSSY form here on purpose, unlike deployDocker,
 	// which aborts when its probe cannot answer (containerRunningKnown). The
 	// consequence of guessing differs entirely: an unanswered probe here sends an
@@ -888,6 +961,10 @@ func (m *Manager) deletePodman(ctx context.Context) error {
 	if err := m.systemctl(ctx, "daemon-reload"); err != nil {
 		return err
 	}
+	// With the other things the container consumed, now that the unit is gone.
+	if err := m.removeCertBundle(); err != nil {
+		return err
+	}
 	return m.removePodmanSecrets(ctx)
 }
 
@@ -912,8 +989,12 @@ func (m *Manager) removePodmanSecrets(ctx context.Context) error {
 			m.progress().Info("would remove podman secret %s (skipped under dry-run).", s.Name)
 			continue
 		}
-		if err := m.R.Run(ctx, r.Name(), r.Args("secret", "rm", s.Name)...); err != nil {
-			m.progress().Warn("removing podman secret %s failed (already removed?): %v", s.Name, err)
+		// --ignore, matching CreatePodmanSecrets so one argv shape serves both call
+		// sites. It also makes the warning below honest: "already removed" stops
+		// being a plausible cause once a missing secret is a success, so what is
+		// left really is a failure worth naming.
+		if err := m.R.Run(ctx, r.Name(), r.Args("secret", "rm", "--ignore", s.Name)...); err != nil {
+			m.progress().Warn("removing podman secret %s failed: %v", s.Name, err)
 			continue
 		}
 		m.progress().OK("removed podman secret %s", s.Name)
@@ -986,7 +1067,7 @@ func (m *Manager) containerExists(ctx context.Context) bool {
 
 func (m *Manager) purgeData(ctx context.Context) error {
 	dir := m.Cfg.ContainerBlock(m.P).DataDir
-	m.logf("Removing data directory %s", dir)
+	m.logf("removing data directory %s", dir)
 	if m.P == config.Podman && m.Cfg.Podman.Rootless {
 		return m.run(ctx, "unshare", "rm", "-rf", dir)
 	}
@@ -1062,6 +1143,20 @@ const solaceImageMarker = "solace-pubsub"
 // than the engine's default table, so the columns are the same on docker and podman.
 const psFormat = "{{.Names}}\t{{.Image}}\t{{.Status}}"
 
+// psTableFormat is psFormat with the ENGINE rendering the header and column widths, for
+// Status, which streams `ps` straight through rather than parsing it the way StatusAll
+// does.
+//
+// It exists to drop PORTS. A broker publishes a dozen or more ports, so the engine's
+// default table spends most of a terminal line on
+// "0.0.0.0:55555->55555/tcp, [::]:55555->55555/tcp, 0.0.0.0:8080->8080/tcp, ..." and wraps
+// every other column into illegibility -- on the one report whose whole job is to answer
+// "is it up". Nothing is lost: the ports are in the env file that chose them, in the
+// artifact `broker generate` prints, and in the inspect block this same command appends
+// below. NAMES, IMAGE and STATUS are what this report is for, and naming them explicitly
+// also keeps docker and podman showing the same columns in the same order.
+const psTableFormat = "table " + psFormat
+
 // StatusAll lists every Solace broker container on this host, not just the one this
 // env file names -- the container answer to `--all`, which on Kubernetes surveys the
 // cluster. Discovery is by image, so a broker someone deployed by hand, or under a
@@ -1084,30 +1179,35 @@ func (m *Manager) StatusAll(ctx context.Context, detail bool) error {
 	for _, name := range names {
 		r.Line("")
 		r.Section(name)
-		if err := m.run(ctx, "inspect", "--format", detailFormat, name); err != nil {
+		// inspect.go decodes the JSON rather than handing the engine a --format
+		// template, because the field names differ between docker and podman in
+		// ways a template gets silently wrong (see the header comment there).
+		if err := m.inspectAndReport(ctx, name); err != nil {
 			r.Line("  (could not inspect %s: %v)", name, err)
 		}
 	}
 	return nil
 }
 
-// detailFormat renders the parts of `inspect` worth reading: what the container
-// was built from, whether it is up, and every path mounted into it. The full
-// inspect output is hundreds of lines of engine bookkeeping that buries exactly
-// these.
+// engineNameRE is what a container name returned BY THE ENGINE must look like before
+// this tool will put it back into an argument vector. It is docker's and podman's own
+// grammar for a container name, deliberately no wider.
 //
-// Mounts are also how secrets show up, and deliberately the ONLY way they do: a
-// broker's secrets are files under /run/secrets/<setting>, so listing mounts names
-// them without reading any. The environment is never printed -- on docker the
-// compose secrets are environment-sourced, so dumping it here would put passwords
-// on a terminal, into scrollback, and into whatever ticket the output is pasted
-// into (S3).
-const detailFormat = "image:   {{.Config.Image}}\n" +
-	"state:   {{.State.Status}}\n" +
-	"mounts:{{range .Mounts}}\n  - {{.Source}} -> {{.Destination}}{{end}}"
+// The names solaceRows returns did not come from the env file: they came out of
+// `<runtime> ps` on this host, which makes them untrusted input on the way back in.
+// Nothing about that is hypothetical to guard -- a name is created by whoever ran the
+// engine, not necessarily by this tool -- and while argv exec means a metacharacter is
+// inert, these names also reach report tables, logs and whatever a ticket quotes.
+// Validating at the boundary is cheaper than trusting every consumer downstream.
+var engineNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
 // solaceRows prints the header plus every row whose image names a Solace broker,
 // and returns the container names it kept so a caller can go deeper on each.
+//
+// A row whose name does not match the engine's own grammar is still SHOWN -- it is a
+// real container on this host and hiding it would be worse -- but its name is not
+// returned, so nothing further is run against it. Skipped out loud rather than
+// silently dropped: a missing row reads as "no such container".
 func solaceRows(s *output.Sink, raw string) []string {
 	lines := strings.Split(strings.TrimRight(raw, "\n"), "\n")
 	var names []string
@@ -1118,6 +1218,12 @@ func solaceRows(s *output.Sink, raw string) []string {
 			continue
 		}
 		rows = append(rows, []string{cols[0], cols[1], cols[2]})
+		if !engineNameRE.MatchString(cols[0]) {
+			// s.Line, not s.Warn: this is a report body, and Warn is the stderr voice
+			// (internal/output). The note rides with the row it is about.
+			s.Line("  (not inspected: %q is not a name this tool will pass back to the engine)", cols[0])
+			continue
+		}
 		names = append(names, cols[0])
 	}
 	// Table computes each column from what is actually in it, so a long image ref
@@ -1131,21 +1237,54 @@ func solaceRows(s *output.Sink, raw string) []string {
 }
 
 // Status reports the container's state. Podman also shows its systemd unit.
+//
+// The `ps` listing is what the engine says about the container; the block after it
+// is what this tool reads out of `inspect` (inspect.go) -- health under whichever
+// spelling this engine uses, and a restart count that on podman comes from systemd
+// rather than from the engine's own counter, which a quadlet restart leaves at zero.
+// Those are the two facts an operator asking "is my broker healthy" needs and
+// neither engine's `ps` line carries.
+//
+// A failed inspect is a WARNING, not a failure: the listing above it already
+// answered whether the container exists, so the command has reported something
+// useful and must not exit non-zero because the extra detail was unavailable.
+//
+// Docker used to run `compose ps` first as well. It listed the same single container the
+// filtered `ps` does, so the only thing it added was a second row -- carrying the widest
+// PORTS column in the output, because compose prints every published port with both host
+// bindings. It could not be narrowed in place either: compose's own --format takes only
+// `table` or `json`, never a column template, so there is no compose-side equivalent of
+// psTableFormat. Dropping it costs nothing a reader of this report wanted: the listing
+// below reports the container whether it is running or stopped, and the compose FILE's
+// own existence and path are already in `broker check`.
 func (m *Manager) Status(ctx context.Context) error {
 	if m.P == config.Podman {
+		// The unit is podman's half of "is it up": a quadlet container that systemd
+		// never started has no engine-side row to find.
 		svc := m.name() + ".service"
 		if err := m.systemctl(ctx, "status", svc, "--no-pager"); err != nil {
 			m.progress().Warn("systemctl status %s reported non-zero (unit not active?): %v", svc, err)
 		}
-		return m.run(ctx, "ps", "--all", "--filter", "name="+exactName(m.name()))
 	}
-	file := m.composeFile()
-	if m.isEcho() || fileExists(file) {
-		if err := m.compose(ctx, "-f", file, "ps"); err != nil {
-			m.progress().Warn("compose ps failed: %v", err)
-		}
+	if err := m.run(ctx, "ps", "--all", "--filter", "name="+exactName(m.name()),
+		"--format", psTableFormat); err != nil {
+		return err
 	}
-	return m.run(ctx, "ps", "--all", "--filter", "name="+exactName(m.name()))
+	return m.statusDetail(ctx)
+}
+
+// statusDetail appends the decoded inspect block to Status, warning rather than
+// failing when it cannot be read.
+//
+// The call is made under the Echo runner too, so a preview still shows the `inspect`
+// it would issue -- but the warning is suppressed there. Echo returns no output by
+// construction, so the decode cannot succeed, and a preview complaining about a
+// parse that was never going to happen reads as a real problem with the deployment.
+func (m *Manager) statusDetail(ctx context.Context) error {
+	if err := m.inspectAndReport(ctx, m.name()); err != nil && !m.isEcho() {
+		m.progress().Warn("could not read %s state in detail: %v", m.name(), err)
+	}
+	return nil
 }
 
 // Describe prints detailed inspection output for this host's broker, the container
@@ -1163,9 +1302,28 @@ func (m *Manager) Describe(ctx context.Context) error {
 	return m.run(ctx, "inspect", m.name())
 }
 
-// Logs streams the broker container's logs (`<runtime> logs -f <name>`).
-func (m *Manager) Logs(ctx context.Context) error {
-	return m.run(ctx, "logs", "-f", m.name())
+// Logs reads the broker container's logs, appending the caller's log-selection
+// tokens (-f, --tail, --since, --timestamps -- the spellings kubectl and both engines
+// share). It prints what is buffered and exits unless the caller asked to follow.
+//
+// It used to hard-code `-f` with no way to switch it off, which made
+// `solace-util logs broker` block until interrupted on docker and podman while the
+// kubernetes side could not follow at all: the two platforms were broken in opposite
+// directions.
+//
+// `-p`/`--previous` is refused here as well as at pre-run, and that is not
+// belt-and-braces. checkFlagPlatforms walks only the flags the operator actually SET,
+// so a defaulted value never reaches it -- and this method can be called by something
+// that is not this CLI. Neither engine keeps a previous container's log, so passing it
+// through would ask for something that cannot exist.
+func (m *Manager) Logs(ctx context.Context, extra ...string) error {
+	for _, a := range extra {
+		if a == "-p" || a == "--previous" {
+			return fmt.Errorf("--previous is not supported on %s: neither engine keeps a previous "+
+				"container's log, so there is nothing to read", m.P)
+		}
+	}
+	return m.run(ctx, append([]string{"logs"}, append(extra, m.name())...)...)
 }
 
 // CopyFrom copies files out of the broker container into the working directory,
@@ -1178,7 +1336,8 @@ func (m *Manager) CopyFrom(ctx context.Context, files []string) error {
 	t := NewTransport(m.R, m.Cfg, m.P)
 	var failed int
 	for _, f := range files {
-		local := path.Base(f)
+		// config.BaseName, not path.Base -- see the same call in k8s.Cluster.CopyFrom.
+		local := config.BaseName(f)
 		m.logf("copying %s from container %s", f, m.name())
 		if err := t.Download(ctx, config.Primary, f, local); err != nil {
 			m.report().Fail("%s: %v", f, err)
@@ -1287,38 +1446,6 @@ func (m *Manager) composeFile() string {
 		return f
 	}
 	return "docker-compose.yml"
-}
-
-// defaultGenPSK returns a base64 pre-shared key from 60 crypto-random bytes,
-// matching 002-host-prep.sh's `openssl rand -base64 60`.
-func defaultGenPSK() (string, error) {
-	b := make([]byte, 60)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("read random bytes for PSK: %w", err)
-	}
-	return base64.StdEncoding.EncodeToString(b), nil
-}
-
-// replacePSKLine rewrites the `psk:` line inside the top-level `nodes:` block of
-// a YAML document, preserving its indentation and every other line. It returns
-// the updated content and whether a line was replaced. Scoping to the nodes:
-// block avoids touching an unrelated `psk:` key elsewhere in the file.
-func replacePSKLine(content, psk string) (string, bool) {
-	lines := strings.Split(content, "\n")
-	inNodes := false
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		indent := len(line) - len(strings.TrimLeft(line, " \t"))
-		if trimmed != "" && !strings.HasPrefix(trimmed, "#") && indent == 0 {
-			inNodes = strings.HasPrefix(trimmed, "nodes:")
-			continue
-		}
-		if inNodes && indent > 0 && strings.HasPrefix(trimmed, "psk:") {
-			lines[i] = fmt.Sprintf("%spsk: %q", line[:indent], psk)
-			return strings.Join(lines, "\n"), true
-		}
-	}
-	return content, false
 }
 
 // fileExists reports whether p exists (used to pick compose-down vs stop/rm).

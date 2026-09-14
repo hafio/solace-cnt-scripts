@@ -22,26 +22,55 @@ func decodeStrict(doc string, c *Config) error {
 // config.Load does, so the runtime fields hold their real defaults unless a case
 // overrides them.
 func guardConfig(p Platform) *Config {
-	c := &Config{Redundancy: "no"}
+	c := &Config{Redundancy: Redundancy{Enabled: "false"}}
 	c.Image.Repo = "solace/solace-pubsub-standard"
 	c.Image.Tag = "10.10.1.35"
-	c.Admin.Pass = "s3cret-not-a-real-password"
+	c.SEMP.AdminPass = "s3cret-not-a-real-password"
 	c.K8s.Name = "broker"
 	c.K8s.Namespace = "solace"
-	c.K8s.Storage.MsgNode = "30Gi"
-	c.Nodes.Primary.Name = "primary-host"
+	c.K8s.Storage.MsgNodeSize = "30Gi"
+	c.Redundancy.Primary.Name = "primary-host"
+	// Mandatory on podman and deliberately not defaulted (it receives a file holding
+	// a private key, so the location is the operator's choice), which means a fixture
+	// that omits it fails validation for a reason unrelated to what these tests cover.
+	c.Podman.BaseDir = "/opt/solace"
 	c.ApplyDefaults(p)
 	return c
 }
 
 // TestGuardConfigIsValid guards the fixture itself: every case below reads a
 // Validate failure as "the guard rejected the command", which is only sound while
-// the untouched fixture validates cleanly on all three platforms.
+// the untouched fixture validates cleanly on every platform. It walks Platforms()
+// rather than a literal, so a fourth platform is covered the day it is declared
+// instead of the day someone remembers this loop.
 func TestGuardConfigIsValid(t *testing.T) {
-	for _, p := range []Platform{K8s, Docker, Podman} {
+	for _, p := range Platforms() {
 		if err := guardConfig(p).Validate(p); err != nil {
 			t.Errorf("guardConfig(%s) must validate cleanly before any command is overridden: %v", p, err)
 		}
+	}
+}
+
+// TestExecBinariesCoversEveryPlatform pins the allowlist against Platforms(). A
+// missing key is not a compile error and not an obvious runtime one either:
+// commandRules.allowed would return an empty set, so EVERY command that platform
+// names would be refused as un-allowlisted, and commandRules.list would offer an
+// empty "allowed" list in the error -- a confusing refusal rather than a loud
+// wiring failure. This is the test that turns that into a build-time answer.
+func TestExecBinariesCoversEveryPlatform(t *testing.T) {
+	for _, p := range Platforms() {
+		names, ok := execBinaries[p]
+		if !ok {
+			t.Errorf("execBinaries has no entry for platform %s: every command it names would be refused", p)
+			continue
+		}
+		if len(names) == 0 {
+			t.Errorf("execBinaries[%s] is empty: no command could ever be allowed on that platform", p)
+		}
+	}
+	if len(execBinaries) != len(Platforms()) {
+		t.Errorf("execBinaries has %d entries but there are %d platforms: an entry for a platform that does not exist is dead allowlist",
+			len(execBinaries), len(Platforms()))
 	}
 }
 
@@ -658,7 +687,7 @@ func TestComposeDerivationInheritsRejection(t *testing.T) {
 // unexported, so yaml.v3 could not write it even without strict mode.
 func TestAllowCommandIsNotASchemaKey(t *testing.T) {
 	for _, key := range []string{"allowCommand", "allow-command", "allowCommands", "extraAllowed"} {
-		doc := "redundancy: no\n" + key + ": [lima]\n"
+		doc := "redundancy:\n  enabled: false\n" + key + ": [lima]\n"
 		var c Config
 		if err := decodeStrict(doc, &c); err == nil {
 			t.Errorf("an env file key %q was accepted; the allowlist must not be settable from config", key)

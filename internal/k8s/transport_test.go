@@ -139,12 +139,17 @@ func (r *recRunner) afterPreflight(t *testing.T, verb, resource string) []rrCall
 		t.Fatalf("no calls recorded: the read-only `auth can-i %s %s` probe must run before anything else", verb, resource)
 	}
 	first := r.calls[0]
-	// A cluster-scoped resource is probed WITHOUT -n. Passing one made kubectl
-	// print "resource X is not namespace scoped" and, when the namespace did not
-	// exist yet, fail with an unrelated NotFound -- so the absence of -n here is
-	// the assertion, not an omission.
+	// A cluster-scoped resource is probed with --all-namespaces, never -n. Passing
+	// -n made kubectl fail with an unrelated NotFound when the namespace did not
+	// exist yet; but merely OMITTING it is not enough either, because kubectl then
+	// falls back to the kubeconfig context's namespace -- which both prints
+	// "resource X is not namespace scoped" and puts a namespace in the access
+	// review, where RBAC would also evaluate namespaced Roles and could answer yes
+	// for a permission the cluster-scoped action does not actually have.
 	want := []string{"auth", "can-i", verb, resource}
-	if !clusterScoped[resource] {
+	if clusterScoped[resource] {
+		want = append(want, "--all-namespaces")
+	} else {
 		want = append(want, "-n", "solace")
 	}
 	if first.method != "Output" || !eqArgs(first.args, want) {
@@ -303,8 +308,72 @@ func TestTransportEchoHidesUploadBody(t *testing.T) {
 	if !strings.Contains(out, "bytes on stdin") {
 		t.Errorf("Echo should show the upload as a byte count:\n%s", out)
 	}
-	// The CLI exec itself is echoed as a normal command against the primary pod.
-	if !strings.Contains(out, "dev-broker-pubsubplus-p-0 -- "+broker.CLIBinary+" -Apes .probe.cli") {
+	// The exec itself is still echoed as a normal command against the primary pod.
+	// RunCLI now sends one `sh -c <skeleton>` rather than a bare `cli -Apes`, so the
+	// anchors are the pod and the shell it is handed -- the skeleton's own body is
+	// multi-line and shell-quoted, and matching a fragment of it would break on any
+	// whitespace change without protecting anything.
+	if !strings.Contains(out, "dev-broker-pubsubplus-p-0 -- sh -c ") {
 		t.Errorf("Echo missing the cli exec line:\n%s", out)
 	}
+	// The shell still runs the CLI, and runs THIS call's script: the broker-side
+	// filenames are derived from the script name RunCLI was given, and they are the
+	// only part of the traced line that is. Dropping this would leave the whole
+	// assertion satisfiable by constant skeleton text, so a RunCLI that stopped
+	// threading the name through would pass.
+	if !strings.Contains(out, broker.CLIBinary) || !strings.Contains(out, "-Apes") {
+		t.Errorf("Echo's exec line does not invoke the CLI:\n%s", out)
+	}
+	if !strings.Contains(out, "solace-util-cli-probe") {
+		t.Errorf("Echo's exec line does not name this script's own broker-side files:\n%s", out)
+	}
+}
+
+// afterPreflights is afterPreflight's counterpart for an operation that probes SEVERAL
+// permissions. It consumes every leading `auth can-i` call, asserts the set contains
+// each wanted verb/resource, and returns the calls that follow.
+//
+// The single-probe helper cannot serve here: it asserts calls[0] is the only probe and
+// returns calls[1:], so an operation that legitimately asks about seven kinds would
+// look like six stray calls before its real work.
+func (r *recRunner) afterPreflights(t *testing.T, want ...probe) []rrCall {
+	t.Helper()
+	got := map[string]bool{}
+	i := 0
+	for ; i < len(r.calls); i++ {
+		a := r.calls[i].args
+		if len(a) < 4 || a[0] != "auth" || a[1] != "can-i" {
+			break
+		}
+		got[a[2]+" "+a[3]] = true
+	}
+	if i == 0 {
+		t.Fatal("no leading `auth can-i` probe: every mutating operation must ask before it acts")
+	}
+	for _, p := range want {
+		if !got[p.verb+" "+p.resource] {
+			t.Errorf("no probe for %q %q -- an operation must ask about every kind it touches, or it passes "+
+				"the check and fails halfway through the work", p.verb, p.resource)
+		}
+	}
+	return r.calls[i:]
+}
+
+// probedNamespace returns the -n value of the leading probe for verb/resource, or ""
+// when it carried none. It exists because a probe asking about the wrong namespace is
+// silent: it answers, it just answers a question nobody asked.
+func (r *recRunner) probedNamespace(verb, resource string) (string, bool) {
+	for _, c := range r.calls {
+		a := c.args
+		if len(a) < 4 || a[0] != "auth" || a[1] != "can-i" || a[2] != verb || a[3] != resource {
+			continue
+		}
+		for j := 4; j+1 < len(a); j++ {
+			if a[j] == "-n" {
+				return a[j+1], true
+			}
+		}
+		return "", true
+	}
+	return "", false
 }

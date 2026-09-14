@@ -15,11 +15,11 @@ import (
 func writeRuntimeEnv(t *testing.T, runtime string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "runtime.yaml")
-	doc := "redundancy: no\n" +
+	doc := "redundancy:\n  enabled: false\n" +
 		"image:\n  repo: solace/solace-pubsub-standard\n  tag: \"10.10.1.35\"\n" +
-		"admin:\n  pass: " + smokeAdminPass + "\n" +
+		"semp:\n  adminPass: " + smokeAdminPass + "\n" +
 		"kubernetes:\n  name: broker\n  namespace: solace\n  runtime: " + runtime + "\n" +
-		"  storage:\n    msgNode: 30Gi\n"
+		"  storage:\n    msgNodeSize: 30Gi\n"
 	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
 		t.Fatalf("writing env: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestAllowCommandIsRegisteredWhereItExecutes(t *testing.T) {
 func TestAllowCommandIsRepeatable(t *testing.T) {
 	app := &App{}
 	root := newRootCmd(app)
-	root.SetArgs([]string{"check", "deploy", "--allow-command", "lima", "--allow-command", "microk8s",
+	root.SetArgs([]string{"validate", "--allow-command", "lima", "--allow-command", "microk8s",
 		"--env", "does-not-exist.yaml"})
 	_ = root.Execute() // fails on the missing env; the flag values are what matter
 	if len(app.AllowCommand) != 2 || app.AllowCommand[0] != "lima" || app.AllowCommand[1] != "microk8s" {
@@ -89,13 +89,13 @@ func TestAllowCommandIsRepeatable(t *testing.T) {
 func TestAllowCommandApprovesAWrappedRuntime(t *testing.T) {
 	env := writeRuntimeEnv(t, "microk8s kubectl")
 
-	if _, err := runRootWith(t, []string{"check", "deploy", "--platform", "kubernetes", "--env", env}, echoRunner); err == nil {
+	if _, err := runRootWith(t, []string{"validate", "--platform", "kubernetes", "--env", env}, echoRunner); err == nil {
 		t.Fatal("an unapproved `microk8s kubectl` must be refused")
 	} else if !strings.Contains(err.Error(), "--allow-command microk8s") {
 		t.Errorf("error = %v, want it to name the escape hatch", err)
 	}
 
-	out, err := runRootWith(t, []string{"check", "deploy", "--allow-command", "microk8s", "--platform", "kubernetes", "--env", env}, echoRunner)
+	out, err := runRootWith(t, []string{"validate", "--allow-command", "microk8s", "--platform", "kubernetes", "--env", env}, echoRunner)
 	if err != nil {
 		t.Fatalf("an approved `microk8s kubectl` must run: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestAllowCommandRejectsBadValues(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := runRoot(t, withEnv("check", "deploy", "--allow-command", tc.value, "--platform", "kubernetes"))
+			_, err := runRoot(t, withEnv("validate", "--allow-command", tc.value, "--platform", "kubernetes"))
 			if err == nil {
 				t.Fatalf("--allow-command %q must be a usage error", tc.value)
 			}
@@ -143,10 +143,10 @@ func TestAllowCommandRejectsBadValues(t *testing.T) {
 // wrapper script that DOES execute.
 func TestAllowCommandRejectedWhereNothingExecutes(t *testing.T) {
 	cases := [][]string{
-		{"generate", "broker", "--allow-command", "lima", "--platform", "kubernetes"},
-		{"generate", "operator", "--allow-command", "lima", "--platform", "kubernetes"},
-		{"generate", "secrets", "broker", "--allow-command", "lima", "--platform", "docker"},
-		{"generate", "broker", "--allow-command", "lima", "--platform", "podman"},
+		{"broker", "generate", "--allow-command", "lima", "--platform", "kubernetes"},
+		{"operator", "generate", "--allow-command", "lima", "--platform", "kubernetes"},
+		{"broker", "generate", "--allow-command", "lima", "--platform", "docker"},
+		{"broker", "generate", "--allow-command", "lima", "--platform", "podman"},
 	}
 	for _, args := range cases {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
@@ -168,11 +168,11 @@ func TestEscalationIsRefusedEndToEnd(t *testing.T) {
 	env := writeRuntimeEnv(t, "sudo kubectl")
 
 	// Without the hatch: an unlisted binary.
-	if _, err := runRootWith(t, []string{"status", "broker", "--platform", "kubernetes", "--env", env}, echoRunner); err == nil {
+	if _, err := runRootWith(t, []string{"broker", "status", "--platform", "kubernetes", "--env", env}, echoRunner); err == nil {
 		t.Fatal("`sudo kubectl` was accepted")
 	}
 	// With the hatch: refused at the flag, before the config is even read.
-	_, err := runRootWith(t, []string{"status", "broker", "--allow-command", "sudo", "--platform", "kubernetes", "--env", env}, echoRunner)
+	_, err := runRootWith(t, []string{"broker", "status", "--allow-command", "sudo", "--platform", "kubernetes", "--env", env}, echoRunner)
 	if err == nil {
 		t.Fatal("--allow-command sudo was accepted")
 	}
@@ -190,12 +190,12 @@ func TestEscalationIsRefusedEndToEnd(t *testing.T) {
 func TestHostileRuntimeIsRefusedByEveryVerb(t *testing.T) {
 	env := writeRuntimeEnv(t, "curl")
 	verbs := [][]string{
-		{"check", "deploy"},
-		{"status", "broker"},
-		{"deploy", "broker"},
-		{"remove", "broker", "--no-prompt"},
-		{"status", "broker", "--all"},
-		{"logs", "broker"},
+		{"validate"},
+		{"broker", "status"},
+		{"broker", "deploy"},
+		{"broker", "remove", "--no-prompt"},
+		{"broker", "status", "--all"},
+		{"broker", "logs"},
 	}
 	for _, verb := range verbs {
 		t.Run(strings.Join(verb, " "), func(t *testing.T) {
@@ -217,7 +217,7 @@ func TestSmuggledSubcommandIsRefused(t *testing.T) {
 	for _, runtime := range []string{"kubectl delete", "kubectl delete ns prod", "kubectl --"} {
 		t.Run(runtime, func(t *testing.T) {
 			env := writeRuntimeEnv(t, runtime)
-			_, err := runRootWith(t, []string{"status", "broker", "--platform", "kubernetes", "--env", env}, echoRunner)
+			_, err := runRootWith(t, []string{"broker", "status", "--platform", "kubernetes", "--env", env}, echoRunner)
 			if err == nil {
 				t.Fatalf("kubernetes.runtime %q was accepted", runtime)
 			}
@@ -235,7 +235,7 @@ func TestPathRuntimeIsRefused(t *testing.T) {
 	for _, runtime := range []string{"./kubectl", "/usr/local/bin/kubectl", "../kubectl"} {
 		t.Run(runtime, func(t *testing.T) {
 			env := writeRuntimeEnv(t, runtime)
-			_, err := runRootWith(t, []string{"status", "broker", "--platform", "kubernetes", "--env", env}, echoRunner)
+			_, err := runRootWith(t, []string{"broker", "status", "--platform", "kubernetes", "--env", env}, echoRunner)
 			if err == nil {
 				t.Fatalf("kubernetes.runtime %q was accepted", runtime)
 			}
@@ -253,7 +253,7 @@ func TestPathRuntimeIsRefused(t *testing.T) {
 func TestGenPathNeverExecutes(t *testing.T) {
 	app := &App{}
 	root := newRootCmd(app)
-	root.SetArgs([]string{"generate", "broker", "--platform", "kubernetes", "--env", writeRuntimeEnv(t, "curl")})
+	root.SetArgs([]string{"broker", "generate", "--platform", "kubernetes", "--env", writeRuntimeEnv(t, "curl")})
 	root.SetOut(nil)
 	root.SetErr(nil)
 	_ = captureStdout(t, func() { _ = root.Execute() })

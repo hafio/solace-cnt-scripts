@@ -17,7 +17,7 @@ Ulimit=memlock=-1
 Ulimit=core=-1
 Network=host
 Volume=/opt/solace/data:/var/lib/solace:Z
-Volume=certs/tls.crt:/run/secrets/tls.crt:ro
+Volume=/etc/solace/solace-tls-servercertificate.pem:/mnt/certs/server/tls.pem:ro,Z
 Environment="routername=solace-primary"
 Environment="nodetype=message_routing"
 Environment="redundancy_activestandbyrole=primary"
@@ -31,7 +31,7 @@ Environment="redundancy_group_node_solace-monitor_connectvia=10.0.0.13"
 Environment="redundancy_group_node_solace-monitor_nodetype=monitoring"
 Environment="configsync_tls_enable=yes"
 Environment="redundancy_matelink_tls_enable=yes"
-Environment="tls_servercertificate_filepath=/run/secrets/tls.crt"
+Environment="tls_servercertificate_filepath=/mnt/certs/server/tls.pem"
 Environment="system_scaling_maxconnectioncount=1000"
 Environment="system_scaling_maxqueuemessagecount=100"
 Environment="system_scaling_maxkafkabridgecount=0"
@@ -41,10 +41,10 @@ Environment="system_scaling_maxsubscriptioncount=50000"
 Environment="system_scaling_maxguaranteedmessagesize=10"
 Environment="messagespool_maxspoolusage=100000"
 Environment="username_admin_globalaccesslevel=admin"
-Environment="username_admin_passwordfilepath=/run/secrets/username_admin_password"
-Environment="redundancy_authentication_presharedkey_keyfilepath=/run/secrets/redundancy_authentication_presharedkey_key"
-Secret=solace-admin-password,type=mount,target=username_admin_password
-Secret=solace-redundancy-psk,type=mount,target=redundancy_authentication_presharedkey_key
+Environment="username_admin_passwordfilepath=/mnt/secrets/username_admin_password"
+Environment="redundancy_authentication_presharedkey_keyfilepath=/mnt/secrets/redundancy_authentication_presharedkey_key"
+Secret=solace-admin-password,type=mount,target=/mnt/secrets/username_admin_password
+Secret=solace-redundancy-psk,type=mount,target=/mnt/secrets/redundancy_authentication_presharedkey_key
 
 [Service]
 Restart=always

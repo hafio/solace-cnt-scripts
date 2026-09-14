@@ -38,7 +38,7 @@ func TestPreflightRunsBeforeAnything(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Chdir(t.TempDir()) // keep any written artifact out of the repo
-			cfg := ctrCfg(tc.p, "no")
+			cfg := ctrCfg(tc.p, "false")
 			cfg.Podman.QuadletDir = t.TempDir()
 			m, rr, _ := newCapMgr(cfg, tc.p)
 			m.Geteuid = func() int { return 0 }
@@ -65,7 +65,7 @@ func TestPreflightRunsBeforeAnything(t *testing.T) {
 func TestPreflightFailureStopsTheDeploy(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	cfg := ctrCfg(config.Docker, "no")
+	cfg := ctrCfg(config.Docker, "false")
 	m, rr, _ := newCapMgr(cfg, config.Docker)
 	rr.outFail = failOn("info")
 
@@ -108,7 +108,7 @@ func TestPreflightFailureStopsLifecycle(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m, rr, _ := newCapMgr(ctrCfg(config.Docker, "no"), config.Docker)
+			m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 			rr.outFail = failOn("info")
 			if err := tc.call(m); err == nil {
 				t.Fatalf("%s must fail when the engine cannot be reached", tc.name)
@@ -138,7 +138,7 @@ func TestPreflightHintIsPlatformShaped(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := ctrCfg(tc.p, "no")
+			cfg := ctrCfg(tc.p, "false")
 			cfg.Podman.Rootless = tc.rootless
 			m, rr, _ := newCapMgr(cfg, tc.p)
 			rr.outFail = failOn("info")
@@ -170,7 +170,7 @@ func TestPreflightHintIsPlatformShaped(t *testing.T) {
 // arrangement checkDNS and checkPodmanEUID already use. This is why there is no
 // skip flag: the one legitimate reason to skip already has one.
 func TestPreflightIsPreviewableUnderDryRun(t *testing.T) {
-	m, buf := newEchoMgr(ctrCfg(config.Docker, "no"), config.Docker)
+	m, buf := newEchoMgr(ctrCfg(config.Docker, "false"), config.Docker)
 	if err := m.Preflight(context.Background()); err != nil {
 		t.Fatalf("Preflight under the Echo runner must not fail: %v", err)
 	}
@@ -196,14 +196,24 @@ func TestComposeSecretEnvNamesCannotBeSystemVars(t *testing.T) {
 	hostile := []string{"PATH", "path", "LD_PRELOAD", "ld.preload", "ld-preload", "IFS", "BASH_ENV"}
 
 	for _, name := range hostile {
-		cfg := ctrCfg(config.Docker, "yes")
+		cfg := ctrCfg(config.Docker, "true")
 		cfg.Docker.Container.Name = name
-		cfg.Admin.AdditionalUsers = []config.AdditionalUser{
+		cfg.SEMP.AdditionalUsers = []config.AdditionalUser{
 			{Username: name + "-x", Password: "p", AccessLevel: "read-only"},
 		}
+		// TLS set so the server-certificate secret is in the list too: it is built
+		// from the container name like every other name here, so leaving it out would
+		// have left the newest variable name uncovered.
+		cfg.TLS.Cert, cfg.TLS.CertKey = "certs/tls.crt", "certs/tls.key"
 		m, _, _ := newCapMgr(cfg, config.Docker)
 
-		for _, pair := range m.composeSecretEnv() {
+		// preview: this test is about NAMES, and a name does not depend on the value.
+		// Reading the certificate would need real files for no benefit.
+		env, err := m.composeSecretEnv(true)
+		if err != nil {
+			t.Fatalf("composeSecretEnv: %v", err)
+		}
+		for _, pair := range env {
 			varName, _, _ := strings.Cut(pair, "=")
 			for _, bad := range hostile {
 				if strings.EqualFold(varName, bad) {
@@ -213,7 +223,7 @@ func TestComposeSecretEnvNamesCannotBeSystemVars(t *testing.T) {
 			// The structural reason it cannot: a fixed literal suffix always
 			// remains, so the name is never only config text.
 			if !strings.Contains(varName, "_PASSWORD") && !strings.Contains(varName, "_PSK") &&
-				!strings.Contains(varName, "_PASSPHRASE") {
+				!strings.Contains(varName, "_PASSPHRASE") && !strings.Contains(varName, "_SERVERCERTIFICATE") {
 				t.Errorf("child variable %q carries no fixed suffix; the collision guarantee rests on that suffix", varName)
 			}
 		}
@@ -224,14 +234,22 @@ func TestComposeSecretEnvNamesCannotBeSystemVars(t *testing.T) {
 // above rest on: if a second code path ever starts adding variables to a child, it
 // must be audited the same way. render.ContainerSecrets is that single source.
 func TestComposeSecretEnvIsTheOnlyChildEnvironment(t *testing.T) {
-	cfg := ctrCfg(config.Docker, "yes")
+	cfg := ctrCfg(config.Docker, "true")
 	m, _, _ := newCapMgr(cfg, config.Docker)
-	if got, want := len(m.composeSecretEnv()), len(render.ContainerSecrets(cfg, config.Docker)); got != want {
+	env, err := m.composeSecretEnv(false)
+	if err != nil {
+		t.Fatalf("composeSecretEnv: %v", err)
+	}
+	if got, want := len(env), len(render.ContainerSecrets(cfg, config.Docker)); got != want {
 		t.Errorf("composeSecretEnv built %d variables from %d secrets; it must pass through exactly the "+
 			"secrets render declares, adding none of its own", got, want)
 	}
 	// And every value is masked in any display path (§3).
-	masked := engine.MaskEnv(m.composeSecretEnv())
+	raw, err := m.composeSecretEnv(false)
+	if err != nil {
+		t.Fatalf("composeSecretEnv: %v", err)
+	}
+	masked := engine.MaskEnv(raw)
 	if strings.Contains(masked, "secret-pass") || strings.Contains(masked, "test-psk") {
 		t.Errorf("MaskEnv leaked a secret value: %q", masked)
 	}

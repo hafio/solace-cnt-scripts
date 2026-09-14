@@ -185,7 +185,7 @@ func TestValidateScalingTierRejectsOffTier(t *testing.T) {
 		}
 		// Every platform reads this value, so every platform rejects it.
 		for _, p := range []Platform{Docker, Podman} {
-			cc := validContainerConfig(p, "yes")
+			cc := validContainerConfig(p, "true")
 			cc.Scaling.MaxConnections = v
 			if err := cc.Validate(p); err == nil || !strings.Contains(err.Error(), "scaling.maxConnections must be one of") {
 				t.Errorf("%s maxConnections %d: expected the tier error, got: %v", p, v, err)
@@ -203,7 +203,7 @@ func TestValidateScalingTierAcceptsEveryTier(t *testing.T) {
 			t.Errorf("k8s tier %d rejected: %v", v, err)
 		}
 		for _, p := range []Platform{Docker, Podman} {
-			cc := validContainerConfig(p, "yes")
+			cc := validContainerConfig(p, "true")
 			cc.Scaling.MaxConnections = v
 			cc.ApplyDefaults(p)
 			if err := cc.Validate(p); err != nil {
@@ -239,8 +239,8 @@ func TestValidateMaxPoolRemoved(t *testing.T) {
 		cfg func() *Config
 	}{
 		{K8s, validK8sConfig},
-		{Docker, func() *Config { return validContainerConfig(Docker, "yes") }},
-		{Podman, func() *Config { return validContainerConfig(Podman, "yes") }},
+		{Docker, func() *Config { return validContainerConfig(Docker, "true") }},
+		{Podman, func() *Config { return validContainerConfig(Podman, "true") }},
 	} {
 		c := tc.cfg()
 		c.Scaling.MaxPool = 10000
@@ -261,7 +261,7 @@ func TestValidateMaxPoolRemoved(t *testing.T) {
 func TestValidateContainerMem(t *testing.T) {
 	for _, p := range []Platform{Docker, Podman} {
 		// The likely mistake: the Kubernetes spelling copied across.
-		c := validContainerConfig(p, "yes")
+		c := validContainerConfig(p, "true")
 		setContainerMem(c, p, "3410Mi")
 		err := c.Validate(p)
 		if err == nil || !strings.Contains(err.Error(), ".container.mem") {
@@ -272,14 +272,14 @@ func TestValidateContainerMem(t *testing.T) {
 		}
 
 		for _, bad := range []string{"6898", "6898mb", "6g b", "-1g", "1.5g", "lots"} {
-			c := validContainerConfig(p, "yes")
+			c := validContainerConfig(p, "true")
 			setContainerMem(c, p, bad)
 			if err := c.Validate(p); err == nil {
 				t.Errorf("%s: container.mem %q was accepted", p, bad)
 			}
 		}
 		for _, good := range []string{"6898m", "512M", "2g", "4G", "1024k", "536870912b", ""} {
-			c := validContainerConfig(p, "yes")
+			c := validContainerConfig(p, "true")
 			setContainerMem(c, p, good)
 			if err := c.Validate(p); err != nil {
 				t.Errorf("%s: container.mem %q was rejected: %v", p, good, err)

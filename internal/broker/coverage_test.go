@@ -268,9 +268,11 @@ func TestExecCLIRunError(t *testing.T) {
 	if err := o.ExecCLI(context.Background(), config.Primary, local); err == nil {
 		t.Error("ExecCLI should return an error when the CLI run fails")
 	}
-	// Cleanup is still attempted even on run failure.
-	if !ranContains(ft, "rm", "-f") {
-		t.Error("ExecCLI should clean up its script even when the run errored")
+	// Cleanup is baked into the skeleton's own trap now, not a separate rm -f Run
+	// call -- it is issued unconditionally as part of the one exec, run failure or
+	// not.
+	if len(ft.outputs) != 1 || !strings.Contains(ft.outputs[0].argv[2], "trap cleanup") {
+		t.Errorf("ExecCLI skeleton must still carry its cleanup trap when the run errored: %v", ft.outputs)
 	}
 }
 
@@ -362,7 +364,7 @@ func TestLeaderPollCondError(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	if err := o.Leader(context.Background()); err == nil {
 		t.Error("Leader should return the poll condition error")
 	}
@@ -378,7 +380,7 @@ func TestRedundancyShowRDError(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	if err := o.Redundancy(context.Background()); err == nil {
 		t.Error("Redundancy should surface the initial show redundancy error")
 	}
@@ -392,7 +394,7 @@ func TestRedundancyUnhealthyPrimary(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, buf := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, buf := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	if err := o.Redundancy(context.Background()); err == nil {
 		t.Error("Redundancy should fail when the Primary is not healthy")
 	}
@@ -416,28 +418,57 @@ func TestRedundancyNeitherActive(t *testing.T) {
 		}
 		return []byte(mk("Backup", "Mate Active")), nil // backup also not locally active
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	if err := o.Redundancy(context.Background()); err == nil {
 		t.Error("Redundancy should fail when neither node is active")
 	}
 }
 
-// --- RunCLI upload error -----------------------------------------------------
+// --- CLI primitive failure branches ------------------------------------------
 
-// TestRunCLIUploadError closes the shared RunCLI primitive's upload-failure
-// branch: every config/verify op is built on RunCLI, so a broker-side upload
-// failure (network blip, full disk) must stop before the CLI binary is ever
-// invoked, wrapped with the script name -- not silently continue to exec a
-// script that never arrived.
-func TestRunCLIUploadError(t *testing.T) {
+// TestRunCLIReadUploadError closes the upload-failure branch of runCLIRead, the
+// read half of this package's CLI channel: a broker-side upload failure (network
+// blip, full disk) must stop before the CLI binary is ever invoked, wrapped with
+// the script name -- not silently continue to exec a script that never arrived.
+//
+// This property used to be asserted against RunCLI, which had the same
+// upload-then-exec shape. RunCLI no longer does: it sends ONE call, and the
+// window this guards -- between writing the script and running it -- exists only
+// here now. So the test moved rather than went away; runCLIRead is the last thing
+// in the package that can exec a script it failed to write.
+func TestRunCLIReadUploadError(t *testing.T) {
 	ut := &uploadErrTransport{fakeTransport: &fakeTransport{}, err: errors.New("upload boom")}
 	o := &Ops{T: ut, Cfg: &config.Config{}, Out: &bytes.Buffer{}, PollInterval: 0}
-	_, err := o.RunCLI(context.Background(), config.Primary, "probe", "body")
+	_, err := o.runCLIRead(context.Background(), config.Primary, "probe", "body")
 	if err == nil || !strings.Contains(err.Error(), "upload cli script") {
-		t.Errorf("RunCLI upload error = %v, want wrapped %q", err, "upload cli script")
+		t.Errorf("runCLIRead upload error = %v, want wrapped %q", err, "upload cli script")
 	}
 	if len(ut.fakeTransport.outputs) != 0 {
-		t.Error("RunCLI must not exec the CLI binary when the upload fails")
+		t.Error("runCLIRead must not exec the CLI binary when the upload fails")
+	}
+}
+
+// TestRunCLIExecError is RunCLI's counterpart, closing its transport-failure
+// branch. RunCLI writes the script, wraps it and runs it in ONE call, so there is
+// no longer a window for the tool to exec a script whose write failed -- the shell
+// either got both or neither. What still has to be asserted is that a failure of
+// that single call is reported rather than swallowed, wrapped with the script
+// name, and that it really was ONE call.
+//
+// The call's SHAPE -- body on stdin, no Upload, no separate cleanup -- is
+// TestRunCLIWrapsWithStopOnError's job on the success path and is not repeated
+// here.
+func TestRunCLIExecError(t *testing.T) {
+	ft := &fakeTransport{responder: func(config.Role, []string, []byte) ([]byte, error) {
+		return nil, errors.New("exec boom")
+	}}
+	o := &Ops{T: ft, Cfg: &config.Config{}, Out: &bytes.Buffer{}, PollInterval: 0}
+	_, err := o.RunCLI(context.Background(), config.Primary, "probe", "body")
+	if err == nil || !strings.Contains(err.Error(), "run cli script") {
+		t.Errorf("RunCLI exec error = %v, want wrapped %q", err, "run cli script")
+	}
+	if len(ft.outputs) != 1 {
+		t.Errorf("RunCLI made %d transport calls, want exactly 1", len(ft.outputs))
 	}
 }
 
@@ -582,7 +613,7 @@ func TestDisableDefaultUsersShowVPNError(t *testing.T) {
 	if err := o.DisableDefaultUsers(context.Background(), config.Primary); err == nil {
 		t.Error("DisableDefaultUsers should return the show-vpn error")
 	}
-	if ft.hasUpload(cliScriptPath("disable-default-usernames")) {
+	if hasCall(ft, "disable-default-usernames") {
 		t.Error("DisableDefaultUsers must not disable anything when the VPN listing fails")
 	}
 }
@@ -632,28 +663,6 @@ func TestProductKeysRunCLIErrorStopsLoop(t *testing.T) {
 }
 
 // --- AdditionalUsers transport-level error -----------------------------------
-
-// TestAdditionalUsersRunCLITransportError closes the transport-level failure
-// branch: unlike TestAdditionalUsersReportsExistingUser (RunCLI succeeds; the
-// broker's transcript merely contains an error string), this is a hard exec
-// failure -- the deferred removeCLI must still delete the uploaded script,
-// which carries every plaintext password.
-func TestAdditionalUsersRunCLITransportError(t *testing.T) {
-	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
-		if matchCLI(argv, "additional-users") {
-			return nil, errors.New("exec boom")
-		}
-		return nil, nil
-	}}
-	o, _ := newTestOps(t, &config.Config{}, ft)
-	err := o.AdditionalUsers(context.Background(), config.Primary, appUsers())
-	if err == nil || !strings.Contains(err.Error(), "exec boom") {
-		t.Errorf("AdditionalUsers transport error = %v, want wrapped %q", err, "exec boom")
-	}
-	if !ft.removed(cliScriptPath("additional-users")) {
-		t.Error("a hard transport failure must still remove the uploaded script")
-	}
-}
 
 // --- ExecCLI UploadFile error -------------------------------------------------
 
@@ -727,7 +736,7 @@ func TestLeaderRevertActivityError(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	if err := o.Leader(context.Background()); err == nil {
 		t.Error("Leader should return the revert-activity error")
 	}
@@ -753,7 +762,7 @@ func TestLeaderAssertLeaderError(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, buf := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, buf := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	if err := o.Leader(context.Background()); err == nil {
 		t.Error("Leader should return the assert-leader error")
 	}
@@ -782,7 +791,7 @@ func TestRedundancyReleaseError(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	if err := o.Redundancy(context.Background()); err == nil {
 		t.Error("Redundancy should return the release error")
 	}
@@ -823,7 +832,7 @@ func TestRedundancyBackupShowError(t *testing.T) {
 		}
 		return nil, errors.New("backup show boom") // Redundancy's post-release read
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	if err := o.Redundancy(context.Background()); err == nil {
 		t.Error("Redundancy should return the post-release Backup show-rd error")
 	}
@@ -846,7 +855,7 @@ func TestRedundancyRevertToPrimaryError(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	if err := o.Redundancy(context.Background()); err == nil {
 		t.Error("Redundancy should return the revertToPrimary error")
 	}
@@ -863,7 +872,7 @@ func TestReleaseToBackupReleaseError(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	if err := o.releaseToBackup(context.Background()); err == nil {
 		t.Error("releaseToBackup should return the release RunCLI error")
 	}
@@ -885,12 +894,12 @@ func TestReleaseToBackupReleasedTimeout(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	o.PollAttempts = 2
 	if err := o.releaseToBackup(context.Background()); err == nil {
 		t.Error("releaseToBackup should time out when the release never converges")
 	}
-	if ft.hasUpload(cliScriptPath("no-release")) {
+	if hasCall(ft, "no-release") {
 		t.Error("releaseToBackup must not send no-release when released never became true")
 	}
 }
@@ -909,7 +918,7 @@ func TestReleaseToBackupNoReleaseError(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	if err := o.releaseToBackup(context.Background()); err == nil {
 		t.Error("releaseToBackup should return the no-release RunCLI error")
 	}
@@ -926,7 +935,7 @@ func TestReleaseToBackupUnreleasedTimeout(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	o.PollAttempts = 2
 	if err := o.releaseToBackup(context.Background()); err == nil {
 		t.Error("releaseToBackup should time out when un-released never converges")
@@ -945,7 +954,7 @@ func TestRevertToPrimaryRunCLIError(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: "yes"}, ft)
+	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
 	if err := o.revertToPrimary(context.Background()); err == nil {
 		t.Error("revertToPrimary should return the revert-activity RunCLI error")
 	}

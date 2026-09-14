@@ -14,7 +14,7 @@ import (
 // container platforms. The container transport is node-local (one broker per
 // host), so a coordinated HA operation started on the primary host has exactly
 // one way to touch the backup: an HTTP request this host's own broker container
-// sends to the mate's SEMP service, addressed by nodes.backup.ip. Every helper
+// sends to the mate's SEMP service, addressed by redundancy.backup.addr. Every helper
 // here execs curl with role config.Primary -- the only role the container
 // transport reaches -- and reaches the mate by URL, never by role. Credentials
 // and request bodies ride a curl config file on stdin (curl -K -), never argv
@@ -114,13 +114,40 @@ func curlConfigLine(key, value string) string {
 // curlConfigLine's `key = "value"` form, which a boolean option does not take.
 func curlConfigFlag(key string) string { return key + "\n" }
 
-// sempCurl execs curl in THIS host's broker container against url, with the
-// admin credentials plus the caller's extra config lines (e.g. a POST body) on
-// stdin via `curl -K -` -- nothing secret reaches argv or an echoed command (S3).
-// The role is always config.Primary: every caller has already asserted this
-// host is the primary, and the mate is addressed by the URL alone.
-func (o *Ops) sempCurl(ctx context.Context, url string, extraLines ...string) ([]byte, error) {
-	cfg := curlConfigLine("user", o.Cfg.Admin.User+":"+o.Cfg.Admin.Pass) + strings.Join(extraLines, "")
+// Credential is the login one SEMP request is made with. It is a parameter rather
+// than a field read off the config because sempCurl now serves two different brokers:
+// the HA mate, which shares this deployment's admin password, and a REPLICATION mate,
+// which is a separate broker whose password this env file states separately.
+//
+// Passing it explicitly is what stops the second case silently sending the first case's
+// password: a DR site reached with the local broker's credentials would fail to
+// authenticate at best, and at worst succeed because the two happen to match, hiding a
+// misconfiguration until the day they diverge.
+type Credential struct {
+	User string
+	Pass string
+}
+
+// LocalAdmin is this deployment's own admin login, for the HA paths that have always
+// used it. AdminUser is a constant because it is the BROKER's name for the account, not
+// a schema field (config.AdminUser).
+func (o *Ops) LocalAdmin() Credential {
+	return Credential{User: config.AdminUser, Pass: o.Cfg.SEMP.AdminPass}
+}
+
+// sempCurl execs curl in THIS host's broker container against url, with cred plus the
+// caller's extra config lines (e.g. a POST body) on stdin via `curl -K -` -- nothing
+// secret reaches argv or an echoed command (S3).
+//
+// The role is always config.Primary: the request is issued FROM this host, and which
+// broker it reaches is decided by the URL alone. That is what lets one primitive serve
+// both an HA mate on the same rack and a replication mate across a WAN.
+//
+// The `user` line is written HERE and nowhere else. A caller could otherwise pass its
+// own through extraLines and rely on curl's behaviour for a repeated key, which is
+// unspecified for this case and would make which password was sent depend on ordering.
+func (o *Ops) sempCurl(ctx context.Context, url string, cred Credential, extraLines ...string) ([]byte, error) {
+	cfg := curlConfigLine("user", cred.User+":"+cred.Pass) + strings.Join(extraLines, "")
 	out, err := o.T.OutputInput(ctx, config.Primary, []byte(cfg), "curl", "-is", "-K", "-", url)
 	if err != nil {
 		return nil, fmt.Errorf("SEMP request to %s failed: %w", url, err)
@@ -138,7 +165,7 @@ type mateTarget struct {
 	warn     string
 }
 
-// mateSEMPTarget resolves nodes.backup.ip and the mate's SEMP port into a
+// mateSEMPTarget resolves redundancy.backup.addr and the mate's SEMP port into a
 // mateTarget, preferring TLS: without it, the admin password crosses the
 // network to the mate in cleartext. A mapped TLS port with tls.cas configured
 // verifies the mate's certificate against them; a mapped TLS port with no CAs
@@ -151,9 +178,9 @@ type mateTarget struct {
 // machine, this request crosses the network between hosts, so the plaintext
 // case always carries a warning naming the fix.
 func (o *Ops) mateSEMPTarget() (mateTarget, error) {
-	ip := o.Cfg.Nodes.Backup.IP
+	ip := o.Cfg.Redundancy.Backup.Addr
 	if ip == "" {
-		return mateTarget{}, fmt.Errorf("nodes.backup.ip is not set; the coordinated redundancy/leader steps need it to reach " +
+		return mateTarget{}, fmt.Errorf("redundancy.backup.addr is not set; the coordinated redundancy/leader steps need it to reach " +
 			"the mate's SEMP service (see env/sample.yaml)")
 	}
 	port, tls, err := sempPort(o.Cfg, o.Platform)
@@ -170,23 +197,32 @@ func (o *Ops) mateSEMPTarget() (mateTarget, error) {
 				ip, port, string(o.Platform)),
 		}, nil
 	}
-	if len(o.Cfg.TLS.CAs) == 0 {
-		return mateTarget{
-			url:      fmt.Sprintf("https://%s:%d", ip, port),
-			curlOpts: []string{curlConfigFlag("insecure")},
-			warn: fmt.Sprintf("not verifying the mate's TLS certificate at %s:%d -- set tls.cas to the CA(s) that "+
-				"signed it to verify this connection", ip, port),
-		}, nil
-	}
+	// The TLS leg does not verify the mate's certificate, and tls.cas cannot make
+	// it: those are paths on THIS host, while the curl that would read them is
+	// exec'd inside the broker container (sempCurl), where the tool mounts no CA
+	// material at all -- domain CAs reach the broker through
+	// `config apply domain-certs`, which installs them into the broker's own trust
+	// store rather than onto a filesystem curl can point at.
+	//
+	// This used to pass tls.cas[0] to `cacert`, which made one field mean a host
+	// path to every other reader and an in-broker path to this one. It could not
+	// have worked: a relative value resolved against curl's working directory
+	// inside the container, and once host paths resolve against the env file's
+	// directory it is an absolute host path that certainly does not exist there.
+	// So the honest shape is one branch, always warning, rather than a verified
+	// branch that never verified.
 	return mateTarget{
 		url:      fmt.Sprintf("https://%s:%d", ip, port),
-		curlOpts: []string{curlConfigLine("cacert", o.Cfg.TLS.CAs[0])},
+		curlOpts: []string{curlConfigFlag("insecure")},
+		warn: fmt.Sprintf("not verifying the mate's TLS certificate at %s:%d -- the admin credentials are "+
+			"encrypted in transit but the mate's identity is not checked. tls.cas cannot verify this leg: "+
+			"curl runs inside the broker container, where those host files are not mounted", ip, port),
 	}, nil
 }
 
 // MateSEMPPreflight is the read-only reachability check every coordinated flow
 // runs before its first mutation: the same GET Login sends to localhost, aimed
-// at the mate. It is exported so internal/tools/itest can run it standalone --
+// at the mate. It is exported so a caller can run it standalone --
 // the claim that this path and the port resolution behind it are right has never
 // been checked against a live broker, and reaching it only through
 // RedundancyCoordinated would mean failing over a real HA group to find out.
@@ -205,14 +241,14 @@ func (o *Ops) MateSEMPPreflight(ctx context.Context) error {
 		o.progress().Warn("%s", target.warn)
 	}
 	url := target.url + "/SEMP/v2/monitor"
-	out, err := o.sempCurl(ctx, url, target.curlOpts...)
+	out, err := o.sempCurl(ctx, url, o.LocalAdmin(), target.curlOpts...)
 	if err != nil {
 		return fmt.Errorf("mate SEMP preflight: %w -- check that the SEMP port is reachable host-to-host (a working "+
-			"HA group does not need it open) and that nodes.backup.ip is the mate's address", err)
+			"HA group does not need it open) and that redundancy.backup.addr is the mate's address", err)
 	}
 	if !anyHTTP2xx(string(out)) {
 		return fmt.Errorf("mate SEMP preflight: login to %s failed (%s) -- check the admin credentials, "+
-			"nodes.backup.ip and any firewall between the hosts", url, lastHTTPStatus(string(out)))
+			"redundancy.backup.addr and any firewall between the hosts", url, lastHTTPStatus(string(out)))
 	}
 	return nil
 }
@@ -221,7 +257,7 @@ func (o *Ops) MateSEMPPreflight(ctx context.Context) error {
 // need (everything else runs on the primary, matching the k8s sequences):
 // admin-level `redundancy revert-activity` on the mate, over SEMP v1.
 //
-// Exported for internal/tools/itest, which sends it to a mate that is ALREADY
+// Exported so it can be driven against a mate that is ALREADY
 // standby -- the case revertActivityMateBody's own comment flags as unverified,
 // and the only way to learn whether this RPC is idempotent without moving
 // activity on a live group. A caller doing that must confirm the mate is standby
@@ -241,13 +277,14 @@ func (o *Ops) MateRevertActivity(ctx context.Context) error {
 		o.progress().Warn("%s", target.warn)
 	}
 	url := target.url + "/SEMP"
-	out, err := o.sempCurl(ctx, url, append(target.curlOpts, curlConfigLine("data", revertActivityMateBody()))...)
+	out, err := o.sempCurl(ctx, url, o.LocalAdmin(),
+		append(target.curlOpts, curlConfigLine("data", revertActivityMateBody()))...)
 	if err != nil {
 		return err
 	}
 	if !anyHTTP2xx(string(out)) {
 		return fmt.Errorf("mate revert-activity request to %s failed (%s) -- check the admin credentials, "+
-			"nodes.backup.ip and any firewall between the hosts", url, lastHTTPStatus(string(out)))
+			"redundancy.backup.addr and any firewall between the hosts", url, lastHTTPStatus(string(out)))
 	}
 	if !sempV1OK(out) {
 		return fmt.Errorf("mate rejected the revert-activity RPC; its reply:\n%s", httpBody(out))
@@ -257,12 +294,22 @@ func (o *Ops) MateRevertActivity(ctx context.Context) error {
 
 // revertActivityMateBody is the SEMP v1 RPC equivalent of the CLI's admin-level
 // `redundancy revert-activity` (revertActivityConfigureScript), POSTed to the
-// mate's /SEMP endpoint. The semp-version attribute is deliberately omitted:
-// current brokers ignore it, older releases fall back to their latest installed
-// schema, and leaving it out keeps the body quote-free inside a curl config
-// `data` line. NEEDS VERIFICATION ON A LIVE BROKER: the /SEMP path, the
-// ok-reply shape sempV1OK matches, and whether reverting a mate that is already
-// standby returns code="ok" (idempotent) or a benign error needing a carve-out.
+// mate's /SEMP endpoint.
+//
+// Three of the four unknowns here are now settled against the broker's own schemas
+// (semp/semp-rpc-soltr.xsd and semp-rpc-reply-soltr.xsd, captured from 10.26.0.8827):
+//
+//   - the request path is exactly rpc > admin > redundancy > revert-activity;
+//   - omitting the semp-version attribute is schema-legal, not a gamble -- the request
+//     schema declares it `use="optional"` with the broker's own version as the default,
+//     which is also what keeps the body quote-free inside a curl config `data` line;
+//   - the reply carries <execute-result code="ok|fail"> with optional reason/reasonCode,
+//     so sempV1OK's match on code="ok" is the right success test.
+//
+// STILL NEEDS VERIFICATION ON A LIVE BROKER: the /SEMP HTTP path itself (the XSDs
+// describe the payload, not the endpoint), and whether reverting a mate that is
+// ALREADY standby returns code="ok" (idempotent) or a benign failure needing a
+// carve-out here.
 func revertActivityMateBody() string {
 	return "<rpc><admin><redundancy><revert-activity/></redundancy></admin></rpc>"
 }

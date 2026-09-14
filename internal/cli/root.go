@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 
 	"solace/internal/config"
@@ -19,27 +17,18 @@ func newRootCmd(app *App) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "solace-util",
 		Short: "Deploy and operate Solace PubSub+ brokers on Kubernetes, Docker, or Podman",
-		Long: "solace-util is a single CLI for deploying and operating Solace PubSub+ Event Brokers.\n" +
-			"It presents the same lifecycle verbs on every platform, and every verb names\n" +
-			"what it acts on -- run a verb on its own to see what it can act on:\n\n" +
-			"  check deploy -> prepare all -> deploy all     build it\n" +
-			"  config ...                                    POST-DEPLOYMENT, over the broker CLI\n" +
-			"  check semp-login / smoke redundancy           prove it works\n" +
-			"  stop broker / start broker                    pause it without removing it\n" +
-			"  remove all                                    tear it down\n\n" +
-			"The operator is cluster-scoped and shared, so it is installed and removed on\n" +
-			"its own: `deploy operator`, `remove operator`.\n\n" +
-			"`generate` renders any artifact to stdout without applying it -- that is how\n" +
-			"you see what a command would send before you send it.\n\n" +
-			"Every command takes -e/--env <file>, searched in the current directory then\n" +
-			"./env. The platform comes from that file: whichever of kubernetes:, docker:\n" +
-			"or podman: it declares is the one driven. A file declaring more than one asks\n" +
-			"which to use, and --platform kubernetes|docker|podman (kube|dk|pm) answers that\n" +
-			"up front. A few commands apply to only one platform; their help says so.\n\n" +
-			"No env file yet? `examples <platform>` writes one to start from, and\n" +
-			"`examples full` prints the whole annotated schema.\n\n" +
-			"Coming from the bash scripts? 'solace-util convert <bash-env-file>' turns an old\n" +
-			"env file into the YAML this reads.",
+		Long: "Deploy and operate Solace PubSub+ Event Brokers from one YAML env file, with the\n" +
+			"same commands on every platform. Name the thing, then the verb:\n" +
+			"\n" +
+			"  broker <verb>      the broker this env file describes\n" +
+			"  operator <verb>    the cluster-scoped EventBroker Operator (kubernetes only)\n" +
+			"  validate           check the whole env file\n" +
+			"  examples           write a starting env file\n" +
+			"\n" +
+			"Every command takes -e/--env <file>; the platform comes from that file, or from\n" +
+			"--platform kubernetes|docker|podman when it declares more than one.\n" +
+			"\n" +
+			"Exit status: 0 worked, 2 bad command line or env file, 1 anything else.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -48,6 +37,28 @@ func newRootCmd(app *App) *cobra.Command {
 	// without executing it. Disabling cobra's is explicit rather than relying on it
 	// standing down for a same-named command of ours.
 	root.CompletionOptions.DisableDefaultCmd = true
+	// Cobra runs a WINDOWS-ONLY pre-exec hook that decides whether this binary was
+	// double-clicked in Explorer, so it can print "this is a command line application"
+	// instead of running. Setting the text to "" is cobra's own switch for turning that
+	// off, and it belongs off here for two independent reasons.
+	//
+	// It is wrong for this tool. `solace-util` is driven from a terminal, from scripts
+	// and from CI; the message is for a GUI user who has no console, and a tool that
+	// refuses to run because of how it was launched is a failure mode nobody here wants.
+	//
+	// And it is not free. The check walks the OS process table on every single
+	// Execute(): `syscall.Getppid` plus a snapshot scan to find the parent. A CPU
+	// profile of internal/cli put it at 37% of the whole suite -- 10.6 seconds of a
+	// 13.8-second run, and 85% of everything cobra itself did, against 1.8 seconds for
+	// the commands under test. Tests pay it once per command they run and a real
+	// invocation pays it once, so this is a startup cost for operators too, not just a
+	// test-suite one.
+	cobra.MousetrapHelpText = ""
+	// A flag pflag refuses -- unknown, or a bad value for its type -- is a usage
+	// error, not a runtime failure, and must exit 2 like every other one. Cobra
+	// resolves this hook through the nearest ancestor that sets it, so setting it
+	// on root covers every command in the tree.
+	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return asUsage(err) })
 
 	root.PersistentFlags().StringVarP(&app.EnvName, "env", "e", config.EnvFileDefault, "env file name, searched in the base dir then <base-dir>/env; a value with a directory is used as-is")
 	root.PersistentFlags().StringVar(&app.BaseDir, "base-dir", "", "directory searched for the env file, and holding env/ (default: current directory)")
@@ -66,7 +77,7 @@ func newRootCmd(app *App) *cobra.Command {
 	addCommands(root, app)
 	root.AddCommand(
 		newConvertCmd(app),
-		newExamplesCmd(),
+		newExamplesCmd(app),
 		newCompletionCmd(),
 		newVersionCmd(),
 	)
@@ -74,11 +85,9 @@ func newRootCmd(app *App) *cobra.Command {
 	// and the collision check that comes with them can only be complete once every
 	// command is in place.
 	applyAliases(root)
+	// Also last, and for the same reason: markUsageArgs wraps every Args validator in
+	// the tree so a refusal from one exits 2 rather than 1. It has to run after every
+	// command is attached, and after applyAliases, so nothing added later is missed.
+	markUsageArgs(root)
 	return root
-}
-
-// notImplemented is a placeholder for handlers whose downstream package is not
-// wired yet. It fails loud so a half-built command can never appear to succeed.
-func notImplemented(name string) error {
-	return fmt.Errorf("%s: not implemented yet", name)
 }

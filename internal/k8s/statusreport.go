@@ -331,9 +331,7 @@ func (c *Cluster) OperatorReport(ctx context.Context) error {
 
 // operatorRunningImage names the image the controller is running, or says so when
 // the deployment carries no container this tool can read.
-func operatorRunningImage(containers []struct {
-	Image string `json:"image"`
-}) string {
+func operatorRunningImage(containers []containerSpec) string {
 	if len(containers) == 0 {
 		return "(no container reported)"
 	}

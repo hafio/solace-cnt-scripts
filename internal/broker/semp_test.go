@@ -191,17 +191,21 @@ func TestLastHTTPStatus(t *testing.T) {
 
 // --- preflight -----------------------------------------------------------------
 
-// TestMateSEMPPreflightSuccess covers host networking with a server certificate
-// and no tls.cas: the broker serves a TLS SEMP listener, so the mate is reached
-// over https on the TLS port with certificate verification disabled and a
-// warning naming tls.cas as the fix. The certificate is set explicitly because
-// it is the precondition -- without it the answer is plaintext, which
-// TestMateSEMPPreflightPlaintextWarns covers.
+// TestMateSEMPPreflightSuccess covers host networking with a server certificate:
+// the broker serves a TLS SEMP listener, so the mate is reached over https on the
+// TLS port, with the mate's certificate NOT verified and a warning saying so. The
+// certificate is set explicitly because it is the precondition -- without it the
+// answer is plaintext, which TestMateSEMPPreflightPlaintextWarns covers.
+//
+// The warning explains that tls.cas cannot help here rather than offering it as
+// the fix: those are host files and this request is made by a curl running inside
+// the broker container. TestMateRevertActivityTLSIgnoresTLSCAs pins that setting
+// them changes nothing.
 func TestMateSEMPPreflightSuccess(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte(sempOK), nil
 	}}
-	o, _ := newTestOps(t, localCfg("yes"), ft)
+	o, _ := newTestOps(t, localCfg("true"), ft)
 	o.Cfg.TLS = serverCert
 	var logs []string
 	o.Log = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
@@ -213,10 +217,10 @@ func TestMateSEMPPreflightSuccess(t *testing.T) {
 		t.Errorf("preflight calls = %v, want one GET of the mate's monitor endpoint over TLS", calls)
 	}
 	if !strings.Contains(calls[0].stdin, "insecure") {
-		t.Errorf("preflight stdin = %q, want the insecure option when tls.cas is unset", calls[0].stdin)
+		t.Errorf("preflight stdin = %q, want the insecure option: this leg cannot verify the mate", calls[0].stdin)
 	}
-	if !strings.Contains(strings.Join(logs, "\n"), "tls.cas") {
-		t.Errorf("preflight logs = %q, want a warning naming tls.cas", logs)
+	if !strings.Contains(strings.Join(logs, "\n"), "not verifying") {
+		t.Errorf("preflight logs = %q, want a warning that the mate's certificate is not verified", logs)
 	}
 	assertNoPasswordInArgv(t, ft, "adminpw")
 }
@@ -230,7 +234,7 @@ func TestMateSEMPPreflightPlaintextWarns(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte(sempOK), nil
 	}}
-	o, _ := newTestOps(t, localCfg("yes"), ft) // no TLS configured
+	o, _ := newTestOps(t, localCfg("true"), ft) // no TLS configured
 	var logs []string
 	o.Log = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 	if err := o.MateSEMPPreflight(context.Background()); err != nil {
@@ -252,11 +256,11 @@ func TestMateSEMPPreflightPlaintextWarns(t *testing.T) {
 
 func TestMateSEMPPreflightMissingIP(t *testing.T) {
 	ft := &fakeTransport{}
-	o, _ := newTestOps(t, localCfg("yes"), ft)
-	o.Cfg.Nodes.Backup.IP = ""
+	o, _ := newTestOps(t, localCfg("true"), ft)
+	o.Cfg.Redundancy.Backup.Addr = ""
 	err := o.MateSEMPPreflight(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "nodes.backup.ip") {
-		t.Errorf("MateSEMPPreflight missing-IP err = %v, want it to name nodes.backup.ip", err)
+	if err == nil || !strings.Contains(err.Error(), "redundancy.backup.addr") {
+		t.Errorf("MateSEMPPreflight missing-IP err = %v, want it to name redundancy.backup.addr", err)
 	}
 	if len(ft.outputs) != 0 {
 		t.Error("MateSEMPPreflight must refuse before any transport call without a mate address")
@@ -267,9 +271,9 @@ func TestMateSEMPPreflightNon2xx(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte("HTTP/1.1 401 Unauthorized\r\n\r\n"), nil
 	}}
-	o, _ := newTestOps(t, localCfg("yes"), ft)
+	o, _ := newTestOps(t, localCfg("true"), ft)
 	err := o.MateSEMPPreflight(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "nodes.backup.ip") {
+	if err == nil || !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "redundancy.backup.addr") {
 		t.Errorf("MateSEMPPreflight non-2xx err = %v, want the status and the actionable causes", err)
 	}
 }
@@ -278,7 +282,7 @@ func TestMateSEMPPreflightTransportError(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return nil, errors.New("connection refused")
 	}}
-	o, _ := newTestOps(t, localCfg("yes"), ft)
+	o, _ := newTestOps(t, localCfg("true"), ft)
 	err := o.MateSEMPPreflight(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "connection refused") ||
 		!strings.Contains(err.Error(), "host-to-host") {
@@ -295,7 +299,7 @@ func TestMateRevertActivitySuccess(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte(sempOK), nil
 	}}
-	o, _ := newTestOps(t, localCfg("yes"), ft)
+	o, _ := newTestOps(t, localCfg("true"), ft)
 	o.Cfg.TLS = serverCert
 	var logs []string
 	o.Log = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
@@ -327,6 +331,59 @@ func TestMateRevertActivitySuccess(t *testing.T) {
 	assertNoPasswordInArgv(t, ft, "adminpw")
 }
 
+// TestSempCurlSendsTheCallersCredential proves the login is a parameter rather than a
+// field read off the local config.
+//
+// sempCurl used to hardcode config.AdminUser + Cfg.SEMP.AdminPass, which was correct
+// while the only remote it reached was the HA mate -- the same deployment, the same
+// password. A REPLICATION mate is a different broker with its own credential, so leaving
+// it hardcoded would have sent this deployment's admin password across a WAN to a foreign
+// broker: a failure at best, and at worst a success because the two happened to match,
+// hiding the misconfiguration until the day they diverged.
+//
+// The assertion is two-sided on purpose. Seeing the caller's password is not enough --
+// the local one must be ABSENT, since a stray second `user` line would leave which
+// credential arrives depending on how curl treats a repeated key.
+func TestSempCurlSendsTheCallersCredential(t *testing.T) {
+	ft := &fakeTransport{responder: func(_ config.Role, _ []string, _ []byte) ([]byte, error) {
+		return []byte(sempOK), nil
+	}}
+	o, _ := newTestOps(t, localCfg("true"), ft)
+
+	mate := Credential{User: "admin", Pass: "dr-site-password"}
+	if _, err := o.sempCurl(context.Background(), "https://dr:1943/SEMP", mate); err != nil {
+		t.Fatalf("sempCurl: %v", err)
+	}
+	calls := curlCalls(ft)
+	if len(calls) != 1 {
+		t.Fatalf("made %d calls, want 1", len(calls))
+	}
+	if !strings.Contains(calls[0].stdin, `user = "admin:dr-site-password"`) {
+		t.Errorf("stdin = %q, want the caller's credential", calls[0].stdin)
+	}
+	if strings.Contains(calls[0].stdin, "adminpw") {
+		t.Errorf("stdin = %q, must not carry the LOCAL broker's password", calls[0].stdin)
+	}
+	if strings.Count(calls[0].stdin, "user = ") != 1 {
+		t.Errorf("stdin = %q, want exactly one user line: a repeated key makes which password "+
+			"arrives depend on curl's ordering", calls[0].stdin)
+	}
+	assertNoPasswordInArgv(t, ft, "dr-site-password")
+}
+
+// TestLocalAdminIsTheDeploymentsOwnLogin pins what the HA callers pass, so the lift
+// above cannot quietly change the credential those paths have always used.
+func TestLocalAdminIsTheDeploymentsOwnLogin(t *testing.T) {
+	o, _ := newTestOps(t, localCfg("true"), &fakeTransport{})
+	got := o.LocalAdmin()
+	if got.User != config.AdminUser {
+		t.Errorf("LocalAdmin().User = %q, want the broker's own constant %q", got.User, config.AdminUser)
+	}
+	if got.Pass != o.Cfg.SEMP.AdminPass {
+		t.Errorf("LocalAdmin().Pass = %q, want semp.adminPass", got.Pass)
+	}
+}
+
 // assertNoPasswordInArgv is the S3 boundary check every mate-SEMP path shares:
 // the admin credentials (and, where applicable, the RPC body) ride stdin
 // only -- an argv token carrying either would surface in process listings and
@@ -349,7 +406,7 @@ func TestMateRevertActivityCredsAndBodyNeverInArgv(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte(sempOK), nil
 	}}
-	o, _ := newTestOps(t, localCfg("yes"), ft)
+	o, _ := newTestOps(t, localCfg("true"), ft)
 	if err := o.MateRevertActivity(context.Background()); err != nil {
 		t.Fatalf("MateRevertActivity error: %v", err)
 	}
@@ -360,7 +417,7 @@ func TestMateRevertActivityNon2xx(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte("HTTP/1.1 500 Internal Server Error\r\n\r\n<rpc-reply><execute-result code=\"ok\"/></rpc-reply>"), nil
 	}}
-	o, _ := newTestOps(t, localCfg("yes"), ft)
+	o, _ := newTestOps(t, localCfg("true"), ft)
 	err := o.MateRevertActivity(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Errorf("MateRevertActivity non-2xx err = %v, want the HTTP status (a non-2xx ok body must not pass)", err)
@@ -371,7 +428,7 @@ func TestMateRevertActivityRPCNotOK(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte("HTTP/1.1 200 OK\r\n\r\n<rpc-reply><execute-result code=\"fail\" reason=\"denied\"/></rpc-reply>"), nil
 	}}
-	o, _ := newTestOps(t, localCfg("yes"), ft)
+	o, _ := newTestOps(t, localCfg("true"), ft)
 	err := o.MateRevertActivity(context.Background())
 	if err == nil || !strings.Contains(err.Error(), `code="fail"`) {
 		t.Errorf("MateRevertActivity RPC-not-ok err = %v, want the mate's header-stripped reply", err)
@@ -394,7 +451,7 @@ func TestMateRevertActivityBridgePlaintextOnly(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte(sempOK), nil
 	}}
-	o, _ := newTestOps(t, localCfg("yes"), ft)
+	o, _ := newTestOps(t, localCfg("true"), ft)
 	o.Platform = config.Docker
 	o.Cfg.TLS = serverCert
 	o.Cfg.Docker.Network = config.Network{Mode: "bridge", Ports: []string{"18080:8080"}}
@@ -426,7 +483,7 @@ func TestMateRevertActivityBridgeTLSNoCA(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte(sempOK), nil
 	}}
-	o, _ := newTestOps(t, localCfg("yes"), ft)
+	o, _ := newTestOps(t, localCfg("true"), ft)
 	o.Platform = config.Docker
 	o.Cfg.TLS = serverCert
 	o.Cfg.Docker.Network = config.Network{Mode: "bridge", Ports: []string{"18080:8080", "18943:1943"}}
@@ -448,15 +505,25 @@ func TestMateRevertActivityBridgeTLSNoCA(t *testing.T) {
 	assertNoPasswordInArgv(t, ft, "adminpw")
 }
 
-// TestMateRevertActivityBridgeTLSWithCA pins the fully-verified branch: a
-// bridge mapping exposing 1943 plus tls.cas configured verifies the mate's
-// certificate (--cacert) instead of disabling verification, and no warning is
-// needed since the channel is both encrypted and verified.
-func TestMateRevertActivityBridgeTLSWithCA(t *testing.T) {
+// TestMateRevertActivityTLSIgnoresTLSCAs pins that tls.cas does NOT change this
+// leg, which is the opposite of what this test asserted before.
+//
+// It used to pin a "fully verified" branch that passed tls.cas[0] to curl's
+// cacert. That branch could not have worked: curl is exec'd INSIDE the broker
+// container (Ops.sempCurl), while tls.cas names files on the host running this
+// tool, and the tool mounts no CA material into the broker at all -- domain CAs
+// are installed into the broker's own trust store by `config apply domain-certs`,
+// not onto a path curl can read. Now that host paths resolve against the env
+// file's directory, the value is unambiguously a host path, so the branch is gone
+// rather than silently pointing curl at a file that is not there.
+//
+// The warning is therefore required even with CAs configured: the channel is
+// encrypted, the mate's identity is not checked, and the operator should know.
+func TestMateRevertActivityTLSIgnoresTLSCAs(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte(sempOK), nil
 	}}
-	o, _ := newTestOps(t, localCfg("yes"), ft)
+	o, _ := newTestOps(t, localCfg("true"), ft)
 	o.Platform = config.Docker
 	o.Cfg.TLS = serverCert
 	o.Cfg.Docker.Network = config.Network{Mode: "bridge", Ports: []string{"18943:1943"}}
@@ -464,20 +531,26 @@ func TestMateRevertActivityBridgeTLSWithCA(t *testing.T) {
 	var logs []string
 	o.Log = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 	if err := o.MateRevertActivity(context.Background()); err != nil {
-		t.Fatalf("MateRevertActivity bridge TLS+CA error: %v", err)
+		t.Fatalf("MateRevertActivity bridge TLS error: %v", err)
 	}
 	post := curlCalls(ft)[0]
 	if got := post.argv[len(post.argv)-1]; got != "https://10.0.0.12:18943/SEMP" {
-		t.Errorf("bridge TLS+CA revert-activity URL = %q, want the mapped TLS host port", got)
+		t.Errorf("bridge TLS revert-activity URL = %q, want the mapped TLS host port", got)
 	}
-	if !strings.Contains(post.stdin, `cacert = "/etc/solace/ca.pem"`) {
-		t.Errorf("bridge TLS+CA stdin = %q, want the cacert option naming tls.cas", post.stdin)
+	// The important assertion: no host path reaches a curl running in the broker.
+	if strings.Contains(post.stdin, "cacert") {
+		t.Errorf("bridge TLS stdin = %q, must not carry cacert: tls.cas are host files and curl runs "+
+			"inside the broker container, where they are not mounted", post.stdin)
 	}
-	if strings.Contains(post.stdin, "insecure") {
-		t.Errorf("bridge TLS+CA stdin = %q, want verification enabled, not insecure", post.stdin)
+	if strings.Contains(post.stdin, "/etc/solace/ca.pem") {
+		t.Errorf("bridge TLS stdin = %q, must not carry a host path", post.stdin)
 	}
-	if len(logs) != 0 {
-		t.Errorf("bridge TLS+CA logs = %v, want no warning: the channel is encrypted and verified", logs)
+	if !strings.Contains(post.stdin, "insecure") {
+		t.Errorf("bridge TLS stdin = %q, want the insecure option: this leg cannot verify the mate", post.stdin)
+	}
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, "not verifying") {
+		t.Errorf("bridge TLS logs = %v, want the warning even with tls.cas set, since it changes nothing here", logs)
 	}
 	assertNoPasswordInArgv(t, ft, "adminpw")
 }
