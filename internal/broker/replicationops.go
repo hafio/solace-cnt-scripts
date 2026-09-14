@@ -34,9 +34,9 @@ import (
 // itself uses. Phase 1 below is what makes the SAME true when converging an already-running
 // broker rather than replaying a fresh capture onto an empty one.
 //
-//	PHASE 1 (mate convergence, only when the mate actually differs): shut down every VPN
-//	this broker currently reports admin-ENABLED for replication, then the removals, then
-//	the new mate lines -- one RunCLI call.
+//	PHASE 1 (mate convergence, only when the mate actually differs): disable REPLICATION
+//	on every VPN this broker currently reports admin-ENABLED for it, then the removals,
+//	then the new mate lines -- one RunCLI call.
 //
 //	PHASE 2 (per-VPN, always): for each LISTED VPN, in file order, `state <role>` -- and
 //	`no shutdown` ONLY where one is needed -- then `shutdown` for every unlisted VPN this
@@ -82,8 +82,10 @@ type ReplicationConfigResult struct {
 	// are what WOULD have been sent, not what was: nothing was written and no VPN was
 	// stopped for it.
 	MateApplied bool
-	// StoppedForMate names every VPN phase 1 shut down to satisfy the broker's
-	// mate-change precondition, sorted. Empty when MateApplied is false. Phase 2 turns
+	// StoppedForMate names every VPN phase 1 disabled REPLICATION on to satisfy the
+	// broker's mate-change precondition, sorted. The VPNs themselves are untouched and
+	// their clients stay connected -- every line either phase sends is inside the VPN's
+	// own `replication` node. Empty when MateApplied is false. Phase 2 turns
 	// the listed ones back on and leaves the rest down -- which is the same set its own
 	// unlisted pass would have shut down anyway, because both phases key on the same
 	// predicate (admin-enabled) precisely so no VPN falls between them.
@@ -321,11 +323,13 @@ func replPhase1Rejected(err error, out []byte, stopped []string) error {
 	return fmt.Errorf("phase 1 (mate convergence) was rejected by the broker: %w\n%s\n\n"+
 		"The broker stopped at that line under stop-on-error, so the rest of phase 1 was not "+
 		"applied and phase 2 (the per-VPN state) was never sent. Nothing is rolled back.\n\n"+
-		"Phase 1 sends, in order: a shutdown for each of these VPNs, then the mate removals, "+
-		"then the new mate address lines -- so WHERE it stopped decides what is true now, and "+
-		"only the broker can tell you. Some or all of these are left with replication shut "+
-		"down and will NOT be turned back on by this run: %s. If it stopped after the "+
-		"removals, this broker now holds NO mate configuration at all.\n\n"+
+		"Phase 1 sends, in order: a replication shutdown for each of these VPNs, then the "+
+		"mate removals, then the new mate address lines -- so WHERE it stopped decides what "+
+		"is true now, and only the broker can tell you. Some or all of these have replication "+
+		"disabled and will NOT have it turned back on by this run: %s. The VPNs themselves "+
+		"are untouched and their clients are still connected; what stopped is the feed to the "+
+		"mate. If it stopped after the removals, this broker now holds NO mate configuration "+
+		"at all.\n\n"+
 		"Run %s to see exactly what landed before doing anything else, then fix what the "+
 		"broker refused and run this command again.",
 		err, replTranscriptTail(out),
@@ -363,14 +367,20 @@ func replPhase2Rejected(err error, out []byte, mateApplied bool, stopped, listed
 			"had not turned all of them back on when it stopped.",
 			replVPNList(stopped, "no VPN, because none had replication enabled"))
 	}
-	// With no listed VPNs, phase 2 is doing nothing BUT shutting unlisted ones down, and
-	// saying it "applies the listed VPNs in file order" would describe work it never had.
-	body := fmt.Sprintf("Phase 2 applies the listed VPNs in file order -- %s -- shutting each "+
-		"down, setting its role, then re-enabling it; after them it shuts down every VPN the "+
-		"file does not list.", replVPNList(listed, ""))
+	// Says REPLICATION throughout, never "the VPN": everything either phase sends is
+	// inside the VPN's `replication` node, so a VPN is never itself shut down and no
+	// client connection is dropped. An operator reading this is deciding how urgent the
+	// situation is, and "your VPNs are down" is a much worse thing to believe than "the
+	// mate feed stopped".
+	//
+	// With no listed VPNs, phase 2 only disables replication for unlisted ones, so saying
+	// it "applies the listed VPNs" would describe work it never had.
+	body := fmt.Sprintf("Phase 2 sets the replication role of each listed VPN in place -- %s -- "+
+		"enabling replication only where it was off; after them it disables replication for "+
+		"every VPN the file does not list.", replVPNList(listed, ""))
 	if len(listed) == 0 {
-		body = "Phase 2 had no listed VPNs to apply, so all it sends is a shutdown for each " +
-			"VPN the env file does not name."
+		body = "Phase 2 had no listed VPNs to apply, so all it sends is a replication " +
+			"shutdown for each VPN the env file does not name."
 	}
 	return fmt.Errorf("phase 2 (per-VPN replication state) was rejected by the broker: %w\n%s\n\n"+
 		"%s\n\n%s The broker stopped at the rejected line under stop-on-error, so the VPN it "+

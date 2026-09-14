@@ -55,7 +55,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-77 test files, 1247 test functions. Three of those are not tests. Two are os/exec
+77 test files, 1248 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -67,7 +67,7 @@ launched from.
 | Package | Files | Tests |
 | --- | --- | --- |
 | internal/k8s | 18 | 200 |
-| internal/broker | 22 | 425 |
+| internal/broker | 22 | 426 |
 | internal/cli | 11 | 188 |
 | internal/config | 11 | 164 |
 | internal/container | 6 | 132 |
@@ -78,7 +78,7 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **77** | **1247** |
+| **Total** | **77** | **1248** |
 
 
 ## Coverage
@@ -825,7 +825,7 @@ Broker CLI operations over an injected transport: script generation, config step
 state machines, the primary-driven container HA variants, the SEMP mate channel, and the
 config-export/import feature's block parser, marker layer, section classification, shutdown
 injection, verification diff, replay transformations and the generated apply
-driver, and the replication mate renderers and readers. 425 tests across 22 files.
+driver, and the replication mate renderers and readers. 426 tests across 22 files.
 
 `blocks_test.go`, `sections_test.go`, `inject_test.go`, `diff_test.go`, `annotate_test.go`
 and `importops_test.go` share one fixture: `testdata/currentconfig_sample.cli`, a
@@ -1206,6 +1206,7 @@ section only when an older or hand-edited artifact still carries one.
 | `TestPlannedRolesNamesEveryListedVPN` | The caller can describe the whole move before any of it runs, which is what the exact-`yes` gate has to show |
 | `TestVPNReplicationBlockShape` | The emitted block matches the shape a capture uses, so a generated script reads beside one rather than against it. Checked for a block of ANY length rather than a fixed trio, because phase 2 usually sends one line -- `state <role>` alone -- and adds an enable only where one is needed |
 | `TestReplicationVPNLinesSetsRoleWithoutCyclingReplication` | A role is set IN PLACE -- `state <role>` alone, against a VPN that is up and replicating, with no shutdown around it. The earlier draft cycled every listed VPN down and back up, interrupting replication on each one on EVERY run, including the runs where the mate had not changed and nothing needed to stop. The contradiction was already in the tree: `setReplicationRoleScript`, which the switchover uses, always set `state` alone against a VPN its preflight requires ENABLED. Also pins the enable KEYWORD off the QUEUE column, including the two cases reading enablement got wrong, and that `force-recreate-queue` is never emitted |
+| `TestNothingEverShutsDownTheVPNItself` | The blast-radius guarantee, and the property that separates an interruption from an outage: `configure dr` disables REPLICATION and never shuts down a message-VPN. Every command either phase sends is nested inside that VPN's own `replication` node, so clients stay connected and only the feed to the mate stops. A bare `shutdown` one level higher would disconnect every client of that VPN, and on phase 1's path it would do that to every replicating VPN on the broker at once. The two forms differ by one level of indentation and nothing else, which is why this is a test rather than a comment -- the mistake reads as correct and only shows up in production. Walks the generated script the way the broker parses it, across both phases and both shapes of phase 2 |
 | `TestReplicationVPNLinesReEnablesWhatPhase1StoppedOnly` | The one case where a listed VPN that was already up still gets an enable: phase 1 stopped it to converge the mate, so this command is responsible for bringing it back. The same VPN in the same state with phase 1 skipped must produce NO enable -- that difference is the point, because the no-phase-1 run is the common one. Also pins that an unlisted VPN phase 1 already stopped is reported as disabled without a second shutdown being sent |
 | `TestMateConvergenceShutdownsIsDeterministic` | Phase 1's shutdown set -- a second map range alongside `replicationVPNLines`' own -- is sorted the same way, and is keyed on ADMIN STATE ALONE rather than `Replicating()`: a VPN enabled with no resolved role yet must still be shut down, because the broker's mate-change precondition is about enablement, not role. `#config-sync` (admin `-`) never appears |
 | `TestConfigureReplicationReadsTypeOffReadMateConfig` | The broker type comes off `readMateConfig`'s own `show replication` round trip -- its echoed login banner -- not a dedicated call, so `Ops.brokerType` is gone. The responder answers only the scripts the command actually needs, with no `banner` case, which is what proves nothing else was asked for. It drives LISTED VPNs, because phase 1's own shutdowns now cover the unlisted ones and a run with nothing listed would correctly send no phase-2 chunk |

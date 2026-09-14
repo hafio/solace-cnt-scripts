@@ -89,7 +89,8 @@ func confirmReplicationConfig(a *App, self, mate config.ReplSite) bool {
 	}
 	sort.Strings(names)
 	step("if this broker's mate configuration does not already match the env file, " +
-		"replication is stopped on EVERY VPN this broker is replicating -- including ones " +
+		"REPLICATION is stopped on EVERY VPN this broker is replicating -- the VPNs " +
+		"themselves keep running and clients stay connected -- including ones " +
 		"this file does not list -- and restored only for the VPNs below")
 	for _, v := range names {
 		step("  message-vpn %q -> %s", v, roles[v])

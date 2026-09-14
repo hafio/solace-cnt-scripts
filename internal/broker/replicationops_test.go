@@ -194,6 +194,65 @@ func TestReplicationVPNLinesSetsRoleWithoutCyclingReplication(t *testing.T) {
 	}
 }
 
+// TestNothingEverShutsDownTheVPNItself is the blast-radius guarantee, and it is the one
+// property here that separates an interruption from an outage.
+//
+// `configure dr` disables REPLICATION. It never shuts down a message-VPN. Every command
+// either phase sends is nested inside that VPN's own `replication` node, so clients stay
+// connected and only the feed to the mate stops. A bare `shutdown` one level higher --
+// directly under `message-vpn "X"` -- would disconnect every client of that VPN, and on
+// phase 1's path it would do so to EVERY replicating VPN on the broker at once.
+//
+// The two forms differ by one level of indentation and nothing else, which is exactly why
+// this is worth a test rather than a comment: the mistake is invisible in review, produces
+// a script that still looks right, and is only discovered in production.
+func TestNothingEverShutsDownTheVPNItself(t *testing.T) {
+	state := map[string]VPNRepl{
+		"LISTED":   {Admin: AdminEnabled, Role: RoleStandby, Queue: QueueDown},
+		"UNLISTED": {Admin: AdminEnabled, Role: RoleActive, Queue: QueueDown},
+		"OFF":      {Admin: AdminShutdown, Role: RoleStandby, Queue: QueueNA},
+	}
+	vpns := []config.ReplVPN{{Name: "LISTED", ActiveAt: siteA}, {Name: "OFF", ActiveAt: siteB}}
+
+	// Both phases, and both the mate-changed and mate-unchanged shapes of phase 2.
+	var all []string
+	for _, stopped := range []bool{false, true} {
+		lines, _ := replicationVPNLines(vpns, siteAEntry(), state, stopped)
+		all = append(all, lines...)
+	}
+	for _, name := range mateConvergenceShutdowns(state) {
+		all = append(all, vpnReplicationBlock(name, "shutdown")...)
+	}
+
+	// Walk the generated script the way the broker reads it: a command belongs to the
+	// node it is indented under. Anything at the `message-vpn` child level that is not
+	// the `replication` node itself is a command against the VPN.
+	const vpnChildIndent = "  "
+	inVPN := false
+	for _, l := range all {
+		switch {
+		case strings.HasPrefix(l, "message-vpn "):
+			inVPN = true
+		case !strings.HasPrefix(l, " "):
+			inVPN = false
+		case inVPN && strings.HasPrefix(l, vpnChildIndent) && !strings.HasPrefix(l, vpnChildIndent+" "):
+			body := strings.TrimSpace(l)
+			if body != "replication" && body != "exit" {
+				t.Errorf("%q sits directly under message-vpn, so it acts on the VPN rather than "+
+					"its replication node; every command here must be nested one level deeper:\n%s",
+					body, strings.Join(all, "\n"))
+			}
+		}
+	}
+
+	// And the belt-and-braces version of the same thing, stated as the shape that would
+	// actually cause the outage.
+	joined := strings.Join(all, "\n")
+	if strings.Contains(joined, "\n"+vpnChildIndent+"shutdown") {
+		t.Errorf("a bare `shutdown` under message-vpn disconnects every client of that VPN:\n%s", joined)
+	}
+}
+
 // TestReplicationVPNLinesReEnablesWhatPhase1StoppedOnly pins the one case where a listed
 // VPN that was already up still gets an enable: phase 1 took it down to converge the mate,
 // so this command is responsible for bringing it back.
@@ -626,13 +685,23 @@ func TestConfigureReplicationPhase1RejectionStopsBeforePhase2(t *testing.T) {
 	if err == nil {
 		t.Fatal("ConfigureReplication should fail when the broker rejects phase 1")
 	}
+	// Each entry is the shortest phrase that still carries the FACT, not a sentence. An
+	// earlier version pinned "NOT be turned back on" and broke the moment the sentence
+	// around it was reworded to say replication rather than the VPN -- which was a
+	// correction to the error, not a regression, and a test that fails on those is a test
+	// nobody trusts.
 	for _, want := range []string{
 		"phase 1",                // which phase stopped
 		"rejected",               // a refused line, not an unreachable broker
-		"NOT be turned back on",  // what that leaves stopped
-		"Nothing is rolled back", // and that nothing undoes it
+		"replication disabled",   // what is actually off
+		"turned back on",         // and that this run will not restore it
+		"Nothing is rolled back", // nothing undoes it
 		"phase 2",                // the phase that was never sent
 		"show replication",       // where to read the truth
+		// The blast radius, which is the difference between an interruption and an
+		// outage: only replication stopped, so nobody's clients were dropped. An
+		// operator reading this error is deciding how urgent it is.
+		"clients are still connected",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("err = %v, missing %q", err, want)

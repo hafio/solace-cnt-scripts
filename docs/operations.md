@@ -1051,10 +1051,14 @@ the whole run.
 
 **A rejection is never retroactive.** Each phase runs inside the broker's own
 `source script ... stop-on-error`, so a rejected line stops THAT phase; an EARLIER phase that
-already succeeded is not rolled back. A phase-1 rejection leaves every VPN it shut down still
-down, and phase 2 is never sent. A phase-2 rejection after a successful phase 1 leaves the
-mate already converged, some prefix of the listed VPNs re-enabled, and the rest -- including
-every unlisted-but-replicating VPN -- still shut down from phase 1. The error names which
+already succeeded is not rolled back. A phase-1 rejection leaves replication disabled on every VPN
+it reached, and phase 2 is never sent. A phase-2 rejection after a successful phase 1 leaves
+the mate already converged, replication back on for some prefix of the listed VPNs, and the
+rest -- including every unlisted one -- still disabled from phase 1.
+
+Throughout, what stops is REPLICATION, never the message-VPN. Every line either phase sends
+is inside the VPN's own `replication` node, so the VPNs keep running and their clients stay
+connected; what a failure interrupts is the feed to the mate. The error names which
 phase stopped and states plainly what that leaves running or stopped, and points at
 `show replication` and `show message-vpn * replication` to read the rest back. **Re-running is
 SAFE** -- the whole script is recomputed from a fresh read of the broker rather than replayed,
