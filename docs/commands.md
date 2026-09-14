@@ -195,8 +195,19 @@ flags, plus the values they take: env files for -e/--env, primary|backup|monitor
 for --pod, platform names for --platform, and directories for --base-dir and
 --dir.
 
+To load it for every new shell:
+
+  bash        solace-util auto-complete bash > /etc/bash_completion.d/solace-util
+  zsh         solace-util auto-complete zsh > "${fpath[1]}/_solace-util"
+  fish        solace-util auto-complete fish > ~/.config/fish/completions/solace-util.fish
+  powershell  solace-util auto-complete powershell > $HOME\solace-util.ps1
+              then add  . $HOME\solace-util.ps1  to $PROFILE
+
+Each shell's own help has the one-liner for loading into the CURRENT shell
+instead, and the prerequisites where a shell has any.
+
 Completion never reads the env file, so it stays inert -- a TAB press cannot
-parse config or run anything. See each shell's help for how to load it.
+parse config or run anything.
 
 ```
 solace-util auto-complete
@@ -255,10 +266,16 @@ Load into the current shell:
 
   solace-util auto-complete powershell | Out-String | Invoke-Expression
 
-Load for every session, by writing the script once and sourcing it from
-your profile:
+Load for every session. Write the script once, then dot-source it from your
+profile -- generating it once is what keeps shell start-up fast, since the
+alternative runs this binary on every new shell:
 
-  solace-util auto-complete powershell > solace-util.ps1
+  solace-util auto-complete powershell > $HOME\solace-util.ps1
+  Add-Content $PROFILE '. $HOME\solace-util.ps1'
+
+If $PROFILE does not exist yet, create it first:
+
+  New-Item -ItemType File -Force $PROFILE
 
 ```
 solace-util auto-complete powershell [flags]

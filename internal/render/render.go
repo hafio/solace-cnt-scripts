@@ -124,7 +124,11 @@ func BrokerCR(c *config.Config) []byte {
 	fmt.Fprintf(&b, "    system_scaling_maxbridgecount: %d\n", s.MaxBridges)
 	fmt.Fprintf(&b, "    system_scaling_maxsubscriptioncount: %d\n", s.MaxSubscriptions)
 	fmt.Fprintf(&b, "    system_scaling_maxguaranteedmessagesize: %d\n", s.MaxGuaranteedMsgMB)
-	fmt.Fprintf(&b, "    maxSpoolUsage: %d\n", s.MaxSpoolUsageMB)
+	// messagespool_maxspoolusage: until this change k8s alone spelled it
+	// maxSpoolUsage; docker and podman already used this name (EnvPairs), so this
+	// is Kubernetes converging on the name the containers already had, not the
+	// reverse. See docs/configuration.md's Scaling section.
+	fmt.Fprintf(&b, "    messagespool_maxspoolusage: %d\n", s.MaxSpoolUsageMB)
 	// CPU is derived from the tier above rather than read from the env file
 	// (config/scaling.go). It is empty only for a Config built in code that never
 	// ran ApplyDefaults; emitting nothing then leaves the operator's own default
@@ -776,11 +780,18 @@ func EnvPairs(c *config.Config, id config.NodeIdentity) []EnvPair {
 		pairs = append(pairs, EnvPair{certFilePathKey, certMount})
 	}
 
-	// Every scaling knob reaches the container, in the same order and under the
+	// Every scaling knob reaches the container in the same order and under the
 	// same broker setting names the k8s CR writes into spec.systemScaling -- one
 	// schema block, one set of settings, two ways of delivering them. They are
-	// emitted unconditionally so the artifact states the whole sizing rather than
-	// leaving the broker's internal defaults to fill the gaps invisibly.
+	// emitted unconditionally so the artifact states the whole sizing rather
+	// than leaving the broker's internal defaults to fill the gaps invisibly.
+	//
+	// That the two platforms share every name is a constraint worth keeping, not
+	// a coincidence: it is what lets config.scalingKeys name ONE destination per
+	// setting. A setting whose name had to differ per platform could not be
+	// expressed there at all -- which is a real limit, because a systemd
+	// Environment= name is alphanumeric and underscore only, so a broker setting
+	// spelled with a hyphen cannot reach a container this way.
 	pairs = append(pairs,
 		EnvPair{"system_scaling_maxconnectioncount", itoa(c.Scaling.MaxConnections)},
 		EnvPair{"system_scaling_maxqueuemessagecount", itoa(c.Scaling.MaxQueueMessages)},

@@ -27,8 +27,16 @@ func newCompletionCmd() *cobra.Command {
 			"flags, plus the values they take: env files for -e/--env, primary|backup|monitor\n" +
 			"for --pod, platform names for --platform, and directories for --base-dir and\n" +
 			"--dir.\n\n" +
+			"To load it for every new shell:\n\n" +
+			"  bash        solace-util auto-complete bash > /etc/bash_completion.d/solace-util\n" +
+			"  zsh         solace-util auto-complete zsh > \"${fpath[1]}/_solace-util\"\n" +
+			"  fish        solace-util auto-complete fish > ~/.config/fish/completions/solace-util.fish\n" +
+			"  powershell  solace-util auto-complete powershell > $HOME\\solace-util.ps1\n" +
+			"              then add  . $HOME\\solace-util.ps1  to $PROFILE\n\n" +
+			"Each shell's own help has the one-liner for loading into the CURRENT shell\n" +
+			"instead, and the prerequisites where a shell has any.\n\n" +
 			"Completion never reads the env file, so it stays inert -- a TAB press cannot\n" +
-			"parse config or run anything. See each shell's help for how to load it.",
+			"parse config or run anything.",
 		Args:              cobra.NoArgs,
 		ValidArgsFunction: cobra.NoFileCompletions,
 		// A parent with no RunE is not Runnable, and cobra answers a non-runnable
@@ -72,9 +80,13 @@ func newCompletionCmd() *cobra.Command {
 		completionShell("powershell",
 			"Load into the current shell:\n\n"+
 				"  solace-util auto-complete powershell | Out-String | Invoke-Expression\n\n"+
-				"Load for every session, by writing the script once and sourcing it from\n"+
-				"your profile:\n\n"+
-				"  solace-util auto-complete powershell > solace-util.ps1",
+				"Load for every session. Write the script once, then dot-source it from your\n"+
+				"profile -- generating it once is what keeps shell start-up fast, since the\n"+
+				"alternative runs this binary on every new shell:\n\n"+
+				"  solace-util auto-complete powershell > $HOME\\solace-util.ps1\n"+
+				"  Add-Content $PROFILE '. $HOME\\solace-util.ps1'\n\n"+
+				"If $PROFILE does not exist yet, create it first:\n\n"+
+				"  New-Item -ItemType File -Force $PROFILE",
 			func(root *cobra.Command, w io.Writer, desc bool) error {
 				if !desc {
 					return root.GenPowerShellCompletion(w)

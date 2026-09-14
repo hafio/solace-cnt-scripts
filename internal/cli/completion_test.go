@@ -355,3 +355,65 @@ func TestFlagCompletionsRegistered(t *testing.T) {
 		}
 	}
 }
+
+// TestCompletionHelpKeepsTheLoadingInstructions pins the one thing this command exists to
+// tell you, which has gone missing before.
+//
+// A completion script is useless on its own: its whole value is the line you paste to load
+// it, and the line differs per shell in a way nobody remembers. So both halves have to be
+// in the help -- the one-liner for the CURRENT shell, and the permanent form for every new
+// shell -- and the parent has to carry the permanent form for all four, so `auto-complete`
+// on its own is enough without drilling into each subcommand.
+//
+// Nothing else would notice their removal: every other completion test drives the
+// generator and checks the SCRIPT, which is unaffected by the help text around it.
+func TestCompletionHelpKeepsTheLoadingInstructions(t *testing.T) {
+	root := newRootCmd(&App{})
+	var comp *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "auto-complete" {
+			comp = c
+		}
+	}
+	if comp == nil {
+		t.Fatal("no auto-complete command in the tree")
+	}
+
+	// The parent names the permanent form for every shell it supports, so one help
+	// screen is enough to set this up.
+	for _, want := range []string{
+		"/etc/bash_completion.d/solace-util",
+		"_solace-util",
+		"~/.config/fish/completions/solace-util.fish",
+		"$PROFILE",
+	} {
+		if !strings.Contains(comp.Long, want) {
+			t.Errorf("`auto-complete` help does not say how to load permanently for one of the\n"+
+				"shells it supports: missing %q\n\n%s", want, comp.Long)
+		}
+	}
+
+	// And each shell says both how to load it NOW and how to keep it.
+	shells := 0
+	for _, sub := range comp.Commands() {
+		shells++
+		if !strings.Contains(sub.Long, "current shell") {
+			t.Errorf("`auto-complete %s` help does not show how to load into the current shell:\n%s",
+				sub.Name(), sub.Long)
+		}
+		if !strings.Contains(sub.Long, "every session") {
+			t.Errorf("`auto-complete %s` help does not show how to load for every session:\n%s",
+				sub.Name(), sub.Long)
+		}
+		// A heading promising a command, with no command under it, is worse than no
+		// heading: the powershell help said "source it from your profile" for a while
+		// and never gave the line to put there.
+		if !strings.Contains(sub.Long, "solace-util auto-complete "+sub.Name()) {
+			t.Errorf("`auto-complete %s` help explains loading without showing the command:\n%s",
+				sub.Name(), sub.Long)
+		}
+	}
+	if shells != 4 {
+		t.Errorf("auto-complete offers %d shells, want 4 (bash, zsh, fish, powershell)", shells)
+	}
+}

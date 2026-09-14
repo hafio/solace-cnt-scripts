@@ -26,7 +26,7 @@ spec:
     system_scaling_maxbridgecount: 25
     system_scaling_maxsubscriptioncount: 50000
     system_scaling_maxguaranteedmessagesize: 10
-    maxSpoolUsage: 10000
+    messagespool_maxspoolusage: 10000
     messagingNodeCpu: "2"
     messagingNodeMemory: 3410Mi
   storage:

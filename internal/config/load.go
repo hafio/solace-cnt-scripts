@@ -229,7 +229,6 @@ func (c *Config) applyContainerDefaults(p Platform) {
 	applyBridgePortDefaults(&c.Docker.Network)
 	applyBridgePortDefaults(&c.Podman.Network)
 
-
 	// Scaling: the same knobs k8s takes, since every one of them now reaches the
 	// container as an environment variable. Only maxConnections and the spool
 	// size differ from the k8s defaults; the rest are deliberately identical, so

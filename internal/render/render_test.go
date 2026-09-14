@@ -755,9 +755,11 @@ func TestScalingTierReachesEveryArtifact(t *testing.T) {
 	}
 }
 
-// scalingSettings is every broker scaling setting the schema drives, under the
-// names the broker itself uses. k8s writes them into spec.systemScaling and the
-// containers pass them as environment variables, but the set is the same.
+// scalingSettings is every broker scaling setting whose destination name is
+// IDENTICAL on every platform: k8s writes them into spec.systemScaling and the
+// containers pass them as environment variables, under the same name.
+// // TestScalingReachesContainersAsEnv each check it under its own
+// platform-specific name instead of through this shared list.
 var scalingSettings = []string{
 	"system_scaling_maxconnectioncount",
 	"system_scaling_maxqueuemessagecount",
@@ -766,6 +768,7 @@ var scalingSettings = []string{
 	"system_scaling_maxbridgecount",
 	"system_scaling_maxsubscriptioncount",
 	"system_scaling_maxguaranteedmessagesize",
+	"messagespool_maxspoolusage",
 }
 
 // TestScalingReachesContainersAsEnv pins the delivery split. Every scaling knob
@@ -787,7 +790,7 @@ func TestScalingReachesContainersAsEnv(t *testing.T) {
 		for _, pair := range EnvPairs(c, c.ResolveNode(config.Primary)) {
 			got[pair.Key] = pair.Value
 		}
-		for _, want := range append(scalingSettings, "messagespool_maxspoolusage") {
+		for _, want := range scalingSettings {
 			if _, ok := got[want]; !ok {
 				t.Errorf("%s: %s is not passed to the container", p, want)
 			}
@@ -813,6 +816,9 @@ func TestScalingReachesContainersAsEnv(t *testing.T) {
 // owns the pod, so an env-var delivery there would be both wrong and invisible.
 func TestScalingReachesK8sAsSpecOnly(t *testing.T) {
 	c := load(t, config.K8s)
+	// A value no default or tier would produce, so the spool assertion below proves
+	// the renderer READ this field rather than happening to match the fixture.
+	c.Scaling.MaxSpoolUsageMB = 1507
 	cr := string(BrokerCR(c))
 	if !strings.Contains(cr, "  systemScaling:\n") {
 		t.Fatalf("broker CR has no systemScaling block:\n%s", cr)
@@ -822,12 +828,19 @@ func TestScalingReachesK8sAsSpecOnly(t *testing.T) {
 			t.Errorf("broker CR does not carry %s under systemScaling:\n%s", want, cr)
 		}
 	}
-	// The spool size is the one setting the CR spells differently.
-	if !strings.Contains(cr, "    maxSpoolUsage: 10000\n") {
-		t.Errorf("broker CR should carry maxSpoolUsage from scaling.maxSpoolUsageMB:\n%s", cr)
+	// The spool key is the RENAME this change makes, so it gets a value check of
+	// its own rather than resting on the presence check above: a renderer that
+	// emitted the new name against the wrong field would pass presence and be
+	// wrong in exactly the way a rename goes wrong.
+	if !strings.Contains(cr, "    messagespool_maxspoolusage: 1507\n") {
+		t.Errorf("broker CR should carry the spool size under its new name, from "+
+			"scaling.maxSpoolUsageMB:\n%s", cr)
 	}
-	if strings.Contains(cr, "messagespool_maxspoolusage") {
-		t.Errorf("the container env spelling must not appear in the CR:\n%s", cr)
+	// maxSpoolUsage was the CR's OWN spelling until this change; now the CR uses
+	// the same messagespool_maxspoolusage name the containers always have, so the
+	// old camelCase form must no longer appear anywhere.
+	if strings.Contains(cr, "maxSpoolUsage:") {
+		t.Errorf("the retired camelCase spool spelling must not appear in the CR:\n%s", cr)
 	}
 	// env: is how a pod would take variables; the CR must not grow one for these.
 	if strings.Contains(cr, "\n  env:\n") {

@@ -203,6 +203,13 @@ writes them into the broker CR's `spec.systemScaling`, while docker and podman p
 the container as environment variables under the broker's own setting names. One env file
 therefore sizes the same broker whichever platform runs it.
 
+**Every setting is settable under either spelling.** The `scaling` key column below is the
+schema's own friendly name; the destination column is the broker setting this tool emits for
+it, which is *also* a legal key in the env file -- `system_scaling_maxconnectioncount: 1000`
+works exactly like `maxConnections: 1000`. Both write the same value. Setting the same
+setting under both spellings at once fails to load, naming both keys -- a file that could
+hold a contradiction is worse than one that refuses it.
+
 | `scaling` key | Broker setting (container env var / CR field) |
 | --- | --- |
 | `maxConnections` | `system_scaling_maxconnectioncount` |
@@ -212,7 +219,19 @@ therefore sizes the same broker whichever platform runs it.
 | `maxBridges` | `system_scaling_maxbridgecount` |
 | `maxSubscriptions` | `system_scaling_maxsubscriptioncount` |
 | `maxGuaranteedMsgMB` | `system_scaling_maxguaranteedmessagesize` |
-| `maxSpoolUsageMB` | `messagespool_maxspoolusage` (the CR spells it `maxSpoolUsage`) |
+| `maxSpoolUsageMB` | `messagespool_maxspoolusage` (now the same name on every platform) |
+
+Every destination name above is the name BOTH platforms use: the key inside the CR's
+`spec.systemScaling`, and the environment variable on docker and podman. That is a constraint
+rather than a coincidence, and it has a limit worth knowing -- a systemd `Environment=` name
+may contain only letters, digits and underscores, so a broker setting spelled with a hyphen
+cannot reach a container this way and could not be added to the table above as it stands.
+
+A key that is neither a friendly name nor a destination name -- a typo, or a real broker
+setting this tool does not map (`system_scaling_maxtransactedsessioncount`, say) -- fails to
+load exactly as an unknown key does anywhere else in this schema. `cpu` and `messagingNodeCpu`
+are refused by name for a different reason: `scaling.cpu` is fixed by the `maxConnections`
+tier and derived, so there is no key for it under either spelling (see Scaling tiers, below).
 
 Defaults are identical across platforms except `maxConnections` (100 on Kubernetes, 1000 on
 containers) and `maxSpoolUsageMB` (10000 on Kubernetes, 100000 on containers).
@@ -524,7 +543,10 @@ privileged one and says so; raise it per user as needed.
 **`kubernetes.msgNode.cpu` and `scaling.maxPool` fail to load, each naming its
 replacement.** Broker CPU is fixed by the scaling tier rather than set by hand, and
 `maxPool` would name the same broker setting as `scaling.maxSpoolUsageMB` -- one concept
-under two platform-specific keys, which the scaling block keeps under a single name.
-`kubernetes.msgNode.mem` is unaffected. Docker always deploys through compose, so there is
-no `docker.mode` key to choose a mode with; a file still carrying it fails strict decoding
-as an unknown field. See [Scaling](#scaling).
+under two platform-specific keys, which the scaling block keeps under a single name today.
+That is not the same thing as the dual-spelling alias every other scaling setting now
+gets (see [Scaling](#scaling)): `maxPool` and `maxSpoolUsageMB` had no defined winner if a
+file set both, where an alias pair does -- setting both spellings of one setting fails to
+load, naming both. `kubernetes.msgNode.mem` is unaffected. Docker always deploys through
+compose, so there is no `docker.mode` key to choose a mode with; a file still carrying it
+fails strict decoding as an unknown field. See [Scaling](#scaling).

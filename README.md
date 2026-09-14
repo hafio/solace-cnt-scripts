@@ -86,9 +86,28 @@ solace-util auto-complete fish | source                                # fish
 solace-util auto-complete powershell | Out-String | Invoke-Expression  # PowerShell
 ```
 
-For every session, write it where the shell looks -- `/etc/bash_completion.d/solace-util`,
-`"${fpath[1]}/_solace-util"`, `~/.config/fish/completions/solace-util.fish`, or a `.ps1`
-sourced from your `$PROFILE`.
+To load it for every new shell, write it where that shell looks:
+
+```
+solace-util auto-complete bash > /etc/bash_completion.d/solace-util      # bash
+solace-util auto-complete zsh > "${fpath[1]}/_solace-util"               # zsh
+solace-util auto-complete fish > ~/.config/fish/completions/solace-util.fish
+```
+
+PowerShell has no such directory, so write the script once and dot-source it from your
+profile -- generating it once is what keeps shell start-up fast, since the alternative
+runs this binary on every new shell:
+
+```powershell
+solace-util auto-complete powershell > $HOME\solace-util.ps1
+Add-Content $PROFILE '. $HOME\solace-util.ps1'
+```
+
+If `$PROFILE` does not exist yet, `New-Item -ItemType File -Force $PROFILE` creates it.
+
+`solace-util auto-complete` on its own prints all of this, and each shell's own `--help`
+adds whatever that shell needs first (bash wants the `bash-completion` package; zsh wants
+`compinit` enabled).
 
 Beyond command and flag names it completes the values they take: the env files `-e`/`--env`
 would actually resolve, `primary`/`backup`/`monitor` for `--pod`, directories for

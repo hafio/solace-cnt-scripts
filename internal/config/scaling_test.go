@@ -4,6 +4,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // tierOrder is the ascending key order scalingTierList claims. Keeping it here
@@ -294,4 +296,193 @@ func setContainerMem(c *Config, p Platform, mem string) {
 		return
 	}
 	c.Docker.Container.Mem = mem
+}
+
+// --- Scaling.UnmarshalYAML: the dual-spelling allowlist ----------------------
+
+// decodeScaling runs a document through the same strict decoder Load uses, up
+// to but NOT including ApplyDefaults/Validate -- so an explicit 0 is still
+// visible here, the same reason decodeRuntime (command_test.go) stops short
+// of the full Load pipeline. Every case below exercises the real schema path,
+// including Scaling.UnmarshalYAML, rather than a bare Scaling built in Go.
+func decodeScaling(t *testing.T, doc string) (*Config, error) {
+	t.Helper()
+	var c Config
+	dec := yaml.NewDecoder(strings.NewReader(doc))
+	dec.KnownFields(true)
+	err := dec.Decode(&c)
+	return &c, err
+}
+
+// TestScalingDualSpellingAliasesTheSameField pins rule B: a friendly name and
+// its destination broker setting both write the one typed field -- and an
+// explicit 0 survives decode (defaulting is ApplyDefaults' job, not the
+// decoder's), the same property TestScalingReachesContainersAsEnv pins at the
+// render layer.
+func TestScalingDualSpellingAliasesTheSameField(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		doc  string
+		get  func(*Scaling) int
+		want int
+	}{
+		{"friendly maxConnections", "scaling:\n  maxConnections: 1000\n",
+			func(s *Scaling) int { return s.MaxConnections }, 1000},
+		{"destination maxConnections", "scaling:\n  system_scaling_maxconnectioncount: 1000\n",
+			func(s *Scaling) int { return s.MaxConnections }, 1000},
+		{"friendly maxBridges", "scaling:\n  maxBridges: 25\n",
+			func(s *Scaling) int { return s.MaxBridges }, 25},
+		{"destination maxBridges", "scaling:\n  system_scaling_maxbridgecount: 25\n",
+			func(s *Scaling) int { return s.MaxBridges }, 25},
+		{"explicit zero survives decode", "scaling:\n  maxKafkaBridge: 0\n",
+			func(s *Scaling) int { return s.MaxKafkaBridge }, 0},
+		{"omitted key decodes to zero", "scaling:\n  maxConnections: 1000\n",
+			func(s *Scaling) int { return s.MaxBridges }, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := decodeScaling(t, tc.doc)
+			if err != nil {
+				t.Fatalf("decode %q: %v", tc.doc, err)
+			}
+			if got := tc.get(&c.Scaling); got != tc.want {
+				t.Errorf("got %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestScalingUnknownKeyFailsAtLoad is the property the custom decoder is most
+// likely to have silently destroyed: a custom UnmarshalYAML takes over
+// decoding for the whole struct, and yaml.v3's KnownFields(true) never
+// reaches inside it, so without Scaling.UnmarshalYAML doing its own policing,
+// BOTH cases here would decode clean, leave the real field at zero, and
+// ApplyDefaults would silently size the broker at the default tier. The
+// second case is a REAL broker setting this tool does not map
+// (system_scaling_maxtransactedsessioncount), not a typo -- proving the
+// allowlist is closed rather than open passthrough for anything
+// system_scaling_*-shaped.
+func TestScalingUnknownKeyFailsAtLoad(t *testing.T) {
+	for _, tc := range []struct{ name, doc, want string }{
+		{"typo", "scaling:\n  maxConections: 1000\n", "scaling.maxConections is not a scaling setting"},
+		{"unmapped real broker setting", "scaling:\n  system_scaling_maxtransactedsessioncount: 500\n",
+			"scaling.system_scaling_maxtransactedsessioncount is not a scaling setting"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempYAML(t, tc.doc)
+			_, err := Load(path, K8s)
+			if err == nil {
+				t.Fatalf("%s: expected an error, got none", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("%s: error = %v, want it to contain %q", tc.name, err, tc.want)
+			}
+			// Stays a schema error, the same shape TestLoadUnknownFieldHasNoConvertHint
+			// pins for a top-level typo -- this is the same failure, one level deeper.
+			if !strings.Contains(err.Error(), "parse env file") {
+				t.Errorf("%s: error should keep the schema-error shape, got: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+// TestScalingBothSpellingsAtOnceFails pins rule D: a file naming a setting
+// under both its friendly and destination spelling is refused rather than
+// silently letting the second win, and the error names both keys.
+func TestScalingBothSpellingsAtOnceFails(t *testing.T) {
+	path := writeTempYAML(t, "scaling:\n  maxConnections: 1000\n  system_scaling_maxconnectioncount: 1000\n")
+	_, err := Load(path, K8s)
+	if err == nil {
+		t.Fatal("setting both spellings of one setting should fail to load")
+	}
+	for _, want := range []string{"scaling.system_scaling_maxconnectioncount", "scaling.maxConnections"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should name %q, got: %v", want, err)
+		}
+	}
+}
+
+// TestScalingSameKeyTwiceFails covers the collateral cost of walking the
+// mapping by hand: yaml.v3's own duplicate-key rejection (uniqueKeys) never
+// runs on content a custom UnmarshalYAML reads itself, so this is now this
+// method's job, with its own wording distinct from the two-spellings case.
+func TestScalingSameKeyTwiceFails(t *testing.T) {
+	_, err := decodeScaling(t, "scaling:\n  maxConnections: 1000\n  maxConnections: 2000\n")
+	if err == nil {
+		t.Fatal("the same scaling key set twice should fail to decode")
+	}
+	if !strings.Contains(err.Error(), "scaling.maxConnections is set twice") {
+		t.Errorf("error should say the key is set twice, got: %v", err)
+	}
+}
+
+// TestScalingDeniesDerivedFields pins the denylist: scaling.cpu is fixed by
+// the maxConnections tier, so neither spelling belongs in this schema, and the
+// operator gets a reason rather than the generic unknown-key message.
+func TestScalingDeniesDerivedFields(t *testing.T) {
+	for _, tc := range []struct{ name, doc, want string }{
+		{"cpu", "scaling:\n  cpu: \"4\"\n", "scaling.cpu is fixed by the maxConnections tier"},
+		{"messagingNodeCpu", "scaling:\n  messagingNodeCpu: \"4\"\n", "messagingNodeCpu is fixed by the maxConnections tier"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempYAML(t, tc.doc)
+			_, err := Load(path, K8s)
+			if err == nil {
+				t.Fatalf("%s: expected an error, got none", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("%s: error = %v, want it to contain %q", tc.name, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestScalingMustBeAMapping covers the one non-mapping-kind branch:
+// Scaling.UnmarshalYAML must refuse a scalar or sequence the same way
+// Command.UnmarshalYAML refuses a kind it does not accept, rather than
+// panicking on value.Content.
+func TestScalingMustBeAMapping(t *testing.T) {
+	for _, tc := range []struct{ name, doc string }{
+		{"scalar", "scaling: oops\n"},
+		{"sequence", "scaling:\n  - 1\n  - 2\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempYAML(t, tc.doc)
+			_, err := Load(path, K8s)
+			if err == nil || !strings.Contains(err.Error(), "scaling must be a mapping") {
+				t.Errorf("%s: expected the mapping error, got: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+// TestScalingValueTypeErrorIsActionable: a value of the wrong type still
+// surfaces yaml's own decode error, naming the offending key, rather than
+// falling through to a zero value with nothing said about it.
+func TestScalingValueTypeErrorIsActionable(t *testing.T) {
+	path := writeTempYAML(t, "scaling:\n  maxConnections: not-a-number\n")
+	_, err := Load(path, K8s)
+	if err == nil {
+		t.Fatal("a non-numeric scaling value should fail to load")
+	}
+	if !strings.Contains(err.Error(), "scaling.maxConnections") {
+		t.Errorf("error should name the offending key, got: %v", err)
+	}
+}
+
+// TestValidateMaxPoolRemovedThroughLoad is TestValidateMaxPoolRemoved's
+// decode-path sibling. That test sets Scaling.MaxPool directly in Go and
+// never decodes YAML, so it would keep passing even if maxPool had been
+// dropped from scalingKeys and an env file carrying it started failing with a
+// generic unknown-key message instead of validateScaling's explanation --
+// exactly the regression the hazard this change was warned about. This drives
+// the same key through the real decoder and Validate.
+func TestValidateMaxPoolRemovedThroughLoad(t *testing.T) {
+	path := writeTempYAML(t, "scaling:\n  maxPool: 10000\n")
+	_, err := Load(path, K8s)
+	if err == nil || !strings.Contains(err.Error(), "scaling.maxPool was removed") {
+		t.Fatalf("expected the maxPool removal error through Load, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "scaling.maxSpoolUsageMB") {
+		t.Errorf("removal error should name the replacement, got: %v", err)
+	}
 }

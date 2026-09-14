@@ -105,6 +105,11 @@ tls:                                # uncomment cert+certKey together once you h
 # be exactly one of the five values below; a value between tiers is rejected, not rounded.
 # Memory is the tier's default and stays overridable.
 #
+# Every key below is ALSO settable under the broker setting name this tool emits for it
+# (e.g. `system_scaling_maxconnectioncount` for maxConnections) -- see docs/configuration.md
+# for the full pairing. Both spellings write the same value; setting a key under both at
+# once fails to load, naming both.
+#
 #   maxConnections | cpu (fixed) | memory default
 #   ---------------+-------------+----------------
 #   100            | 2           | 3410Mi  (Kubernetes default tier)

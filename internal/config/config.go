@@ -287,10 +287,24 @@ type TLS struct {
 // differ only in delivery: k8s writes them into the CR's spec.systemScaling,
 // while docker and podman pass them to the container as environment variables
 // under the same broker setting names (render.EnvPairs).
+//
+// Every knob below is settable under EITHER of two spellings: the friendly
+// name the yaml tag documents, or the destination broker setting this tool
+// emits for it (also given here, in the comment). Both write the same field.
+// That is NOT what the tags below do by themselves, though, and that is the
+// fact a future reader is most likely to delete by accident: Scaling has its
+// own UnmarshalYAML (scaling.go), which TAKES OVER decoding for this whole
+// struct, and yaml.v3's KnownFields(true) (load.go) -- the mechanism that
+// makes a typo'd key fail loud everywhere else in this schema -- never
+// reaches inside a type with a custom UnmarshalYAML. So the tags below are
+// documentation only; the actual closed allowlist, the dual-spelling table
+// and the duplicate-spelling refusal are scaling.go's scalingKeys and
+// Scaling.UnmarshalYAML, and unknown-key rejection inside this block is that
+// method's job, not the decoder's.
 type Scaling struct {
 	MaxConnections      int `yaml:"maxConnections"`      // system_scaling_maxconnectioncount
 	MaxQueueMessages    int `yaml:"maxQueueMessages"`    // system_scaling_maxqueuemessagecount
-	MaxSpoolUsageMB     int `yaml:"maxSpoolUsageMB"`     // messagespool_maxspoolusage / CR maxSpoolUsage
+	MaxSpoolUsageMB     int `yaml:"maxSpoolUsageMB"`     // messagespool_maxspoolusage (same name on every platform)
 	MaxKafkaBridge      int `yaml:"maxKafkaBridge"`      // system_scaling_maxkafkabridgecount
 	MaxKafkaConnections int `yaml:"maxKafkaConnections"` // system_scaling_maxkafkabrokerconnectioncount
 	MaxBridges          int `yaml:"maxBridges"`          // system_scaling_maxbridgecount
@@ -300,7 +314,11 @@ type Scaling struct {
 	// MaxPool is retained so an env file carrying the removed maxPool fails with
 	// an actionable error instead of a bare unknown-field decode error. It named
 	// the same broker setting as MaxSpoolUsageMB -- one concept under two keys,
-	// one per platform -- which is exactly what this block no longer has.
+	// one per platform -- which is exactly what this block no longer has. It is
+	// NOT an alias like the pairs above: nothing decides which of maxPool and
+	// maxSpoolUsageMB would win if both were set, where every alias pair above
+	// has a defined answer (an error naming both). That undefined-winner problem
+	// is why it was removed rather than folded in as a third spelling.
 	MaxPool int `yaml:"maxPool"`
 
 	// CPU is the broker CPU the MaxConnections tier fixes, derived in
@@ -308,6 +326,9 @@ type Scaling struct {
 	// YAML, so no env file can set it: k8s renders it as messagingNodeCpu,
 	// docker and podman as their own CPU cap. It replaces the independently
 	// settable kubernetes.msgNode.cpu, which could contradict the tier.
+	// Scaling.UnmarshalYAML refuses both `cpu` and `messagingNodeCpu` as
+	// scaling: keys by name (scalingDenylist), for the same reason: neither
+	// spelling of a derived value belongs in this schema.
 	CPU string `yaml:"-"`
 }
 

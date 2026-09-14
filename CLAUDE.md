@@ -267,6 +267,31 @@ read-only preflight first -- `Cluster.Preflight` (`auth can-i <verb> <resource>`
 own error through, adds one actionable hint, never authenticates on the operator's behalf, and
 has no skip flag.
 
+**Scaling's dual spelling bypasses KnownFields, on purpose (`internal/config/scaling.go`).**
+Every `scaling:` setting is settable under either its friendly schema name (`maxConnections`)
+or the destination broker setting this tool emits for it (`system_scaling_maxconnectioncount`)
+-- both write the one typed field, and setting a setting under both spellings at once fails to
+load, naming both. That closed allowlist is `scalingKeys`, and it exists only because
+`Scaling.UnmarshalYAML` does: a custom `UnmarshalYAML` TAKES OVER decoding for the whole struct
+it is declared on, and `dec.KnownFields(true)` (`load.go`) -- the mechanism that fails a typo'd
+key loud everywhere else in this schema -- never reaches inside it. Implemented naively (a
+struct with both tags, or any shape that lets yaml.v3's own struct-decode run over the block),
+`scaling:` would become open passthrough: `system_scaling_maxtransactedsessioncount` (a real
+broker setting this tool does not map) or `maxConections` (a typo) would decode clean, leave
+the real field at zero, and the broker would be silently sized at the default tier with no
+error anywhere. So `Scaling.UnmarshalYAML` walks the mapping's nodes by hand and re-implements
+that strictness itself, collecting every failure into a `*yaml.TypeError` rather than returning
+the first one immediately -- callUnmarshaler splices a `*TypeError`'s `Errors` into the
+document's own aggregate and keeps decoding, where any other error type panics and aborts the
+whole document, hiding every other mistake the rest of the file carries. `maxPool` is the one
+entry with no destination: it exists solely so a file carrying the removed key still reaches
+`validateScaling`'s explanation instead of a bare unknown-key error, and it is NOT a precedent
+for a third spelling -- it named the same broker setting as `maxSpoolUsageMB` with no defined
+winner if both were set, which is exactly the failure mode the duplicate-spelling check exists
+to prevent for every alias pair. `cpu`/`messagingNodeCpu` are refused by name (`scalingDenylist`)
+for the same reason `kubernetes.msgNode.cpu` is: both are derived from the `maxConnections`
+tier, so neither spelling belongs in this schema under any name.
+
 [docs/commands.md](docs/commands.md) is the full CLI reference and is **generated** from the
 cobra tree by `internal/cli/commanddoc_test.go`. It is a golden: `test` fails while it is
 stale, so any command, flag, or `Short` change means regenerating it in the same change with

@@ -55,7 +55,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-77 test files, 1249 test functions. Three of those are not tests. Two are os/exec
+78 test files, 1262 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -68,8 +68,8 @@ launched from.
 | --- | --- | --- |
 | internal/k8s | 18 | 200 |
 | internal/broker | 22 | 426 |
-| internal/cli | 11 | 188 |
-| internal/config | 11 | 164 |
+| internal/cli | 11 | 189 |
+| internal/config | 12 | 176 |
 | internal/container | 6 | 132 |
 | internal/convert | 1 | 37 |
 | internal/render | 2 | 32 |
@@ -78,7 +78,7 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **77** | **1249** |
+| **Total** | **78** | **1262** |
 
 
 ## Coverage
@@ -178,7 +178,7 @@ type behind the platform CLI overrides and the execution guard that decides what
 `Command` may be, the scaling block that sizes the broker on every platform, and the
 platform vocabulary the CLI resolves against, the host-path rules every file-valued
 key is held to, and the two storage stories a Kubernetes deployment may tell.
-164 tests across 11 files.
+176 tests across 12 files.
 
 ### command_test.go
 
@@ -309,11 +309,30 @@ decides which system every later step talks to.
 | `TestDetectPlatformsMissingFile` | A bad path fails here rather than reaching `Load` with an empty platform list |
 | `TestDetectPlatformsBashFileHint` | The legacy-bash-env mistake keeps its `solace-util convert` hint. `DetectPlatforms` is now the first thing to read the file, so without this the message would degrade to a bare decode error |
 
+### domaincerts_test.go
+
+Covers the NAME a domain certificate authority is created under, for certificates found by
+walking `broker.domainCerts.dirs`. The name does three jobs at once -- the operand of the
+broker's `create domain-certificate-authority`, the filename the certificate is uploaded
+under inside the broker, and the key `--remove` deletes by -- which is why its charset and
+length rules are as strict as they are, and why it has to be STABLE: a name that changed
+between runs would create a second authority beside the first rather than update it.
+
+| Test | What it covers |
+| --- | --- |
+| `TestDeriveCAName` | The derivation itself: the sanitised last directory element, an underscore, and the sanitised filename with its extension. Covers a real certificate name with spaces, a run of unsafe characters collapsing to ONE underscore (one-for-one substitution would make visibly different files look alike), legal separators like a dash being PRESERVED rather than tidied away -- collapsing across them would make a-b.pem and a_b.pem one CA name and silently merge two certificates -- the directory component keeping two identically-named certificates apart, a trailing separator, Windows separators splitting the same way on either OS, and a Windows short name whose tilde is not in the safe set. Every case also asserts the result is usable as all three of the things it has to be |
+| `TestDeriveCANameShortensTheStemOnly` | Which part gives way when a name would exceed the broker's 64-character limit: the file STEM. The directory component is never dropped, because it is what disambiguates two same-named certificates, and the extension stays because it is what makes the name recognisable. The stem keeps a leading slice rather than becoming a hash, so the result still reads as the file it came from |
+| `TestDeriveCANameRefusesWhatItCannotName` | The refusals, which exist so nothing is silently dropped or silently merged: a directory or file with no usable characters, and a directory name so long nothing is left to shorten. Each error must also name the explicit `files:` entry, since that is how an operator gets past a name this cannot derive |
+| `TestMatchesCertExt` | Which files in a directory are offered to the broker. A filter rather than every file is the safe default, because a certificate directory routinely also holds a README, a private key or an editor backup -- uploading one of those as a certificate authority fails at best and installs something unintended at worst. Also covers case-insensitivity, a caller's own extension set REPLACING the default, and the dot being optional |
+
 ### scaling_test.go
 
 The scaling-tier table: `scaling.maxConnections` fixes the broker's CPU on every
 platform and defaults its memory, so these cover the table itself, the derivation,
-and the two keys the change removed or added.
+and the keys the change removed or added. Also `Scaling.UnmarshalYAML`'s
+dual-spelling allowlist -- the custom decoder every scaling setting goes through
+now that it is settable under either its friendly name or its destination broker
+setting.
 
 | Test | What it covers |
 | --- | --- |
@@ -330,6 +349,14 @@ and the two keys the change removed or added.
 | `TestValidateK8sMsgNodeCPURemoved` | `kubernetes.msgNode.cpu` still decodes but fails validation, so the operator gets a reason naming `scaling.maxConnections` and noting `mem` is unaffected, rather than a bare unknown-field error |
 | `TestValidateMaxPoolRemoved` | `maxPool` would name the same broker setting as `maxSpoolUsageMB` under a platform-specific name; it is rejected on all three platforms naming the replacement, and an unset (zero) value does not trip the sentinel |
 | `TestValidateContainerMem` | `container.mem` takes docker's and podman's own `b\|k\|m\|g` suffix: the likely mistake (a `Mi` quantity copied from `kubernetes.msgNode.mem`) is refused naming that trap, alongside bare numbers, decimals and unknown suffixes, while every legal form and the unset case pass |
+| `TestScalingDualSpellingAliasesTheSameField` | Every scaling setting is settable under EITHER its friendly name or its destination broker setting, both writing the one typed field -- including the new `maxDMRLinks`/`max-dmr-links` pair -- and an explicit 0 survives decode (defaulting is `ApplyDefaults`' job, not the decoder's) |
+| `TestScalingUnknownKeyFailsAtLoad` | The property a custom `UnmarshalYAML` is most likely to have silently destroyed: a typo (`maxConections`) and a REAL broker setting this tool does not map (`system_scaling_maxtransactedsessioncount`) both still fail at load, keeping the `parse env file` schema-error shape rather than becoming open passthrough |
+| `TestScalingBothSpellingsAtOnceFails` | Setting one setting under both its friendly and destination spelling in the same file fails to load naming both keys, rather than letting the second silently win |
+| `TestScalingSameKeyTwiceFails` | Walking the mapping by hand gives up yaml.v3's own duplicate-key rejection for this block, so `Scaling.UnmarshalYAML` re-implements it, with wording distinct from the two-spellings case |
+| `TestScalingDeniesDerivedFields` | `cpu` and `messagingNodeCpu` are refused by name under either spelling: `scaling.cpu` is fixed by the `maxConnections` tier and derived, so there is no key for it in this schema |
+| `TestScalingMustBeAMapping` | A scalar or sequence `scaling:` value is refused loud rather than panicking on `value.Content` |
+| `TestScalingValueTypeErrorIsActionable` | A wrong-typed scaling value still surfaces yaml's own decode error, prefixed with the offending key, rather than a bare unmarshal message with no field named |
+| `TestValidateMaxPoolRemovedThroughLoad` | `TestValidateMaxPoolRemoved`'s decode-path sibling: that test sets `Scaling.MaxPool` directly in Go and never decodes YAML, so it would keep passing even if `maxPool` had been dropped from the allowlist and started failing at decode with a generic message instead of `validateScaling`'s explanation. This drives the same key through the real decoder and `Validate` |
 
 ### duration_test.go
 
@@ -453,7 +480,7 @@ without a live broker;
 fixtures stand in for a captured `show current-config` transcript; and
 `exportconfigReadCounter` wraps `App.PromptIn` to prove a confirmation prompt was never
 actually read, not merely that the command did not block.
-188 tests across 11 files.
+189 tests across 11 files.
 
 Because the platform is a flag rather than the first word of a command, the
 invocations here name it explicitly (`--platform docker`) rather than relying on
@@ -629,6 +656,7 @@ the destructive-confirmation tests use.
 | `TestRolePositionalTeachesPodFlag` | The likelier half of the H2 migration: an operator on KUBERNETES typing the OLD documented spelling (`shell backup`, `broker logs monitor`, `cli primary`, `broker status backup`, `broker restart backup`, `broker perform semp-login-check backup`) gets an error naming both `--pod` and the role typed, rather than cobra's bare "unknown command" hiding the fact that it merely moved. A `shell typo` subtest pins the other side: a word that is not a role keeps cobra's own wording and never offers the `--pod` hint, since a typo is not a migration |
 | `TestPlatformIsAnnouncedInThePreamble` | The platform is inferred rather than typed by the operator, so it is stated in the preamble -- otherwise the one fact the operator does not type themselves would also be the one they cannot see |
 | `TestCompletionNeverReadsTheEnvFile` | The invariant that decided where the pre-run hook lives. Cobra runs the NEAREST ancestor's `PersistentPreRunE` and `__complete` is root's own child, so a hook on root would parse an untrusted env file on every TAB press; keeping it per-command prevents that, proven by completing with an env file that does not exist |
+| `TestCompletionHelpKeepsTheLoadingInstructions` | The one thing this command exists to tell you, which has gone missing before: a completion script is useless without the line that loads it, and that line differs per shell in a way nobody remembers. Pins that each shell shows BOTH the current-shell one-liner and the permanent form, that each actually shows a command rather than just promising one (the powershell help said "source it from your profile" for a while without giving the line), and that the parent lists the permanent form for all four so one help screen is enough. No other completion test would notice: they drive the generator and check the SCRIPT, which is unaffected by the help around it |
 | `TestPlatformFlagIsOnRoot` | `--platform` is a root persistent flag inherited by every command including `convert`, which is what lets one word mean one thing across the whole CLI |
 | `TestScopedCommandsSaySoInHelp` | The tree is one static shape, so help text is the only place to learn a command does not apply before running it; a command that applies everywhere carries no scope tail |
 | `TestPlatformOpsCoversEveryPlatform` | The builder pinned against `Platforms()`. Every other consumer of an ops map already walks `Platforms()`, so `platformOps` is the one place a fourth platform would be dropped silently: with both halves non-nil it would still return three entries, `supported()` would omit the new name, `onlyOn` would tag the command for three platforms, and the new one would refuse every command that has a perfectly good implementation -- and the refusal would look deliberate |
@@ -2083,8 +2111,8 @@ certificate's two delivery routes. 32 tests across 2 files.
 | `TestParsePort` | Port entries across the `name=container`, `container:service`, and `/PROTO` forms |
 | `TestParseToleration` | Toleration Equal (`key=value:effect`) and Exists (`key:effect`) forms |
 | `TestQuadletEscape` | systemd `Environment=` escaping of `%`, `"`, and `\` |
-| `TestScalingReachesContainersAsEnv` | Every scaling knob reaches docker and podman as a container environment variable, carrying the env file's values, including an explicit `0`, which is a real setting rather than an absent one |
-| `TestScalingReachesK8sAsSpecOnly` | The other half of the delivery split: on k8s the same settings are CR fields under `spec.systemScaling` and never pod environment variables, the spool size is spelled `maxSpoolUsage` there, and the container spelling appears nowhere in the CR |
+| `TestScalingReachesContainersAsEnv` | Every scaling knob reaches docker and podman as a container environment variable, carrying the env file's values, including an explicit `0`, which is a real setting rather than an absent one. `max-dmr-links` -- the CR's hyphenated spelling -- must never appear there; the container gets `max_dmr_links` instead, since a systemd `Environment=` name cannot carry a hyphen |
+| `TestScalingReachesK8sAsSpecOnly` | The other half of the delivery split: on k8s the same settings are CR fields under `spec.systemScaling` and never pod environment variables. `max-dmr-links` is the one setting whose CR spelling differs from what reaches the container (`max_dmr_links`); the retired camelCase `maxSpoolUsage:` must no longer appear now that the CR uses the same `messagespool_maxspoolusage` name the containers always have |
 | `TestScalingTierReachesEveryArtifact` | One tier value decides the CPU cap in all three artifacts: the broker CR's `messagingNodeCpu`/`messagingNodeMemory`, compose's `cpus:`/`mem_limit:`, and the quadlet's `PodmanArgs=--cpus=`/`Memory=`. It uses 100000, which is no platform's default, so the value is proven read rather than hardcoded -- the goldens only ever show the default tier |
 | `TestContainerMemOverrideReachesArtifact` | The asymmetry survives to the artifact: an overridden `container.mem` reaches compose while the CPU stays the tier's |
 | `TestCustomVolumeMountRendersTheCRArray` | The translation at the boundary: the env file keys on this tool's lowercase role word, the CRD constrains `customVolumeMount[].name` to a capitalised enum, and the order is fixed rather than map order -- a Go map iterates randomly, and this renders into a CR that is diffed and re-applied, so an unstable order would look like a change on every deploy |
