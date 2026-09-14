@@ -802,14 +802,17 @@ SAFE because the script is recomputed from a fresh read rather than replayed (CO
 idempotent: the queue-guard keyword is state-dependent), but converges further only when the
 cause was transient.
 
-Phase 2's shutdown/state/no-shutdown order is the OWNER'S say-so, not a confirmed broker rule,
-and the discrepancy is left open rather than resolved here: the CLI reference states no
-precondition on changing `state` either, and `setReplicationRoleScript` -- the script
-`perform dr`'s switch plan calls to move a role -- sets `state` alone, with no shutdown, against
-a VPN the switch plan requires already ENABLED. Phase 2 takes the safe superset regardless
-(harmless if the rule is false, required if it is true); if the rule turns out to be universal,
-`SetRole` needs the same cycle, as its own separate change with its own review of the switch
-plan's preflight.
+A ROLE IS SET IN PLACE (operator, 2026-09-14): `message-vpn <n>` -> `replication` ->
+`state <active|standby>`, against a VPN that is up and replicating, with no shutdown around
+it. An earlier draft of phase 2 cycled every listed VPN down and back up to change its role,
+on the assumption that a role could only move while replication was disabled. The assumption
+was wrong and it cost a real outage: replication stopped on every listed VPN on every run,
+including the runs where the mate had not changed and nothing needed to stop at all.
+
+The evidence was already in the tree. `setReplicationRoleScript`, which `perform dr`'s
+switchover calls, has always set `state` alone against a VPN its own preflight requires to be
+ENABLED -- so the two paths contradicted each other and the switchover was the one telling
+the truth. They now agree, and phase 1 is the ONLY thing that stops replication.
 
 A site's `via` is validated ON DEMAND, not at load: a file with none is valid for `configure
 dr` and is refused by `perform dr`'s own preflight. An EMPTY `via:` is accepted for a reason

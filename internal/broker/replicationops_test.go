@@ -62,7 +62,7 @@ func TestReplicationVPNLinesEnablesListedAndDisablesTheRest(t *testing.T) {
 		{Name: "ORDERS", ActiveAt: siteA},
 		{Name: "PAYMENTS", ActiveAt: siteB},
 	}
-	lines, res := replicationVPNLines(vpns, siteAEntry(), state)
+	lines, res := replicationVPNLines(vpns, siteAEntry(), state, false)
 	body := strings.Join(lines, "\n")
 
 	if res.Roles["ORDERS"] != RoleActive || res.Roles["PAYMENTS"] != RoleStandby {
@@ -90,7 +90,7 @@ func TestReplicationVPNLinesEnablesListedAndDisablesTheRest(t *testing.T) {
 func TestReplicationVPNLinesQuotesNamesWithSpaces(t *testing.T) {
 	lines, _ := replicationVPNLines(
 		[]config.ReplVPN{{Name: "A VPN WITH SPACES", ActiveAt: siteA}},
-		siteAEntry(), map[string]VPNRepl{})
+		siteAEntry(), map[string]VPNRepl{}, false)
 	body := strings.Join(lines, "\n")
 	if !strings.Contains(body, `message-vpn "A VPN WITH SPACES"`) {
 		t.Errorf("the VPN name must be quoted:\n%s", body)
@@ -109,9 +109,9 @@ func TestReplicationVPNLinesIsDeterministic(t *testing.T) {
 		"CCC": {Admin: AdminEnabled, Role: RoleStandby},
 		"DDD": {Admin: AdminEnabled, Role: RoleStandby},
 	}
-	first, res := replicationVPNLines(nil, siteAEntry(), state)
+	first, res := replicationVPNLines(nil, siteAEntry(), state, false)
 	for i := 0; i < 20; i++ {
-		again, _ := replicationVPNLines(nil, siteAEntry(), state)
+		again, _ := replicationVPNLines(nil, siteAEntry(), state, false)
 		if strings.Join(again, "\n") != strings.Join(first, "\n") {
 			t.Fatalf("run %d rendered a different script:\n%s\n---\n%s",
 				i, strings.Join(first, "\n"), strings.Join(again, "\n"))
@@ -125,62 +125,109 @@ func TestReplicationVPNLinesIsDeterministic(t *testing.T) {
 	}
 }
 
-// TestReplicationVPNLinesOrderIsShutdownStateEnable pins DEFECT 2's fix: a role is only
-// ever touched while replication is disabled (the owner's stated broker constraint; see
-// replicationVPNLines' own doc comment for the counter-evidence this is built on
-// regardless), so every listed VPN must be SHUT DOWN, given its role, and only then
-// re-enabled -- never enabled first, which is what this used to emit.
+// TestReplicationVPNLinesSetsRoleWithoutCyclingReplication pins the rule that replaced a
+// wrong one: a role is set IN PLACE, with no shutdown around it, against a VPN that is up
+// and replicating (operator, 2026-09-14).
 //
-// It also pins the re-enable KEYWORD, which is read from the QUEUE column and never from
-// enablement. The broker's default is fail-on-existing-queue, refused when a replication
-// queue already exists, and force-use-existing-queue is its inverse, refused when there is
-// none -- a two-sided choice, so a wrong guess is a refused re-enable either way.
+// The earlier draft cycled every listed VPN down and back up to change its role. That
+// interrupted replication on each one on EVERY run, including the ones where nothing about
+// the mate had changed and nothing needed to stop -- which is every re-run after the first.
+// The contradiction was visible in the tree the whole time: setReplicationRoleScript, which
+// perform dr's switchover uses, already set `state` alone against a VPN its own preflight
+// requires to be ENABLED.
 //
-// Enablement is the wrong signal in BOTH directions, which is why this reads Q, and the
-// real capture settles it: semp/show-message-vpn-replication.out carries
-// `vpn-01  U S U - - - Y A` -- admin-UP with the queue n/a, so an enabled VPN need not
-// have one. And phase 1 shuts VPNs down, so on the re-run this command's own errors ask
-// for, a VPN that still holds its queue reads back admin-DOWN.
-func TestReplicationVPNLinesOrderIsShutdownStateEnable(t *testing.T) {
+// The enable is emitted only where one is actually needed, and its KEYWORD comes from the
+// QUEUE column rather than from enablement. The broker's default is fail-on-existing-queue,
+// refused when a queue already exists, and force-use-existing-queue is its inverse, refused
+// when none does -- two-sided, so a wrong guess is a refused enable either way. Enablement
+// is the wrong signal in both directions: the real capture has `vpn-01  U S U - - - Y A`,
+// admin-UP with the queue n/a, so an enabled VPN need not have one.
+func TestReplicationVPNLinesSetsRoleWithoutCyclingReplication(t *testing.T) {
 	state := map[string]VPNRepl{
-		// No queue: the bare, default-guarded form.
+		// Already up: the role changes under it, and nothing else happens.
+		"LIVE": {Admin: AdminEnabled, Role: RoleStandby, Queue: QueueDown},
+		// Down with no queue: needs enabling, bare default-guarded form.
 		"NEW": {Admin: AdminShutdown, Role: RoleStandby, Queue: QueueNA},
-		// Enabled with NO queue -- the vpn-01 row from the real capture, and exactly the
-		// case reading enablement instead of the queue column got wrong.
-		"ENABLED_NO_QUEUE": {Admin: AdminEnabled, Role: RoleStandby, Queue: QueueNA},
-		// Shut down but the queue is still there: what phase 1 leaves behind, so this is
-		// the re-run path the failure errors send an operator down.
+		// Down but the queue survived: needs enabling, and the bare form would be refused.
 		"DOWN_WITH_QUEUE": {Admin: AdminShutdown, Role: RoleActive, Queue: QueueDown},
-		// A report carrying no Q column: fall back to the broker's own default rather
-		// than assert something that was never read.
-		"UNREADABLE": {Admin: AdminEnabled, Role: RoleActive, Queue: QueueUnknown},
+		// Enabled with NO queue -- the vpn-01 row, the case reading enablement got wrong.
+		"ENABLED_NO_QUEUE": {Admin: AdminEnabled, Role: RoleStandby, Queue: QueueNA},
 	}
 	vpns := []config.ReplVPN{
+		{Name: "LIVE", ActiveAt: siteA},
 		{Name: "NEW", ActiveAt: siteA},
-		{Name: "ENABLED_NO_QUEUE", ActiveAt: siteA},
 		{Name: "DOWN_WITH_QUEUE", ActiveAt: siteA},
-		{Name: "UNREADABLE", ActiveAt: siteA},
+		{Name: "ENABLED_NO_QUEUE", ActiveAt: siteA},
 	}
-	lines, _ := replicationVPNLines(vpns, siteAEntry(), state)
+	lines, _ := replicationVPNLines(vpns, siteAEntry(), state, false)
 	body := strings.Join(lines, "\n")
 
-	for _, c := range []struct{ vpn, want, why string }{
-		{"NEW", "no shutdown", "no queue means the bare, default-guarded form"},
-		{"ENABLED_NO_QUEUE", "no shutdown",
-			"enabled is NOT the same fact as having a queue, and asking to reuse one that does not exist is refused"},
-		{"DOWN_WITH_QUEUE", "no shutdown force-use-existing-queue",
-			"the queue outlived the shutdown, so the default guard would refuse this re-enable"},
-		{"UNREADABLE", "no shutdown",
-			"an unread queue column falls back to the broker's default, never to a claim the report did not make"},
+	for _, c := range []struct {
+		vpn  string
+		want []string
+		why  string
+	}{
+		{"LIVE", []string{"state active"},
+			"already up and replicating: the role changes in place, with NOTHING else sent"},
+		{"ENABLED_NO_QUEUE", []string{"state active"},
+			"also already up: still no cycling, whatever its queue column says"},
+		{"NEW", []string{"state active", "no shutdown"},
+			"was down, so it needs enabling -- role FIRST, so it never comes up in the wrong one"},
+		{"DOWN_WITH_QUEUE", []string{"state active", "no shutdown force-use-existing-queue"},
+			"was down but kept its queue, so the default guard would refuse the bare form"},
 	} {
-		want := strings.Join(vpnReplicationBlock(c.vpn, "shutdown", "state active", c.want), "\n")
+		want := strings.Join(vpnReplicationBlock(c.vpn, c.want...), "\n")
 		if !strings.Contains(body, want) {
 			t.Errorf("%s: %s\ngot:\n%s\nwant substring:\n%s", c.vpn, c.why, body, want)
+		}
+	}
+	// The heart of it: no listed VPN is ever taken down to change its role.
+	for _, vpn := range []string{"LIVE", "ENABLED_NO_QUEUE"} {
+		block := strings.Join(vpnReplicationBlock(vpn, "shutdown"), "\n")
+		if strings.Contains(body, block) {
+			t.Errorf("%s was shut down to change its role; a role is set in place:\n%s", vpn, body)
 		}
 	}
 	// force-recreate-queue discards whatever the queue holds. Nothing here may emit it.
 	if strings.Contains(body, "force-recreate-queue") {
 		t.Errorf("force-recreate-queue discards spooled messages and must never be emitted:\n%s", body)
+	}
+}
+
+// TestReplicationVPNLinesReEnablesWhatPhase1StoppedOnly pins the one case where a listed
+// VPN that was already up still gets an enable: phase 1 took it down to converge the mate,
+// so this command is responsible for bringing it back.
+//
+// When phase 1 did NOT run, the same VPN in the same state must produce no enable at all.
+// That difference is the whole point of the change, because the no-phase-1 run is the
+// common one -- every re-run after the mate is settled.
+func TestReplicationVPNLinesReEnablesWhatPhase1StoppedOnly(t *testing.T) {
+	state := map[string]VPNRepl{
+		"LIVE":     {Admin: AdminEnabled, Role: RoleStandby, Queue: QueueDown},
+		"UNLISTED": {Admin: AdminEnabled, Role: RoleActive, Queue: QueueDown},
+	}
+	vpns := []config.ReplVPN{{Name: "LIVE", ActiveAt: siteA}}
+
+	stopped, res := replicationVPNLines(vpns, siteAEntry(), state, true)
+	stoppedBody := strings.Join(stopped, "\n")
+	if !strings.Contains(stoppedBody, "no shutdown") {
+		t.Errorf("phase 1 stopped this VPN, so phase 2 must turn it back on:\n%s", stoppedBody)
+	}
+	// And the unlisted one is NOT shut down again -- phase 1 already did it.
+	if strings.Contains(stoppedBody, strings.Join(vpnReplicationBlock("UNLISTED", "shutdown"), "\n")) {
+		t.Error("phase 1 already stopped the unlisted VPN; re-sending a shutdown adds nothing " +
+			"and gives the broker a second chance to refuse it")
+	}
+	// It is still REPORTED as disabled, because it is.
+	if strings.Join(res.Disabled, ",") != "UNLISTED" {
+		t.Errorf("Disabled = %v, want the unlisted VPN recorded even though phase 1 stopped it", res.Disabled)
+	}
+
+	running, _ := replicationVPNLines(vpns, siteAEntry(), state, false)
+	runningBody := strings.Join(running, "\n")
+	if strings.Contains(runningBody, "no shutdown") {
+		t.Errorf("nothing stopped this VPN, so nothing may re-enable it -- that is the "+
+			"interruption this change exists to remove:\n%s", runningBody)
 	}
 }
 
@@ -270,15 +317,24 @@ func TestRouterNameReadsTheCaptureHeader(t *testing.T) {
 	})
 }
 
-// TestVPNReplicationBlockShape pins the emitted block against the shape a capture uses,
-// so a generated script reads beside one rather than against it. Arguments are given in
-// phase 2's own order -- shutdown, state, re-enable -- rather than the reversed order this
-// used to take.
+// TestVPNReplicationBlockShape pins the emitted block against the shape a capture uses, so
+// a generated script reads beside one rather than against it: the VPN named and quoted, the
+// replication node entered, the commands indented inside it, and both levels closed.
+//
+// It takes whatever commands the caller has, in the caller's order. Phase 2 usually sends
+// one line -- `state <role>` alone, since a role is set in place -- and adds an enable only
+// where one is needed, so this must hold for a block of any length rather than for a fixed
+// trio, which is what it used to assert.
 func TestVPNReplicationBlockShape(t *testing.T) {
-	got := strings.Join(vpnReplicationBlock("X", "shutdown", "state active", "no shutdown"), "\n")
-	want := "message-vpn \"X\"\n  replication\n    shutdown\n    state active\n    no shutdown\n    exit\n  exit"
-	if got != want {
-		t.Errorf("block =\n%s\nwant\n%s", got, want)
+	one := strings.Join(vpnReplicationBlock("X", "state active"), "\n")
+	wantOne := "message-vpn \"X\"\n  replication\n    state active\n    exit\n  exit"
+	if one != wantOne {
+		t.Errorf("single-command block =\n%s\nwant\n%s", one, wantOne)
+	}
+	two := strings.Join(vpnReplicationBlock("X", "state active", "no shutdown"), "\n")
+	wantTwo := "message-vpn \"X\"\n  replication\n    state active\n    no shutdown\n    exit\n  exit"
+	if two != wantTwo {
+		t.Errorf("two-command block =\n%s\nwant\n%s", two, wantTwo)
 	}
 }
 
@@ -347,7 +403,8 @@ func TestConfigureReplicationReadsTypeOffReadMateConfig(t *testing.T) {
 	}}
 	o, _ := newTestOps(t, &config.Config{}, ft)
 	self := config.ReplSite{VirtualRouterName: siteA, RouterNames: []string{"sol-a1"}}
-	if _, err := o.ConfigureReplication(context.Background(), config.Primary, self, replTestMate(), nil); err != nil {
+	if _, err := o.ConfigureReplication(context.Background(), config.Primary, self,
+		replTestMate(), replListed()); err != nil {
 		t.Fatalf("ConfigureReplication error: %v", err)
 	}
 	if hasCall(ft, "banner") {
@@ -356,8 +413,66 @@ func TestConfigureReplicationReadsTypeOffReadMateConfig(t *testing.T) {
 	if !hasCall(ft, scriptConfigureReplMate) {
 		t.Error("replTestMate differs from the capture by one endpoint, so phase 1 must run")
 	}
+	// LISTED VPNs, not nil: phase 1 has stopped everything here, so its own shutdowns now
+	// stand in for phase 2's unlisted pass and a run with nothing listed would correctly
+	// send no phase-2 chunk. The roles are what gives phase 2 work.
 	if !hasCall(ft, scriptConfigureReplVPNs) {
-		t.Error("the capture reports default and vpn-01 replicating and unlisted, so phase 2 must run")
+		t.Error("VPNs are listed, so phase 2 must run to give each its role")
+	}
+}
+
+// TestConfigureReplicationSkipsPhase2WhenPhase1DidItAll pins the other half of that, which
+// is a real saving rather than an accident: when the mate differs and the env file lists no
+// VPN, phase 1 stops every replicating VPN and there is nothing left for phase 2 to say --
+// so no second chunk is sent at all.
+//
+// Before a role could be set in place, phase 2 always had work here, because it re-sent a
+// shutdown to each unlisted VPN that phase 1 had just stopped. That was a second broker
+// round trip, and a second chance for the broker to refuse a line, for no change in state.
+func TestConfigureReplicationSkipsPhase2WhenPhase1DidItAll(t *testing.T) {
+	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
+		if out, ok := replReadOnlyResponder(argv); ok {
+			return out, nil
+		}
+		switch {
+		case matchCLI(argv, scriptConfigureReplMate):
+			return []byte(softwareBanner + "xps-ps-01> \n"), nil
+		case matchCLI(argv, scriptReplStatus):
+			return []byte(softwareBanner + showReplicationSoftware), nil
+		}
+		return nil, nil
+	}}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	self := config.ReplSite{VirtualRouterName: siteA, RouterNames: []string{"sol-a1"}}
+	res, err := o.ConfigureReplication(context.Background(), config.Primary, self, replTestMate(), nil)
+	if err != nil {
+		t.Fatalf("ConfigureReplication error: %v", err)
+	}
+	if !hasCall(ft, scriptConfigureReplMate) {
+		t.Fatal("the mate differs, so phase 1 must run")
+	}
+	if hasCall(ft, scriptConfigureReplVPNs) {
+		t.Error("phase 1 already stopped every replicating VPN and nothing is listed, so phase 2 " +
+			"has nothing to send -- an empty chunk is a round trip and a rejection risk for no change")
+	}
+	// Still REPORTED as disabled, because they are: the report describes the end state,
+	// not which phase happened to produce it.
+	if strings.Join(res.Disabled, ",") == "" {
+		t.Error("the VPNs phase 1 stopped and the file does not list must still be reported as disabled")
+	}
+}
+
+// replListed names VPNs the shared capture actually reports, which is what phase 2 needs
+// to have work of its own.
+//
+// It matters more since a role stopped being a shutdown/state/enable cycle. Phase 2's
+// unlisted pass is now SKIPPED when phase 1 already stopped those VPNs, so a run with no
+// listed VPNs and a differing mate correctly sends no phase-2 chunk at all -- which means
+// a test that wants to exercise phase 2 has to list something.
+func replListed() []config.ReplVPN {
+	return []config.ReplVPN{
+		{Name: "default", ActiveAt: siteA},
+		{Name: "vpn-01", ActiveAt: siteB},
 	}
 }
 
@@ -601,7 +716,10 @@ func TestConfigureReplicationPhase2RejectionAfterPhase1Success(t *testing.T) {
 	}}
 	o, _ := newTestOps(t, &config.Config{}, ft)
 	self := config.ReplSite{VirtualRouterName: siteA, RouterNames: []string{"sol-a1"}}
-	_, err := o.ConfigureReplication(context.Background(), config.Primary, self, replTestMate(), nil)
+	// Listed VPNs, so phase 2 has work: with nothing listed, phase 1's own shutdowns cover
+	// every unlisted VPN and no phase-2 chunk is sent for this test to have rejected.
+	_, err := o.ConfigureReplication(context.Background(), config.Primary, self,
+		replTestMate(), replListed())
 	if err == nil {
 		t.Fatal("ConfigureReplication should fail when the broker rejects phase 2")
 	}

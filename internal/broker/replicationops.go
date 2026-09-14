@@ -38,21 +38,25 @@ import (
 //	this broker currently reports admin-ENABLED for replication, then the removals, then
 //	the new mate lines -- one RunCLI call.
 //
-//	PHASE 2 (per-VPN, always): for each LISTED VPN, in file order, `shutdown`, then
-//	`state <role>`, then `no shutdown` -- never enable before setting the role, which is
-//	backwards from what this used to emit -- then `shutdown` for every unlisted VPN still
-//	replicating. One RunCLI call, run whether or not phase 1 ran.
+//	PHASE 2 (per-VPN, always): for each LISTED VPN, in file order, `state <role>` -- and
+//	`no shutdown` ONLY where one is needed -- then `shutdown` for every unlisted VPN this
+//	broker still has enabled. One RunCLI call, run whether or not phase 1 ran.
 //
-// Phase 2's own shutdown/state/no-shutdown order is written on the OWNER'S say-so, not on
-// a confirmed broker rule: the CLI reference's `replication state` command carries no
-// precondition text either, and `setReplicationRoleScript` (scripts.go) -- the script
-// `perform dr`'s switch plan calls to move a role -- sets `state` alone, with no shutdown
-// around it, against a VPN the switch plan requires already ENABLED. The two cannot both be
-// describing a hard broker rule. This function takes the safe superset regardless: shutting
-// down first is harmless if the rule is false, and required if it is true, so it costs
-// nothing to do it here. The discrepancy is not resolved by this change -- if the rule
-// really is universal, `perform dr`'s SetRole needs the same cycle and its own review,
-// which is a separate change with its own tests and its own preflight to reconsider.
+// A ROLE IS SET IN PLACE, with no shutdown around it, against a VPN that is up and
+// replicating (operator, 2026-09-14): `message-vpn <n>` -> `replication` ->
+// `state <active|standby>` is the whole of it. An earlier draft of phase 2 cycled every
+// listed VPN down and back up to change its role, on the assumption that a role could
+// only move while replication was disabled. That assumption was wrong, and the cost was
+// real: it interrupted replication on every listed VPN on every run, including the runs
+// where nothing about the mate had changed and nothing needed to stop at all.
+//
+// The evidence was in the tree the whole time. `setReplicationRoleScript` (scripts.go),
+// which `perform dr`'s switchover calls to move a role, sets `state` alone against a VPN
+// its own preflight requires to be ENABLED -- so the two paths contradicted each other,
+// and the switchover was the one telling the truth. They now agree.
+//
+// Phase 1 is therefore the ONLY thing that stops replication, and it runs only when the
+// mate configuration actually differs. Phase 2 re-enables what phase 1 took down.
 //
 // A REJECTION IS NEVER RETROACTIVE. `RunCLI` wraps each phase in the broker's own
 // `source script ... stop-on-error no-prompt`, so a rejected line stops THAT call; it does
@@ -168,9 +172,9 @@ func (o *Ops) ConfigureReplication(ctx context.Context, role config.Role,
 			strings.Join(missing, ", "))
 	}
 
-	vpnLines, res := replicationVPNLines(vpns, self, state)
-	res.Removed, res.Mate = removals, mateLines
-
+	// The mate decision comes FIRST now, because the per-VPN body depends on it: a
+	// listed VPN needs re-enabling only when phase 1 is about to take it down.
+	//
 	// The mate only needs converging when it actually differs. Built from SameEndpoints
 	// and the router name rather than from "removals is empty": a broker holding a
 	// SUBSET of the wanted endpoints renders zero removals (RenderMateRemovals only ever
@@ -180,7 +184,10 @@ func (o *Ops) ConfigureReplication(ctx context.Context, role config.Role,
 	// broker omits the `plain-text` keyword on render (renderMateSoftware) but a real
 	// broker may echo it back, and a keyword-sensitive compare would call that drift on
 	// every plain-text endpoint, on every run, forever.
-	res.MateApplied = have.VirtualRouterName != want.VirtualRouterName || !SameEndpoints(have.Endpoints, want.Endpoints)
+	mateApplied := have.VirtualRouterName != want.VirtualRouterName || !SameEndpoints(have.Endpoints, want.Endpoints)
+
+	vpnLines, res := replicationVPNLines(vpns, self, state, mateApplied)
+	res.Removed, res.Mate, res.MateApplied = removals, mateLines, mateApplied
 
 	if res.MateApplied {
 		// Iterated in sorted order for the same reason replicationVPNLines' own map
@@ -547,30 +554,35 @@ func mateConvergenceShutdowns(state map[string]VPNRepl) []string {
 
 // replicationVPNLines renders phase 2's body and records what it decided.
 //
-// Two rules, and the second is the one with teeth. LISTED means enabled, with the role
-// RoleAtSite derives for THIS site -- and the per-VPN ORDER is shutdown, then state, then
-// no shutdown, never the reverse: a role is the owner's stated precondition to change
-// only while replication is disabled (see this file's own doc comment for the
-// counter-evidence this rests on, and why the order is kept regardless), so every listed
-// VPN is shut down before its role is touched and only then turned back on.
-// UNLISTED-BUT-REPLICATING means shut down -- the file is authoritative, so a VPN
-// replicating on the broker that the block does not name stops. That is destructive to
-// message flow, which is why the command takes an exact-`yes` gate naming those VPNs
-// before any of it runs.
+// A ROLE IS SET IN PLACE. `message-vpn <n>` -> `replication` -> `state <role>` is all it
+// takes, against a VPN that is up and replicating, with no shutdown around it (operator,
+// 2026-09-14). That is also what `setReplicationRoleScript` has always done for
+// `perform dr`'s switchover, so the two paths now agree; an earlier draft of this
+// function cycled every listed VPN down and back up to change its role, which interrupted
+// replication on each one for no reason on every run where the mate had not changed --
+// that is, on every re-run after the first.
 //
-// The re-enable line's KEYWORD depends on the VPN's state BEFORE this call (from state,
-// read in phase 0, before any write): a VPN already admin-enabled has an existing
-// replication queue, and the broker's default `no shutdown` guard is
-// `fail-on-existing-queue` -- it refuses to re-enable against a queue that is already
-// there (semp/appliance_cli_reference.html, `enable configure message-vpn <vpn-name>
-// replication shutdown`). So a VPN that was already enabled is re-enabled with
-// `force-use-existing-queue`, which the same reference restricts to "the existing queue
-// is configured the same as is currently specified under replication configuration" --
-// satisfied here, since nothing in this command touches the replication queue's own
-// settings. A VPN that was NOT already enabled has no queue yet, so the bare, default-
-// guarded form is correct and is what it gets.
+// So a listed VPN is NEVER shut down here. It gets `state <role>`, and `no shutdown` only
+// when it actually needs enabling, which is either of two cases:
+//
+//   - it was not admin-enabled when this run read the broker, or
+//   - phase 1 ran and shut it down to converge the mate (mateStopped), which is the one
+//     situation where this command is responsible for it being down.
+//
+// The role is written BEFORE the enable in that case, deliberately: a VPN that comes up
+// holding the wrong role, even briefly, is worse than one that comes up a moment later.
+//
+// UNLISTED-BUT-ENABLED means shut down -- the file is authoritative, so a VPN replicating
+// on the broker that the block does not name stops. That is destructive to message flow,
+// which is why the command takes an exact-`yes` gate naming those VPNs before any of it
+// runs. When phase 1 already stopped it, the line is not repeated: it is recorded in the
+// report as disabled, because it is, but nothing re-sends a shutdown to a VPN that is
+// already down.
+//
+// The enable line's KEYWORD comes from the QUEUE column, never from enablement -- see
+// reenableLine, and the real capture that settles why the two are different facts.
 func replicationVPNLines(vpns []config.ReplVPN, self config.ReplSite,
-	state map[string]VPNRepl) ([]string, *ReplicationConfigResult) {
+	state map[string]VPNRepl, mateStopped bool) ([]string, *ReplicationConfigResult) {
 	res := &ReplicationConfigResult{Roles: map[string]ReplRole{}}
 	listed := make(map[string]bool, len(vpns))
 	var lines []string
@@ -579,11 +591,22 @@ func replicationVPNLines(vpns []config.ReplVPN, self config.ReplSite,
 		listed[v.Name] = true
 		role := RoleAtSite(v, self)
 		res.Roles[v.Name] = role
-		cur, ok := state[v.Name]
-		if !ok || cur.Admin != AdminEnabled {
-			res.Enabled = append(res.Enabled, v.Name)
+		cur := state[v.Name]
+
+		// The role always. No shutdown around it -- see this function's doc comment.
+		cmds := []string{"state " + string(role)}
+
+		// The enable only when it is actually needed. mateStopped is the case this
+		// command created itself: phase 1 took every enabled VPN down to converge the
+		// mate, so a listed one has to be brought back even though it was up when the
+		// run started.
+		if wasDown := cur.Admin != AdminEnabled; wasDown || mateStopped {
+			if wasDown {
+				res.Enabled = append(res.Enabled, v.Name)
+			}
+			cmds = append(cmds, reenableLine(cur))
 		}
-		lines = append(lines, vpnReplicationBlock(v.Name, "shutdown", "state "+string(role), reenableLine(cur))...)
+		lines = append(lines, vpnReplicationBlock(v.Name, cmds...)...)
 	}
 
 	// Iterated in sorted order: a map range is randomised, and a generated script that
@@ -600,8 +623,13 @@ func replicationVPNLines(vpns []config.ReplVPN, self config.ReplSite,
 		if listed[name] || state[name].Admin != AdminEnabled {
 			continue
 		}
+		// Reported as disabled either way, because it is. The LINE is skipped when
+		// phase 1 already stopped it: re-sending a shutdown to a VPN that is already
+		// down adds nothing and gives the broker a second chance to refuse it.
 		res.Disabled = append(res.Disabled, name)
-		lines = append(lines, vpnReplicationBlock(name, "shutdown")...)
+		if !mateStopped {
+			lines = append(lines, vpnReplicationBlock(name, "shutdown")...)
+		}
 	}
 	sort.Strings(res.Enabled)
 	return lines, res

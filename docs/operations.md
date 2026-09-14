@@ -1024,16 +1024,20 @@ wrong the other way means writing mate lines the broker silently refuses:
    `virtualRouterName`. Rendering happens, and is checked for a broker-type mismatch, BEFORE
    this or the per-VPN step ever writes anything. When the mate already matches, this phase
    writes NOTHING and stops no VPN -- the report says so.
-2. **Per message-VPN, always**: for each one in `replication.vpns`, in file order --
-   `shutdown`, then `state active|standby` (the role derived from `activeAt`), then
-   `no shutdown` -- never enabled before its role is set. That ordering is ALSO the operator's
-   say-so rather than a confirmed broker rule, and it is the weaker of the two: the CLI
-   reference states no precondition on `state`, and `broker perform data-replication`'s own
-   switchover path sets `state` alone against a VPN it requires to be enabled. The cycle is
-   kept because it is the safe superset -- harmless if the rule is false, required if it is
-   true -- but it costs a brief replication interruption per VPN that setting the role alone
-   would not. Then `shutdown` on any VPN the file does not list that this broker currently has
-   replication enabled for.
+2. **Per message-VPN, always**: for each one in `replication.vpns`, in file order,
+   `state active|standby` -- the role derived from `activeAt`, set IN PLACE against a VPN
+   that is up and replicating, with no shutdown around it. A VPN is only enabled
+   (`no shutdown`) when it actually needs it: either replication was off for it when the
+   run started, or phase 1 just stopped it to change the mate. The role is written before
+   the enable in that case, so a VPN never comes up holding the wrong one, even briefly.
+   Then `shutdown` on any VPN the file does not list that this broker currently has
+   replication enabled for -- skipped when phase 1 already stopped it.
+
+   This is why phase 1 is the only thing that interrupts replication. An earlier version
+   cycled every listed VPN down and back up to change its role, which stopped replication on
+   each of them on every run, including runs where the mate had not changed and nothing
+   needed to stop. **If the mate configuration already matches your env file, this command
+   now interrupts nothing.**
 
 Phase 1's shutdown is broader than the listed VPNs: it stops replication on **every** VPN this
 broker currently has replication enabled for, including ones the file does not mention,
