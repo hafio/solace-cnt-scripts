@@ -4729,7 +4729,7 @@
       "node_kind": "heading",
       "norm_label": "a replication switch refuses before changing anything",
       "source_file": "docs/operations.md",
-      "source_location": "L1282"
+      "source_location": "L1285"
     },
     {
       "id": "docs_operations_a_wrapper_runtime_is_refused",
@@ -4741,7 +4741,7 @@
       "node_kind": "heading",
       "norm_label": "a wrapper runtime is refused",
       "source_file": "docs/operations.md",
-      "source_location": "L1295"
+      "source_location": "L1298"
     },
     {
       "id": "docs_operations_docker_compose_secrets_need_compose_2_23_1",
@@ -4753,7 +4753,7 @@
       "node_kind": "heading",
       "norm_label": "docker compose secrets need compose 2.23.1+",
       "source_file": "docs/operations.md",
-      "source_location": "L1248"
+      "source_location": "L1251"
     },
     {
       "id": "docs_operations_file_descriptors_on_rootless_podman",
@@ -4765,7 +4765,7 @@
       "node_kind": "heading",
       "norm_label": "file descriptors on rootless podman",
       "source_file": "docs/operations.md",
-      "source_location": "L1215"
+      "source_location": "L1218"
     },
     {
       "id": "docs_operations_import_reported_failure",
@@ -4777,7 +4777,7 @@
       "node_kind": "heading",
       "norm_label": "import reported failure",
       "source_file": "docs/operations.md",
-      "source_location": "L1267"
+      "source_location": "L1270"
     },
     {
       "id": "docs_operations_podman_secret_flags",
@@ -4789,7 +4789,7 @@
       "node_kind": "heading",
       "norm_label": "podman secret flags",
       "source_file": "docs/operations.md",
-      "source_location": "L1239"
+      "source_location": "L1242"
     },
     {
       "id": "docs_operations_troubleshooting",
@@ -4801,7 +4801,7 @@
       "node_kind": "heading",
       "norm_label": "troubleshooting",
       "source_file": "docs/operations.md",
-      "source_location": "L1213"
+      "source_location": "L1216"
     },
     {
       "id": "docs_operations_wrong_cluster_kubeconfig_drift",
@@ -4813,7 +4813,7 @@
       "node_kind": "heading",
       "norm_label": "wrong cluster (kubeconfig drift)",
       "source_file": "docs/operations.md",
-      "source_location": "L1254"
+      "source_location": "L1257"
     },
     {
       "id": "docs_test_command_test_go",
@@ -7168,7 +7168,7 @@
       "file_type": "code",
       "norm_label": ".readmateconfig()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L459"
+      "source_location": "L468"
     },
     {
       "id": "broker_ops_readtarget",
@@ -7190,7 +7190,7 @@
       "file_type": "code",
       "norm_label": ".replicationstatus()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L490"
+      "source_location": "L499"
     },
     {
       "id": "broker_ops_runcapture",
@@ -18313,7 +18313,7 @@
       "file_type": "code",
       "norm_label": "plannedroles()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L517"
+      "source_location": "L526"
     },
     {
       "id": "internal_broker_replicationops_roleatsite",
@@ -18324,7 +18324,7 @@
       "file_type": "code",
       "norm_label": "roleatsite()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L508"
+      "source_location": "L517"
     },
     {
       "id": "internal_broker_scripts_setreplicationrolescript",
@@ -20403,7 +20403,7 @@
       "file_type": "code",
       "norm_label": ".configurereplication()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L106"
+      "source_location": "L115"
     },
     {
       "id": "broker_ops_readvpnreplication",
@@ -20414,7 +20414,7 @@
       "file_type": "code",
       "norm_label": ".readvpnreplication()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L481"
+      "source_location": "L490"
     },
     {
       "id": "broker_ops_routername",
@@ -20425,7 +20425,7 @@
       "file_type": "code",
       "norm_label": ".routername()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L429"
+      "source_location": "L438"
     },
     {
       "id": "broker_ops_runmatephase",
@@ -20436,7 +20436,7 @@
       "file_type": "code",
       "norm_label": ".runmatephase()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L237"
+      "source_location": "L246"
     },
     {
       "id": "broker_ops_runvpnphase",
@@ -20447,7 +20447,7 @@
       "file_type": "code",
       "norm_label": ".runvpnphase()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L260"
+      "source_location": "L269"
     },
     {
       "id": "broker_vpnrepl",
@@ -20491,7 +20491,7 @@
       "file_type": "code",
       "norm_label": "ops",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L106"
+      "source_location": "L115"
     },
     {
       "id": "internal_broker_replicationops_go_broker_replicationconfigresult",
@@ -20502,7 +20502,7 @@
       "file_type": "code",
       "norm_label": "replicationconfigresult",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L76"
+      "source_location": "L85"
     },
     {
       "id": "internal_broker_replicationops_isrunclirejection",
@@ -20513,7 +20513,7 @@
       "file_type": "code",
       "norm_label": "isrunclirejection()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L296"
+      "source_location": "L305"
     },
     {
       "id": "internal_broker_replicationops_mateconvergenceshutdowns",
@@ -20524,7 +20524,7 @@
       "file_type": "code",
       "norm_label": "mateconvergenceshutdowns()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L554"
+      "source_location": "L563"
     },
     {
       "id": "internal_broker_replicationops_missinglistedvpns",
@@ -20535,7 +20535,7 @@
       "file_type": "code",
       "norm_label": "missinglistedvpns()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L528"
+      "source_location": "L537"
     },
     {
       "id": "internal_broker_replicationops_newlineif",
@@ -20546,7 +20546,7 @@
       "file_type": "code",
       "norm_label": "newlineif()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L448"
+      "source_location": "L457"
     },
     {
       "id": "internal_broker_replicationops_reenableline",
@@ -20557,7 +20557,7 @@
       "file_type": "code",
       "norm_label": "reenableline()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L675"
+      "source_location": "L684"
     },
     {
       "id": "internal_broker_replicationops_replicationvpnlines",
@@ -20568,7 +20568,7 @@
       "file_type": "code",
       "norm_label": "replicationvpnlines()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L594"
+      "source_location": "L603"
     },
     {
       "id": "internal_broker_replicationops_replphase1rejected",
@@ -20579,7 +20579,7 @@
       "file_type": "code",
       "norm_label": "replphase1rejected()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L322"
+      "source_location": "L331"
     },
     {
       "id": "internal_broker_replicationops_replphase2rejected",
@@ -20590,7 +20590,7 @@
       "file_type": "code",
       "norm_label": "replphase2rejected()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L361"
+      "source_location": "L370"
     },
     {
       "id": "internal_broker_replicationops_repltranscripttail",
@@ -20601,7 +20601,7 @@
       "file_type": "code",
       "norm_label": "repltranscripttail()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L311"
+      "source_location": "L320"
     },
     {
       "id": "internal_broker_replicationops_repltransportfailure",
@@ -20612,7 +20612,7 @@
       "file_type": "code",
       "norm_label": "repltransportfailure()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L399"
+      "source_location": "L408"
     },
     {
       "id": "internal_broker_replicationops_replvpnlist",
@@ -20623,7 +20623,7 @@
       "file_type": "code",
       "norm_label": "replvpnlist()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L345"
+      "source_location": "L354"
     },
     {
       "id": "internal_broker_replicationops_sortedvpns",
@@ -20634,7 +20634,7 @@
       "file_type": "code",
       "norm_label": "sortedvpns()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L682"
+      "source_location": "L691"
     },
     {
       "id": "internal_broker_replicationops_test_siteaentry",
@@ -20722,7 +20722,7 @@
       "file_type": "code",
       "norm_label": "vpnreplicationblock()",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L694"
+      "source_location": "L703"
     },
     {
       "id": "internal_cli_replication_reportreplicationconfig",
@@ -23168,7 +23168,7 @@
       "node_kind": "heading",
       "norm_label": "upgrading a running broker",
       "source_file": "docs/operations.md",
-      "source_location": "L1171"
+      "source_location": "L1174"
     },
     {
       "id": "docs_operations_version_floors",
@@ -32493,7 +32493,7 @@
       "node_kind": "heading",
       "norm_label": "reaching the mate",
       "source_file": "docs/operations.md",
-      "source_location": "L1146"
+      "source_location": "L1149"
     },
     {
       "id": "docs_operations_switching_roles",
@@ -32505,7 +32505,7 @@
       "node_kind": "heading",
       "norm_label": "switching roles",
       "source_file": "docs/operations.md",
-      "source_location": "L1084"
+      "source_location": "L1087"
     },
     {
       "id": "docs_operations_when_a_run_fails_partway",
@@ -32517,7 +32517,7 @@
       "node_kind": "heading",
       "norm_label": "when a run fails partway",
       "source_file": "docs/operations.md",
-      "source_location": "L1161"
+      "source_location": "L1164"
     },
     {
       "id": "go_type_time_time",
@@ -37376,7 +37376,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L113",
+      "source_location": "L122",
       "weight": 1.0
     },
     {
@@ -37388,7 +37388,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L133",
+      "source_location": "L142",
       "weight": 1.0
     },
     {
@@ -37400,7 +37400,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L170",
+      "source_location": "L179",
       "weight": 1.0
     },
     {
@@ -37412,7 +37412,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L191",
+      "source_location": "L200",
       "weight": 1.0
     },
     {
@@ -37424,7 +37424,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L198",
+      "source_location": "L207",
       "weight": 1.0
     },
     {
@@ -37436,7 +37436,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L199",
+      "source_location": "L208",
       "weight": 1.0
     },
     {
@@ -37448,7 +37448,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L211",
+      "source_location": "L220",
       "weight": 1.0
     },
     {
@@ -37460,7 +37460,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L225",
+      "source_location": "L234",
       "weight": 1.0
     },
     {
@@ -38468,7 +38468,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L240",
+      "source_location": "L249",
       "weight": 1.0
     },
     {
@@ -38480,7 +38480,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L244",
+      "source_location": "L253",
       "weight": 1.0
     },
     {
@@ -38492,7 +38492,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L248",
+      "source_location": "L257",
       "weight": 1.0
     },
     {
@@ -38504,7 +38504,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L249",
+      "source_location": "L258",
       "weight": 1.0
     },
     {
@@ -38516,7 +38516,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L251",
+      "source_location": "L260",
       "weight": 1.0
     },
     {
@@ -38528,7 +38528,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L262",
+      "source_location": "L271",
       "weight": 1.0
     },
     {
@@ -38540,7 +38540,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L265",
+      "source_location": "L274",
       "weight": 1.0
     },
     {
@@ -38552,7 +38552,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L266",
+      "source_location": "L275",
       "weight": 1.0
     },
     {
@@ -38564,7 +38564,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L268",
+      "source_location": "L277",
       "weight": 1.0
     },
     {
@@ -45968,7 +45968,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L520",
+      "source_location": "L529",
       "weight": 1.0
     },
     {
@@ -45980,7 +45980,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L602",
+      "source_location": "L611",
       "weight": 1.0
     },
     {
@@ -45992,7 +45992,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L617",
+      "source_location": "L626",
       "weight": 1.0
     },
     {
@@ -46004,7 +46004,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L619",
+      "source_location": "L628",
       "weight": 1.0
     },
     {
@@ -46016,7 +46016,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L632",
+      "source_location": "L641",
       "weight": 1.0
     },
     {
@@ -46028,7 +46028,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L335",
+      "source_location": "L344",
       "weight": 1.0
     },
     {
@@ -46040,7 +46040,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L336",
+      "source_location": "L345",
       "weight": 1.0
     },
     {
@@ -46052,7 +46052,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L368",
+      "source_location": "L377",
       "weight": 1.0
     },
     {
@@ -46064,7 +46064,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L391",
+      "source_location": "L400",
       "weight": 1.0
     },
     {
@@ -69728,7 +69728,7 @@
       "confidence_score": 1.0,
       "context": "field",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L96",
+      "source_location": "L105",
       "weight": 1.0
     },
     {
@@ -70868,7 +70868,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L106",
+      "source_location": "L115",
       "weight": 1.0
     },
     {
@@ -70880,7 +70880,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L106",
+      "source_location": "L115",
       "weight": 1.0
     },
     {
@@ -70892,7 +70892,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L106",
+      "source_location": "L115",
       "weight": 1.0
     },
     {
@@ -70904,7 +70904,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L106",
+      "source_location": "L115",
       "weight": 1.0
     },
     {
@@ -71420,7 +71420,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L459",
+      "source_location": "L468",
       "weight": 1.0
     },
     {
@@ -71432,7 +71432,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L459",
+      "source_location": "L468",
       "weight": 1.0
     },
     {
@@ -71468,7 +71468,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L481",
+      "source_location": "L490",
       "weight": 1.0
     },
     {
@@ -71480,7 +71480,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L481",
+      "source_location": "L490",
       "weight": 1.0
     },
     {
@@ -71648,7 +71648,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L490",
+      "source_location": "L499",
       "weight": 1.0
     },
     {
@@ -71660,7 +71660,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L490",
+      "source_location": "L499",
       "weight": 1.0
     },
     {
@@ -71708,7 +71708,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L429",
+      "source_location": "L438",
       "weight": 1.0
     },
     {
@@ -71720,7 +71720,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L429",
+      "source_location": "L438",
       "weight": 1.0
     },
     {
@@ -71840,7 +71840,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L237",
+      "source_location": "L246",
       "weight": 1.0
     },
     {
@@ -71852,7 +71852,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L237",
+      "source_location": "L246",
       "weight": 1.0
     },
     {
@@ -71864,7 +71864,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L260",
+      "source_location": "L269",
       "weight": 1.0
     },
     {
@@ -71876,7 +71876,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L260",
+      "source_location": "L269",
       "weight": 1.0
     },
     {
@@ -77852,7 +77852,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L554",
+      "source_location": "L563",
       "weight": 1.0
     },
     {
@@ -77864,7 +77864,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L528",
+      "source_location": "L537",
       "weight": 1.0
     },
     {
@@ -77876,7 +77876,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L528",
+      "source_location": "L537",
       "weight": 1.0
     },
     {
@@ -77888,7 +77888,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L517",
+      "source_location": "L526",
       "weight": 1.0
     },
     {
@@ -77900,7 +77900,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L517",
+      "source_location": "L526",
       "weight": 1.0
     },
     {
@@ -77912,7 +77912,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L675",
+      "source_location": "L684",
       "weight": 1.0
     },
     {
@@ -77924,7 +77924,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L594",
+      "source_location": "L603",
       "weight": 1.0
     },
     {
@@ -77936,7 +77936,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L594",
+      "source_location": "L603",
       "weight": 1.0
     },
     {
@@ -77948,7 +77948,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L594",
+      "source_location": "L603",
       "weight": 1.0
     },
     {
@@ -77960,7 +77960,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L508",
+      "source_location": "L517",
       "weight": 1.0
     },
     {
@@ -77972,7 +77972,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L508",
+      "source_location": "L517",
       "weight": 1.0
     },
     {
@@ -77984,7 +77984,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L682",
+      "source_location": "L691",
       "weight": 1.0
     },
     {
@@ -98264,7 +98264,7 @@
       "confidence_score": 1.0,
       "context": "return_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L106",
+      "source_location": "L115",
       "weight": 1.0
     },
     {
@@ -98408,7 +98408,7 @@
       "confidence_score": 1.0,
       "context": "return_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L459",
+      "source_location": "L468",
       "weight": 1.0
     },
     {
@@ -98420,7 +98420,7 @@
       "confidence_score": 1.0,
       "context": "return_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L459",
+      "source_location": "L468",
       "weight": 1.0
     },
     {
@@ -98456,7 +98456,7 @@
       "confidence_score": 1.0,
       "context": "return_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L481",
+      "source_location": "L490",
       "weight": 1.0
     },
     {
@@ -99428,7 +99428,7 @@
       "confidence_score": 1.0,
       "context": "return_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L517",
+      "source_location": "L526",
       "weight": 1.0
     },
     {
@@ -99440,7 +99440,7 @@
       "confidence_score": 1.0,
       "context": "return_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L594",
+      "source_location": "L603",
       "weight": 1.0
     },
     {
@@ -99452,7 +99452,7 @@
       "confidence_score": 1.0,
       "context": "return_type",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L508",
+      "source_location": "L517",
       "weight": 1.0
     },
     {
@@ -103803,7 +103803,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations.md",
-      "source_location": "L1084",
+      "source_location": "L1087",
       "weight": 1.0
     },
     {
@@ -103814,7 +103814,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations.md",
-      "source_location": "L1146",
+      "source_location": "L1149",
       "weight": 1.0
     },
     {
@@ -103825,7 +103825,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations.md",
-      "source_location": "L1161",
+      "source_location": "L1164",
       "weight": 1.0
     },
     {
@@ -103913,7 +103913,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations.md",
-      "source_location": "L1171",
+      "source_location": "L1174",
       "weight": 1.0
     },
     {
@@ -103924,7 +103924,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations.md",
-      "source_location": "L1213",
+      "source_location": "L1216",
       "weight": 1.0
     },
     {
@@ -104100,7 +104100,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations.md",
-      "source_location": "L1215",
+      "source_location": "L1218",
       "weight": 1.0
     },
     {
@@ -104111,7 +104111,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations.md",
-      "source_location": "L1239",
+      "source_location": "L1242",
       "weight": 1.0
     },
     {
@@ -104122,7 +104122,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations.md",
-      "source_location": "L1248",
+      "source_location": "L1251",
       "weight": 1.0
     },
     {
@@ -104133,7 +104133,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations.md",
-      "source_location": "L1254",
+      "source_location": "L1257",
       "weight": 1.0
     },
     {
@@ -104144,7 +104144,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations.md",
-      "source_location": "L1267",
+      "source_location": "L1270",
       "weight": 1.0
     },
     {
@@ -104155,7 +104155,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations.md",
-      "source_location": "L1282",
+      "source_location": "L1285",
       "weight": 1.0
     },
     {
@@ -104166,7 +104166,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations.md",
-      "source_location": "L1295",
+      "source_location": "L1298",
       "weight": 1.0
     },
     {
@@ -110282,7 +110282,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L296",
+      "source_location": "L305",
       "weight": 1.0
     },
     {
@@ -110293,7 +110293,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L311",
+      "source_location": "L320",
       "weight": 1.0
     },
     {
@@ -110304,7 +110304,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L322",
+      "source_location": "L331",
       "weight": 1.0
     },
     {
@@ -110315,7 +110315,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L345",
+      "source_location": "L354",
       "weight": 1.0
     },
     {
@@ -110326,7 +110326,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L361",
+      "source_location": "L370",
       "weight": 1.0
     },
     {
@@ -110337,7 +110337,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L399",
+      "source_location": "L408",
       "weight": 1.0
     },
     {
@@ -110348,7 +110348,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L448",
+      "source_location": "L457",
       "weight": 1.0
     },
     {
@@ -110359,7 +110359,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L508",
+      "source_location": "L517",
       "weight": 1.0
     },
     {
@@ -110370,7 +110370,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L517",
+      "source_location": "L526",
       "weight": 1.0
     },
     {
@@ -110381,7 +110381,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L528",
+      "source_location": "L537",
       "weight": 1.0
     },
     {
@@ -110392,7 +110392,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L554",
+      "source_location": "L563",
       "weight": 1.0
     },
     {
@@ -110403,7 +110403,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L594",
+      "source_location": "L603",
       "weight": 1.0
     },
     {
@@ -110414,7 +110414,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L675",
+      "source_location": "L684",
       "weight": 1.0
     },
     {
@@ -110425,7 +110425,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L682",
+      "source_location": "L691",
       "weight": 1.0
     },
     {
@@ -110436,7 +110436,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L694",
+      "source_location": "L703",
       "weight": 1.0
     },
     {
@@ -110447,7 +110447,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L76",
+      "source_location": "L85",
       "weight": 1.0
     },
     {
@@ -133217,7 +133217,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L106",
+      "source_location": "L115",
       "weight": 1.0
     },
     {
@@ -133228,7 +133228,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L237",
+      "source_location": "L246",
       "weight": 1.0
     },
     {
@@ -133239,7 +133239,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L260",
+      "source_location": "L269",
       "weight": 1.0
     },
     {
@@ -133250,7 +133250,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L429",
+      "source_location": "L438",
       "weight": 1.0
     },
     {
@@ -133261,7 +133261,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L459",
+      "source_location": "L468",
       "weight": 1.0
     },
     {
@@ -133272,7 +133272,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L481",
+      "source_location": "L490",
       "weight": 1.0
     },
     {
@@ -133283,7 +133283,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L490",
+      "source_location": "L499",
       "weight": 1.0
     },
     {
@@ -136972,7 +136972,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L121",
+      "source_location": "L130",
       "weight": 1.0
     },
     {
@@ -136984,7 +136984,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L128",
+      "source_location": "L137",
       "weight": 1.0
     },
     {
@@ -136996,7 +136996,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L159",
+      "source_location": "L168",
       "weight": 1.0
     },
     {
@@ -137008,7 +137008,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L189",
+      "source_location": "L198",
       "weight": 1.0
     },
     {
@@ -137488,7 +137488,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L460",
+      "source_location": "L469",
       "weight": 1.0
     },
     {
@@ -137500,7 +137500,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L464",
+      "source_location": "L473",
       "weight": 1.0
     },
     {
@@ -137512,7 +137512,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L470",
+      "source_location": "L479",
       "weight": 1.0
     },
     {
@@ -137548,7 +137548,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L482",
+      "source_location": "L491",
       "weight": 1.0
     },
     {
@@ -137560,7 +137560,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L486",
+      "source_location": "L495",
       "weight": 1.0
     },
     {
@@ -137776,7 +137776,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L491",
+      "source_location": "L500",
       "weight": 1.0
     },
     {
@@ -137788,7 +137788,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L495",
+      "source_location": "L504",
       "weight": 1.0
     },
     {
@@ -137812,7 +137812,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/broker/replicationops.go",
-      "source_location": "L430",
+      "source_location": "L439",
       "weight": 1.0
     },
     {
@@ -160232,5 +160232,5 @@
       "source_file": "README.md"
     }
   ],
-  "built_at_commit": "17dc295d3a0ba31a7d554428b627230e61ddb4db"
+  "built_at_commit": "d8e9f1186b33770522b1f96fcf8a15d4c5acf5a4"
 }

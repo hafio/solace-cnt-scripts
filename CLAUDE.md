@@ -762,10 +762,13 @@ unlisted VPN and demoting a listed one both interrupt delivery.
 **`configure dr`'s own apply is TWO PHASES in two separate broker calls, not one script**
 (`internal/broker/replicationops.go`), because mate configuration -- the address lines and the
 virtual-router-name -- can only change while EVERY VPN on the broker has replication disabled
-(operator, 2026-09-13; ASSUMED rather than confirmed -- neither mate command states a
-precondition in the CLI reference, where the reference DOES spell one out where it exists for
-other services -- and corroborated only by the broker's own replayable dump, which orders
-`! Configure Replication` ~32,000 lines before the first per-VPN `no shutdown`). Phase 1 shuts
+(CONFIRMED by the operator 2026-09-14, carried as an assumption from 2026-09-13). It is NOT
+in the CLI reference, which does state such preconditions for other services, so the
+documentation would never have settled it; the only repo-side evidence was circumstantial,
+the broker's own replayable dump ordering `! Configure Replication` ~32,000 lines ahead of the
+first per-VPN `no shutdown`. Phase 1's outage window is therefore the true cost of a mate
+change, not an artefact of this implementation -- which is what makes the "only when the mate
+differs" check load-bearing rather than an optimisation. Phase 1 shuts
 down every VPN this broker reports admin-ENABLED -- not `Replicating()`, which also requires a
 resolved role and would leave an enabled-but-roleless VPN up to refuse the very mate lines this
 phase exists to protect -- then the removals, then the new mate lines, and ONLY when the mate

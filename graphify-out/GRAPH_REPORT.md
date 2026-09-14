@@ -1,7 +1,7 @@
 # Graph Report - solace-k8-scripts  (2026-09-14)
 
 ## Corpus Check
-- 182 files · ~510,454 words
+- 182 files · ~510,609 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -10,7 +10,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `17dc295d`
+- Built from commit: `d8e9f118`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 

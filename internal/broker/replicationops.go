@@ -24,15 +24,24 @@ import (
 // THE APPLY IS TWO PHASES, IN TWO SEPARATE RunCLI CALLS, because the broker enforces a
 // precondition the single-script apply this replaced did not respect: mate configuration
 // (the address lines and the virtual-router-name) can only be changed while EVERY VPN on
-// the broker has replication disabled (operator, 2026-09-13). That is an ASSUMED broker
-// rule -- neither `enable configure replication mate connect-port` nor `... virtual-router-
-// name` states a precondition in the CLI reference, where the reference DOES spell one out
-// where it exists ("AMQP must be disabled to change the port", and similarly for the health
-// check and SEMP services) -- but it is corroborated by the broker's own replayable dump:
-// `show current-config`'s `! Configure Replication` section comes ~32,000 lines before the
-// first per-VPN `no shutdown`, i.e. mate-first, VPN-enable-after is the order the broker
-// itself uses. Phase 1 below is what makes the SAME true when converging an already-running
-// broker rather than replaying a fresh capture onto an empty one.
+// the broker has replication disabled. CONFIRMED by the operator (2026-09-14), having been
+// carried as an assumption since 2026-09-13.
+//
+// Worth recording that it was NOT derivable from the documentation: neither
+// `enable configure replication mate connect-port` nor `... virtual-router-name` states a
+// precondition in the CLI reference, even though that reference does spell one out where it
+// exists for other services ("AMQP must be disabled to change the port", and likewise for
+// the health check and SEMP). The only evidence in the repo was circumstantial -- the
+// broker's own replayable dump orders `! Configure Replication` some 32,000 lines ahead of
+// the first per-VPN `no shutdown`, so mate-first, VPN-enable-after is the order the broker
+// itself writes.
+//
+// Phase 1 is what makes that order true when converging an already-running broker, rather
+// than replaying a fresh capture onto an empty one. It is therefore NECESSARY, and the
+// outage window it opens is the real cost of a mate change rather than something a cleverer
+// implementation could avoid. Which is also why phase 1 runs ONLY when the mate actually
+// differs: that check is the only thing standing between an ordinary re-run and a
+// site-wide replication stop.
 //
 //	PHASE 1 (mate convergence, only when the mate actually differs): disable REPLICATION
 //	on every VPN this broker currently reports admin-ENABLED for it, then the removals,

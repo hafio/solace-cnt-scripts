@@ -1006,13 +1006,16 @@ contacts the mate**. It therefore works on every platform, needs no `via:` block
 and cannot be blocked by a WAN outage. Run it at both sites with the same file.
 
 **The apply is TWO PHASES, in two separate broker calls**, because mate configuration (the
-address lines and the virtual-router-name) is understood to be changeable only while every VPN
-on the broker has replication disabled. That precondition is the operator's, ASSUMED rather
-than confirmed: neither mate command states one in the CLI reference, which does spell a
-precondition out where one exists for other services. It is corroborated only by the broker's
-own replayable dump, which orders the replication configuration tens of thousands of lines
-ahead of the first per-VPN enable. The phases are built for it regardless, because being
-wrong the other way means writing mate lines the broker silently refuses:
+address lines and the virtual-router-name) can only be changed while every VPN on the broker
+has replication disabled. That is a real broker rule, confirmed by the operator; it is not
+stated in the CLI reference, which does spell such preconditions out for other services, so
+it is worth knowing that the documentation will not tell you.
+
+**This is why a mate change is disruptive and a role change is not.** Changing which addresses
+this broker dials its mate on requires stopping replication everywhere on it first, so there
+is no version of that operation that avoids the interruption. Changing a VPN's role requires
+nothing of the sort. The command keeps the two apart, and only does the disruptive half when
+the mate configuration genuinely differs from the env file:
 
 1. **Mate convergence -- only when the mate actually differs** from what this broker already
    holds (compared by address set and virtual-router-name, not by whether a removal happens to
