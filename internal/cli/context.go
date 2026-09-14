@@ -36,7 +36,7 @@ type App struct {
 
 	Platform config.Platform
 	Cfg      *config.Config
-	Runner   engine.Runner
+	Runner   engine.EnvRunner
 
 	// Prompt seams, in the spirit of Manager.Resolve/Geteuid: the confirm
 	// helpers gate destructive actions on an interactive terminal, and a test cannot
@@ -58,24 +58,24 @@ type App struct {
 	// a test ever substitutes one -- there is no user-facing way to make this tool
 	// print commands instead of running them, because `generate` is how you look
 	// at an artifact before applying it.
-	NewRunner func(a *App) engine.Runner
+	NewRunner func(a *App) engine.EnvRunner
 
 	// Command-local flag scratch space. Only one command runs per invocation,
 	// so sharing these on the app context is safe.
-	deleteLayer bool   // remove --delete-data / --delete-crd (take the retained layer too)
-	noPrompt    bool   // --no-prompt: ask nothing, and take the safe answer to each question
-	all         bool   // status broker --all (every broker in the cluster)
-	detail      bool   // status --detail (static artifacts, not just running ones)
-	pod         string // --pod role selector for cli/shell/copy/cli-script
-	destDir     string // copy into --dir
-	days        int    // diagnostics --days
-	restart     bool   // deploy broker --restart (bounce a running broker)
-	out         string // --out/-o: write the rendered artifact here instead of stdout
-	follow      bool   // logs --follow/-f: keep streaming instead of printing a snapshot
-	tail        string // logs --tail: how many trailing lines (a count, or "all")
-	since       string // logs --since: how far back to read, canonicalised as a duration
-	timestamps  bool   // logs --timestamps: prefix each line with its time
-	previous    bool   // logs broker --previous: the PREVIOUS container's logs (kubernetes only)
+	deleteLayer bool     // remove --delete-data / --delete-crd (take the retained layer too)
+	noPrompt    bool     // --no-prompt: ask nothing, and take the safe answer to each question
+	all         bool     // status broker --all (every broker in the cluster)
+	detail      bool     // status --detail (static artifacts, not just running ones)
+	pod         string   // --pod role selector for cli/shell/copy/cli-script
+	destDir     string   // copy into --dir
+	days        int      // diagnostics --days
+	restart     bool     // deploy broker --restart (bounce a running broker)
+	out         string   // --out/-o: write the rendered artifact here instead of stdout
+	follow      bool     // logs --follow/-f: keep streaming instead of printing a snapshot
+	tail        string   // logs --tail: how many trailing lines (a count, or "all")
+	since       string   // logs --since: how far back to read, canonicalised as a duration
+	timestamps  bool     // logs --timestamps: prefix each line with its time
+	previous    bool     // logs broker --previous: the PREVIOUS container's logs (kubernetes only)
 	vpns        []string // export-config --vpn: capture only these message-VPNs (repeatable)
 	brokerOnly  bool     // export-config --broker-only: broker-level configuration only
 

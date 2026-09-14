@@ -32,7 +32,7 @@ const reportKeyWidth = 15
 // redundancy) is a per-host handshake handled in package broker. Every mutating
 // command routes through the engine.Runner, so the Echo runner records without running.
 type Manager struct {
-	R   engine.Runner
+	R   engine.EnvRunner
 	Cfg *config.Config
 	P   config.Platform
 	// Log is the RAW line sink for progress: one already-formatted line, emitted
@@ -69,7 +69,7 @@ type Manager struct {
 // redundancy pre-shared key on a first HA deploy and rewrite the env file it was handed;
 // the key is the operator's to make now (config.validateContainerPSK refuses an empty one
 // and prints the openssl command), and nothing in this package writes to an env file.
-func NewManager(r engine.Runner, cfg *config.Config, p config.Platform, log func(string, ...any), out io.Writer) *Manager {
+func NewManager(r engine.EnvRunner, cfg *config.Config, p config.Platform, log func(string, ...any), out io.Writer) *Manager {
 	return &Manager{
 		R:       r,
 		Cfg:     cfg,

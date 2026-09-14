@@ -55,7 +55,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-77 test files, 1248 test functions. Three of those are not tests. Two are os/exec
+77 test files, 1249 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -73,12 +73,12 @@ launched from.
 | internal/container | 6 | 132 |
 | internal/convert | 1 | 37 |
 | internal/render | 2 | 32 |
-| internal/engine | 2 | 26 |
+| internal/engine | 2 | 27 |
 | internal/output | 1 | 16 |
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **77** | **1248** |
+| **Total** | **77** | **1249** |
 
 
 ## Coverage
@@ -97,7 +97,7 @@ adding uncovered code lowers the ratio the same way deleting covered code does (
 `importdoc_test.go`) then closed it, taking `internal/broker` to 95.0% and the total to
 94.5%, above the previous floor either doc had recorded. `internal/cli` moved the same way
 on a smaller scale: `exportconfig.go`'s two new leaves (`broker perform
-export-config`/`import-config`) plus their wiring in `commands.go`/`helpers.go`/
+export-config`/`import-config`) plus their wiring in `commands.go`/`flags.go`/
 `ops_k8s.go`/`ops_container.go`/`aliases.go` took it to 84.9% before
 `exportconfig_test.go`'s 13 tests brought it to 90.1%. docs/developer.md last recorded
 94.1% and this file 94.2% -- 94.5% supersedes both.
@@ -700,7 +700,7 @@ with no `--env` at all (and once with a deliberately missing one). It writes fil
 ### exportconfig_test.go
 
 Fixtures and doubles for `broker perform export-config`/`import-config`
-(`exportconfig.go`, plus the wiring in `commands.go`/`helpers.go`/`ops_k8s.go`/
+(`exportconfig.go`, plus the wiring in `commands.go`/`flags.go`/`ops_k8s.go`/
 `ops_container.go`). Both commands talk to the broker over the CLI-over-exec channel
 (`broker.Ops`, `internal/broker/importops.go`): upload a script, run `cli -Apes`, read
 stdout. `exportconfigTransportOutput` cans `opRunner`'s (`cli_test.go`) output hook to
@@ -2017,7 +2017,7 @@ the "nothing happened" property on each failure path, and previewability.
 ## internal/engine
 
 The command runner seam: `Echo` (dry-run) and `Exec` (real subprocess), plus display
-quoting, PATH resolution, and the pre-exec announcement. 26 tests across 2 files.
+quoting, PATH resolution, and the pre-exec announcement. 27 tests across 2 files.
 
 ### runner_test.go
 
@@ -2039,6 +2039,7 @@ quoting, PATH resolution, and the pre-exec announcement. 26 tests across 2 files
 | `TestExecRun` | `Run` streams on success and errors (naming the binary) on failure |
 | `TestExecRunInput` | `RunInput` feeds stdin to the child and streams its output |
 | `TestExecRunEnv` | `RunEnv` gives the child the extra variable *and* still inherits this process's environment; a non-zero exit errors naming the binary |
+| `TestOnlyEnvRunnerCarriesRunEnv` | The interface narrowing, which is a security boundary rather than a tidiness one: `RunEnv` is how a secret reaches a child without passing through an argv, and exactly one caller needs it (the container manager's compose deploy, for docker's environment-sourced secrets). Every other runner holder -- the cluster, both transports, the mate channel -- has no business putting a value in a child's environment. Compile-time assertions that `Exec` and `Echo` satisfy BOTH interfaces so wiring is unaffected, plus a runtime check that a value reached only through `Runner` does not satisfy `EnvRunner` -- the negative half, because putting the method back on `Runner` would otherwise still compile and pass |
 | `TestExecRunInteractive` | `RunInteractive` runs a child to a clean exit |
 | `TestExecOutputInput` | OutputInput wires stdin from `in` into the child and captures stdout into the returned buffer rather than leaking it to the real terminal -- the curl -K - path this backs has no other way to get the response body back |
 | `TestExecOutputInputFail` | OutputInput wraps a child failure the same way Output does ("name: err") |

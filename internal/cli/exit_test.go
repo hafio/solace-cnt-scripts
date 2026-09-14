@@ -191,7 +191,7 @@ func TestChildExitStatusIsScopedToInteractiveSessions(t *testing.T) {
 	env := writeStandaloneEnv(t)
 
 	_, err := runRootWith(t, []string{"broker", "shell", "--env", env}, func(a *App) {
-		a.NewRunner = func(*App) engine.Runner {
+		a.NewRunner = func(*App) engine.EnvRunner {
 			return interactiveFailRunner{Echo: engine.Echo{W: io.Discard}, err: child}
 		}
 	})
@@ -200,7 +200,7 @@ func TestChildExitStatusIsScopedToInteractiveSessions(t *testing.T) {
 	}
 
 	_, err = runRootWith(t, []string{"broker", "logs", "--env", env}, func(a *App) {
-		a.NewRunner = func(*App) engine.Runner {
+		a.NewRunner = func(*App) engine.EnvRunner {
 			return runFailRunner{Echo: engine.Echo{W: io.Discard}, err: child}
 		}
 	})

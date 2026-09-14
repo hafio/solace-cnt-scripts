@@ -53,7 +53,9 @@ func withEnv(args ...string) []string {
 // --dry-run flag: the flag is gone from the CLI, but the property these tests
 // assert -- which argv a command would issue -- is unchanged, so the seam that
 // used to be a user-facing mode is now a test-only one.
-func echoRunner(a *App) { a.NewRunner = func(*App) engine.Runner { return engine.Echo{W: os.Stdout} } }
+func echoRunner(a *App) {
+	a.NewRunner = func(*App) engine.EnvRunner { return engine.Echo{W: os.Stdout} }
+}
 
 // smokeAdminPass is a distinctive admin password used only by the standalone test
 // env, so TestSecretsNeverEchoed can prove it never reaches stdout.

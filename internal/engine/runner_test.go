@@ -10,6 +10,21 @@ import (
 	"testing"
 )
 
+// WHY `go test -cover ./internal/engine` PRINTS 0.0% WHILE THIS PACKAGE IS WELL COVERED.
+//
+// It is not: `go tool cover -func` over the profile from the same run reports 95.2%, every
+// function between 88.9% and 100%, and the repo-wide profile the `cov` task builds carries
+// all of it -- so the coverage floor has always counted this package correctly. Only the
+// per-package SUMMARY LINE reads zero, and the helper-process pattern below is why: the
+// tests re-exec this very binary as a child, and the child exits through os.Exit without
+// flushing counters the way a normal test process does.
+//
+// Recorded here because the number is alarming and the wrong conclusion is easy. It was
+// reported as a gate-integrity hole -- a whole package invisible to the floor -- and acting
+// on that would have meant changing the dev scripts to fix something that was never broken.
+// The check that settles it costs nothing: coverage/coverage.out is on disk after any cov
+// run, so read the profile rather than the summary.
+//
 // TestHelperProcess is not a real test: it is re-invoked as the child process
 // by the Exec tests via the standard os/exec helper-process pattern. It only
 // runs when GO_WANT_HELPER_PROCESS=1, so under a normal `go test` run it is a
@@ -466,5 +481,43 @@ func TestEchoOutputInput(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "hunter2") {
 		t.Errorf("OutputInput leaked stdin body into dry-run output: %q", buf.String())
+	}
+}
+
+// TestOnlyEnvRunnerCarriesRunEnv pins the narrowing, which is a security boundary rather
+// than a tidiness one.
+//
+// RunEnv is how a secret reaches a child process without passing through an argv, and
+// exactly one caller in the tool needs it: the container manager's compose deploy, for
+// docker's environment-sourced secrets. Every other holder of a runner -- the Kubernetes
+// cluster, both broker transports, the replication mate channel -- has no business putting
+// a value in a child's environment, and an interface that offered them the ability is an
+// invitation to do it.
+//
+// A compile-time assertion is the whole test: Exec and Echo must satisfy BOTH, so nothing
+// about wiring changes, while a plain Runner must NOT expose RunEnv. If someone puts the
+// method back on Runner this still compiles and passes, which is why the negative half is
+// asserted through an interface that deliberately lacks it.
+func TestOnlyEnvRunnerCarriesRunEnv(t *testing.T) {
+	// Both real implementations satisfy the wider interface, so a caller that needs
+	// RunEnv can always be given one.
+	var _ EnvRunner = Exec{}
+	var _ EnvRunner = Echo{}
+	// And both satisfy the narrow one, which is what every other caller takes.
+	var _ Runner = Exec{}
+	var _ Runner = Echo{}
+
+	// The narrowing itself: a value held as a plain Runner cannot reach RunEnv. A type
+	// assertion is how that is observable at runtime -- it succeeds only because the
+	// CONCRETE type has the method, which is exactly the distinction being drawn.
+	var r Runner = Echo{}
+	if _, ok := r.(interface {
+		RunEnv(ctx context.Context, extraEnv []string, name string, args ...string) error
+	}); !ok {
+		t.Fatal("Echo must still implement RunEnv; only the Runner INTERFACE drops it")
+	}
+	if _, isEnv := any(struct{ Runner }{r}).(EnvRunner); isEnv {
+		t.Error("a value reached only through Runner must not satisfy EnvRunner -- if it does, " +
+			"RunEnv is back on Runner and every caller can put a secret in a child's environment")
 	}
 }

@@ -24,11 +24,6 @@ type Runner interface {
 	Run(ctx context.Context, name string, args ...string) error
 	// RunInput is Run with stdin fed from in (used for `kubectl apply -f -`).
 	RunInput(ctx context.Context, in []byte, name string, args ...string) error
-	// RunEnv is Run with extra "KEY=value" variables added to the child's
-	// environment. It carries secret values to a child that reads them from its
-	// environment (docker compose's environment-sourced secrets) without ever
-	// putting them in an argv -- so implementations must never echo a value.
-	RunEnv(ctx context.Context, extraEnv []string, name string, args ...string) error
 	// RunInteractive wires this process's stdio through to the child, for
 	// interactive sessions (`exec -it`, a Solace CLI, a shell).
 	RunInteractive(ctx context.Context, name string, args ...string) error
@@ -37,6 +32,26 @@ type Runner interface {
 	// OutputInput is Output with stdin fed from in: it returns captured stdout
 	// while streaming stderr (used for `curl -K -` with credentials on stdin).
 	OutputInput(ctx context.Context, in []byte, name string, args ...string) ([]byte, error)
+}
+
+// EnvRunner is a Runner that can also hand variables to the child's environment.
+//
+// It is separate from Runner because exactly ONE caller in the tool needs it --
+// container.Manager's compose deploy, which is how docker's environment-sourced secrets
+// reach the child without ever appearing in an argv. Every other holder of a runner
+// (k8s.Cluster, both transports, the replication mate channel) has no business passing
+// environment to a child, and an interface that offered them the ability would be
+// inviting a secret into a place none of them should be putting one.
+//
+// Exec and Echo both satisfy it, so nothing changes about wiring: the narrowing is about
+// what a given caller is ABLE to do, which is the only thing an interface is for.
+type EnvRunner interface {
+	Runner
+	// RunEnv is Run with extra "KEY=value" variables added to the child's
+	// environment. It carries secret values to a child that reads them from its
+	// environment (docker compose's environment-sourced secrets) without ever
+	// putting them in an argv -- so implementations must never echo a value.
+	RunEnv(ctx context.Context, extraEnv []string, name string, args ...string) error
 }
 
 // Resolve turns a command name into the absolute path this tool will execute. It is

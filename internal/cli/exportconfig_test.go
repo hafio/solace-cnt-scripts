@@ -13,7 +13,7 @@ import (
 )
 
 // Fixtures and doubles for `broker perform export-config` / `import-config`
-// (exportconfig.go, plus the wiring in commands.go/helpers.go/ops_k8s.go/
+// (exportconfig.go, plus the wiring in commands.go/flags.go/ops_k8s.go/
 // ops_container.go).
 //
 // Both commands talk to the broker over the CLI-over-exec channel (broker.Ops,
@@ -261,7 +261,7 @@ func runImportConfirmation(t *testing.T, path, artifact string, targetVPNs []str
 	var err error
 	stderrText := captureStderr(t, func() {
 		out, err = runRootWith(t, args, func(a *App) {
-			a.NewRunner = func(*App) engine.Runner { return rr }
+			a.NewRunner = func(*App) engine.EnvRunner { return rr }
 			if configure != nil {
 				configure(a)
 			}
@@ -280,7 +280,7 @@ func runImportConfirmation(t *testing.T, path, artifact string, targetVPNs []str
 func TestExportConfigScopeConflictIsUsageError(t *testing.T) {
 	rr := &opRunner{}
 	_, err := runRootWith(t, withEnv("broker", "perform", "export-config", "--vpn", "acme", "--broker-only", "--platform", "kubernetes"),
-		func(a *App) { a.NewRunner = func(*App) engine.Runner { return rr } })
+		func(a *App) { a.NewRunner = func(*App) engine.EnvRunner { return rr } })
 	if err == nil || ExitCode(err) != exitUsage {
 		t.Fatalf("export-config --vpn x --broker-only err = %v (exit %d), want a usage error (exit %d)",
 			err, ExitCode(err), exitUsage)
@@ -364,7 +364,7 @@ func TestExportImportPodFlagPlatformScope(t *testing.T) {
 	for _, tc := range rejected {
 		t.Run(tc.name, func(t *testing.T) {
 			rr := &opRunner{}
-			_, err := runRootWith(t, withEnv(tc.args...), func(a *App) { a.NewRunner = func(*App) engine.Runner { return rr } })
+			_, err := runRootWith(t, withEnv(tc.args...), func(a *App) { a.NewRunner = func(*App) engine.EnvRunner { return rr } })
 			if err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), "--pod is not supported on") {
 				t.Fatalf("%s err = %v (exit %d), want a --pod usage refusal (exit %d)", tc.name, err, ExitCode(err), exitUsage)
 			}
@@ -409,7 +409,7 @@ func TestExportConfigWithoutOutWritesOnlyArtifactToStdout(t *testing.T) {
 	var err error
 	stderrText := captureStderr(t, func() {
 		out, err = runRootWith(t, []string{"broker", "perform", "export-config", "--env", path, "--platform", "kubernetes"},
-			func(a *App) { a.NewRunner = func(*App) engine.Runner { return rr } })
+			func(a *App) { a.NewRunner = func(*App) engine.EnvRunner { return rr } })
 	})
 	if err != nil {
 		t.Fatalf("export-config err = %v, want nil", err)
@@ -435,7 +435,7 @@ func TestExportConfigWithOutWritesFile0600AndReportsOnStdout(t *testing.T) {
 	rr := newExportconfigRunner(nil)
 
 	out, err := runRootWith(t, []string{"broker", "perform", "export-config", "--out", outFile, "--env", path, "--platform", "kubernetes"},
-		func(a *App) { a.NewRunner = func(*App) engine.Runner { return rr } })
+		func(a *App) { a.NewRunner = func(*App) engine.EnvRunner { return rr } })
 	if err != nil {
 		t.Fatalf("export-config --out err = %v, want nil", err)
 	}
@@ -483,7 +483,7 @@ func TestExportConfigOutOverwriteGate(t *testing.T) {
 			_, err = runRootWith(t, []string{"broker", "perform", "export-config", "--out", outFile, "--env", path, "--platform", "kubernetes"},
 				func(a *App) {
 					a.Interactive = func() bool { return false }
-					a.NewRunner = func(*App) engine.Runner { return rr }
+					a.NewRunner = func(*App) engine.EnvRunner { return rr }
 				})
 		})
 		// The refusal formats the path with %q, so on Windows the message carries
@@ -515,7 +515,7 @@ func TestExportConfigOutOverwriteGate(t *testing.T) {
 				func(a *App) {
 					a.Interactive = func() bool { return true }
 					a.PromptIn = strings.NewReader("y\n")
-					a.NewRunner = func(*App) engine.Runner { return rr }
+					a.NewRunner = func(*App) engine.EnvRunner { return rr }
 				})
 		})
 		if err != nil {
@@ -543,7 +543,7 @@ func TestExportConfigOutOverwriteGate(t *testing.T) {
 			t.Fatalf("reseed a world-readable --out file: %v", err)
 		}
 		_, err := runRootWith(t, []string{"broker", "perform", "export-config", "--out", outFile, "--no-prompt", "--env", path, "--platform", "kubernetes"},
-			func(a *App) { a.NewRunner = func(*App) engine.Runner { return rr } })
+			func(a *App) { a.NewRunner = func(*App) engine.EnvRunner { return rr } })
 		if err != nil {
 			t.Fatalf("export-config over an existing file err = %v, want nil", err)
 		}
@@ -561,7 +561,7 @@ func TestExportConfigOutOverwriteGate(t *testing.T) {
 			t.Fatalf("reseed existing --out file: %v", err)
 		}
 		_, err := runRootWith(t, []string{"broker", "perform", "export-config", "--out", outFile, "--no-prompt", "--env", path, "--platform", "kubernetes"},
-			func(a *App) { a.NewRunner = func(*App) engine.Runner { return rr } })
+			func(a *App) { a.NewRunner = func(*App) engine.EnvRunner { return rr } })
 		if err != nil {
 			t.Fatalf("export-config --out --no-prompt err = %v, want nil", err)
 		}
@@ -583,7 +583,7 @@ func TestImportConfigMissingFileIsUsageError(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist.cli")
 	rr := &opRunner{}
 	_, err := runRootWith(t, withEnv("broker", "perform", "import-config", missing, "--platform", "kubernetes"),
-		func(a *App) { a.NewRunner = func(*App) engine.Runner { return rr } })
+		func(a *App) { a.NewRunner = func(*App) engine.EnvRunner { return rr } })
 	if err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), "read the configuration artifact") {
 		t.Fatalf("import-config <missing file> err = %v (exit %d), want a usage error naming the read failure",
 			err, ExitCode(err))
@@ -629,7 +629,7 @@ func TestImportConfigFailedApplySkipsVerification(t *testing.T) {
 	stderrText := captureStderr(t, func() {
 		out, err = runRootWith(t, []string{"broker", "perform", "import-config", artifact,
 			"--no-prompt", "--env", path, "--platform", "docker"},
-			func(a *App) { a.NewRunner = func(*App) engine.Runner { return rr } })
+			func(a *App) { a.NewRunner = func(*App) engine.EnvRunner { return rr } })
 	})
 
 	if err == nil {
@@ -661,7 +661,7 @@ func TestExportConfigRejectsABadVPNNameAsUsage(t *testing.T) {
 	for _, bad := range []string{"", "   ", `evil"vpn`} {
 		rr := newExportconfigRunner(nil)
 		_, err := runRootWith(t, []string{"broker", "perform", "export-config", "--vpn", bad, "--env", path, "--platform", "docker"},
-			func(a *App) { a.NewRunner = func(*App) engine.Runner { return rr } })
+			func(a *App) { a.NewRunner = func(*App) engine.EnvRunner { return rr } })
 		if err == nil {
 			t.Fatalf("--vpn %q was accepted", bad)
 		}
@@ -755,7 +755,7 @@ func TestImportConfigBrokerScopeNeverPrompts(t *testing.T) {
 
 	runRootWith(t, []string{"broker", "perform", "import-config", artifact, "--env", path, "--platform", "docker"},
 		func(a *App) {
-			a.NewRunner = func(*App) engine.Runner { return rr }
+			a.NewRunner = func(*App) engine.EnvRunner { return rr }
 			a.Interactive = func() bool { return true }
 			a.PromptIn = exportconfigReadCounter{Reader: strings.NewReader("yes\n"), n: &reads}
 		})
