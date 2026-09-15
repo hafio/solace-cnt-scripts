@@ -133,7 +133,14 @@ func TestExpandTilde(t *testing.T) {
 		{"certs/tls.crt", "certs/tls.crt"}, // no leading tilde: untouched
 		{"~", "/home/op"},                  // bare tilde
 		{"~/certs/tls.crt", "/home/op/certs/tls.crt"},
-		{`~\certs\tls.crt`, "/home/op/certs/tls.crt"}, // backslash form, ToSlash'd
+		// The backslash form, normalised to forward slashes -- and this row asserts
+		// the SAME answer on both operating systems, which is the whole point of it.
+		// expandTilde used filepath.ToSlash here, which rewrites only the separator
+		// of the OS running: identity on Linux. So this row passed on Windows and
+		// failed on Linux CI with "/home/op\\certs\\tls.crt", where that entire
+		// value is one filename. The env file it came from is authored on one OS and
+		// run on the other routinely, so one answer is the requirement.
+		{`~\certs\tls.crt`, "/home/op/certs/tls.crt"},
 		// An embedded tilde -- an 8.3 short name -- is not a LEADING one and must
 		// survive completely untouched, backslashes included.
 		{`C:\Users\RUNNER~1\AppData\Local\Temp`, `C:\Users\RUNNER~1\AppData\Local\Temp`},
@@ -839,8 +846,16 @@ kubernetes:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if strings.Contains(c.Broker.CLIScriptsDir, "~") {
-		t.Fatalf("broker.cliScriptsDir = %q: the tilde survived Load, so nothing expanded it",
+	// HasPrefix, not Contains: the question is whether the LEADING tilde survived, and
+	// only a leading one was ever going to be expanded. Contains asked a different
+	// question and got a false answer for it on a Windows GitHub runner, where the home
+	// directory this test sets is a t.TempDir under `C:\Users\RUNNER~1\...` -- an 8.3
+	// short name whose own tilde is embedded. The expansion had worked perfectly and the
+	// assertion failed on the substring it introduced. That is the same leading-vs-
+	// everywhere-else line expandTilde and CheckHostPath are both built around, so the
+	// test has to draw it too.
+	if strings.HasPrefix(c.Broker.CLIScriptsDir, "~") {
+		t.Fatalf("broker.cliScriptsDir = %q: the leading tilde survived Load, so nothing expanded it",
 			c.Broker.CLIScriptsDir)
 	}
 	// And it expanded to the HOME above rather than being rebased onto the env file's

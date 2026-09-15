@@ -377,13 +377,23 @@ func expandTilde(p string, homeDir func() (string, error)) (string, error) {
 	if err != nil || strings.TrimSpace(home) == "" {
 		return "", fmt.Errorf("the home directory of the user running this tool could not be resolved: %v", err)
 	}
-	// String concatenation + ToSlash, not filepath.Join: the result may be read
-	// by this tool (fine on either OS) or written into a compose/quadlet
-	// artifact as a path on the Linux host that runs the container, and
-	// filepath.Join would apply this OS's own cleaning rules to a value built
-	// from two otherwise-unrelated strings. ToSlash is the same house rule
-	// load.go's xdgConfigHome already follows for the same reason.
-	expanded := filepath.ToSlash(home + rest)
+	// String concatenation, not filepath.Join: the result may be read by this
+	// tool (fine on either OS) or written into a compose/quadlet artifact as a
+	// path on the Linux host that runs the container, and filepath.Join would
+	// apply this OS's own cleaning rules to a value built from two otherwise-
+	// unrelated strings.
+	//
+	// The slash normalisation is a ReplaceAll and deliberately NOT
+	// filepath.ToSlash, for the reason BaseName gives at the top of this file:
+	// ToSlash rewrites only THIS OS's separator, so on Linux it is the identity
+	// function -- and the backslashes here did not come from this OS. They came
+	// out of the env file, which is routinely authored on Windows and run on
+	// Linux. ToSlash therefore answered `~\certs\tls.crt` two different ways for
+	// the same file, normalising it on Windows and leaving `<home>\certs\tls.crt`
+	// on Linux, where that whole value is one filename. (load.go's xdgConfigHome
+	// keeps ToSlash correctly: its separators come from a filepath.Join on the
+	// machine running, so there is only ever one to rewrite.)
+	expanded := strings.ReplaceAll(home+rest, `\`, "/")
 	// Re-checked here, not only as written: CheckHostPath ran on the literal
 	// "~/...", which never carries whitespace -- but a real Windows home
 	// routinely does (`C:\Users\John Smith`), and that space would otherwise

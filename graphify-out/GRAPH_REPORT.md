@@ -1,8 +1,9 @@
 # Graph Report - solace-k8-scripts  (2026-09-15)
 
 ## Corpus Check
-- 186 files · ~537,037 words
+- 186 files · ~537,339 words
 - Verdict: corpus is large enough that graph structure adds value.
+- Unclassified: 21 file(s) not represented in the graph (top: .golden 15, (none) 2, .cli 2)
 
 ## Summary
 - 3450 nodes · 10828 edges · 134 communities (126 shown, 4 thin omitted)
@@ -10,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `fb4301ca`
+- Built from commit: `948184b6`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 

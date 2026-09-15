@@ -1530,7 +1530,7 @@
       "file_type": "code",
       "norm_label": "testhaspathseparator()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L240"
+      "source_location": "L247"
     },
     {
       "id": "internal_broker_broker_test_matchcli",
@@ -16615,7 +16615,7 @@
       "file_type": "code",
       "norm_label": "testisabshostpath()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L188"
+      "source_location": "L195"
     },
     {
       "id": "internal_config_validate",
@@ -17876,7 +17876,7 @@
       "file_type": "code",
       "norm_label": "testrenamedbrokerkeysfailloud()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L586"
+      "source_location": "L593"
     },
     {
       "id": "broker_downloaderrtransport",
@@ -23101,7 +23101,7 @@
       "file_type": "code",
       "norm_label": "testkubernetesnameisboundedbyitsderivednames()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L718"
+      "source_location": "L725"
     },
     {
       "id": "internal_config_hostpath_test_testloadexpandsatildethroughthewholepipeline",
@@ -23112,7 +23112,7 @@
       "file_type": "code",
       "norm_label": "testloadexpandsatildethroughthewholepipeline()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L817"
+      "source_location": "L824"
     },
     {
       "id": "internal_config_imagepullsecret_test_testimagepullsecretcredentialsresolvefrompassenv",
@@ -33884,7 +33884,7 @@
       "file_type": "code",
       "norm_label": "setcontainername()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L796"
+      "source_location": "L803"
     },
     {
       "id": "internal_config_hostpath_test_testbasenamesplitsonbothseparators",
@@ -33895,7 +33895,7 @@
       "file_type": "code",
       "norm_label": "testbasenamesplitsonbothseparators()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L219"
+      "source_location": "L226"
     },
     {
       "id": "internal_config_hostpath_test_testcontainercertrequireskey",
@@ -33906,7 +33906,7 @@
       "file_type": "code",
       "norm_label": "testcontainercertrequireskey()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L668"
+      "source_location": "L675"
     },
     {
       "id": "internal_config_hostpath_test_testcontainerhostpathsrefuseatilde",
@@ -33917,7 +33917,7 @@
       "file_type": "code",
       "norm_label": "testcontainerhostpathsrefuseatilde()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L512"
+      "source_location": "L519"
     },
     {
       "id": "internal_config_hostpath_test_testcontainernamemustbeanenginename",
@@ -33928,7 +33928,7 @@
       "file_type": "code",
       "norm_label": "testcontainernamemustbeanenginename()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L761"
+      "source_location": "L768"
     },
     {
       "id": "internal_config_hostpath_test_testdatadirmustbeabsolute",
@@ -33939,7 +33939,7 @@
       "file_type": "code",
       "norm_label": "testdatadirmustbeabsolute()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L473"
+      "source_location": "L480"
     },
     {
       "id": "internal_config_hostpath_test_testdomaincertsdirsarenotdefaulted",
@@ -33950,7 +33950,7 @@
       "file_type": "code",
       "norm_label": "testdomaincertsdirsarenotdefaulted()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L561"
+      "source_location": "L568"
     },
     {
       "id": "internal_config_hostpath_test_testexpandhomepathscoverseveryfielditclaims",
@@ -33961,7 +33961,7 @@
       "file_type": "code",
       "norm_label": "testexpandhomepathscoverseveryfielditclaims()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L872"
+      "source_location": "L887"
     },
     {
       "id": "internal_config_hostpath_test_testexpandhomepathsreportswhichfieldfailed",
@@ -33972,7 +33972,7 @@
       "file_type": "code",
       "norm_label": "testexpandhomepathsreportswhichfieldfailed()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L921"
+      "source_location": "L936"
     },
     {
       "id": "internal_config_hostpath_test_testexpandhomepathsrunsbeforerebaseanddoesnotdependonbasedir",
@@ -33983,7 +33983,7 @@
       "file_type": "code",
       "norm_label": "testexpandhomepathsrunsbeforerebaseanddoesnotdependonbasedir()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L621"
+      "source_location": "L628"
     },
     {
       "id": "internal_config_hostpath_test_testexpandhomepathssurfacesanunresolvablehome",
@@ -33994,7 +33994,7 @@
       "file_type": "code",
       "norm_label": "testexpandhomepathssurfacesanunresolvablehome()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L957"
+      "source_location": "L972"
     },
     {
       "id": "internal_config_hostpath_test_testhostpathcharsetisderivedfromthetokencharset",
@@ -34016,7 +34016,7 @@
       "file_type": "code",
       "norm_label": "testpodmanbasedirisrequiredandabsolute()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L425"
+      "source_location": "L432"
     },
     {
       "id": "internal_config_hostpath_test_testquadletdiranddatadirarenotrebased",
@@ -34027,7 +34027,7 @@
       "file_type": "code",
       "norm_label": "testquadletdiranddatadirarenotrebased()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L396"
+      "source_location": "L403"
     },
     {
       "id": "internal_config_hostpath_test_testrebaseisanoopwithoutabasedir",
@@ -34038,7 +34038,7 @@
       "file_type": "code",
       "norm_label": "testrebaseisanoopwithoutabasedir()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L378"
+      "source_location": "L385"
     },
     {
       "id": "internal_config_hostpath_test_testrebaseresolvesagainsttheenvfiledirectory",
@@ -34049,7 +34049,7 @@
       "file_type": "code",
       "norm_label": "testrebaseresolvesagainsttheenvfiledirectory()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L333"
+      "source_location": "L340"
     },
     {
       "id": "internal_config_hostpath_test_testvalidatehostpathscheckseveryplatformsfields",
@@ -34060,7 +34060,7 @@
       "file_type": "code",
       "norm_label": "testvalidatehostpathscheckseveryplatformsfields()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L258"
+      "source_location": "L265"
     },
     {
       "id": "internal_config_hostpath_test_testvalidatehostpathsmatchestherebaselist",
@@ -34071,7 +34071,7 @@
       "file_type": "code",
       "norm_label": "testvalidatehostpathsmatchestherebaselist()",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L300"
+      "source_location": "L307"
     },
     {
       "id": "internal_k8s_inspect",
@@ -60066,7 +60066,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L765",
+      "source_location": "L772",
       "weight": 1.0
     },
     {
@@ -90570,7 +90570,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L796",
+      "source_location": "L803",
       "weight": 1.0
     },
     {
@@ -90582,7 +90582,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L796",
+      "source_location": "L803",
       "weight": 1.0
     },
     {
@@ -90594,7 +90594,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L219",
+      "source_location": "L226",
       "weight": 1.0
     },
     {
@@ -90630,7 +90630,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L668",
+      "source_location": "L675",
       "weight": 1.0
     },
     {
@@ -90642,7 +90642,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L512",
+      "source_location": "L519",
       "weight": 1.0
     },
     {
@@ -90654,7 +90654,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L761",
+      "source_location": "L768",
       "weight": 1.0
     },
     {
@@ -90666,7 +90666,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L473",
+      "source_location": "L480",
       "weight": 1.0
     },
     {
@@ -90678,7 +90678,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L561",
+      "source_location": "L568",
       "weight": 1.0
     },
     {
@@ -90690,7 +90690,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L872",
+      "source_location": "L887",
       "weight": 1.0
     },
     {
@@ -90702,7 +90702,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L921",
+      "source_location": "L936",
       "weight": 1.0
     },
     {
@@ -90714,7 +90714,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L621",
+      "source_location": "L628",
       "weight": 1.0
     },
     {
@@ -90726,7 +90726,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L957",
+      "source_location": "L972",
       "weight": 1.0
     },
     {
@@ -90750,7 +90750,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L240",
+      "source_location": "L247",
       "weight": 1.0
     },
     {
@@ -90774,7 +90774,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L188",
+      "source_location": "L195",
       "weight": 1.0
     },
     {
@@ -90786,7 +90786,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L718",
+      "source_location": "L725",
       "weight": 1.0
     },
     {
@@ -90798,7 +90798,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L817",
+      "source_location": "L824",
       "weight": 1.0
     },
     {
@@ -90810,7 +90810,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L425",
+      "source_location": "L432",
       "weight": 1.0
     },
     {
@@ -90822,7 +90822,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L396",
+      "source_location": "L403",
       "weight": 1.0
     },
     {
@@ -90834,7 +90834,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L378",
+      "source_location": "L385",
       "weight": 1.0
     },
     {
@@ -90846,7 +90846,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L333",
+      "source_location": "L340",
       "weight": 1.0
     },
     {
@@ -90858,7 +90858,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L586",
+      "source_location": "L593",
       "weight": 1.0
     },
     {
@@ -90870,7 +90870,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L258",
+      "source_location": "L265",
       "weight": 1.0
     },
     {
@@ -90882,7 +90882,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L300",
+      "source_location": "L307",
       "weight": 1.0
     },
     {
@@ -124681,7 +124681,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L188",
+      "source_location": "L195",
       "weight": 1.0
     },
     {
@@ -124692,7 +124692,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L219",
+      "source_location": "L226",
       "weight": 1.0
     },
     {
@@ -124703,7 +124703,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L240",
+      "source_location": "L247",
       "weight": 1.0
     },
     {
@@ -124714,7 +124714,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L258",
+      "source_location": "L265",
       "weight": 1.0
     },
     {
@@ -124725,7 +124725,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L300",
+      "source_location": "L307",
       "weight": 1.0
     },
     {
@@ -124736,7 +124736,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L333",
+      "source_location": "L340",
       "weight": 1.0
     },
     {
@@ -124747,7 +124747,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L378",
+      "source_location": "L385",
       "weight": 1.0
     },
     {
@@ -124758,7 +124758,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L396",
+      "source_location": "L403",
       "weight": 1.0
     },
     {
@@ -124769,7 +124769,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L425",
+      "source_location": "L432",
       "weight": 1.0
     },
     {
@@ -124780,7 +124780,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L473",
+      "source_location": "L480",
       "weight": 1.0
     },
     {
@@ -124791,7 +124791,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L512",
+      "source_location": "L519",
       "weight": 1.0
     },
     {
@@ -124802,7 +124802,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L561",
+      "source_location": "L568",
       "weight": 1.0
     },
     {
@@ -124813,7 +124813,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L586",
+      "source_location": "L593",
       "weight": 1.0
     },
     {
@@ -124824,7 +124824,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L621",
+      "source_location": "L628",
       "weight": 1.0
     },
     {
@@ -124846,7 +124846,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L668",
+      "source_location": "L675",
       "weight": 1.0
     },
     {
@@ -124857,7 +124857,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L718",
+      "source_location": "L725",
       "weight": 1.0
     },
     {
@@ -124868,7 +124868,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L761",
+      "source_location": "L768",
       "weight": 1.0
     },
     {
@@ -124879,7 +124879,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L796",
+      "source_location": "L803",
       "weight": 1.0
     },
     {
@@ -124890,18 +124890,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L817",
-      "weight": 1.0
-    },
-    {
-      "source": "internal_config_hostpath_test",
-      "target": "internal_config_hostpath_test_testexpandhomepathscoverseveryfielditclaims",
-      "relation": "contains",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L872",
+      "source_location": "L824",
       "weight": 1.0
     },
     {
@@ -124917,13 +124906,24 @@
     },
     {
       "source": "internal_config_hostpath_test",
+      "target": "internal_config_hostpath_test_testexpandhomepathscoverseveryfielditclaims",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "internal/config/hostpath_test.go",
+      "source_location": "L887",
+      "weight": 1.0
+    },
+    {
+      "source": "internal_config_hostpath_test",
       "target": "internal_config_hostpath_test_testexpandhomepathsreportswhichfieldfailed",
       "relation": "contains",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L921",
+      "source_location": "L936",
       "weight": 1.0
     },
     {
@@ -124934,7 +124934,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L957",
+      "source_location": "L972",
       "weight": 1.0
     },
     {
@@ -156236,7 +156236,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L231",
+      "source_location": "L238",
       "weight": 1.0
     },
     {
@@ -156272,7 +156272,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L670",
+      "source_location": "L677",
       "weight": 1.0
     },
     {
@@ -156284,7 +156284,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L528",
+      "source_location": "L535",
       "weight": 1.0
     },
     {
@@ -156296,7 +156296,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L764",
+      "source_location": "L771",
       "weight": 1.0
     },
     {
@@ -156308,7 +156308,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L476",
+      "source_location": "L483",
       "weight": 1.0
     },
     {
@@ -156320,7 +156320,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L562",
+      "source_location": "L569",
       "weight": 1.0
     },
     {
@@ -156332,7 +156332,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L142",
+      "source_location": "L149",
       "weight": 1.0
     },
     {
@@ -156344,7 +156344,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L242",
+      "source_location": "L249",
       "weight": 1.0
     },
     {
@@ -156356,7 +156356,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L197",
+      "source_location": "L204",
       "weight": 1.0
     },
     {
@@ -156368,7 +156368,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L722",
+      "source_location": "L729",
       "weight": 1.0
     },
     {
@@ -156380,7 +156380,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L822",
+      "source_location": "L829",
       "weight": 1.0
     },
     {
@@ -156392,7 +156392,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L838",
+      "source_location": "L845",
       "weight": 1.0
     },
     {
@@ -156404,7 +156404,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L427",
+      "source_location": "L434",
       "weight": 1.0
     },
     {
@@ -156416,7 +156416,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L397",
+      "source_location": "L404",
       "weight": 1.0
     },
     {
@@ -156428,7 +156428,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L379",
+      "source_location": "L386",
       "weight": 1.0
     },
     {
@@ -156440,7 +156440,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L334",
+      "source_location": "L341",
       "weight": 1.0
     },
     {
@@ -156452,7 +156452,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L600",
+      "source_location": "L607",
       "weight": 1.0
     },
     {
@@ -156464,7 +156464,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L282",
+      "source_location": "L289",
       "weight": 1.0
     },
     {
@@ -156476,7 +156476,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L301",
+      "source_location": "L308",
       "weight": 1.0
     },
     {
@@ -156488,7 +156488,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "internal/config/hostpath_test.go",
-      "source_location": "L305",
+      "source_location": "L312",
       "weight": 1.0
     },
     {
@@ -165012,5 +165012,5 @@
       "source_file": "README.md"
     }
   ],
-  "built_at_commit": "fb4301cac6e82f2f7f1afe55d4e38b9ce87c33a2"
+  "built_at_commit": "948184b69b0ca0324b3d0e92e8cde190ce4fe195"
 }
