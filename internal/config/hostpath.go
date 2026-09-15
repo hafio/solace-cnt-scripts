@@ -23,16 +23,17 @@ import (
 // which is what stops the two drifting apart when one is edited.
 // TestHostPathCharsetIsDerivedFromTheTokenCharset pins the derivation itself.
 //
-// Two characters are removed:
+// One character is removed: the backslash, because `C:\certs\tls.crt` is a
+// legitimate host path on a Windows machine authoring or running this tool. Forcing
+// forward slashes there would be a rule with no purpose: the value is never argv[0],
+// so the bare-name rule that motivates the token ban does not apply.
 //
-//   - backslash, because `C:\certs\tls.crt` is a legitimate host path on a Windows
-//     machine authoring or running this tool. Forcing forward slashes there would
-//     be a rule with no purpose: the value is never argv[0], so the bare-name rule
-//     that motivates the token ban does not apply.
-//   - tilde, because `%TEMP%` on a GitHub Windows runner really is an 8.3 short name
-//     (`C:\Users\RUNNER~1\...`). Refusing it made the sibling project's own Windows
-//     CI fail on a path the operator never chose. See the leading-tilde carve-out in
-//     CheckHostPath, which is a separate question from the charset.
+// The tilde used to be removed here too, for the 8.3 short name a GitHub Windows
+// runner really hands out (`C:\Users\RUNNER~1\...`). It no longer has to be: the
+// token charset stopped carrying `~` at all, because a command token's tilde is now
+// refused POSITIONALLY (execguard.go's checkToken refuses a leading one and admits an
+// embedded one) -- which is the rule host paths were already using, so both sides of
+// the derivation now say the same thing about this character.
 //
 // A colon needs no removal: unsafeTokenChars never contained one, because
 // `--server=https://host:6443` is a legitimate command token. It is called out here
@@ -50,7 +51,13 @@ var hostPathUnsafe = strings.Map(func(r rune) rune {
 // hostPathAdmits are the token-charset characters a host path is allowed to carry.
 // Named so the test can assert the relationship against one definition instead of
 // repeating the list.
-const hostPathAdmits = `\~`
+//
+// It is just the backslash now. The tilde used to be here too, removed from the
+// token charset by this same derivation; it left when `~` stopped being in
+// unsafeTokenChars at all -- a command token's tilde is now refused POSITIONALLY
+// (checkToken refuses a leading one, admits an 8.3 short name's embedded one), which
+// is the rule host paths were already using, so there is nothing left to remove.
+const hostPathAdmits = `\`
 
 // CheckHostPath is the single definition of what a host filesystem path may be in
 // an env file. It runs on the value AS WRITTEN, before any base-directory
@@ -86,37 +93,26 @@ func CheckHostPath(field, p string) error {
 			"the generated compose file or quadlet unit, where that character changes how the engine reads "+
 			"the line", field, p, string(p[j]))
 	}
-	// A leading tilde is accepted here: expandHomePaths (below) expands it, after
-	// this check runs and before rebaseHostPaths joins a relative value onto the
-	// env file's directory. It used to be refused outright, on the grounds that
-	// nothing expanded it -- see expandTilde's doc comment for what changed and
-	// why an 8.3 short name like RUNNER~1, whose tilde sits in the middle, was
-	// never affected either way.
-	return nil
-}
-
-// checkContainerHostPath is CheckHostPath plus one more refusal, for the fields
-// expandHomePaths deliberately does not touch (podman.quadletDir, podman.baseDir,
-// <platform>.container.dataDir): each names a path on the machine that runs the
-// CONTAINER, not the machine running this tool, so os.UserHomeDir() cannot
-// answer for it (expandHomePaths' own doc comment has the full argument).
-//
-// CheckHostPath's charset gate no longer refuses a leading '~' -- expandHomePaths
-// is what interprets one, for every OTHER field -- so without a check here, a
-// literal '~' reaching one of these fields (an operator's typo, or the rootless
-// quadletDir default's own os.UserHomeDir fallback in load.go's xdgConfigHome,
-// which falls back to the literal string "~" when the home directory cannot be
-// resolved) would sail through unexpanded and silently reappear as a literal '~'
-// segment in the generated quadlet unit -- the exact failure this whole feature
-// exists to end, reintroduced for the one set of fields it cannot safely fix.
-func checkContainerHostPath(field, p string) error {
-	if err := CheckHostPath(field, p); err != nil {
-		return err
-	}
+	// A LEADING tilde is refused, and this is the FAIL-CLOSED half of the expansion
+	// feature rather than a rejection of the syntax: expandHomePaths runs over every
+	// host-path field in this schema BEFORE Validate calls this, so an operator who
+	// writes `~/solace/data` never reaches here -- the value arriving is already
+	// their home directory. One surviving means the field is not in
+	// expandHomePaths' list (a new key someone forgot) or the Config never went
+	// through Load, and the alternative to failing is a literal `~` reaching a
+	// quadlet `Volume=` line, a compose mount source, or the `rm -rf` behind
+	// `broker remove --delete-data`, each of which would silently act on a
+	// directory named `~` instead. The message therefore names the field.
+	//
+	// An EMBEDDED tilde is untouched, here and in expandTilde: `C:/Users/RUNNER~1/`
+	// is an 8.3 short name and a perfectly ordinary path, and it is what expansion
+	// itself produces on such a machine.
 	if strings.HasPrefix(p, "~") {
-		return fmt.Errorf("%s = %q starts with '~', which is not expanded for this field: it names a path "+
-			"on the machine that runs the container, not the machine running this tool, so this tool's own "+
-			"home directory cannot answer for it here -- write the path out in full", field, p)
+		return fmt.Errorf("%s = %q still starts with '~', which no later step expands: it would be written "+
+			"verbatim into a mount line or handed to a file operation, naming a directory literally called "+
+			"'~'. Every path key in this schema has a leading '~' expanded to the home directory of the user "+
+			"running this tool while the env file is loaded, so one surviving here means this configuration "+
+			"was not loaded from a file -- write the path out in full", field, p)
 	}
 	return nil
 }
@@ -281,36 +277,56 @@ func (c *Config) hostPath(p string) string {
 //
 // Order matters twice over, both directions:
 //
-//   - It runs AFTER Validate/CheckHostPath, which polices the value AS
-//     WRITTEN. A leading `~` used to be refused there for exactly this reason;
-//     now it is accepted there and resolved here instead.
+//   - It runs BEFORE Validate/CheckHostPath. That is the opposite of where this
+//     pass started, and the reason it moved is that a directory key must be
+//     allowed to be relative to a home directory and still satisfy the checks
+//     that require it to be ABSOLUTE: `dataDir: ~/solace/data` is not absolute by
+//     IsAbsHostPath, so validated first it was refused before anything could
+//     expand it. Running first means every host-path check -- the charset, the
+//     absoluteness requirements on podman.baseDir and container.dataDir, and
+//     CheckHostPath's own leading-`~` refusal -- sees the value that will
+//     actually be used.
+//     The cost, stated plainly: the charset gate now also polices a home
+//     directory the env file did not name, so a home containing `'` or a space
+//     fails the load. That is deliberate rather than accepted -- such a value
+//     lands unquoted in a `Volume=` line -- and expandTilde reports the
+//     whitespace case itself, with the resolved value in the message. (The
+//     env file's own directory is still gated nowhere, because rebaseHostPaths
+//     runs after Validate: an operator opts into expansion by writing `~`,
+//     where the rebase happens to every relative path whether they think about
+//     it or not.)
 //   - It runs BEFORE rebaseHostPaths. An expanded value is already absolute, so
 //     IsAbsHostPath leaves it alone in hostPath -- the join can no longer
 //     happen. Expanding AFTER the join would look for a leading tilde in
 //     "<baseDir>/~/certs", find none, and silently do nothing: the exact bug
 //     this feature replaces, reintroduced one step later.
 //
-// The fields expanded are exactly the ones this PROCESS reads from disk:
-// tls.cert/certKey/cas, broker.cliScriptsDir, broker.hostDiagnosticDir,
-// broker.domainCerts.dirs[].path, broker.domainCerts.files{}, and
-// docker.composeFile. The fields that are gated but never rebased --
-// podman.quadletDir, podman.baseDir, docker/podman container.dataDir -- are
-// deliberately EXCLUDED: they name a path on the machine that runs the
-// CONTAINER, which for docker/podman is a Linux host even when this tool is
-// driven from Windows (render.go's ServerCertBundlePath comment says so),
-// while os.UserHomeDir answers for the machine running THIS TOOL -- expanding
-// them would resolve the wrong machine's home. Because CheckHostPath's charset
-// gate no longer refuses a leading tilde for ANY field (expandHomePaths is what
-// interprets one now), these three go through checkContainerHostPath instead
-// of CheckHostPath in validateHostPaths, which restores exactly that refusal
-// for exactly these fields -- otherwise a literal '~' reaching one of them
-// (an operator's typo, or the rootless podman.quadletDir default's own
-// xdgConfigHome fallback in load.go) would sail through unexpanded.
+// EVERY host-path key in this schema is covered, which is what makes the rule
+// something an operator can hold in their head -- `~` works in a path key, full
+// stop -- and what lets CheckHostPath refuse a surviving one instead of having to
+// decide per field whether it means anything.
+//
+// The three container-host keys (podman.quadletDir, podman.baseDir,
+// <platform>.container.dataDir) were excluded at first, on the argument that they
+// name a path on the machine running the CONTAINER while os.UserHomeDir answers for
+// the machine running this TOOL. For docker and podman those are the same machine,
+// and the code says so rather than assuming it: this process writes the quadlet unit
+// to quadletDir with os.WriteFile and deletes it with os.Remove
+// (container.Manager.writeArtifact / deletePodman), writes the server-certificate
+// bundle under baseDir the same way, and creates, chowns and `rm -rf`s dataDir
+// through local subprocesses of its own (Manager.PrepHost, purgeData) before the
+// locally-invoked engine ever reads it as a bind-mount source. The rootless
+// quadletDir DEFAULT is itself built from os.UserHomeDir (load.go's xdgConfigHome),
+// so the field was already answering for this machine's home before any of this.
+// The exclusion cost the operator the one platform where a home-relative directory
+// is most natural, and bought nothing.
+//
+// One knock-on worth knowing: xdgConfigHome falls back to the literal string "~"
+// when it cannot resolve a home directory, and that default now flows through this
+// pass, which fails naming the unresolvable home -- where before it reached the
+// charset gate and was refused for the wrong reason.
 func (c *Config) expandHomePaths() error {
-	home := c.homeDir
-	if home == nil {
-		home = os.UserHomeDir
-	}
+	home := c.home()
 	expand := func(field string, p *string) error {
 		v, err := expandTilde(*p, home)
 		if err != nil {
@@ -339,6 +355,23 @@ func (c *Config) expandHomePaths() error {
 	if err := expand("docker.composeFile", &c.Docker.ComposeFile); err != nil {
 		return err
 	}
+	// The four container-host directories, expanded for the machine that actually
+	// writes and deletes them (the paragraph above has the evidence). They are listed
+	// unconditionally rather than per platform, the way every field above is: an
+	// unset field is left alone by expandTilde, and a platform-shaped list here would
+	// be a second enumeration of the schema to keep in step with validateHostPaths'.
+	if err := expand("docker.container.dataDir", &c.Docker.Container.DataDir); err != nil {
+		return err
+	}
+	if err := expand("podman.quadletDir", &c.Podman.QuadletDir); err != nil {
+		return err
+	}
+	if err := expand("podman.baseDir", &c.Podman.BaseDir); err != nil {
+		return err
+	}
+	if err := expand("podman.container.dataDir", &c.Podman.Container.DataDir); err != nil {
+		return err
+	}
 	for i := range c.Broker.DomainCerts.Dirs {
 		field := fmt.Sprintf("broker.domainCerts.dirs[%d]", i)
 		if err := expand(field, &c.Broker.DomainCerts.Dirs[i].Path); err != nil {
@@ -355,16 +388,68 @@ func (c *Config) expandHomePaths() error {
 	return nil
 }
 
-// expandTilde expands a LEADING tilde only: exactly "~", or "~" immediately
+// home is the home-directory resolver this Config's expansion passes use: the test
+// seam when one was installed, os.UserHomeDir otherwise. One accessor rather than
+// the same two-line fallback in expandHomePaths and expandCommandHomes, so a Config
+// built by hand cannot have one pass see the seam and the other the real machine.
+func (c *Config) home() func() (string, error) {
+	if c.homeDir != nil {
+		return c.homeDir
+	}
+	return os.UserHomeDir
+}
+
+// expandTilde expands a leading tilde in a HOST PATH. The expansion itself is
+// tildeHome's; what this wrapper adds is the whitespace re-check, whose message is
+// about a mount line -- see expandTildeToken for the command-token twin, which is the
+// same expansion under a different explanation.
+//
+// Re-checked here, and not only as written: CheckHostPath ran on the literal
+// "~/...", which never carries whitespace -- but a real Windows home routinely does
+// (`C:\Users\John Smith`), and that space would otherwise reach a compose/quadlet
+// mount line this tool cannot delimit, silently.
+func expandTilde(p string, homeDir func() (string, error)) (string, error) {
+	expanded, err := tildeHome(p, homeDir)
+	if err != nil {
+		return "", err
+	}
+	if strings.IndexFunc(expanded, isSpace) >= 0 {
+		return "", fmt.Errorf("expands to %q, which contains whitespace; a mount line is written as "+
+			"source:target:options on a single line and cannot delimit a path with a space in it -- write "+
+			"the path out in full instead of relying on '~' expansion", expanded)
+	}
+	return expanded, nil
+}
+
+// expandTildeToken expands a leading tilde in a COMMAND TOKEN (execguard.go's
+// expandCommandHomes). It is expandTilde's twin and differs only in what it says
+// about whitespace: an expanded home carrying a space would reach CheckCommand's own
+// whitespace refusal, which explains itself by telling the operator to write each
+// argument as its own list entry -- true of a token they typed, and misleading advice
+// for a space that came out of their home directory rather than their env file.
+func expandTildeToken(tok string, homeDir func() (string, error)) (string, error) {
+	expanded, err := tildeHome(tok, homeDir)
+	if err != nil {
+		return "", err
+	}
+	if strings.IndexFunc(expanded, isSpace) >= 0 {
+		return "", fmt.Errorf("expands to %q, which contains whitespace; a command is split into arguments on "+
+			"whitespace, so this token cannot be delimited -- pass the path in full instead of relying on '~' "+
+			"expansion", expanded)
+	}
+	return expanded, nil
+}
+
+// tildeHome expands a LEADING tilde only: exactly "~", or "~" immediately
 // followed by '/' or '\\'. A tilde anywhere else in the value -- including one
 // followed by any other character -- is left untouched, which is what keeps an
-// 8.3 short name (`C:\Users\RUNNER~1\...`) working: CheckHostPath's charset
-// gate already draws this same line between "leading" and "everywhere else",
-// this is the resolving half of the same rule. Anything starting `~` and
+// 8.3 short name (`C:\Users\RUNNER~1\...`) working: CheckHostPath and checkToken
+// both draw this same line between "leading" and "everywhere else", and this is
+// the resolving half of that one rule. Anything starting `~` and
 // followed by something other than a separator is the `~user/...` form (another
 // user's home directory) and is refused by name rather than guessed at -- this
 // tool has no notion of another account's home.
-func expandTilde(p string, homeDir func() (string, error)) (string, error) {
+func tildeHome(p string, homeDir func() (string, error)) (string, error) {
 	if p == "" || p[0] != '~' {
 		return p, nil
 	}
@@ -393,15 +478,7 @@ func expandTilde(p string, homeDir func() (string, error)) (string, error) {
 	// on Linux, where that whole value is one filename. (load.go's xdgConfigHome
 	// keeps ToSlash correctly: its separators come from a filepath.Join on the
 	// machine running, so there is only ever one to rewrite.)
-	expanded := strings.ReplaceAll(home+rest, `\`, "/")
-	// Re-checked here, not only as written: CheckHostPath ran on the literal
-	// "~/...", which never carries whitespace -- but a real Windows home
-	// routinely does (`C:\Users\John Smith`), and that space would otherwise
-	// reach a compose/quadlet mount line this tool cannot delimit, silently.
-	if strings.IndexFunc(expanded, isSpace) >= 0 {
-		return "", fmt.Errorf("expands to %q, which contains whitespace; a mount line is written as "+
-			"source:target:options on a single line and cannot delimit a path with a space in it -- write "+
-			"the path out in full instead of relying on '~' expansion", expanded)
-	}
-	return expanded, nil
+	// Whitespace in the resolved home is left to the two callers above: it is
+	// refused by both, in the words that fit where the value is going.
+	return strings.ReplaceAll(home+rest, `\`, "/"), nil
 }

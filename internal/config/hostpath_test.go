@@ -57,10 +57,11 @@ func TestHostPathCharsetIsDerivedFromTheTokenCharset(t *testing.T) {
 }
 
 // TestCheckHostPathAccepts covers the shapes an operator legitimately writes,
-// including the two Windows forms that a command token may not carry, and every
-// leading-tilde shape -- CheckHostPath no longer refuses one: expandHomePaths is
-// what interprets it (and what refuses the unsupported `~user/...` form), so at
-// the as-written charset gate a tilde is just another admitted character.
+// including the two Windows forms that a command token may not carry and an
+// EMBEDDED tilde. A LEADING one is not here: it belongs to
+// TestCheckHostPathRejects, because expandHomePaths runs over every host-path key
+// BEFORE Validate reaches this gate, so a `~` still arriving is a wiring failure
+// rather than a shape an operator writes (hostpath.go states the argument).
 func TestCheckHostPathAccepts(t *testing.T) {
 	for _, p := range []string{
 		"",                        // empty is a per-field question, not this one
@@ -72,10 +73,6 @@ func TestCheckHostPathAccepts(t *testing.T) {
 		"../shared/certs/tls.crt", // above the env file
 		"diag-configs",            // a bare directory name
 		"a.b_c-d/e.pem",           // punctuation a name grammar would refuse
-		"~",                       // expands to the home directory, alone
-		"~/certs/tls.crt",         // expands to the home directory, forward slash
-		`~\certs\tls.crt`,         // expands to the home directory, backslash
-		"~bob/certs",              // the unsupported ~user form -- refused later, at expand time, not here
 	} {
 		if err := CheckHostPath("tls.cert", p); err != nil {
 			t.Errorf("CheckHostPath(%q) = %v, want accepted", p, err)
@@ -106,6 +103,18 @@ func TestCheckHostPathRejects(t *testing.T) {
 		// isCtrl is r < 0x20. Pinned so the branch order is deliberate.
 		{"certs/tls\t.crt", "control character"},
 		{"certs/tls\n.crt", "control character"},
+		// Every LEADING-tilde shape, and the message is the whole point: this is
+		// the fail-closed half of the expansion feature, not a rejection of the
+		// syntax an operator writes. expandHomePaths has already run by the time
+		// Validate reaches here, so one arriving means the field is missing from
+		// its list or the Config never came from a file -- which is what the
+		// message has to say, rather than "a tilde is not allowed in a path".
+		{"~", "not loaded from a file"},
+		{"~/certs/tls.crt", "not loaded from a file"},
+		{`~\certs\tls.crt`, "not loaded from a file"},
+		// The unsupported ~user form is refused BY NAME at expand time
+		// (TestExpandTilde); reaching this gate it is just another leading tilde.
+		{"~bob/certs", "not loaded from a file"},
 	}
 	for _, tc := range cases {
 		err := CheckHostPath("tls.cert", tc.path)
@@ -507,53 +516,86 @@ func TestDataDirMustBeAbsolute(t *testing.T) {
 	}
 }
 
-// TestContainerHostPathsRefuseATilde pins the fix for the gap that opened when
-// CheckHostPath stopped refusing a leading '~' everywhere (expandHomePaths now
-// handles it, for every field IT reaches): podman.quadletDir, podman.baseDir
-// and <platform>.container.dataDir are deliberately NOT in that expansion list,
-// because each names a path on the machine that runs the CONTAINER rather than
-// the machine running this tool, and os.UserHomeDir() cannot answer for the
-// former. Without a check here, a literal '~' -- an operator's typo, or the
-// rootless quadletDir default's own xdgConfigHome fallback -- would silently
-// reach the generated quadlet unit as a literal segment.
-func TestContainerHostPathsRefuseATilde(t *testing.T) {
-	cases := []struct {
-		name  string
-		p     Platform
-		setup func(*Config)
+// TestContainerHostDirsExpandATilde replaces TestContainerHostPathsRefuseATilde, which
+// pinned an exclusion that is gone. podman.quadletDir, podman.baseDir and
+// <platform>.container.dataDir were the three fields expandHomePaths deliberately skipped,
+// on the argument that they name a path on the machine running the CONTAINER while
+// os.UserHomeDir answers for the machine running this TOOL -- so a leading '~' in one had
+// to be refused by a check of its own (checkContainerHostPath). hostpath.go carries the
+// evidence that the premise is wrong: this process writes the quadlet unit and the
+// certificate bundle itself (os.WriteFile / os.Remove) and creates, chowns and `rm -rf`s
+// the data dir through local subprocesses, and the rootless quadletDir DEFAULT is already
+// built from os.UserHomeDir. So they expand like every other path key, and the per-field
+// refusal went with the exception it existed for.
+//
+// Two things are pinned per field, and the second is what forced load.go's ordering
+// change: the value expands, and the EXPANDED value then satisfies Validate's own
+// absoluteness requirement. `dataDir: ~/solace/data` is not absolute by IsAbsHostPath, so
+// a Validate that ran first refused it before anything could expand it.
+func TestContainerHostDirsExpandATilde(t *testing.T) {
+	const home = "/home/op"
+	for _, tc := range []struct {
 		field string
+		p     Platform
+		set   func(*Config)
+		get   func(*Config) string
 	}{
-		{"podman.quadletDir", Podman, func(c *Config) { c.Podman.QuadletDir = "~/quadlets" }, "podman.quadletDir"},
-		{"podman.baseDir", Podman, func(c *Config) { c.Podman.BaseDir = "~/solace" }, "podman.baseDir"},
-		{"podman.container.dataDir", Podman, func(c *Config) { c.Podman.Container.DataDir = "~/data" },
-			"podman.container.dataDir"},
-		{"docker.container.dataDir", Docker, func(c *Config) { c.Docker.Container.DataDir = "~/data" },
-			"docker.container.dataDir"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
+		{"podman.quadletDir", Podman,
+			func(c *Config) { c.Podman.QuadletDir = "~/quadlets" },
+			func(c *Config) string { return c.Podman.QuadletDir }},
+		{"podman.baseDir", Podman,
+			func(c *Config) { c.Podman.BaseDir = "~/solace" },
+			func(c *Config) string { return c.Podman.BaseDir }},
+		{"podman.container.dataDir", Podman,
+			func(c *Config) { c.Podman.Container.DataDir = "~/solace/data" },
+			func(c *Config) string { return c.Podman.Container.DataDir }},
+		{"docker.container.dataDir", Docker,
+			func(c *Config) { c.Docker.Container.DataDir = "~/solace/data" },
+			func(c *Config) string { return c.Docker.Container.DataDir }},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
 			c := guardConfig(tc.p)
-			tc.setup(c)
-			err := c.validateHostPaths(tc.p)
-			if err == nil {
-				t.Fatalf("%s: a leading '~' must be refused, not silently left as a literal", tc.field)
+			c.homeDir = func() (string, error) { return home, nil }
+			tc.set(c)
+			if err := c.expandHomePaths(); err != nil {
+				t.Fatalf("%s: expandHomePaths: %v", tc.field, err)
 			}
-			if !strings.Contains(err.Error(), tc.field) {
-				t.Errorf("%s: error %q must name the field", tc.field, err)
+			got := tc.get(c)
+			if strings.HasPrefix(got, "~") {
+				t.Fatalf("%s = %q: the leading tilde survived, so this field is not in "+
+					"expandHomePaths' list", tc.field, got)
 			}
-			if !strings.Contains(err.Error(), "not expanded for this field") {
-				t.Errorf("%s: error %q must explain why (this field is on the container's host, not this "+
-					"tool's), not just refuse", tc.field, err)
+			if !strings.HasPrefix(got, home+"/") {
+				t.Errorf("%s = %q, want it under %q", tc.field, got, home)
+			}
+			// The absoluteness interaction, stated as its own assertion rather than
+			// left implicit in the Validate call below: this is the requirement the
+			// unexpanded value could not meet.
+			if !IsAbsHostPath(got) {
+				t.Errorf("%s = %q must be absolute after expansion -- Validate requires it, and "+
+					"an unexpanded '~/...' is not", tc.field, got)
+			}
+			if err := c.Validate(tc.p); err != nil {
+				t.Errorf("%s: an expanded '~' must validate: %v", tc.field, err)
 			}
 		})
 	}
-	// docker.composeFile is expanded and rebased -- it IS read by this tool --
-	// so it must NOT be refused here; it goes through the ordinary gate.
-	dc := guardConfig(Docker)
-	dc.Docker.ComposeFile = "~/compose.yml"
-	if err := dc.validateHostPaths(Docker); err != nil {
-		t.Errorf("docker.composeFile with a leading '~' must be accepted at validate time (expanded at "+
-			"Load, not refused): %v", err)
+	// And the fail-closed half, for these fields like every other: a Config that never
+	// went through the expansion pass is refused by CheckHostPath ITSELF -- one rule and
+	// one gate now, which is what deleting checkContainerHostPath bought.
+	c := guardConfig(Podman)
+	c.Podman.QuadletDir = "~/quadlets"
+	err := c.validateHostPaths(Podman)
+	if err == nil {
+		t.Fatal("an unexpanded leading '~' must still be refused, not left as a literal segment " +
+			"for a quadlet Volume= line")
+	}
+	if !strings.Contains(err.Error(), "podman.quadletDir") {
+		t.Errorf("error %q must name the field", err)
+	}
+	if !strings.Contains(err.Error(), "not loaded from a file") {
+		t.Errorf("error %q must say what a surviving '~' actually means now (the Config did not "+
+			"come through Load), not that the field is unexpandable", err)
 	}
 }
 
@@ -808,9 +850,10 @@ func setContainerName(c *Config, p Platform, name string) {
 	c.Docker.Container.Name = name
 }
 
-// TestLoadExpandsATildeThroughTheWholePipeline is the WIRING test, and it is the one that
-// was missing: every other tilde test calls expandTilde or expandHomePaths directly, so
-// deleting the single call from Load left the whole suite green.
+// TestLoadExpandsATildeThroughTheWholePipeline is the WIRING test for BOTH expansion
+// passes, and it is the one that was missing: every other tilde test calls expandTilde,
+// expandHomePaths or expandCommandHomes directly, so deleting either call from Load left
+// the whole suite green.
 //
 // That is a real gap rather than a stylistic one. The behaviour this feature replaced --
 // CheckHostPath's outright refusal of a leading '~' -- was reached through Validate, whose
@@ -836,6 +879,7 @@ semp:
 broker:
   cliScriptsDir: ~/scripts
 kubernetes:
+  command: kubectl --kubeconfig ~/kc
   name: mybroker
   namespace: sol-ns
   storage:
@@ -870,6 +914,25 @@ kubernetes:
 		t.Errorf("broker.cliScriptsDir = %q, want it to keep the path after the tilde",
 			c.Broker.CLIScriptsDir)
 	}
+	// The command pass has exactly the same wiring gap, and one more reason to be pinned
+	// here: `kubernetes.command: oc --kubeconfig ~/solace/kubecontext` is the env file that
+	// reported this feature missing, so this is the line an operator actually writes,
+	// loaded exactly as they load it. Two things have to hold at once and only a full Load
+	// shows both -- the token expanded, and the guard Validate runs afterwards ACCEPTED the
+	// expanded token. An expanded home is why tildeHome normalises separators to '/':
+	// '\' is in unsafeTokenChars, so a Windows home spliced in verbatim would be refused
+	// by the very check this pass exists to satisfy.
+	kc := c.K8s.Command[len(c.K8s.Command)-1]
+	if strings.HasPrefix(kc, "~") {
+		t.Fatalf("kubernetes.command last token = %q: the leading tilde survived Load, so "+
+			"expandCommandHomes is not wired into it", kc)
+	}
+	if !strings.HasPrefix(kc, filepath.ToSlash(home)) {
+		t.Errorf("kubernetes.command last token = %q, want it under the home directory %q", kc, home)
+	}
+	if !strings.HasSuffix(kc, "/kc") {
+		t.Errorf("kubernetes.command last token = %q, want it to keep the path after the tilde", kc)
+	}
 }
 
 // TestExpandHomePathsCoversEveryFieldItClaims walks EVERY field expandHomePaths lists,
@@ -893,6 +956,14 @@ func TestExpandHomePathsCoversEveryFieldItClaims(t *testing.T) {
 	c.Broker.CLIScriptsDir = "~/scripts"
 	c.Broker.HostDiagnosticDir = "~/diag"
 	c.Docker.ComposeFile = "~/compose.yaml"
+	// The four container-host directories. They are listed unconditionally by
+	// expandHomePaths -- not per platform -- so they are set unconditionally here:
+	// a per-platform list there would be a second enumeration of the schema, and a
+	// per-platform loop here would not notice one appearing.
+	c.Docker.Container.DataDir = "~/solace/docker-data"
+	c.Podman.QuadletDir = "~/quadlets"
+	c.Podman.BaseDir = "~/solace/base"
+	c.Podman.Container.DataDir = "~/solace/podman-data"
 	c.Broker.DomainCerts.Dirs = []CertDir{{Path: "~/cas/a"}, {Path: "~/cas/b"}}
 	c.Broker.DomainCerts.Files = map[string]string{
 		"first":  "~/cas/one.pem",
@@ -911,6 +982,10 @@ func TestExpandHomePathsCoversEveryFieldItClaims(t *testing.T) {
 		"broker.cliScriptsDir":        c.Broker.CLIScriptsDir,
 		"broker.hostDiagnosticDir":    c.Broker.HostDiagnosticDir,
 		"docker.composeFile":          c.Docker.ComposeFile,
+		"docker.container.dataDir":    c.Docker.Container.DataDir,
+		"podman.quadletDir":           c.Podman.QuadletDir,
+		"podman.baseDir":              c.Podman.BaseDir,
+		"podman.container.dataDir":    c.Podman.Container.DataDir,
 		"broker.domainCerts.dirs[0]":  c.Broker.DomainCerts.Dirs[0].Path,
 		"broker.domainCerts.dirs[1]":  c.Broker.DomainCerts.Dirs[1].Path,
 		"broker.domainCerts.files[1]": c.Broker.DomainCerts.Files["first"],

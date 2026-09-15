@@ -244,7 +244,12 @@ kubernetes:
                                     # THIS FIELD RUNS A BINARY: restricted to a bare
                                     # name from {kubectl, oc} followed by flags only.
                                     # A wrapper such as `microk8s kubectl` needs
-                                    # --allow-command microk8s per run
+                                    # --allow-command microk8s per run.
+                                    # A leading ~ expands to the home directory of the
+                                    # user RUNNING this tool in every argument BUT the
+                                    # first -- `--kubeconfig ~/solace/kubecontext` works,
+                                    # `~/bin/kubectl` does not (the binary is a bare
+                                    # name). Same non-portability as a path key
   name: dev-broker                  # mandatory
   namespace: solace                 # mandatory
   adminSecret: solace-admin-secret  # Secret holding the admin/monitor credentials

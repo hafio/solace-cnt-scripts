@@ -273,24 +273,37 @@ annotation) -- and it is absent from root, so `convert` never offers it.
 compose/quadlet artifact and run by the container engine *inside* the broker, so it never
 becomes argv here.
 
-**Home-directory (`~`) expansion is a host-path feature and does not reach a command field.**
-It does not need a new rule to be kept out: `~` is already in `unsafeTokenChars`, so layer 1
-(`checkToken`) refuses it in any command token, at any position -- a stronger statement than
-`checkBinary`'s bare-name rule, since `checkBinary` only looks for `/` and `\`, which a bare
-`~` carries neither of. The host-path charset (`hostpath.go`'s `hostPathUnsafe`) is
-`unsafeTokenChars` minus exactly `\` and `~`, derived by REMOVAL so the two sets cannot drift
-(`TestHostPathCharsetIsDerivedFromTheTokenCharset`); `config.Config.expandHomePaths` (called
-from `Load`, between `Validate` and `rebaseHostPaths`) is what resolves the leading tilde on
-every host-path field this tool itself reads off disk, to `os.UserHomeDir()`. It is
-deliberately NOT the fields that are gated but never rebased (`podman.quadletDir`,
-`podman.baseDir`, `<platform>.container.dataDir`): those name a path on the machine that runs
-the CONTAINER, which for docker/podman is a Linux host even when this tool is driven from
-Windows, and `os.UserHomeDir()` only ever answers for the machine running the tool itself.
-Because `CheckHostPath`'s charset gate stopped refusing a leading tilde for every field once
-`expandHomePaths` took over interpreting it, these three go through `checkContainerHostPath`
-in `validateHostPaths` instead, which restores that refusal for exactly these fields --
-otherwise a literal `~` reaching one (an operator's typo, or the rootless `podman.quadletDir`
-default's own `xdgConfigHome` fallback in `load.go`) would sail through unexpanded.
+**Home-directory (`~`) expansion is ONE rule with one line in it: a LEADING `~` is resolved
+everywhere, an EMBEDDED one is an ordinary character everywhere.** `~` is therefore NOT in
+`unsafeTokenChars` -- it was, which refused it at every position, and that refused the tool's
+own output: `C:\Users\RUNNER~1\...` is the 8.3 short name a Windows GitHub runner really hands
+out, so an embedded tilde is exactly what expansion produces there. The refusal is POSITIONAL
+instead, in layer 1 (`checkToken`) for command tokens and in `CheckHostPath` for host paths,
+and both sides say the same thing about the character -- which is why the host-path charset
+(`hostpath.go`'s `hostPathUnsafe`) is now `unsafeTokenChars` minus exactly `\`, still derived
+by REMOVAL so the two cannot drift (`TestHostPathCharsetIsDerivedFromTheTokenCharset`).
+
+Two passes resolve it, both called from `Load` **BEFORE `Validate`** and after
+`ApplyDefaults`: `Config.expandCommandHomes` for command fields and `Config.expandHomePaths`
+for host paths, each to `os.UserHomeDir()` (one seam, `Config.home()`). The order is
+load-bearing in both directions. A guard polices what will actually be used, so it must see
+the RESOLVED value -- `CheckCommand` polices what reaches exec, and `dataDir: ~/solace/data`
+is not absolute by `IsAbsHostPath`, so a `Validate` that ran first refused it before anything
+could expand it. That in turn is what lets both guards refuse a SURVIVING leading `~`
+outright: one arriving means the field is missing from a pass' list, or the Config never came
+from a file, and each function's message says so. `expandCommandHomes` skips argv[0] alone,
+which stays a bare allowlisted name (`checkBinary`), and refuses a leading `~` there with its
+own message. `expandHomePaths` covers EVERY host-path key -- including `podman.quadletDir`,
+`podman.baseDir` and `<platform>.container.dataDir`, which were excluded on the argument that
+they name the CONTAINER's host: for docker and podman that is this machine, and the code says
+so (`os.WriteFile`/`os.Remove` for the quadlet unit and the cert bundle, local `mkdir`/`chown`/
+`rm -rf` for the data dir, and the rootless `quadletDir` default is itself built from
+`os.UserHomeDir`). The per-field `checkContainerHostPath` that restored a refusal for exactly
+those three went with the exception. Two costs, both deliberate: a home directory the env file
+never named now goes through the charset and whitespace gates (a home with a space or a quote
+in it fails the load, in words about where the value is going), and the `xdgConfigHome`
+literal-`"~"` fallback now fails at expansion naming the unresolvable home instead of reaching
+a charset refusal for the wrong reason.
 
 Two supporting layers: `engine.Resolve` resolves argv[0] with `exec.LookPath` and treats
 `exec.ErrDot` as an error (never the current directory). It is shared by `engine.Exec`, which

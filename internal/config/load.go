@@ -40,21 +40,30 @@ func Load(path string, p Platform, allowCommands ...string) (*Config, error) {
 		return nil, err
 	}
 	c.ApplyDefaults(p)
-	if err := c.Validate(p); err != nil {
+	// Home-directory expansion runs BEFORE Validate, and both passes have to: a
+	// leading '~' is a form the checks are supposed to see RESOLVED, not a form they
+	// are supposed to accept. `dataDir: ~/solace/data` is not absolute by
+	// IsAbsHostPath, so validating first refused it before anything could expand it;
+	// and CheckCommand polices what will actually be handed to exec, which after this
+	// pass is the expanded token. That is what lets both guards refuse a surviving
+	// '~' outright -- one arriving at either of them means the field is missing from
+	// a list here, or the Config never came from a file (each of the two functions
+	// says so in its own message). Each pass' doc comment carries the full argument.
+	if err := c.expandCommandHomes(p); err != nil {
 		return nil, err
 	}
-	// Only now, once the file has been accepted as written. Validate's host-path
-	// gate polices what the FILE says; rebasing first would put the operator's own
-	// checkout directory through a charset check it never agreed to, and a path
-	// with a space in it would fail a load for a reason the env file did not cause.
-	//
-	// Home-directory expansion runs next, before the rebase: an expanded value is
-	// already absolute, so the rebase below leaves it alone rather than joining
-	// the env file's directory onto it (expandHomePaths' own doc comment has the
-	// full ordering argument).
 	if err := c.expandHomePaths(); err != nil {
 		return nil, err
 	}
+	if err := c.Validate(p); err != nil {
+		return nil, err
+	}
+	// The rebase, and only now that the file has been accepted as written.
+	// Validate's host-path gate polices what the FILE says; rebasing first would put
+	// the operator's own checkout directory through a charset check it never agreed
+	// to, and a path with a space in it would fail a load for a reason the env file
+	// did not cause. An expanded '~' is already absolute, so the rebase leaves it
+	// alone rather than joining the env file's directory onto it.
 	// filepath.Abs so the result does not depend on the working directory a moment
 	// later, and so an absolutized `Volume=` source is genuinely absolute -- a
 	// base of "." would otherwise leave every path relative and reintroduce

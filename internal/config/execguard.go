@@ -110,7 +110,18 @@ var neverAllowed = map[string]string{
 // That is not a loss for argv[0], which may not be a path at all, and a flag value
 // takes forward slashes -- kubectl, docker and podman all accept
 // `C:/Users/you/.kube/config`. The error message says so.
-const unsafeTokenChars = "\"'`$;|&<>()*?[]{}~#!\\"
+//
+// Tilde is deliberately NOT included, and the reason is positional rather than a
+// relaxation. A LEADING tilde is refused by checkToken's own rule below, because
+// nothing downstream expands one: exec involves no shell, so `--kubeconfig ~/kc`
+// would hand the cluster CLI a directory literally named `~`. An EMBEDDED tilde has
+// to be ALLOWED, because a real Windows home directory is routinely an 8.3 short
+// name (`C:\Users\RUNNER~1\...`) -- so once expandCommandHomes resolves a leading
+// tilde, the resulting token legitimately carries one in the middle, and a blanket
+// refusal would reject this tool's own expansion on exactly the machines that need
+// it. That is the same leading-vs-everywhere-else line hostpath.go draws for host
+// paths, which is why hostPathAdmits no longer has to remove this character.
+const unsafeTokenChars = "\"'`$;|&<>()*?[]{}#!\\"
 
 // pathSeparators are the characters that make a token a path rather than a bare
 // name. Both are rejected on every platform: an env file that ships alongside a
@@ -250,6 +261,28 @@ func checkToken(field string, i int, tok string) error {
 		return fmt.Errorf("%s[%d] = %q contains %q, which is not allowed in a command token; "+
 			"a Windows path works with forward slashes (C:/Users/you/.kube/config)",
 			field, i, tok, string(tok[j]))
+	}
+	// A LEADING tilde, refused at every position but for two different reasons --
+	// which is why the message differs. Only a leading one is refused: an embedded
+	// tilde is an 8.3 short name (`C:/Users/RUNNER~1/...`) and is exactly what
+	// expandCommandHomes itself produces on such a machine (unsafeTokenChars' comment
+	// has the argument), so refusing those would refuse this tool's own expansion.
+	//
+	// Reaching this branch at index 0 is an operator's mistake and says so. Reaching
+	// it anywhere else means the command never went through config.Load, because
+	// expandCommandHomes resolves those tokens BEFORE Validate runs -- so the layer-5
+	// re-check the executors make on a hand-built Config still fails closed rather
+	// than handing exec a directory named `~`.
+	if strings.HasPrefix(tok, "~") {
+		if i == 0 {
+			return fmt.Errorf("%s[0] = %q starts with '~': argv[0] names the binary to run and is resolved "+
+				"through the operator's own PATH, so it must be a bare name (one of the allowed binaries) "+
+				"rather than a path of any kind -- a home directory cannot be part of it", field, tok)
+		}
+		return fmt.Errorf("%s[%d] = %q still starts with '~', which nothing downstream expands: exec never "+
+			"involves a shell, so this would name a directory literally called '~'. A command read from an "+
+			"env file has its leading '~' expanded before this check runs, so a '~' surviving here means the "+
+			"command was built without going through config.Load", field, i, tok)
 	}
 	return nil
 }
@@ -453,6 +486,84 @@ func (c *Config) validateExecCommands(p Platform) error {
 		}
 		if err := CheckCommand(f.rules, f.cmd, c.extraAllowed); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// expandCommandHomes resolves a leading `~` in every command token EXCEPT argv[0],
+// for the same fields validateExecCommands guards on this platform. `oc --kubeconfig
+// ~/solace/kubecontext` is the case it exists for: exec never involves a shell, so
+// without this the tilde reaches the cluster CLI verbatim and names a directory
+// called `~`.
+//
+// argv[0] is skipped because it is not a path at all -- it is a bare allowlisted
+// name resolved through the operator's PATH (checkBinary), so there is nothing there
+// for a home directory to be part of, and expanding it would turn a refusable
+// mistake into an absolute path that then fails the bare-name rule with a longer
+// value in the message.
+//
+// It runs BEFORE Validate, which is the INVERSE of expandHomePaths' placement, and
+// the reason is what each gate polices. CheckHostPath polices what the FILE says.
+// The command guard polices what will EXECUTE: an expanded token is what reaches
+// os/exec, so it is the expanded token that has to pass the charset, the flag shape
+// and every other layer -- and the executors re-run that same check on a Config that
+// may never have seen Load, where checkToken's leading-tilde rule then fails closed.
+//
+// The two field enumerations are separate lists rather than one shared one, because
+// validateExecCommands checks a derived VALUE for docker.compose while expansion
+// needs the stored field's address. They cannot silently drift apart: a field this
+// misses keeps its literal `~`, and the guard that runs next refuses one in any
+// token, so the failure is loud. TestCommandTildeExpansion covers each field by name.
+func (c *Config) expandCommandHomes(p Platform) error {
+	home := c.home()
+	fields := []struct {
+		field string
+		cmd   *Command
+	}{
+		// Every platform, matching validateExecCommands: ApplyDefaults fills
+		// kubernetes.command everywhere and only k8s reads it.
+		{"kubernetes.command", &c.K8s.Command},
+	}
+	switch p {
+	case Docker:
+		fields = append(fields,
+			struct {
+				field string
+				cmd   *Command
+			}{"docker.command", &c.Docker.Command},
+			// The stored field only. An UNSET compose is derived from
+			// docker.command by composeOrDerived, which reads the expanded value
+			// above and appends the bare word `compose`.
+			struct {
+				field string
+				cmd   *Command
+			}{"docker.compose", &c.Docker.Compose},
+		)
+	case Podman:
+		fields = append(fields, struct {
+			field string
+			cmd   *Command
+		}{"podman.command", &c.Podman.Command})
+	}
+	for i := range c.Replication.Sites {
+		via := c.Replication.Sites[i].Via.Kubernetes
+		if via == nil {
+			continue
+		}
+		fields = append(fields, struct {
+			field string
+			cmd   *Command
+		}{fmt.Sprintf("replication.sites[%d].via.kubernetes.command", i), &via.Command})
+	}
+	for _, f := range fields {
+		cmd := *f.cmd
+		for i := 1; i < len(cmd); i++ {
+			v, err := expandTildeToken(cmd[i], home)
+			if err != nil {
+				return fmt.Errorf("%s[%d] starts with '~': %w", f.field, i, err)
+			}
+			cmd[i] = v
 		}
 	}
 	return nil

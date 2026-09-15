@@ -79,30 +79,55 @@ Three fields deliberately do **not** follow the rule:
 
 Host paths are also **character-checked**, and the rule is deliberately looser than the one
 for the [`command` fields](#the-command-fields-are-executable-content): a path may carry a
-backslash, a colon and a tilde, because `C:\certs\tls.crt` and an 8.3 short name like
-`C:\Users\RUNNER~1\...` are real paths, while a command token may carry none of them. What
+backslash and a colon, because `C:\certs\tls.crt` is a real path and a command token has no
+business carrying either. (A tilde is not part of that difference: both sides admit an
+embedded one -- an 8.3 short name such as `C:\Users\RUNNER~1\...` -- and both expand a leading
+one, see below.) What
 a path may **not** carry is a `$` or a shell metacharacter (both container artifacts write
 these values verbatim, and compose interpolates `$` across the whole document), whitespace
 (a mount is written `source:target:options` on one line, so a space cannot be delimited), or
 a control or invisible character. The check runs on the value as you wrote it, before any
 resolution.
 
-**A leading `~` expands to your own home directory.** `~`, or `~/...`, or `~\...`, expands to
-`os.UserHomeDir()` -- the home directory of whoever is **running this tool** -- before the
-relative-path rule above ever sees it, so the expanded value is already absolute and is never
-joined onto the env file's directory. A tilde anywhere else in the value is left alone, which
-is what keeps an 8.3 short name like `C:\Users\RUNNER~1\...` working. `~someoneelse/...` (another
-user's home) is not supported and is refused by name rather than guessed at. An unresolvable
-home directory is an error naming the field. This applies to every field the rule above
-resolves; the three fields in the table keep refusing a leading `~` exactly as they refuse any
-relative value, because they name a path on the machine that runs the **container** -- for
-docker/podman that is a Linux host even when you drive this tool from Windows -- and
-`os.UserHomeDir()` only ever answers for the machine running the tool itself.
+**A leading `~` expands to your own home directory, in every path key and in every `command`
+field.** `~`, or `~/...`, or `~\...`, expands to `os.UserHomeDir()` -- the home directory of
+whoever is **running this tool** -- before the relative-path rule above ever sees it, so the
+expanded value is already absolute and is never joined onto the env file's directory. A tilde
+anywhere else in the value is left alone, which is what keeps an 8.3 short name like
+`C:\Users\RUNNER~1\...` working. `~someoneelse/...` (another user's home) is not supported and
+is refused by name rather than guessed at. An unresolvable home directory is an error naming
+the field, and so is a home directory whose own path carries whitespace or a character the
+value's destination cannot carry.
 
-A `~` path is the one value in this schema that does **not travel**. Every other host path
+There are no exceptions among the path keys -- the three in the table above included. Those
+three are still never *resolved* against the env file's directory, so a relative value is
+still refused; a `~` one is not relative by the time the check runs. What each is checked for
+does not change:
+
+```yaml
+podman:
+  quadletDir: ~/.config/containers/systemd
+  baseDir: ~/solace
+  container:
+    dataDir: ~/solace/data
+```
+
+In a `command` field every token expands **except the first**, which names the binary and must
+stay a bare allowlisted name (`kubectl`, `oc`, `docker`, `podman`, ...) with no path in it at
+all -- see [the `command` fields](#the-command-fields-are-executable-content). So this works:
+
+```yaml
+kubernetes:
+  command: oc --kubeconfig ~/solace/kubecontext
+```
+
+and `command: ~/bin/oc ...` is refused, naming argv[0] as the reason.
+
+A `~` value is the one thing in this schema that does **not travel**. Every other host path
 either is absolute or resolves against the env file's own directory, so the same file
-describes the same deployment on any machine; a `~` path resolves against whoever runs the
-tool, so an env file carrying one means something different for each operator. Write it out
+describes the same deployment on any machine; a `~` resolves against whoever runs the
+tool, so an env file carrying one means something different for each operator -- and if their
+home cannot be resolved, or carries a space, it means a failed load. Write it out
 in full in any file you share.
 
 ## Which platform runs
@@ -413,12 +438,19 @@ To make that review short, the fields are restricted. A command is accepted only
 1. **Every token is inert and visible.** No control characters, no whitespace inside a single
    argument (any Unicode whitespace, not just the ASCII space), no invisible formatting
    characters (zero-width spaces and joiners, bidirectional overrides), no quotes, no
-   backslash, no backtick, and none of `$ ; | & < > ( ) * ? [ ] { } ~ # !`. Nothing is ever
+   backslash, no backtick, and none of `$ ; | & < > ( ) * ? [ ] { } # !`. Nothing is ever
    passed through a shell, so these are not injections -- but tokens end up in logs and in
    the `-v/--verbose` exec trace, and a token you cannot see is one you cannot
    review. A Windows path in a flag value therefore needs forward slashes:
    `--kubeconfig C:/Users/you/.kube/config`.
-2. **The binary is a bare name from the allowlist.** No `/` or `\` anywhere in it: a path
+2. **A leading `~` is expanded, not refused** -- in every token but the first, to the home
+   directory of whoever runs the tool, exactly as in a [path key](#relative-paths-resolve-against-the-env-file-not-the-current-directory).
+   So `command: oc --kubeconfig ~/solace/kubecontext` works. A tilde anywhere else in a token
+   is an ordinary character (an 8.3 short name such as `C:/Users/RUNNER~1/.kube/config` is
+   what expansion itself produces on Windows), and a `~` that is still leading when the guard
+   runs is refused -- nothing downstream would expand it.
+3. **The binary is a bare name from the allowlist.** No `/` or `\` anywhere in it, and no
+   leading `~` either -- it is the one token that is not expanded, because a path
    would run a file the env file chose -- such as a `./kubectl` unpacked beside it -- rather
    than the one on your `PATH`. One optional `.exe` is stripped, then the name must be:
 
@@ -432,12 +464,12 @@ To make that review short, the fields are restricted. A command is accepted only
    whatever platform this end runs on: the mate may sit in a cluster while the local broker
    runs on docker, and the binary being run is a cluster CLI either way.
 
-3. **Nothing after it is a bare word.** Flags and their values are fine
+4. **Nothing after it is a bare word.** Flags and their values are fine
    (`kubectl --context prod -n solace`); a bare word is not, because this tool appends its
    own subcommand and a word in that position would run ahead of it. `kubectl delete` in a
    config is exactly the attack. The literal `--` is refused for the same reason.
 
-   **One acknowledged gap, in that third rule.** The check cannot know how many values a
+   **One acknowledged gap, in that last rule.** The check cannot know how many values a
    flag takes -- that would mean carrying a table of every flag of every allowed CLI, which
    would rot as those CLIs change -- so the token after any flag is accepted as that flag's
    value. After a flag that takes *no* value, that token is not a value at all, and it lands

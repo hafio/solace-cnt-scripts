@@ -210,27 +210,29 @@ func (c *Config) validateHostPaths(p Platform) error {
 		fields = append(fields,
 			struct{ field, value string }{fmt.Sprintf("broker.domainCerts.files[%s]", ca), path})
 	}
-	for _, f := range fields {
-		if err := CheckHostPath(f.field, f.value); err != nil {
-			return err
-		}
-	}
-	// The container-host fields: checked but never rebased AND never
-	// tilde-expanded (expandHomePaths, hostpath.go), because each is a path on
-	// the machine that runs the container rather than the machine running this
-	// tool -- so they go through checkContainerHostPath, which additionally
-	// refuses a leading '~' rather than silently letting one reach the artifact.
-	var containerFields []struct{ field, value string }
+	// The container-platform fields. They are checked with the SAME function as
+	// everything above -- there used to be a checkContainerHostPath here that added a
+	// leading-'~' refusal for exactly these, back when expandHomePaths deliberately
+	// skipped them. It skips nothing now (hostpath.go says why the three
+	// container-host directories are this machine's after all), so CheckHostPath
+	// itself carries that refusal for every field and the per-field variant went with
+	// the exception it existed for.
+	//
+	// They stay in a platform-shaped list because a value's ABSOLUTENESS is still
+	// required per platform (podman.baseDir and container.dataDir, above) and because
+	// only these two platforms have the fields at all.
 	switch p {
 	case Docker:
-		containerFields = append(containerFields,
+		fields = append(fields,
 			struct{ field, value string }{"docker.container.dataDir", c.Docker.Container.DataDir},
+			struct{ field, value string }{"docker.composeFile", c.Docker.ComposeFile},
 		)
 	case Podman:
-		containerFields = append(containerFields,
+		fields = append(fields,
 			// The quadlet dir is never rebased: the unit has to live where systemd
 			// scans, so a relative value is an operator error rather than
-			// something to resolve helpfully.
+			// something to resolve helpfully. A '~' one is not relative by the time
+			// it arrives here -- expandHomePaths ran first.
 			struct{ field, value string }{"podman.quadletDir", c.Podman.QuadletDir},
 			// Likewise never rebased, and required absolute above: it is a
 			// `Volume=` source, and resolving a relative one would invent a
@@ -239,16 +241,8 @@ func (c *Config) validateHostPaths(p Platform) error {
 			struct{ field, value string }{"podman.container.dataDir", c.Podman.Container.DataDir},
 		)
 	}
-	for _, f := range containerFields {
-		if err := checkContainerHostPath(f.field, f.value); err != nil {
-			return err
-		}
-	}
-	// docker.composeFile IS expanded and rebased (it is read by this tool, not
-	// the container), so it takes the ordinary gate above rather than
-	// checkContainerHostPath.
-	if p == Docker {
-		if err := CheckHostPath("docker.composeFile", c.Docker.ComposeFile); err != nil {
+	for _, f := range fields {
+		if err := CheckHostPath(f.field, f.value); err != nil {
 			return err
 		}
 	}

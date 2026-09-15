@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -102,6 +103,13 @@ func TestCheckCommandAccepts(t *testing.T) {
 		{"joined flag then flag", clusterRules(), Command{"kubectl", "--context=prod", "--namespace=solace"}, nil},
 		// A bare "-" is a flag by shape; kubectl and docker both use it for stdin.
 		{"lone dash", clusterRules(), Command{"kubectl", "-"}, nil},
+
+		// An EMBEDDED tilde is an 8.3 short name, which is what a real Windows home
+		// directory routinely is -- and therefore what expandCommandHomes itself
+		// produces there, so refusing it would refuse this tool's own expansion. Only
+		// a LEADING one is refused (TestCheckCommandRejects).
+		{"8.3 short name in a flag value", clusterRules(),
+			Command{"kubectl", "--kubeconfig", "C:/Users/RUNNER~1/.kube/config"}, nil},
 
 		// Windows portability: one .exe suffix is stripped before the allowlist.
 		{"exe suffix", clusterRules(), Command{"kubectl.exe"}, nil},
@@ -206,7 +214,6 @@ func TestCheckCommandRejects(t *testing.T) {
 		{"bracket close", clusterRules(), Command{"kubectl]"}, nil, `contains "]"`},
 		{"brace open", clusterRules(), Command{"kubectl{"}, nil, `contains "{"`},
 		{"brace close", clusterRules(), Command{"kubectl}"}, nil, `contains "}"`},
-		{"tilde", clusterRules(), Command{"~kubectl"}, nil, `contains "~"`},
 		{"hash", clusterRules(), Command{"kubectl#x"}, nil, `contains "#"`},
 		{"bang", clusterRules(), Command{"kubectl!"}, nil, `contains "!"`},
 		{"dollar", clusterRules(), Command{"$KUBECTL"}, nil, `contains "$"`},
@@ -243,6 +250,16 @@ func TestCheckCommandRejects(t *testing.T) {
 		{"names the code point", clusterRules(), Command{"kubectl", "--context", "pr\u200bod"}, nil, "U+200B"},
 		// The charset applies to every token, not just argv[0].
 		{"metachar in later token", clusterRules(), Command{"kubectl", "--context", "prod;rm"}, nil, `kubernetes.command[2]`},
+		// A LEADING tilde, refused at every position but with two different
+		// messages, because the two mean different things. At index 0 it is an
+		// operator writing a path where a bare binary name belongs; anywhere else it
+		// means the Command never went through Load (expandCommandHomes resolves
+		// those before Validate), which is the fail-closed half the executors'
+		// re-check depends on. TestCommandTildeExpansion covers the resolving half.
+		{"tilde as argv[0]", clusterRules(), Command{"~/bin/kubectl"}, nil, "argv[0] names the binary to run"},
+		{"bare tilde as argv[0]", clusterRules(), Command{"~"}, nil, "a home directory cannot be part of it"},
+		{"unexpanded tilde in a flag value", clusterRules(),
+			Command{"kubectl", "--kubeconfig", "~/solace/kubecontext"}, nil, "nothing downstream expands"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -696,4 +713,156 @@ func TestAllowCommandIsNotASchemaKey(t *testing.T) {
 			t.Errorf("an env file key %q reached the allowlist: %v", key, c.extraAllowed)
 		}
 	}
+}
+
+// --- home-directory expansion in a command ------------------------------------
+
+// TestCommandTildeExpansion covers expandCommandHomes field by field. It is named
+// in expandCommandHomes' own doc comment as the reason its two field enumerations
+// (this one and validateExecCommands') cannot silently drift: a field missing from
+// the pass keeps its literal '~' and the row here fails.
+//
+// Every case runs the whole pass and then CheckCommand, because the two halves are
+// one feature: expansion has to produce something the guard accepts, which is what
+// makes `--kubeconfig ~/solace/kubecontext` work end to end.
+func TestCommandTildeExpansion(t *testing.T) {
+	const home = "/home/op"
+	seam := func(c *Config) { c.homeDir = func() (string, error) { return home, nil } }
+
+	cases := []struct {
+		name     string
+		platform Platform
+		set      func(*Config)
+		get      func(*Config) Command
+		rules    commandRules
+	}{
+		{
+			"kubernetes.command", K8s,
+			func(c *Config) { c.K8s.Command = Command{"oc", "--kubeconfig", "~/solace/kubecontext"} },
+			func(c *Config) Command { return c.K8s.Command },
+			clusterRules(),
+		},
+		{
+			"docker.command", Docker,
+			func(c *Config) { c.Docker.Command = Command{"docker", "--config", "~/dk"} },
+			func(c *Config) Command { return c.Docker.Command },
+			runtimeRules(Docker),
+		},
+		{
+			// The STANDALONE binary, not `docker compose`, and the guard is what
+			// decides that: checkFlagShape admits the `compose` subword only as the
+			// LAST token and only directly after an allowed binary, so there is no
+			// position left for a flag value in that shape -- `docker --config ~/dk
+			// compose` is refused for the subword, not for the tilde. A tilde in
+			// this field is therefore only expressible through docker-compose.
+			"docker.compose", Docker,
+			func(c *Config) { c.Docker.Compose = Command{"docker-compose", "--project-directory", "~/dk"} },
+			func(c *Config) Command { return c.Docker.Compose },
+			composeRules(),
+		},
+		{
+			"podman.command", Podman,
+			func(c *Config) { c.Podman.Command = Command{"podman", "--root", "~/pm"} },
+			func(c *Config) Command { return c.Podman.Command },
+			runtimeRules(Podman),
+		},
+		{
+			"replication.sites[0].via.kubernetes.command", K8s,
+			func(c *Config) {
+				c.Replication.Sites = []ReplSite{{
+					VirtualRouterName: "v:dr",
+					Via:               ReplVia{Kubernetes: &ReplViaKube{Command: Command{"kubectl", "--kubeconfig", "~/dr"}}},
+				}}
+			},
+			func(c *Config) Command { return c.Replication.Sites[0].Via.Kubernetes.Command },
+			siteRules("0"),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := guardConfig(tc.platform)
+			seam(c)
+			tc.set(c)
+			if err := c.expandCommandHomes(tc.platform); err != nil {
+				t.Fatalf("expandCommandHomes = %v, want the leading '~' expanded", err)
+			}
+			got := tc.get(c)
+			last := got[len(got)-1]
+			if !strings.HasPrefix(last, home+"/") {
+				t.Errorf("%s expanded to %q, want it to start with %q -- the field is missing from "+
+					"expandCommandHomes' list", tc.name, last, home+"/")
+			}
+			// The point of expanding at all: the guard must then accept it.
+			if err := CheckCommand(tc.rules, got, nil); err != nil {
+				t.Errorf("CheckCommand after expansion = %v, want accepted", err)
+			}
+		})
+	}
+
+	// argv[0] is deliberately NOT expanded: it names a bare binary resolved through
+	// the operator's PATH, so a home directory cannot be part of it. The pass leaves
+	// it alone and checkBinary's own message is what the operator sees.
+	t.Run("argv[0] is left alone and then refused", func(t *testing.T) {
+		c := guardConfig(K8s)
+		seam(c)
+		c.K8s.Command = Command{"~/bin/kubectl"}
+		if err := c.expandCommandHomes(K8s); err != nil {
+			t.Fatalf("expandCommandHomes = %v, want argv[0] skipped rather than an error", err)
+		}
+		if c.K8s.Command[0] != "~/bin/kubectl" {
+			t.Errorf("argv[0] = %q, want it untouched", c.K8s.Command[0])
+		}
+		if err := CheckCommand(clusterRules(), c.K8s.Command, nil); err == nil {
+			t.Error("an unexpanded argv[0] was accepted; the guard must refuse a path there")
+		}
+	})
+
+	// An 8.3 short name survives the pass unchanged, which is the case that makes
+	// the leading-vs-embedded distinction load-bearing rather than pedantic.
+	t.Run("an embedded tilde survives", func(t *testing.T) {
+		c := guardConfig(K8s)
+		seam(c)
+		const short = "C:/Users/RUNNER~1/.kube/config"
+		c.K8s.Command = Command{"kubectl", "--kubeconfig", short}
+		if err := c.expandCommandHomes(K8s); err != nil {
+			t.Fatalf("expandCommandHomes = %v, want an 8.3 short name left alone", err)
+		}
+		if c.K8s.Command[2] != short {
+			t.Errorf("token = %q, want %q unchanged", c.K8s.Command[2], short)
+		}
+	})
+
+	// A home this tool cannot resolve fails naming that, rather than letting a
+	// literal '~' reach the guard and be refused for a reason the operator cannot act
+	// on.
+	t.Run("an unresolvable home is reported", func(t *testing.T) {
+		c := guardConfig(K8s)
+		c.homeDir = func() (string, error) { return "", fmt.Errorf("no home for this user") }
+		c.K8s.Command = Command{"kubectl", "--kubeconfig", "~/kc"}
+		err := c.expandCommandHomes(K8s)
+		if err == nil {
+			t.Fatal("an unresolvable home was accepted")
+		}
+		for _, want := range []string{"kubernetes.command[2]", "no home for this user"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v\n  want it to contain %q", err, want)
+			}
+		}
+	})
+
+	// A home with a space in it is refused HERE, in the words that fit a command --
+	// checkToken's own whitespace message tells the operator to write each argument
+	// as its own list entry, which is wrong advice for a space they did not type.
+	t.Run("a home with whitespace is refused in command words", func(t *testing.T) {
+		c := guardConfig(K8s)
+		c.homeDir = func() (string, error) { return `C:\Users\John Smith`, nil }
+		c.K8s.Command = Command{"kubectl", "--kubeconfig", "~/kc"}
+		err := c.expandCommandHomes(K8s)
+		if err == nil {
+			t.Fatal("a home directory containing a space was accepted")
+		}
+		if !strings.Contains(err.Error(), "split into arguments on whitespace") {
+			t.Errorf("error = %v\n  want the command-shaped whitespace explanation", err)
+		}
+	})
 }
