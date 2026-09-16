@@ -130,6 +130,28 @@ func TestBashScriptDoesNotNeedBashCompletion(t *testing.T) {
 // _init_completion) nor on a built binary named solace-util being on PATH for the
 // `${words[0]} __complete` round trip. Gated on bash being present rather than on GOOS:
 // where a Windows runner has Git Bash, this is worth running there too.
+// driveBash runs the generated script plus a driving snippet under bash, on STDIN
+// rather than as a `-c` argument. The script is multi-line and full of quotes, and
+// as one argv element Go quotes it by MSVCRT rules while Git Bash re-parses by MSYS
+// rules -- the two disagree and the Windows runner sees an unterminated quote in a
+// script that is valid. stdin has no such round-trip.
+//
+// Returns stdout alone so the exact comparisons below are not polluted, and folds
+// stderr into the error, which is where bash reports a syntax error.
+func driveBash(t *testing.T, bash, script, drive, dir string) ([]byte, error) {
+	t.Helper()
+	var stderr bytes.Buffer
+	cmd := exec.Command(bash, "--norc", "-s")
+	cmd.Stdin = strings.NewReader(script + drive)
+	cmd.Stderr = &stderr
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return out, fmt.Errorf("%w\n%s", err, stderr.String())
+	}
+	return out, nil
+}
+
 func TestBashInitFallbackRejoinsSplitWords(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
@@ -148,7 +170,7 @@ cur=; prev=; words=(); cword=
 __solace-util_init_completion -n =:
 printf '%s|%s|%s|%s' "${words[*]}" "$cword" "$cur" "$prev"
 `
-	out, err := exec.Command(bash, "--norc", "-c", script+drive).CombinedOutput()
+	out, err := driveBash(t, bash, script, drive, "")
 	if err != nil {
 		t.Fatalf("driving the generated script: %v\n%s", err, out)
 	}
@@ -196,9 +218,7 @@ COMPREPLY=()
 _filedir -d 2>/dev/null
 printf '%s\n' "${COMPREPLY[@]}"
 `
-	cmd := exec.Command(bash, "--norc", "-c", script+drive)
-	cmd.Dir = dir
-	out, err := cmd.Output()
+	out, err := driveBash(t, bash, script, drive, dir)
 	if err != nil {
 		t.Fatalf("driving _filedir in the generated script: %v", err)
 	}

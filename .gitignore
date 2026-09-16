@@ -48,3 +48,4 @@ graphify-out/cache/.gfy-replace-*.tmp
 # credential-free fixtures by construction, stay tracked.
 /*.cli
 /*.backup
+tmp
