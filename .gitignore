@@ -32,6 +32,15 @@ env.yaml
 cross-platform.md
 graphify-out/20*
 semp
+
+# graphify per-machine state: the interpreter path is one host's absolute path, so
+# each machine regenerates its own (the skill writes it in step 1)
+graphify-out/.graphify_python
+# graphify atomic-replace backups, left behind by an interrupted run
+graphify-out/cache/.gfy-replace-*.tmp
+# Windows-host Docker capture helper, removed 2026-09-16; ignored so it cannot return
+/capture-docker.ps1
+
 # Configuration exports (`broker perform export-config`). A real capture carries the
 # broker's aes-password values and every other configured secret in encrypted form --
 # that is what makes it replayable -- so an artifact must never be committed by
