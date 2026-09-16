@@ -11,15 +11,18 @@ import (
 // confirm.go is the whole prompt-and-confirmation stack, and the layer registry the
 // destructive commands gate on.
 //
-// It is its own file because the rule it implements cost two bugs to learn and is stated
-// once, here, rather than re-derived per call site: whether a human is present is decided
-// by READING, never by the kind of stream stdin is. The question goes to stderr, the
-// answer is read from stdin, and an unanswered question is NOT a "no" -- a reply of `n` is
-// a decision, EOF means nobody could make one, and only the second earns the refusal line
-// naming --no-prompt. See App.Interactive/PromptIn for the seams and CLAUDE.md for the two
-// bugs (a TTY check that made every confirmation a silent refusal, then a console-device
-// read that hung on a handle nothing would write to).
+// It is its own file because the rule is stated once, here, rather than re-derived per
+// call site: whether a human is present is decided by READING, never by the kind of
+// stream stdin is. The question goes to stderr, the answer is read from stdin, and an
+// unanswered question is NOT a "no" -- a reply of `n` is a decision, EOF means nobody
+// could make one, and only the second earns the refusal line naming --no-prompt. See
+// App.Interactive/PromptIn for the seams, and stdinCanAnswer below for why the two
+// obvious alternatives are both wrong.
 
+// layer describes the one thing a removal keeps by default: the part that is expensive to
+// recreate and impossible to get back. Both removals ask about theirs the same way,
+// through addRemoveFlags and confirmLayer, so learning the contract on one teaches the
+// other.
 type layer struct {
 	flag  string // the flag that deletes it without asking
 	what  string // what is kept, for the flag help and the report
@@ -27,22 +30,55 @@ type layer struct {
 	usage string // the flag's own help text
 }
 
+// confirmLayer decides whether the retained layer goes with the removal.
+//
+//	--delete-*  --no-prompt  TTY   outcome
+//	no          any          any   KEPT, nothing asked
+//	yes         yes          any   deleted
+//	yes         no           yes   strict prompt: an exact "yes" deletes, anything else keeps
+//	yes         no           no    KEPT, with a loud warning naming --no-prompt
+//
+// The layer flag RAISES the question rather than silencing it, so asking for the deletion
+// and confirming it stay two separate acts -- and an operator who never asked is never
+// asked. Keeping is the answer in every direction that is not an explicit yes.
+//
+// The last row refuses the LAYER, not the command: the removal itself still proceeds. An
+// abort partway through would leave a half-removed broker, which is worse than a reported
+// keep, and it is the same shape confirmAction already takes on a non-TTY.
 func confirmLayer(a *App, l layer) bool {
 	if !a.deleteLayer {
 		return false
 	}
+	return confirmGate(a, promptYes, fmt.Sprintf(
+		"Also delete %s? %s.\nThis cannot be undone. Type 'yes' to delete, anything else keeps it: ",
+		l.what, l.why),
+		fmt.Sprintf("refusing to delete %s without confirmation; pass --no-prompt to proceed -- %s is kept",
+			l.what, l.what))
+}
+
+// confirmGate is the body every confirmation below shares: --no-prompt answers yes
+// without asking, an interactive run is asked through the App's own seams, and a
+// question nobody could answer refuses and says so. The callers differ ONLY in which
+// prompt reader they hand in -- the lenient [y/N] or the exact-"yes" form -- and in
+// the two sentences they word themselves, so the rule that decides is stated once and
+// a change to it cannot land on one gate and miss another.
+//
+// refusal is pre-formatted rather than a format string with arguments, because what it
+// describes is operator-supplied text (a file path, a container name) that can carry a
+// percent sign.
+//
+// confirmDowngrade deliberately does NOT go through here: it has no --no-prompt escape
+// at all, and the first line of this function is exactly that escape.
+func confirmGate(a *App, ask func(io.Reader, io.Writer, string) (bool, bool), prompt, refusal string) bool {
 	if a.noPrompt {
 		return true
 	}
 	yes, answered := false, false
 	if interactive(a) {
-		yes, answered = promptYes(promptSource(a), os.Stderr, fmt.Sprintf(
-			"Also delete %s? %s.\nThis cannot be undone. Type 'yes' to delete, anything else keeps it: ",
-			l.what, l.why))
+		yes, answered = ask(promptSource(a), os.Stderr, prompt)
 	}
 	if !answered {
-		warn("refusing to delete %s without confirmation; pass --no-prompt to proceed -- %s is kept",
-			l.what, l.what)
+		warn("%s", refusal)
 		return false
 	}
 	return yes
@@ -50,26 +86,22 @@ func confirmLayer(a *App, l layer) bool {
 
 // stdinCanAnswer reports whether stdin is a stream a reply could arrive on.
 //
-// It asks only whether the descriptor is USABLE, never what kind it is, and that
-// restraint is the whole lesson of two bugs. The original test was
-// `isTTY(os.Stdin)` -- stdin is a character device -- and in a shell where stdin was
-// a pipe it made every confirmation in this tool a silent refusal: `broker remove`,
-// `broker restart`, the import tear-down gate and the `--out` overwrite question all
-// declined without asking, on a terminal with the operator sitting at it. Reading the
-// console device instead (`/dev/tty`, then `CONIN$`, the handles git and sudo reach
-// for) fixed that and introduced something worse: in a mintty-style shell the
-// keystrokes go into the stdin pipe and never reach the console input buffer, so the
-// process blocked forever on a handle nothing would ever write to. A descriptor's
-// type does not say whether a human is behind it. Only reading does.
+// It asks only whether the descriptor is USABLE, never what kind it is. A descriptor's
+// type does not say whether a human is behind it, and the two obvious alternatives fail
+// in opposite directions:
 //
-// So the question is asked, the answer is read from stdin, and an EOF before any
-// input is what "nobody is here" means -- decided by observation instead of by a
-// guess that was wrong in both directions.
+//   - `isTTY(os.Stdin)` refuses every confirmation in this tool, silently, in any shell
+//     that hands it a pipe -- with the operator sitting at the terminal.
+//   - Reading the console device instead (`/dev/tty`, then `CONIN$`, what git and sudo
+//     reach for) blocks forever in a mintty-style shell, where the keystrokes go into
+//     the stdin pipe and never reach the console input buffer.
 //
-// The residual cost is a run whose stdin is an open pipe that nobody ever writes to
-// and nobody closes: it now waits at the question rather than refusing it. That is
-// what `--no-prompt` is for, and every refusal below names it.
-
+// So the question is asked, the answer is read from stdin, and an EOF before any input
+// is what "nobody is here" means.
+//
+// The residual cost is a run whose stdin is an open pipe that nobody ever writes to and
+// nobody closes: it waits at the question rather than refusing it. That is what
+// `--no-prompt` is for, and every refusal below names it.
 func stdinCanAnswer() bool {
 	_, err := os.Stdin.Stat()
 	return err == nil
@@ -79,7 +111,6 @@ func stdinCanAnswer() bool {
 // a test can exercise the prompt branches that gate every destructive action; unset
 // (the production case) it is stdinCanAnswer. Whether the question is actually
 // ANSWERED is a separate fact, and only promptLine can report it.
-
 func interactive(a *App) bool {
 	if a != nil && a.Interactive != nil {
 		return a.Interactive()
@@ -90,7 +121,6 @@ func interactive(a *App) bool {
 // promptSource is where a confirmation answer is read from -- the App's seam, or
 // os.Stdin in production. It is stdin and nothing else: a prompt written to one
 // stream and read from another is how the console-handle attempt came to hang.
-
 func promptSource(a *App) io.Reader {
 	if a == nil {
 		return bufio.NewReader(os.Stdin)
@@ -120,7 +150,6 @@ func promptSource(a *App) io.Reader {
 // same as a reply of "no": it means nobody was in a position to reply at all, and the
 // callers report the two differently -- only the unanswered case earns the line
 // naming --no-prompt. A final line with no trailing newline still counts as an answer.
-
 func promptLine(in io.Reader, out io.Writer, prompt string) (text string, answered bool) {
 	fmt.Fprint(out, prompt)
 	// Reuse the caller's reader when it already is one (promptSource hands over the
@@ -142,7 +171,6 @@ func promptLine(in io.Reader, out io.Writer, prompt string) (text string, answer
 
 // promptYesNo returns true for y/yes (case-insensitive) -- the lenient form used to
 // confirm a reversible delete. answered carries promptLine's meaning.
-
 func promptYesNo(in io.Reader, out io.Writer, prompt string) (yes, answered bool) {
 	line, ok := promptLine(in, out, prompt)
 	if !ok {
@@ -157,7 +185,6 @@ func promptYesNo(in io.Reader, out io.Writer, prompt string) (yes, answered bool
 
 // promptYes returns true only for an exact "yes" (case-insensitive) -- the strict
 // form required before an irreversible data purge.
-
 func promptYes(in io.Reader, out io.Writer, prompt string) (yes, answered bool) {
 	line, ok := promptLine(in, out, prompt)
 	if !ok {
@@ -170,7 +197,6 @@ func promptYes(in io.Reader, out io.Writer, prompt string) (yes, answered bool) 
 // without asking; an interactive session is prompted [y/N]; a non-TTY without
 // --no-prompt declines loudly, because nothing should be destroyed unattended
 // without someone having said so on the command line.
-
 func confirmDelete(a *App, what string) bool {
 	return confirmAction(a, "Delete", "delete", what)
 }
@@ -182,63 +208,43 @@ func confirmDelete(a *App, what string) bool {
 // conclusion about what is about to happen to their data, and a prompt that
 // misdescribes its own action is worse than no prompt. title leads the question;
 // lower is the same verb inside the refusal sentence.
-
 func confirmAction(a *App, title, lower, what string) bool {
-	if a.noPrompt {
-		return true
-	}
-	yes, answered := false, false
-	if interactive(a) {
-		yes, answered = promptYesNo(promptSource(a), os.Stderr, fmt.Sprintf("%s %s? [y/N] ", title, what))
-	}
-	if !answered {
-		warn("refusing to %s %s without confirmation; pass --no-prompt to proceed", lower, what)
-		return false
-	}
-	return yes
+	return confirmGate(a, promptYesNo, fmt.Sprintf("%s %s? [y/N] ", title, what),
+		refuseUnconfirmed(lower, what))
 }
 
-// addExportFlags wires the scope flags onto `broker perform export-config`.
-//
-// Scope is expressed by the PRESENCE of a value rather than by a --scope enum,
-// which is the same grammar --pod already uses: a value narrows, absence means the
-// default set. A `--scope total|broker|vpn` enum plus a --vpn list would leave
-// three overlaps to memorise (--scope vpn with no --vpn, --vpn with --scope total,
-// --scope broker --vpn x); this leaves exactly one, and exportScope refuses it.
-//
-// --vpn takes no completer that reads the broker, and cannot: completion never
-// loads the env file, which is what stops a TAB press from parsing untrusted YAML
-// (TestCompletionNeverReadsTheEnvFile). So it is NoFileCompletions -- a VPN name is
-// not a path, and falling back to filename completion would offer nonsense.
+// refuseUnconfirmed is the one sentence both action gates print when the question went
+// unanswered. It names the verb the caller used, so the refusal describes the same act
+// the question did.
+func refuseUnconfirmed(lower, what string) string {
+	return fmt.Sprintf("refusing to %s %s without confirmation; pass --no-prompt to proceed", lower, what)
+}
 
+// confirmActionStrict is confirmAction with promptYes in place of promptYesNo: the same
+// gate, but a lenient "y" is not enough and only an exact "yes" proceeds.
+//
+// It exists for one case the other gates could not describe honestly. confirmLayer already
+// sets this bar, and rightly -- but it gates on a.deleteLayer and its refusal says
+// "refusing to DELETE", so reusing it for an import would misdescribe the action, which
+// confirmAction's own comment says is worse than no prompt at all. And confirmAction's
+// [y/N] is too weak here: importing over an existing message-VPN tears it down first,
+// which destroys the messages spooled in every one of its queues. That is the same
+// irreversible loss --delete-data asks about, so it earns the same exact "yes".
+//
+// --no-prompt still answers it, so `import-config <file> --no-prompt` is what a fully
+// unattended overwrite looks like -- reading exactly as `--delete-data --no-prompt` does.
 func confirmActionStrict(a *App, title, lower, what string) bool {
-	if a.noPrompt {
-		return true
-	}
-	yes, answered := false, false
-	if interactive(a) {
-		yes, answered = promptYes(promptSource(a), os.Stderr,
-			fmt.Sprintf("%s %s?\nType 'yes' to proceed, anything else aborts: ", title, what))
-	}
-	if !answered {
-		warn("refusing to %s %s without confirmation; pass --no-prompt to proceed", lower, what)
-		return false
-	}
-	return yes
+	return confirmGate(a, promptYes,
+		fmt.Sprintf("%s %s?\nType 'yes' to proceed, anything else aborts: ", title, what),
+		refuseUnconfirmed(lower, what))
 }
 
-// addOutFlags wires --out/-o (and the --no-prompt that answers its one question) onto a
-// command whose output is an artifact you keep rather than read.
+// confirmRestart asks whether a running broker may be bounced to apply a changed deploy
+// artifact. A non-interactive session declines: the caller then leaves the new artifact in
+// place and warns, so a scripted deploy never drops messaging traffic unattended.
 //
-// It exists because redirection is not portable. `broker generate > x.yaml` in Windows
-// PowerShell 5.1 re-encodes this tool's plain ASCII as UTF-16LE with a BOM, and kubectl
-// then refuses the file with an error that points at the YAML rather than at the shell --
-// the corruption happens after this process has exited, so nothing inside it can prevent
-// it. Writing the file here is the only fix, and it buys three smaller things too: the
-// file appears only if the render SUCCEEDED (a shell truncates it before the command even
-// runs), the secret-bearing Kubernetes stream stays out of terminal scrollback, and the
-// file is created 0600 rather than inheriting whatever the shell would have used.
-
+// It takes the App so the prompt goes through the same seams as the other confirm helpers;
+// ops_container wires it to Manager.Confirm as a closure.
 func confirmRestart(a *App, question string) bool {
 	if !interactive(a) {
 		return false
@@ -257,7 +263,6 @@ func confirmRestart(a *App, question string) bool {
 // therefore always declines, and the refusal says to re-run interactively rather
 // than naming a flag this command does not offer -- the two versions being
 // weighed were already shown by the warning printed just before this is asked.
-
 func confirmDowngrade(a *App, question string) bool {
 	yes, answered := false, false
 	if interactive(a) {
@@ -270,10 +275,9 @@ func confirmDowngrade(a *App, question string) bool {
 	return yes
 }
 
-// firstArg / firstArgOr are gone with the positional arguments they read. No command
-// takes a role or a platform as an argument any more -- the platform is --platform and the
-// role is --pod -- and the file-path positionals that remain are read directly, since a
-// missing one is an Args-validator failure rather than something to default.
+// No command takes a role or a platform as a positional argument: the platform is
+// --platform and the role is --pod. The file-path positionals that remain are read
+// directly, since a missing one is an Args-validator failure rather than a default.
 
 var (
 	layerData = layer{
@@ -292,24 +296,3 @@ var (
 			"so existing brokers survive",
 	}
 )
-
-// addRemoveFlags wires the confirmation contract onto a command that destroys
-// something. Every such command asks before it acts; --no-prompt answers yes to every
-// question that is ASKED, so a script needs exactly one thing switched off rather than
-// one per question.
-//
-// l is the retained layer, or nil for a command that has none. The two flags answer
-// DIFFERENT questions and compose rather than conflict:
-//
-//	--delete-data / --delete-crd   RAISES the layer question. Without it the layer is
-//	                               kept and no question about it is asked at all.
-//	--no-prompt                    answers yes to whatever was asked.
-//
-// So --no-prompt alone keeps the data, because no data question was raised; a fully
-// unattended wipe is `--delete-data --no-prompt`. That is the inverse of the earlier
-// design, where the layer flag SILENCED a question that was always asked -- which made
-// --delete-data both the request and its own confirmation.
-//
-// It is also why --no-prompt appears on commands that remove nothing (`broker restart`,
-// `operator stop`): they ask before acting, so they need the silencer, and its help text
-// therefore cannot say "the removal".

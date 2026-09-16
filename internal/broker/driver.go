@@ -74,9 +74,8 @@ const driverTailLines = 10
 
 // failKeywords are the phrases that mean the broker rejected something.
 //
-// This list is the operator's and is COMPLETE as it stands (confirmed 2026-09-13; it
-// began as a placeholder on 2026-09-12). It is not provisional and no caller should
-// treat it as approximate -- a new phrase is added here when real rejection output turns
+// This list is the operator's and is COMPLETE as it stands. It is not provisional and
+// no caller should treat it as approximate -- a new phrase is added here when real rejection output turns
 // one up, as its own change. They live in one place, so that is a one-line edit and no
 // caller has to be touched; `broker configure data-replication` scans with the same list
 // for the same reason.

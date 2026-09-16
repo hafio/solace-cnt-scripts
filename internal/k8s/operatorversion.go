@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -124,12 +125,19 @@ func operatorVersionWarning(existingImage, newImage string) []string {
 // lookup whose failure this function is designed to shrug off. The second is
 // correctness: the operator may be running somewhere other than where this env
 // file expects, and that is precisely the case worth noticing before a deploy.
-func (c *Cluster) installedOperatorImage(ctx context.Context) string {
+func (c *Cluster) installedOperatorImage(ctx context.Context) (string, error) {
 	dep, err := c.findOperatorDeployment(ctx)
-	if err != nil {
-		return ""
+	if errors.Is(err, errAmbiguousOperator) {
+		// The one failure not folded into "": the operator IS installed, more than once,
+		// and "" reads as "none installed" -- which skips the downgrade confirmation
+		// using the very condition it exists to catch. Every other error still folds,
+		// because a first install has no operator namespace to read and must not alarm.
+		return "", err
 	}
-	return imageFromDeployment(dep)
+	if err != nil {
+		return "", nil
+	}
+	return imageFromDeployment(dep), nil
 }
 
 // imageFromDeployment reads the running image off an already-fetched operator
@@ -164,7 +172,14 @@ func (c *Cluster) confirmNoDowngrade(ctx context.Context, opNS string) error {
 	if c.isEcho() {
 		return nil // a preview has no cluster to read
 	}
-	body := operatorVersionWarning(c.installedOperatorImage(ctx), operatorImage(c.Cfg))
+	installed, err := c.installedOperatorImage(ctx)
+	if err != nil {
+		// A lookup that could not decide which install is the operator must not be read
+		// as "none installed": that is exactly how the downgrade guard would be skipped.
+		return fmt.Errorf("cannot establish which operator is installed, so a downgrade "+
+			"cannot be ruled out: %w", err)
+	}
+	body := operatorVersionWarning(installed, operatorImage(c.Cfg))
 	if body == nil {
 		return nil
 	}

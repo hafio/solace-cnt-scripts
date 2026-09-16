@@ -25,6 +25,12 @@ import (
 // `configure dr` or an operator at a CLI can still move a role. The re-read narrows that
 // window to one read and one write; the verify afterwards catches an arrival that lands
 // after it.
+//
+// `config-sync assert-leader message-vpn <n>` is NOT issued after a switchover, and that
+// is settled rather than an oversight (operator-confirmed). It forcibly overwrites the
+// other leader's content, so adding it speculatively to "tidy up" after a role change is
+// worse than omitting it. `broker perform assert-leader` remains a separate command an
+// operator invokes deliberately (scripts.go, assertLeaderScript).
 
 // PhaseKind names one step of a switch. The order they appear in a plan IS the order
 // they run; nothing reorders them.
@@ -118,7 +124,7 @@ func SwitchPreflight(ctx context.Context, chans map[string]MateChannel,
 }
 
 // requirePrimaryActive refuses a switch unless the PRIMARY HA node holds activity at
-// every site (operator, 2026-09-13).
+// every site (operator-confirmed).
 //
 // The replication role itself is config-synced, so a role written to a standby HA node
 // still reaches the active one -- this gate is not about where the write lands. It is
@@ -189,14 +195,7 @@ func requireVirtualRouterNamesMatch(ctx context.Context, chans map[string]MateCh
 		"the mate's virtual-router-name", strings.Join(bad, "; "))
 }
 
-func sortedSiteNames(chans map[string]MateChannel) []string {
-	out := make([]string, 0, len(chans))
-	for k := range chans {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
+func sortedSiteNames(chans map[string]MateChannel) []string { return sortedKeys(chans) }
 
 // BuildSwitchPlan turns the file's intent plus both sites' current state into an ordered
 // plan, or refuses.

@@ -31,11 +31,14 @@ const (
 
 // Login tests a SEMP login against the node, porting 060. The credentials ride a
 // curl config on stdin (curl -K -), so the password never appears in an argv or
-// an echoed command (§3). It reports success and writes an outcome line to Out.
+// an echoed command. It reports success and writes an outcome line to Out.
 func (o *Ops) Login(ctx context.Context, role config.Role, user, pass string) (bool, error) {
-	cfg := fmt.Sprintf("user = %q\n", user+":"+pass)
-	out, err := o.T.OutputInput(ctx, role, []byte(cfg),
-		"curl", "-is", "-K", "-", "http://localhost:8080/SEMP/v2/monitor")
+	// curlConfigLine and defaultSEMPPort, not a hand-written line and a literal: the
+	// escaping rule for a curl config value has one definition (semp.go), and so does
+	// the broker's own plaintext SEMP port.
+	cfg := curlConfigLine("user", user+":"+pass)
+	out, err := o.T.OutputInput(ctx, role, []byte(cfg), "curl", "-is", "-K", "-",
+		fmt.Sprintf("http://localhost:%d/SEMP/v2/monitor", defaultSEMPPort))
 	if err != nil {
 		return false, fmt.Errorf("SEMP request failed: %w", err)
 	}
@@ -75,7 +78,7 @@ func (o *Ops) Leader(ctx context.Context) error {
 		return primaryRedundancyUp(out), nil
 	})
 	if err != nil {
-		if detail, dErr := o.runCLIRead(ctx, config.Primary, "show-redundancy-detail", showRedundancyDetailScript()); dErr == nil {
+		if detail, dErr := o.readCLI(ctx, config.Primary, "show-redundancy-detail", showRedundancyDetailScript()); dErr == nil {
 			o.show(detail)
 		}
 		return err
@@ -198,24 +201,16 @@ func (o *Ops) revertToPrimary(ctx context.Context) error {
 // would abort the whole verification instead of polling on. The field() and
 // countContains() scans below are also tuned against real unwrapped transcripts.
 func (o *Ops) showRD(ctx context.Context, role config.Role) (string, error) {
-	out, err := o.runCLIRead(ctx, role, cliShowRD, showRedundancyScript())
+	out, err := o.readCLI(ctx, role, cliShowRD, showRedundancyScript())
 	return string(out), err
 }
 
-// ShowRedundancy is showRD exported for callers outside this package: a read-only
-// `show redundancy` on one role. A live probe needs it to establish which node
-// currently holds activity BEFORE deciding whether a mutation is safe to send,
-// and MateActivityState parses the answer.
-func (o *Ops) ShowRedundancy(ctx context.Context, role config.Role) (string, error) {
-	return o.showRD(ctx, role)
-}
-
-// MateActivityState reports whether `show redundancy` output from the PRIMARY
-// describes a mate that currently holds activity. It is the same reading the
-// coordinated failover flows do (activity + activityMateActive), exported so a
-// live probe decides "is it safe to send revert-activity to the mate?" with the
+// backupActivityState reports whether `show redundancy` output from the PRIMARY
+// describes a backup that currently holds activity. It is the same reading the
+// coordinated failover flows do (activity + activityMateActive), so a caller decides
+// "is it safe to send revert-activity to the backup?" with the
 // tool's own parser rather than a second, drifting copy of it.
-func MateActivityState(showRedundancyOutput string) bool {
+func backupActivityState(showRedundancyOutput string) bool {
 	return activity(showRedundancyOutput, activityMateActive) == 1
 }
 
@@ -233,7 +228,8 @@ func (o *Ops) showRDPair(ctx context.Context) (primary, backup string, err error
 // roles, then downloads the zipped output and the diagnostics bundle into
 // destDir, porting 069. ts is the timestamp stamped into the local zip name.
 func (o *Ops) Diagnostics(ctx context.Context, destDir, ts string, days int, roles ...config.Role) error {
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	// Owner-only: the bundles hold the broker's configuration.
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		return fmt.Errorf("create diagnostics dir %q: %w", destDir, err)
 	}
 	for _, role := range roles {
@@ -259,6 +255,14 @@ func (o *Ops) gatherNode(ctx context.Context, role config.Role, destDir, ts stri
 	if err := o.T.Upload(ctx, role, []byte(zipConfigsScript()), zipPath); err != nil {
 		return err
 	}
+	// Deferred the moment they exist, on every path out. These two were removed inside
+	// the "Diagnostics saved" branch below, so a run whose CLI output did not carry that
+	// field -- or that failed anywhere after the upload -- left both scripts behind.
+	defer func() {
+		if err := o.rmPaths(ctx, role, cliScriptPath(cliGatherConfigs), zipPath); err != nil {
+			o.progress().Warn("cleanup of the gather scripts on %q failed: %v", role, err)
+		}
+	}()
 
 	out, err := o.T.Output(ctx, role, CLIBinary, "-Apes", cliArg(cliGatherConfigs))
 	if err != nil {
@@ -283,11 +287,18 @@ func (o *Ops) gatherNode(ctx context.Context, role config.Role, destDir, ts stri
 
 	if diag := field(string(out), "Diagnostics saved"); diag != "" {
 		local := strings.TrimPrefix(diag, "logs/")
-		if err := o.T.Download(ctx, role, JailRoot+"/"+diag, filepath.Join(destDir, local)); err != nil {
-			o.progress().Warn("failed to download diagnostics bundle %q: %v", diag, err)
+		remote := JailRoot + "/" + diag
+		// A FAILED download must not be followed by the delete. The bundle on the broker
+		// is the only copy, and this command exists to retrieve it -- removing it after
+		// the retrieval failed destroys exactly what was asked for, and the old code did
+		// that unconditionally while warning, then returned nil so nothing downstream
+		// noticed. Now the bundle stays put and the error names where to find it.
+		if err := o.T.Download(ctx, role, remote, filepath.Join(destDir, local)); err != nil {
+			return fmt.Errorf("download the diagnostics bundle from %q: %w\n"+
+				"(it is kept on the broker at %s -- retrieve it by hand before re-running)", role, err, remote)
 		}
-		if err := o.T.Run(ctx, role, "rm", "-rf", JailRoot+"/"+diag, cliScriptPath(cliGatherConfigs), zipPath); err != nil {
-			o.progress().Warn("failed to clean up diagnostics artifacts on %q: %v", role, err)
+		if err := o.T.Run(ctx, role, "rm", "-rf", remote); err != nil {
+			o.progress().Warn("failed to remove the downloaded diagnostics bundle on %q: %v", role, err)
 		}
 	}
 	return nil

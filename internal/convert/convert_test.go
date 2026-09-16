@@ -860,6 +860,10 @@ func TestScalarQuoting(t *testing.T) {
 		{"1000:1048576", `"1000:1048576"`},
 		{`quote"inside`, `"quote\"inside"`},
 		{`back\slash`, `"back\\slash"`},
+		// Every control character is escaped, not only the three with a short spelling:
+		// an ANSI escape inside a bash-file password must not reach the YAML raw.
+		{"esc\x1bhere", `"esc\x1bhere"`},
+		{"nul\x00del\x7f", `"nul\x00del\x7f"`},
 	}
 	for _, tc := range cases {
 		if got := scalar(tc.in); got != tc.want {

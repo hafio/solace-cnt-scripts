@@ -90,7 +90,7 @@ func TestResolveDomainCertsUnreadableDirFailsLoudBeforeUpload(t *testing.T) {
 	dc := DomainCerts{Dirs: []CertDir{{Path: "/opt/missing"}}}
 	_, err := ResolveDomainCerts(dc, fakeReader(nil))
 	if err == nil {
-		t.Fatal("an unreadable dir must fail, not be skipped (rule F)")
+		t.Fatal("an unreadable dir must fail, not be skipped")
 	}
 	if !strings.Contains(err.Error(), "broker.domainCerts.dirs[0]") || !strings.Contains(err.Error(), "/opt/missing") {
 		t.Errorf("error %q must name the field and the dir", err)

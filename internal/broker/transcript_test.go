@@ -9,14 +9,14 @@ import (
 // The tests here cover the one thing a `cli -Apes` capture has that a script does
 // not: the CLI transcript around it. cli -Apes echoes the login banner, the licence
 // text and every prompt+command into stdout ahead of the script's own output, and
-// a real export (2026-09-11) showed all of it landing in the artifact. Three
+// a real export showed all of it landing in the artifact. Three
 // consequences, each pinned below: the banner is where the target's broker type is
 // read from (bannerType); the transcript must be cut off before a capture is parsed
 // or replayed (stripTranscript); and an apply script must keep the pragma while
 // dropping everything else the preamble picked up (preambleForApply).
 
 // testBannerSoftware and testBannerAppliance are real CLI login banners: the
-// software one from the 2026-09-11 export of xps-ps-01, the appliance one from a
+// software one from a recorded export of xps-ps-01, the appliance one from a
 // PubSub+ 3560. They carry no credentials.
 var (
 	testBannerSoftware = []byte("Solace Event Broker Software Enterprise Version 10.26.0.8827\n\n" +

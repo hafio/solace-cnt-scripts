@@ -56,6 +56,11 @@ jobs:
 
       # A task that does not fit the stack warns and skips, so this line is
       # the same whether the project is compiled, interpreted, or mixed.
+      # The two legs do NOT verify quite the same thing, and it is worth knowing which.
+      # -race needs cgo and a C toolchain, so dev.sh defaults it ON and dev.ps1 defaults
+      # it OFF (SOLACE_RACE inverts either). The ubuntu leg is therefore the one that
+      # race-tests; the windows leg proves the same suite passes without the detector, and
+      # is what catches the path, line-ending and PowerShell-only problems ubuntu cannot.
       - name: Gates (POSIX)
         if: runner.os != 'Windows'
         run: ./scripts/dev.sh all scan

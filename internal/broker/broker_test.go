@@ -566,6 +566,30 @@ func TestDisableDefaultUsers(t *testing.T) {
 	}
 }
 
+// TestDisableDefaultUsersRefusesAQuotedVPNName: the VPN names come from the broker's own
+// listing, and each is quoted into a CLI script that runs with admin enabled -- so a
+// name carrying a double quote is refused before any script is built, the same rule a
+// name from the env file meets. Refused loud rather than skipped, because a skipped VPN
+// would keep its default users with nothing said.
+func TestDisableDefaultUsersRefusesAQuotedVPNName(t *testing.T) {
+	row := func(name string) string { return name + strings.Repeat(" ", 40-len(name)) + "Yes" }
+	list := strings.Join([]string{strings.Repeat("-", 40), row("default"), row(`bad"vpn`)}, "\r\n") + "\r\n"
+	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
+		if matchCLI(argv, "show-vpn") {
+			return []byte(list), nil
+		}
+		return nil, nil
+	}}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	err := o.DisableDefaultUsers(context.Background(), config.Primary)
+	if err == nil || !strings.Contains(err.Error(), "will not place in a CLI script") {
+		t.Fatalf("DisableDefaultUsers err = %v, want a refusal naming the CLI script", err)
+	}
+	if hasCall(ft, "disable-default-usernames") {
+		t.Error("the disable script must not run once a broker-reported name is refused")
+	}
+}
+
 func TestDisableDefaultUsersNoVPNs(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, _ []string, _ []byte) ([]byte, error) {
 		return []byte("no separator, nothing to parse\n"), nil
@@ -609,10 +633,17 @@ func TestProductKeysDetectsError(t *testing.T) {
 	}
 }
 
-func TestProductKeysEmpty(t *testing.T) {
-	o, _ := newTestOps(t, &config.Config{}, &fakeTransport{})
-	if err := o.ProductKeys(context.Background(), nil, config.Primary); err == nil {
-		t.Error("ProductKeys should error with no keys")
+// TestProductKeysEmptySkips: nothing configured is a no-op, not a failure. Both this and
+// DomainCerts are reached unconditionally from a config-sourced slice that may legitimately
+// be empty, so the two answer the same way -- this used to refuse and its sibling skipped.
+func TestProductKeysEmptySkips(t *testing.T) {
+	ft := &fakeTransport{}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	if err := o.ProductKeys(context.Background(), nil, config.Primary); err != nil {
+		t.Errorf("an empty key list is a no-op, got %v", err)
+	}
+	if len(ft.uploads) != 0 || len(ft.outputs) != 0 {
+		t.Error("nothing should reach the broker when there is nothing to apply")
 	}
 }
 
@@ -753,14 +784,13 @@ func TestRemoveProductKeys(t *testing.T) {
 	}
 }
 
-// TestRemoveProductKeysRefusesAnEmptyList: with nothing configured there is nothing to
-// revoke, and reporting success for having done nothing is what the apply path already
-// refuses to do.
-func TestRemoveProductKeysRefusesAnEmptyList(t *testing.T) {
+// TestRemoveProductKeysEmptySkips is the removal half of TestProductKeysEmptySkips: with
+// nothing configured there is nothing to revoke, and both directions say so the same way.
+func TestRemoveProductKeysEmptySkips(t *testing.T) {
 	ft := &fakeTransport{}
 	o, _ := newTestOps(t, &config.Config{}, ft)
-	if err := o.RemoveProductKeys(context.Background(), nil, config.Primary); err == nil {
-		t.Error("an empty key list must be refused, not reported as a successful removal")
+	if err := o.RemoveProductKeys(context.Background(), nil, config.Primary); err != nil {
+		t.Errorf("an empty key list is a no-op, got %v", err)
 	}
 	if len(ft.uploads) != 0 {
 		t.Error("nothing should be uploaded when there is nothing to revoke")

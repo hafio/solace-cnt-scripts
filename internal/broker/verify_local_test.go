@@ -931,13 +931,13 @@ func TestLeaderLocalAssertLeaderError(t *testing.T) {
 
 // --- exported surface ---------------------------------------------------------
 
-// TestMateActivityStateReadsTheMateColumn covers the parser a live probe leans on
-// before it sends anything: MateActivityState must say "the mate holds activity"
+// TestBackupActivityStateReadsTheMateColumn covers the parser the coordinated flows lean
+// on before sending anything: backupActivityState must say "the backup holds activity"
 // only when the primary's own `show redundancy` says so, because a probe that
 // misreads this would send revert-activity to an ACTIVE mate and fail a real HA
 // group over. It is the same reading RedundancyCoordinated does, so the two
 // cannot drift.
-func TestMateActivityStateReadsTheMateColumn(t *testing.T) {
+func TestBackupActivityStateReadsTheMateColumn(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		out  string
@@ -950,31 +950,34 @@ func TestMateActivityStateReadsTheMateColumn(t *testing.T) {
 		{"mate active named on an unrelated label", "Some Other Field : Mate Active\n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := MateActivityState(tc.out); got != tc.want {
-				t.Errorf("MateActivityState(%q) = %v, want %v", tc.out, got, tc.want)
+			if got := backupActivityState(tc.out); got != tc.want {
+				t.Errorf("backupActivityState(%q) = %v, want %v", tc.out, got, tc.want)
 			}
 		})
 	}
 }
 
-// TestShowRedundancyIsReadOnly proves the exported wrapper is exactly showRD --
-// one `show redundancy` CLI script on the named role and nothing else. A probe
-// calls it to decide whether a mutation is safe, so it must not itself mutate.
+// TestShowRedundancyIsReadOnly proves showRD is exactly that -- one `show redundancy`
+// CLI script on the named role and nothing else. Every poll condition in the failover
+// flows calls it to decide whether a mutation is safe, so it must not itself mutate.
+//
+// It drove an exported ShowRedundancy wrapper that only forwarded here, added for a
+// live probe outside this package that was never written; that wrapper is gone.
 func TestShowRedundancyIsReadOnly(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, _ []string, _ []byte) ([]byte, error) {
 		return []byte("Activity Status : Mate Active\n"), nil
 	}}
 	o, _ := newTestOps(t, &config.Config{}, ft)
-	out, err := o.ShowRedundancy(context.Background(), config.Backup)
+	out, err := o.showRD(context.Background(), config.Backup)
 	if err != nil {
-		t.Fatalf("ShowRedundancy error: %v", err)
+		t.Fatalf("showRD error: %v", err)
 	}
-	if !MateActivityState(out) {
-		t.Errorf("ShowRedundancy returned %q, which MateActivityState should read as mate-active", out)
+	if !backupActivityState(out) {
+		t.Errorf("showRD returned %q, which backupActivityState should read as mate-active", out)
 	}
 	for _, c := range ft.outputs {
 		if !matchCLI(c.argv, "show-rd") {
-			t.Errorf("ShowRedundancy issued a non-show-redundancy command: %v", c.argv)
+			t.Errorf("showRD issued a non-show-redundancy command: %v", c.argv)
 		}
 	}
 }

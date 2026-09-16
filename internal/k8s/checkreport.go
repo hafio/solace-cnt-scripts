@@ -307,7 +307,7 @@ func (c *Cluster) configRows(rep *checkReport) {
 		info("message storage", "%s", orNone(cfg.K8s.Storage.MsgNodeSize)),
 		info("monitor storage", "%s", orNone(cfg.K8s.Storage.MonNodeSize)),
 	)
-	rep.broker = append(rep.broker, storageRows(cfg)...)
+	rep.broker = append(rep.broker, storageInfoRows(cfg)...)
 
 	// user= is the literal "admin": the operator reads the fixed
 	// username_admin_password key out of the credentials Secret, so that is the
@@ -446,18 +446,15 @@ func containsString(list []string, want string) bool {
 	return false
 }
 
-// operatorRows reports the operator this deploy depends on: whether it is
-// installed, where, and -- the row worth having -- which version is running,
-// since a cluster can carry a different one from the env file and reconciliation
-// follows the installed one.
-// storageRows says where each broker node's data volume comes from.
+// storageInfoRows says where each broker node's data volume comes from. It echoes the
+// env file and contacts nothing; the cluster-checked verdict is Cluster.storageRows.
 //
 // "which volume is this broker actually on" is the question worth answering before a
 // deploy, and it is not readable off the env file at a glance once custom mounts are in
 // play: a role named in customVolumeMount mounts an existing claim, everything else is
 // provisioned. Reported per role so a claim meant for one node and typed under another is
 // visible rather than inferred.
-func storageRows(cfg *config.Config) []checkRow {
+func storageInfoRows(cfg *config.Config) []checkRow {
 	if !cfg.K8s.Storage.UsesCustomMounts() {
 		if cfg.K8s.Storage.Class != "" {
 			return []checkRow{info("storage", "provisioned from StorageClass %q", cfg.K8s.Storage.Class)}
@@ -545,8 +542,8 @@ func allCustomMounted(cfg *config.Config) bool {
 // customVolumeMount together, so resolveStorageClass would fall through to the cluster
 // default and FAIL the whole report over a class the deploy never touches -- advising a
 // fix (`set kubernetes.storage.class`) that config.Load then refuses. The config-side
-// storageRows above has always branched on this; the cluster-side namesake had not, and
-// the shared name is what hid the gap.
+// storageInfoRows above has always branched on this; the cluster-side one had not, and
+// the shared name is what hid the gap -- which is why they no longer share one.
 func (c *Cluster) storageRows(ctx context.Context, rep *checkReport) {
 	if allCustomMounted(c.Cfg) {
 		rep.broker = append(rep.broker, info("storage class",
@@ -582,12 +579,12 @@ func (c *Cluster) storageRows(ctx context.Context, rep *checkReport) {
 
 // additionalUsersRow reports admin.additionalUsers and where their credentials land.
 //
-// They ARE applied on Kubernetes now, through a Secret of their own that the CR names in
-// spec.extraEnvVarsSecret -- so this is an [INFO] echo rather than the warning it used to
-// be. What the row still has to say is that the passwords reach the broker as environment
-// variables here, unlike every other secret this tool handles: the CRD has no way to mount
-// an arbitrary Secret as files, so envFrom is the only channel, and someone reviewing where
-// their credentials end up should not have to read the CRD to find that out. The container
+// They are applied on Kubernetes through a Secret of their own that the CR names in
+// spec.extraEnvVarsSecret, so this is an [INFO] echo rather than a warning. What the row
+// has to say is that the passwords reach the broker as environment variables here, unlike
+// every other secret this tool handles: the CRD cannot mount an arbitrary Secret as files,
+// so envFrom is the only channel, and someone reviewing where their credentials end up
+// should not have to read the CRD to find that out. The container
 // platforms are unaffected: they create these users at boot from the mounted password file.
 //
 // The replacement is planned as a second mounted Secret surfaced as environment variables

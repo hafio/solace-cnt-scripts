@@ -52,8 +52,8 @@ func TestExecutorRefusesUnapprovedRuntime(t *testing.T) {
 		{"deleteStdin", func(cfg *config.Config, rr *recRunner) error {
 			return NewCluster(rr, cfg, nil, nil).deleteStdin(context.Background(), []byte("manifest"))
 		}},
-		{"output", func(cfg *config.Config, rr *recRunner) error {
-			_, err := NewCluster(rr, cfg, nil, nil).output(context.Background(), "get", "sc")
+		{"kubectlOutput", func(cfg *config.Config, rr *recRunner) error {
+			_, err := NewCluster(rr, cfg, nil, nil).kubectlOutput(context.Background(), "get", "sc")
 			return err
 		}},
 		{"interactiveExec", func(cfg *config.Config, rr *recRunner) error {
@@ -135,7 +135,7 @@ func TestClusterHonoursRuntime(t *testing.T) {
 		{
 			name: "output",
 			call: func(c *Cluster) error {
-				_, err := c.output(context.Background(), "get", "sc")
+				_, err := c.kubectlOutput(context.Background(), "get", "sc")
 				return err
 			},
 			wantMethod: "Output",

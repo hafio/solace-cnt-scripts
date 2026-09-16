@@ -16,8 +16,6 @@ LOG_DIR="${SCRIPT_DIR}/logs"
 DIST_DIR="${REPO_ROOT}/dist"
 COV_DIR="${REPO_ROOT}/coverage"
 BIN_NAME="solace-util"
-# ITEST_NAME is the dev-only live-probe harness, named distinctly from BIN_NAME so
-# nothing in dist/ is ambiguous about which binary is shippable.
 
 # Version stamp: on a tag push git describe is exactly the pushed tag, so
 # `solace-util version` matches the GitHub release. --always falls back to the
@@ -72,8 +70,15 @@ log_init() {
 }
 # cap runs a command, streaming combined stdout+stderr to the console and
 # appending an ANSI-stripped copy to LOGFILE. Returns the command's exit code.
+#
+# One synchronous pipeline, deliberately. It used to tee into a process
+# substitution -- `tee >(sed ... >> LOGFILE)` -- which bash does NOT wait for, so
+# the dispatcher's footer could be appended to the log before the task's last lines
+# arrived, interleaving them. dev.ps1's Cap buffers and writes in order, so this is
+# also what makes the two scripts behave the same. The console loses ANSI along
+# with the log; the Go tooling here emits none.
 cap() {
-  "$@" 2>&1 | tee >(sed -E $'s/\x1b\\[[0-9;?]*[a-zA-Z]//g' >> "${LOGFILE}")
+  "$@" 2>&1 | sed -E $'s/\x1b\\[[0-9;?]*[a-zA-Z]//g' | tee -a "${LOGFILE}"
   return "${PIPESTATUS[0]}"
 }
 # finish <task> <exit-code> <elapsed-seconds> -- contract footer, log + console.

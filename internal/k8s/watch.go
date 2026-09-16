@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -47,23 +48,15 @@ const watchEnvVar = "WATCH_NAMESPACE"
 // `watchBrokerNs: false` and no watchNamespaces, since WatchBrokerNSEnabled defaults to
 // true.
 func desiredWatch(cfg *config.Config) []string {
-	var out []string
-	seen := make(map[string]bool)
-	add := func(ns string) {
-		ns = strings.TrimSpace(ns)
-		if ns == "" || seen[ns] {
-			return
-		}
-		seen[ns] = true
-		out = append(out, ns)
-	}
-	for _, ns := range strings.Split(cfg.K8s.Operator.WatchNamespaces, ",") {
-		add(ns)
-	}
+	list := cfg.K8s.Operator.WatchNamespaces
 	if cfg.K8s.Operator.WatchBrokerNSEnabled() {
-		add(cfg.K8s.Namespace)
+		// Appended to the configured list rather than de-duplicated afterwards:
+		// splitWatch already trims, drops empties and keeps the first occurrence, so a
+		// broker namespace the list already names keeps its position, and the separator
+		// left beside an empty list falls away with the empty entry it creates.
+		list += "," + cfg.K8s.Namespace
 	}
-	return out
+	return splitWatch(list)
 }
 
 // watchNamespace is desiredWatch in the form the bundle template substitutes: one
@@ -109,18 +102,55 @@ func (c *Cluster) installedWatch(ctx context.Context) (list []string, allNS, fou
 // facts about this same object -- the watch scope and the running image -- and each
 // reader used to issue its own identical cluster-wide list, so every healthy `validate`
 // paid for two.
+//
+// The match is by name AND namespace, in that order of preference. A Deployment of the
+// same name in ANY namespace used to answer, and the answer decides whether the watch
+// list is widened and whether a deploy is a downgrade -- so anyone able to create a
+// Deployment somewhere on the cluster could steer both. The one in the namespace this
+// env file resolves wins outright; an install elsewhere counts only when nothing is
+// there and it is the sole candidate, and two elsewhere is an error naming them.
 func (c *Cluster) findOperatorDeployment(ctx context.Context) (*deploymentItem, error) {
 	var deps deploymentList
 	if err := c.getJSON(ctx, &deps, "deployment", "--all-namespaces"); err != nil {
 		return nil, err
 	}
+	want := c.operatorNS(ctx)
+	var elsewhere []*deploymentItem
 	for i := range deps.Items {
-		if deps.Items[i].Metadata.Name == operatorDeployment {
-			return &deps.Items[i], nil
+		it := &deps.Items[i]
+		if it.Metadata.Name != operatorDeployment {
+			continue
 		}
+		if it.Metadata.Namespace == want {
+			return it, nil
+		}
+		elsewhere = append(elsewhere, it)
 	}
-	return nil, nil
+	switch len(elsewhere) {
+	case 0:
+		return nil, nil
+	case 1:
+		return elsewhere[0], nil
+	}
+	namespaces := make([]string, len(elsewhere))
+	for i, it := range elsewhere {
+		namespaces[i] = it.Metadata.Namespace
+	}
+	return nil, fmt.Errorf("%w: %d Deployments named %q outside the resolved operator namespace %s (in %s). "+
+		"Set kubernetes.operator.namespace to the one this env file means",
+		errAmbiguousOperator, len(elsewhere), operatorDeployment, want, strings.Join(namespaces, ", "))
 }
+
+// errAmbiguousOperator marks the ONE findOperatorDeployment failure a caller must never
+// fold into "no operator installed".
+//
+// Every other failure here is a read that did not happen -- an RBAC denial, an
+// unreachable API server -- and installedOperatorImage deliberately answers "" for those,
+// because a first install has no operator namespace yet and must not alarm. Ambiguity is
+// the opposite: the operator IS installed, more than once, and this tool cannot say which
+// one a deploy would be downgrading. Answering "" there would disable the downgrade
+// confirmation using the very condition it exists to catch.
+var errAmbiguousOperator = errors.New("cannot tell which Deployment is the operator")
 
 // watchFromDeployment reads the watch scope off an already-fetched operator Deployment.
 // A nil dep is "no operator installed", which is found=false rather than an error.

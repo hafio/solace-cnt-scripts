@@ -62,7 +62,7 @@ func (c *Config) Validate(p Platform) error {
 
 	// These secrets are shared top-level fields (not platform-scoped), and each
 	// reaches a consumer that cannot tolerate a control character in the value:
-	// admin.pass and admin.monitorPass reach broker.sempCurl's curl config on
+	// semp.adminPass and semp.monitorPass reach broker.sempCurl's curl config on
 	// stdin, redundancy.psk and tls.certPassphrase travel the same way through the
 	// container config path. Checked once here rather than per platform, since
 	// the fields exist regardless of which platform ends up reading them.
@@ -210,13 +210,10 @@ func (c *Config) validateHostPaths(p Platform) error {
 		fields = append(fields,
 			struct{ field, value string }{fmt.Sprintf("broker.domainCerts.files[%s]", ca), path})
 	}
-	// The container-platform fields. They are checked with the SAME function as
-	// everything above -- there used to be a checkContainerHostPath here that added a
-	// leading-'~' refusal for exactly these, back when expandHomePaths deliberately
-	// skipped them. It skips nothing now (hostpath.go says why the three
-	// container-host directories are this machine's after all), so CheckHostPath
-	// itself carries that refusal for every field and the per-field variant went with
-	// the exception it existed for.
+	// The container-platform fields, checked with the SAME function as everything above.
+	// They need no variant of their own: expandHomePaths covers them (hostpath.go says why
+	// the three container-host directories are this machine's), so CheckHostPath already
+	// carries the leading-'~' refusal for every field.
 	//
 	// They stay in a platform-shaped list because a value's ABSOLUTENESS is still
 	// required per platform (podman.baseDir and container.dataDir, above) and because
@@ -257,7 +254,7 @@ func (c *Config) validateHostPaths(p Platform) error {
 // `sh -c 'curl ... || exit 1'`, and the engine, not this process, decides what it
 // means. What still applies is the exec-boundary check the field always had: an
 // empty argument, or a control character carried in from a converted bash file,
-// can only ever fail obscurely (§4a).
+// can only ever fail obscurely.
 //
 // An empty Command is not an error: ApplyDefaults runs before Validate on every
 // path and fills the platform default, so "empty" means "unset" exactly as it
@@ -283,7 +280,7 @@ func isCtrl(r rune) bool { return r < 0x20 || r == 0x7f }
 // structural position: a compose service key, a `container_name`, a systemd
 // ContainerName=/HostName=, and the systemd Environment= keys built from node
 // names. A colon, '=' or newline there produces a broken artifact instead of an
-// error, so the check belongs here where it can name the field (§4a).
+// error, so the check belongs here where it can name the field.
 //
 // It is a package-local copy of broker.nameRE / k8s.secretKeyUserRE, which are
 // already the same expression: config sits below both in the import graph, and
@@ -317,7 +314,8 @@ var engineContainerNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 const maxContainerNameLen = 100
 
 // runUserRE allows the container runtime's `uid[:gid]` form, which identRE alone
-// would reject -- the default "0:0" contains a colon.
+// would reject -- both defaults ("1000001:0" and "1000:0") carry a colon, and the
+// bare-uid form an operator may write instead has to stay acceptable too.
 var runUserRE = regexp.MustCompile(`^[A-Za-z0-9._-]+(:[A-Za-z0-9._-]+)?$`)
 
 // dnsLabelBodyRE is the Kubernetes DNS-1123 label charset and start/end rule
@@ -387,7 +385,7 @@ func validDNSSubdomain(field, value string) error {
 // validDNSLabel checks one Kubernetes DNS-1123 label, ignoring an empty value:
 // kubernetes.namespace and kubernetes.name are mandatory and already reported by
 // requireAll, and the remaining fields (the three secret names, operator.namespace)
-// are optional -- an absent value must stay legal (§4a/rule 8), so only a
+// are optional -- an absent value must stay legal, so only a
 // non-empty malformed one is rejected here.
 func validDNSLabel(field, value string) error {
 	if value == "" {
@@ -661,6 +659,10 @@ func (c *Config) redundancyRoles() []Role {
 func (c *Config) validateK8sPorts() error {
 	names := make(map[string]int, len(c.K8s.Ports))
 	containerPorts := make(map[int]int, len(c.K8s.Ports))
+	// servicePorts too. Without it the doc comment above was simply untrue: two entries
+	// naming the same SERVICE port passed validation and reached the CR, where the
+	// second silently overwrote the first.
+	servicePorts := make(map[int]int, len(c.K8s.Ports))
 	for i, entry := range c.K8s.Ports {
 		field := fmt.Sprintf("kubernetes.ports[%d]", i)
 		name, rest, ok := strings.Cut(entry, "=")
@@ -690,7 +692,8 @@ func (c *Config) validateK8sPorts() error {
 		if err != nil {
 			return err
 		}
-		if _, err := validPortNumber(field+" service port", service); err != nil {
+		serviceN, err := validPortNumber(field+" service port", service)
+		if err != nil {
 			return err
 		}
 		if prev, dup := names[name]; dup {
@@ -701,6 +704,11 @@ func (c *Config) validateK8sPorts() error {
 			return fmt.Errorf("%s: container port %d is also used by kubernetes.ports[%d]; container ports must be unique", field, containerN, prev)
 		}
 		containerPorts[containerN] = i
+		if prev, dup := servicePorts[serviceN]; dup {
+			return fmt.Errorf("%s: service port %d is also used by kubernetes.ports[%d]; two entries publishing "+
+				"the same service port would silently collapse to one in the Service", field, serviceN, prev)
+		}
+		servicePorts[serviceN] = i
 	}
 	return nil
 }
@@ -756,7 +764,7 @@ func foldToEnvVar(name string) string {
 // this check's. The message names the field and the byte offset of the
 // offending character but never the value itself, or even the character: these
 // are secrets, and this repo's rule is that reports say set/MISSING and never
-// echo one (§3).
+// echo one.
 func checkCredentialChars(field, value string) error {
 	if i := strings.IndexFunc(value, unicode.IsControl); i >= 0 {
 		return fmt.Errorf("%s contains a control character at byte offset %d; remove it "+
@@ -771,7 +779,7 @@ func checkCredentialChars(field, value string) error {
 // backslash but not a newline, so a credential carrying one breaks out of its
 // line before the request is even sent. Rejecting it here -- rather than
 // escaping harder in curlConfigLine -- means the value never reaches that
-// shape at all. admin.additionalUsers passwords get the same check inline in
+// shape at all. semp.additionalUsers passwords get the same check inline in
 // validateAdditionalUsers, where the per-user field name is already at hand.
 func (c *Config) validateCredentialChars() error {
 	for _, f := range []struct{ field, value string }{
@@ -779,6 +787,7 @@ func (c *Config) validateCredentialChars() error {
 		{"semp.monitorPass", c.SEMP.MonitorPass},
 		{"redundancy.psk", c.Redundancy.PSK},
 		{"tls.certPassphrase", c.TLS.CertPassphrase},
+		{"image.pass", c.Image.Pass}, // reaches `login --password-stdin`; one rule for every secret
 	} {
 		if err := checkCredentialChars(f.field, f.value); err != nil {
 			return err
@@ -1049,7 +1058,7 @@ func (c *Config) validateAdditionalUsers(p Platform) error {
 				field, u.Username, u.Username)
 		}
 		if u.Username == AdminUser || u.Username == MonitorUser {
-			return fmt.Errorf("%s.username %q is a built-in user: admin has admin.pass and monitor has "+
+			return fmt.Errorf("%s.username %q is a built-in user: admin has semp.adminPass and monitor has "+
 				"semp.monitorPass -- additionalUsers is for users beyond those", field, u.Username)
 		}
 		if seen[u.Username] {
@@ -1058,14 +1067,19 @@ func (c *Config) validateAdditionalUsers(p Platform) error {
 		seen[u.Username] = true
 		// Two users differing only in separator style are distinct to the broker but
 		// fold to ONE docker host variable name (render's ContainerSecret.EnvVar maps
-		// every non-alphanumeric to '_'), which would feed one user's password to
-		// both. Caught here, where both offending fields can be named, rather than
-		// silently at deploy time.
+		// every non-alphanumeric to '_' and uppercases), which would feed one user's
+		// password to both. Caught here, where both offending fields can be named,
+		// rather than silently at deploy time.
+		//
+		// CONTAINERS ONLY, as the message itself says. Kubernetes delivers these as
+		// Secret keys projected one-to-one into the environment, with no folding at all
+		// -- so `A_B` and `a_b` are two valid, distinct variables there, and refusing
+		// them rejected a configuration that would have worked.
 		key := foldToEnvVar(u.Username)
-		if other := folded[key]; other != "" {
-			return fmt.Errorf("%s.username %q collides with %q: they differ only in '.', '_' or '-', "+
-				"which become the same host environment variable (...%s...) for docker's compose secrets -- "+
-				"rename one", field, u.Username, other, key)
+		if other := folded[key]; p.IsContainer() && other != "" {
+			return fmt.Errorf("%s.username %q collides with %q: they differ only in case or in '.', '_' "+
+				"or '-', which become the same host environment variable (...%s...) for docker's compose "+
+				"secrets -- rename one", field, u.Username, other, key)
 		}
 		folded[key] = u.Username
 		if !accessLevels[u.AccessLevel] {
@@ -1293,7 +1307,7 @@ func (c *Config) validateContainer(p Platform) error {
 	// (only kubernetes pins it to "admin"), and it is not merely a value there: it is
 	// interpolated into the derived broker setting `username_<user>_globalaccesslevel`
 	// and into the secret key `username_<user>_password`, which is simultaneously a
-	// compose secret target and a podman `target=`. admin.additionalUsers usernames
+	// compose secret target and a podman `target=`. semp.additionalUsers usernames
 	// have always been held to this grammar for exactly that reason; the built-in
 	// admin reaches the same positions and was not.
 	cb := c.ContainerBlock(p)

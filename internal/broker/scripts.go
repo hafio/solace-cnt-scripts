@@ -23,7 +23,7 @@ import (
 //
 // It is one constant so the pair cannot drift apart, and so a new script cannot be
 // written with `home` and without `no paging` -- which is how the scripts that needed
-// this fix came to be missing it (operator, 2026-09-13).
+// this fix came to be missing it (operator-confirmed).
 const cliHome = "home\nno paging\n"
 
 // showRedundancyScript is the one-line probe used by leader/redundancy polling
@@ -320,27 +320,54 @@ func productKeyScript(keys []string, command string) string {
 	for _, k := range keys {
 		fmt.Fprintf(&b, "%s %s\n", command, k)
 	}
-	b.WriteString("show product-key\n")
+	// No trailing `show product-key`: the transcript is shown to the operator, and the
+	// show would print every configured key back onto the terminal. A rejected line is
+	// still caught, by rejectionIn over the transcript.
 	return b.String()
 }
 
-// parseVPNNames extracts message-VPN names from `show message-vpn *` output,
-// porting the parser in 054 (lines 24-31): skip until a 30-dash separator, then
-// take the first token of each subsequent non-comment line's first 32 columns.
+// parseVPNNames extracts message-VPN names from `show message-vpn *` output: skip
+// until the column rule, then read each subsequent non-comment line's FIRST COLUMN,
+// whose width the rule itself defines.
+//
+// The width is measured, not assumed, and the whole column is the name. Both halves
+// of that cost a bug. The port of 054 cut every line at a hardcoded column 32 and
+// then took every whitespace-separated field of what was left -- so a real name like
+// `A VPN WITH LONG NAME AND SPACES` arrived as six VPNs that match nothing, and a
+// name reaching past column 32 was truncated into a seventh. importops.go records
+// the same defect in the table parser readTarget used to use, and abandoned it;
+// this is the other caller of the same output, reading the rule the way
+// ParseVPNReplication already does (dashSpans).
 func parseVPNNames(output string) []string {
 	var vpns []string
+	var name colSpan
+	var header string
 	parsing := false
-	for _, raw := range strings.Split(output, "\n") {
+	lines := strings.Split(output, "\n")
+	for i, raw := range lines {
 		line := strings.TrimRight(raw, "\r")
+		isRule := strings.HasPrefix(line, strings.Repeat("-", 30))
 		switch {
-		case strings.HasPrefix(line, strings.Repeat("-", 30)):
-			parsing = true
-		case parsing && !strings.HasPrefix(line, "#"):
-			col := line
-			if len(col) > 32 {
-				col = col[:32]
+		case isRule && !parsing:
+			spans := dashSpans(strings.TrimRight(line, " \t"))
+			if len(spans) == 0 {
+				continue
 			}
-			vpns = append(vpns, strings.Fields(col)...)
+			name, parsing = spans[0], true
+			if i > 0 {
+				header = strings.TrimSpace(strings.TrimRight(lines[i-1], "\r"))
+			}
+		case isRule, !parsing, strings.HasPrefix(line, "#"):
+			// A REPEATED rule -- which a paginated report prints again partway down --
+			// is skipped rather than read as a row. ParseVPNReplication documents the
+			// same hazard: an all-dash line's name column trims to a run of dashes, so
+			// left in it joins the list as a VPN named "------...". The repeated HEADER
+			// below is the other half of that, and would arrive as "Message VPN".
+		case strings.TrimSpace(line) == header:
+		default:
+			if v := strings.TrimSpace(sliceSpan(line, name)); v != "" {
+				vpns = append(vpns, v)
+			}
 		}
 	}
 	return vpns

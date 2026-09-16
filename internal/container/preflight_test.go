@@ -244,7 +244,7 @@ func TestComposeSecretEnvIsTheOnlyChildEnvironment(t *testing.T) {
 		t.Errorf("composeSecretEnv built %d variables from %d secrets; it must pass through exactly the "+
 			"secrets render declares, adding none of its own", got, want)
 	}
-	// And every value is masked in any display path (§3).
+	// And every value is masked in any display path.
 	raw, err := m.composeSecretEnv(false)
 	if err != nil {
 		t.Fatalf("composeSecretEnv: %v", err)

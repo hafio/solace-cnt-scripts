@@ -20,15 +20,27 @@ import (
 // so the execution guard sees the same allowlist the executors will (execguard.go).
 // It arrives as a function argument rather than a schema field on purpose: nothing
 // in the file being read can put a value here.
+// DecodeStrict decodes env-file YAML into a Config with unknown keys REFUSED, which is
+// the only decode of this schema anything should do. Exported so `convert` can check its
+// own output against the same rule Load applies: a plain yaml.Unmarshal accepts keys Load
+// rejects, so the two disagreeing let convert promise a file loads that then does not.
+func DecodeStrict(raw []byte) (*Config, error) {
+	var c Config
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true) // fail loud on typo'd keys
+	if err := dec.Decode(&c); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
 func Load(path string, p Platform, allowCommands ...string) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read env file %q: %w", path, err)
 	}
-	var c Config
-	dec := yaml.NewDecoder(bytes.NewReader(raw))
-	dec.KnownFields(true) // fail loud on typo'd keys
-	if err := dec.Decode(&c); err != nil {
+	c, err := DecodeStrict(raw)
+	if err != nil {
 		return nil, parseError(path, raw, err)
 	}
 	// Before defaults and validation: a secret referenced through the environment
@@ -75,7 +87,7 @@ func Load(path string, p Platform, allowCommands ...string) (*Config, error) {
 	}
 	c.baseDir = filepath.Dir(abs)
 	c.rebaseHostPaths()
-	return &c, nil
+	return c, nil // c is already *Config: DecodeStrict allocates it
 }
 
 // bashAssignRE matches a shell variable assignment at the start of a line -- the
@@ -117,7 +129,7 @@ func ResolveEnvPath(baseDir, name string) (string, error) {
 		name = EnvFileDefault
 	}
 	// The resolved path is echoed to the terminal, so reject control characters
-	// at the boundary rather than printing them (§3).
+	// at the boundary rather than printing them.
 	if strings.ContainsFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return "", fmt.Errorf("invalid env file name %q: control characters are not allowed", name)
 	}
@@ -140,7 +152,7 @@ func ResolveEnvPath(baseDir, name string) (string, error) {
 	for i, p := range candidates {
 		quoted[i] = fmt.Sprintf("%q", p)
 	}
-	// Actionable: name every place that was tried (§4).
+	// Actionable: name every place that was tried.
 	return "", fmt.Errorf("env file %q not found: looked for %s", name, strings.Join(quoted, " then "))
 }
 
@@ -169,8 +181,8 @@ func (c *Config) ApplyDefaults(p Platform) {
 	// broker.domainCerts.dirs is deliberately NOT defaulted, unlike the retired
 	// `folder` key it replaces (which used to default to "certs"). dirs/files
 	// empty is the no-op `broker configure domain-certs` has always logged
-	// ("No domain certificate authorities configured -- skipping"), and rule F
-	// makes an unreadable dir a hard failure rather than a skip -- defaulting a
+	// ("No domain certificate authorities configured -- skipping"), and an
+	// unreadable dir is a hard failure rather than a skip -- so defaulting a
 	// dir that a deployment configuring no domain certificates never created
 	// would turn that no-op into a failure on every such deployment.
 
@@ -199,14 +211,7 @@ func (c *Config) applyK8sDefaults() {
 	setDefault(&c.K8s.Operator.CPU, "500m")
 	setDefault(&c.K8s.Operator.Mem, "512Mi")
 
-	// Scaling: every knob applies to both platforms, but two of the defaults
-	// differ (maxConnections and the spool size), so the two lists stay separate.
-	setDefaultInt(&c.Scaling.MaxConnections, 100)
-	setDefaultInt(&c.Scaling.MaxSpoolUsageMB, 10000)
-	setDefaultInt(&c.Scaling.MaxQueueMessages, 100)
-	setDefaultInt(&c.Scaling.MaxBridges, 25)
-	setDefaultInt(&c.Scaling.MaxSubscriptions, 50000)
-	setDefaultInt(&c.Scaling.MaxGuaranteedMsgMB, 10)
+	c.applyScalingDefaults(100, 10000)
 
 	if len(c.K8s.Placement.AntiAffinityNS) > 0 {
 		setDefaultInt(&c.K8s.Placement.AntiAffinityWeight, 100)
@@ -232,8 +237,11 @@ func (c *Config) applyK8sDefaults() {
 func (c *Config) applyContainerDefaults(p Platform) {
 	setDefault(&c.Docker.Container.Name, "solace")
 	setDefault(&c.Podman.Container.Name, "solace")
-	applyContainerBlockDefaults(&c.Docker.Container)
-	applyContainerBlockDefaults(&c.Podman.Container)
+	// The run user is the one container knob whose default depends on the platform
+	// AND, for podman, on rootless. Rootless is read straight from YAML, so it is
+	// already settled here even though the knobs derived from it are filled below.
+	applyContainerBlockDefaults(&c.Docker.Container, ImageRunUser)
+	applyContainerBlockDefaults(&c.Podman.Container, podmanRunUser(c.Podman.Rootless))
 
 	setDefault(&c.Docker.Network.Mode, "host")
 	setDefault(&c.Podman.Network.Mode, "host")
@@ -244,16 +252,7 @@ func (c *Config) applyContainerDefaults(p Platform) {
 	applyBridgePortDefaults(&c.Docker.Network)
 	applyBridgePortDefaults(&c.Podman.Network)
 
-	// Scaling: the same knobs k8s takes, since every one of them now reaches the
-	// container as an environment variable. Only maxConnections and the spool
-	// size differ from the k8s defaults; the rest are deliberately identical, so
-	// the same env file sizes the same broker whichever platform runs it.
-	setDefaultInt(&c.Scaling.MaxConnections, 1000)
-	setDefaultInt(&c.Scaling.MaxSpoolUsageMB, 100000)
-	setDefaultInt(&c.Scaling.MaxQueueMessages, 100)
-	setDefaultInt(&c.Scaling.MaxBridges, 25)
-	setDefaultInt(&c.Scaling.MaxSubscriptions, 50000)
-	setDefaultInt(&c.Scaling.MaxGuaranteedMsgMB, 10)
+	c.applyScalingDefaults(1000, 100000)
 
 	if p == Docker {
 		setDefaultCmd(&c.Docker.Command, "docker")
@@ -279,11 +278,48 @@ func (c *Config) applyContainerDefaults(p Platform) {
 	}
 }
 
+// The two run-user defaults. Both artifacts always carry a `-u` equivalent (quadlet
+// `User=`/`Group=`, compose `user:`), so this value overrides whatever USER the image
+// declares -- which is why the default has to be chosen rather than left blank.
+//
+// ImageRunUser is the uid the Solace broker image runs as, and is what a PRIVILEGED
+// engine gets: rootful podman and docker both map container uids straight onto host
+// uids, so container uid 0 would be host root and the broker would run as root on the
+// host for no reason.
+//
+// RootlessRunUser is a low uid on purpose, and NOT ImageRunUser. A rootless container's
+// uids come out of this user's subuid range, and reaching 1000001 would need a range of
+// 1000002 entries against a 65536 default -- so the image's own uid is simply not
+// available there. 1000 needs 1001 entries, which the default allocation covers.
+//
+// BOTH name gid 0, which is the group the broker image expects. It is also the one gid
+// that costs nothing on either side: rootful maps it to the root group, and rootless
+// maps container gid 0 to the invoking user's OWN primary group, so a rootless
+// deployment needs a subuid allocation but no subgid one.
+//
+// Neither is 0:0 any more. In rootless that was safe (container uid 0 maps to the
+// invoking user, not to host root) and it is what a bind-mounted data dir readable from
+// the host wants, so the change buys in-container isolation at the cost of host-side
+// readability -- an operator who wants the old behaviour sets runUser: "0:0" back.
+const (
+	ImageRunUser    = "1000001:0"
+	RootlessRunUser = "1000:0"
+)
+
+// podmanRunUser picks between them. Docker has no rootless mode in this schema, so it
+// always takes ImageRunUser.
+func podmanRunUser(rootless bool) string {
+	if rootless {
+		return RootlessRunUser
+	}
+	return ImageRunUser
+}
+
 // applyContainerBlockDefaults fills the container runtime knobs. TZ is
 // deliberately absent: the timezone is optional on every platform, so an unset
 // value emits no TZ setting at all rather than silently pinning one.
-func applyContainerBlockDefaults(b *Container) {
-	setDefault(&b.RunUser, "0:0")
+func applyContainerBlockDefaults(b *Container, defaultRunUser string) {
+	setDefault(&b.RunUser, defaultRunUser)
 	setDefault(&b.ShmSize, "1g")
 	setDefault(&b.DataDir, "/opt/solace/data")
 	setDefault(&b.Ulimits.NoFile, "2448:1048576")

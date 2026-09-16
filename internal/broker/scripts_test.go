@@ -113,7 +113,7 @@ func TestDisableDefaultUsersScriptQuoting(t *testing.T) {
 // beside it was missing until a paginated report was found parsing as data (cliHome).
 func TestProductKeysScript(t *testing.T) {
 	got := productKeysScript([]string{"KEY-1", "KEY-2"})
-	want := cliHome + "enable\nadmin\nproduct-key KEY-1\nproduct-key KEY-2\nshow product-key\n"
+	want := cliHome + "enable\nadmin\nproduct-key KEY-1\nproduct-key KEY-2\n"
 	if got != want {
 		t.Errorf("productKeysScript = %q, want %q", got, want)
 	}
@@ -125,12 +125,15 @@ func TestProductKeysScript(t *testing.T) {
 // unit test comparing only its own literal would catch.
 func TestRemoveProductKeysScript(t *testing.T) {
 	got := removeProductKeysScript([]string{"KEY-1", "KEY-2"})
-	want := cliHome + "enable\nadmin\nno product-key KEY-1\nno product-key KEY-2\nshow product-key\n"
+	want := cliHome + "enable\nadmin\nno product-key KEY-1\nno product-key KEY-2\n"
 	if got != want {
 		t.Errorf("removeProductKeysScript = %q, want %q", got, want)
 	}
 }
 
+// TestProductKeyScriptsShareAPreamble keeps the apply and remove forms from drifting,
+// and pins that neither ends by SHOWING the keys: the transcript reaches the terminal,
+// so a trailing `show product-key` would print every configured licence key back.
 func TestProductKeyScriptsShareAPreamble(t *testing.T) {
 	const preamble = cliHome + "enable\nadmin\n"
 	for name, got := range map[string]string{
@@ -140,8 +143,8 @@ func TestProductKeyScriptsShareAPreamble(t *testing.T) {
 		if !strings.HasPrefix(got, preamble) {
 			t.Errorf("%s script does not open with the confirmed preamble: %q", name, got)
 		}
-		if !strings.HasSuffix(got, "show product-key\n") {
-			t.Errorf("%s script does not end by showing what it left behind: %q", name, got)
+		if strings.Contains(got, "show product-key") {
+			t.Errorf("%s script echoes the keys back with a show: %q", name, got)
 		}
 	}
 }
@@ -194,8 +197,8 @@ func TestEnableDefaultVPNScript(t *testing.T) {
 }
 
 func TestParseVPNNames(t *testing.T) {
-	// The parser reads the VPN name from the first 32 columns, so each data row
-	// must pad the name well past column 32 before the next column begins.
+	// The name column's width comes from the rule line, so each data row pads the
+	// name out to the rule before the next column begins.
 	row := func(name string) string { return name + strings.Repeat(" ", 40-len(name)) + "Yes" }
 	out := strings.Join([]string{
 		"Flags Legend:",
@@ -211,6 +214,39 @@ func TestParseVPNNames(t *testing.T) {
 	want := []string{"default", "myvpn", "another"}
 	if len(got) != len(want) {
 		t.Fatalf("parseVPNNames = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("parseVPNNames[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestParseVPNNamesKeepsAMultiWordName is the defect this parser was carrying: it cut
+// every row at a hardcoded column 32 and then took every whitespace-separated FIELD of
+// what was left, so a real name with spaces arrived as several VPNs that match nothing,
+// and a name reaching past column 32 was truncated into another. importops.go records the
+// same failure in the table parser readTarget used to use -- "this broker's own `A VPN
+// WITH LONG NAME AND SPACES` came back as seven names and matched nothing" -- and this is
+// the other caller of that same output.
+//
+// It matters because defaultUsers builds ONE script covering every parsed name: a
+// shredded name means the real VPN's default client-username is never shut down, with
+// nothing to say so.
+func TestParseVPNNamesKeepsAMultiWordName(t *testing.T) {
+	const long = "A VPN WITH LONG NAME AND SPACES" // 31 chars: the old cut landed inside it
+	width := len(long) + 4
+	row := func(name string) string { return name + strings.Repeat(" ", width-len(name)) + "Yes" }
+	out := strings.Join([]string{
+		"Message VPN" + strings.Repeat(" ", width-11) + "Enabled",
+		strings.Repeat("-", width) + " -------",
+		row("default"),
+		row(long),
+	}, "\r\n")
+	got := parseVPNNames(out)
+	want := []string{"default", long}
+	if len(got) != len(want) {
+		t.Fatalf("parseVPNNames = %#v, want %#v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
@@ -248,10 +284,6 @@ func TestZipConfigsScript(t *testing.T) {
 	}
 }
 
-// TestSortedKeys is GONE with sortedKeys(map[string]string): domainCertsScript's
-// only caller now sorts a []string of CA names directly (Ops.DomainCerts), so
-// there is no map left in this package for it to sort keys from.
-
 // TestEveryScriptTurnsPagingOffAfterHome is the invariant behind the parsers.
 //
 // A paginated report re-prints its column header and rule partway down, and the rule
@@ -261,7 +293,7 @@ func TestZipConfigsScript(t *testing.T) {
 //
 // This walks every script generator rather than checking the ones that happened to be
 // remembered, because the gap it closes was exactly a set of scripts written with `home`
-// and without `no paging` (operator, 2026-09-13).
+// and without `no paging` (operator-confirmed).
 func TestEveryScriptTurnsPagingOffAfterHome(t *testing.T) {
 	scripts := map[string]string{
 		"assertLeader":            assertLeaderScript(),
@@ -307,5 +339,32 @@ func TestEveryScriptTurnsPagingOffAfterHome(t *testing.T) {
 				t.Errorf("no `home` at all; every execution block opens at a known level:\n%s", body)
 			}
 		})
+	}
+}
+
+// TestParseVPNNamesSkipsARepeatedRule is the regression the column-width rewrite nearly
+// shipped. Reading the rule once and treating every later line as data means a REPEATED
+// rule -- which a paginated report prints again partway down -- is read as a row: its name
+// column trims to a run of dashes, so a VPN literally named "-----..." joins the list.
+// ParseVPNReplication documents the identical hazard and skips both the repeated rule and
+// the repeated header; this does the same.
+func TestParseVPNNamesSkipsARepeatedRule(t *testing.T) {
+	row := func(name string) string { return name + strings.Repeat(" ", 40-len(name)) + "Yes" }
+	header := "Message VPN" + strings.Repeat(" ", 29) + "Enabled"
+	rule := strings.Repeat("-", 40)
+	out := strings.Join([]string{
+		header, rule, row("default"),
+		"", header, rule, // the page break
+		row("myvpn"),
+	}, "\r\n")
+	got := parseVPNNames(out)
+	want := []string{"default", "myvpn"}
+	if len(got) != len(want) {
+		t.Fatalf("parseVPNNames = %#v, want %#v -- a repeated rule or header must not become a VPN", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("parseVPNNames[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }

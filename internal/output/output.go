@@ -156,28 +156,47 @@ type Row struct {
 // TaggedTable is Table with a leading verdict column. The header is indented by
 // TagWidth so its titles line up over the cells rather than over the tags.
 func (s *Sink) TaggedTable(header []string, rows []Row) {
+	cells := make([][]string, len(rows))
+	for i, r := range rows {
+		cells[i] = r.Cells
+	}
+	widths := columnWidths(header, cells)
+	if len(header) > 0 {
+		s.Line("%s%s", strings.Repeat(" ", TagWidth), pad(taggedGap, header, widths))
+	}
+	for _, r := range rows {
+		s.Line("%s %s", r.Level.tag(), pad(taggedGap, r.Cells, widths))
+	}
+}
+
+// The column gap, which differs between the two tables and is stated here rather than
+// being a literal at each call site. A tagged table's rows already start behind a tag,
+// so its columns need the wider gap to stay separable; a plain table does not.
+const (
+	tableGap  = " "
+	taggedGap = "  "
+)
+
+// columnWidths measures every column against the widest cell in it, the header
+// included, so both tables size themselves by the same rule.
+func columnWidths(header []string, rows [][]string) []int {
 	widths := make([]int, len(header))
 	for i, h := range header {
 		widths[i] = len(h)
 	}
-	for _, r := range rows {
-		for i, c := range r.Cells {
+	for _, row := range rows {
+		for i, c := range row {
 			if i < len(widths) && len(c) > widths[i] {
 				widths[i] = len(c)
 			}
 		}
 	}
-	if len(header) > 0 {
-		s.Line("%s%s", strings.Repeat(" ", TagWidth), pad(header, widths))
-	}
-	for _, r := range rows {
-		s.Line("%s %s", r.Level.tag(), pad(r.Cells, widths))
-	}
+	return widths
 }
 
-// pad joins cells at the given widths, leaving the last one unpadded so no line
-// carries trailing whitespace.
-func pad(cells []string, widths []int) string {
+// pad joins cells at the given widths, leaving the LAST one unpadded so no line carries
+// trailing whitespace into a log or a diff.
+func pad(gap string, cells []string, widths []int) string {
 	parts := make([]string, len(cells))
 	for i, c := range cells {
 		if i < len(cells)-1 && i < len(widths) {
@@ -186,7 +205,7 @@ func pad(cells []string, widths []int) string {
 			parts[i] = c
 		}
 	}
-	return strings.Join(parts, "  ")
+	return strings.Join(parts, gap)
 }
 
 // Warning prints a loud, bordered block for the handful of warnings that change
@@ -269,32 +288,9 @@ func (s *Sink) KVRow(width int, key, value string) {
 // cell in it, header included. The last column is never padded, so no line
 // carries trailing whitespace into a log or a diff.
 func (s *Sink) Table(header []string, rows [][]string) {
-	widths := make([]int, len(header))
-	for i, h := range header {
-		widths[i] = len(h)
-	}
+	widths := columnWidths(header, rows)
+	s.Line("%s", pad(tableGap, header, widths))
 	for _, row := range rows {
-		for i, cell := range row {
-			if i < len(widths) && len(cell) > widths[i] {
-				widths[i] = len(cell)
-			}
-		}
+		s.Line("%s", pad(tableGap, row, widths))
 	}
-	s.row(header, widths)
-	for _, row := range rows {
-		s.row(row, widths)
-	}
-}
-
-// row pads every cell but the last, then emits the joined line.
-func (s *Sink) row(cells []string, widths []int) {
-	parts := make([]string, len(cells))
-	for i, c := range cells {
-		if i < len(cells)-1 && i < len(widths) {
-			parts[i] = fmt.Sprintf("%-*s", widths[i], c)
-		} else {
-			parts[i] = c
-		}
-	}
-	s.Line("%s", strings.Join(parts, " "))
 }

@@ -81,7 +81,6 @@ const (
 type Region string
 
 const (
-	RegionPreamble  Region = "preamble"
 	RegionVPNCreate Region = "vpn-create"
 	RegionBroker    Region = "broker"
 	RegionVPN       Region = "vpn"

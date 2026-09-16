@@ -213,9 +213,6 @@ var sectionRules = []SectionRule{
 		Disposition: Apply,
 		Reason:      "Bounces web-transport (semp/all.cli:99, 103) to apply its ports.",
 	},
-	// semp/all.cli:105 "Configure Virtual Hostnames" has no rule: it is empty
-	// in every software capture, a software-relevant no-op rather than
-	// appliance-only, so there is nothing to classify (see the table comment).
 	{
 		Section:     "Configure REST Service",
 		Disposition: Apply,
@@ -261,9 +258,6 @@ var sectionRules = []SectionRule{
 		Disposition: SkipAppliance,
 		Reason:      "DNS server configuration; empty on a software broker.",
 	},
-	// semp/all.cli:128 "Configure Hostname" has no rule: same as Virtual
-	// Hostnames above, empty and software-relevant rather than appliance-only.
-
 	// semp/all.cli:130-131 -- node identity.
 	{
 		Section:     "Configure Router Name",
@@ -357,9 +351,6 @@ var sectionRules = []SectionRule{
 			"guaranteed-messaging data path -- and that on Kubernetes are sized by " +
 			"the CR and the PVC instead.",
 	},
-	// semp/all.cli:202 "Configure Routing DMR" has no rule: empty and
-	// software-relevant, same as Virtual Hostnames and Hostname above.
-
 	// semp/all.cli:204-221 -- apply, with a consequence recorded rather than
 	// an objection: the operator overrode a skip recommendation for this one.
 	{

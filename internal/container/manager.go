@@ -3,12 +3,14 @@ package container
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -50,6 +52,19 @@ type Manager struct {
 	// podman rootless/rootful guard is testable off a POSIX host (Windows returns
 	// -1). NewManager sets the default.
 	Geteuid func() int
+	// Getenv and Setenv are this process's own environment; seams over os.Getenv
+	// and os.Setenv so ensureUserSession's XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS
+	// derivation is testable without mutating the test binary's environment.
+	// NewManager sets the defaults.
+	Getenv func(key string) string
+	Setenv func(key, value string) error
+
+	// The memoised result of ensureUserSession (rootless.go). Every systemctl call
+	// funnels through it, so it must probe once per run rather than once per
+	// command; sessionDesc is what the `user session` report row prints.
+	sessionOnce bool
+	sessionErr  error
+	sessionDesc string
 	// RestartApproved pre-approves bouncing an already-running broker when the
 	// deploy artifact changed (the --restart flag on `deploy broker`). It is an
 	// approval, not an instruction: Restart() is the command that bounces one on
@@ -78,6 +93,8 @@ func NewManager(r engine.EnvRunner, cfg *config.Config, p config.Platform, log f
 		Out:     out,
 		Resolve: func(host string) bool { _, err := net.LookupHost(host); return err == nil },
 		Geteuid: os.Geteuid,
+		Getenv:  os.Getenv,
+		Setenv:  os.Setenv,
 	}
 }
 
@@ -165,14 +182,7 @@ func (m *Manager) compose(ctx context.Context, args ...string) error {
 // secrets; `down`, `stop`, `start`, `restart` and `ps` operate on what already
 // exists. Keeping the list positive rather than negative means a new verb defaults
 // to NOT reading a private key from disk.
-func composeNeedsSecretValues(args []string) bool {
-	for _, a := range args {
-		if a == "up" {
-			return true
-		}
-	}
-	return false
-}
+func composeNeedsSecretValues(args []string) bool { return slices.Contains(args, "up") }
 
 // composeSecretEnv is the "VAR=value" list backing the compose file's
 // environment-sourced secrets. It is the only place a secret value enters a child
@@ -195,10 +205,24 @@ func (m *Manager) composeSecretEnv(preview bool) ([]string, error) {
 // resolves the broker hostname(s). It never mutates host or container state.
 func (m *Manager) Check(ctx context.Context) error {
 	m.CheckEnv()
+	// Reachability is the one hard stop: with no engine every probe after it would
+	// fail for that same reason, and three identical failures are less useful than
+	// one. Everything after it reports in one pass, because `validate` promises to
+	// name every problem it finds rather than stopping at the first.
 	if err := m.Reachable(ctx); err != nil {
 		return err
 	}
-	return m.checkDNS(ctx)
+	// The same `<runtime> info` probe every mutating op runs first, so validate
+	// reports what deploy would refuse on rather than passing and leaving deploy to
+	// fail at its own first step. `version` is not a substitute: it answers from a
+	// binary that has not talked to anything, while `info` is what exercises the
+	// rootless user session and its subuid mapping (preflight.go).
+	if err := m.Preflight(ctx); err != nil {
+		return err
+	}
+	// fix=false: `validate` promises a run that disturbs nothing, so the linger row
+	// reports rather than enabling (rootless.go).
+	return errors.Join(m.checkDNS(ctx), m.checkPodmanHost(ctx, false))
 }
 
 // CheckEnv writes the effective container configuration, mirroring k8s.CheckEnv.
@@ -221,7 +245,10 @@ func (m *Manager) CheckEnv() {
 	tls := "(not configured)"
 	if cfg.TLS.Cert != "" || cfg.TLS.CertKey != "" {
 		tls = fmt.Sprintf("cert=%s key=%s cas=%d",
-			orNone(cfg.TLS.Cert), setOrMissing(cfg.TLS.CertKey), len(cfg.TLS.CAs))
+			// Both are host file PATHS, not secret values, so both are shown. CertKey used
+		// to be masked as set/MISSING beside its sibling on the same line, which read as
+		// though one of the two carried something the other did not.
+		orNone(cfg.TLS.Cert), orNone(cfg.TLS.CertKey), len(cfg.TLS.CAs))
 	}
 
 	r.Section("Broker deployment (" + string(m.P) + ")")
@@ -426,29 +453,29 @@ func (m *Manager) PrepHost(ctx context.Context) error {
 	if err := m.Preflight(ctx); err != nil {
 		return err
 	}
-	// Same invariant Deploy enforces via checkPodmanEUID, and the same call: a
-	// rootful mkdir/chown here would leave a data directory the later rootless
-	// deploy cannot use, so this is a hard stop rather than a warning the
-	// operator could miss.
-	if m.P == config.Podman {
-		if err := m.checkPodmanEUID(); err != nil {
-			return err
-		}
+	// The whole podman host-readiness block, which subsumes the euid guard and the
+	// nofile probe this used to call separately (rootless.go). It runs BEFORE the
+	// first mkdir: a rootful mkdir/chown here would leave a data directory the later
+	// rootless deploy cannot use, and a host missing linger or a user bus would get
+	// a quadlet unit nothing can load. Every row is read-only, so a refusal still
+	// leaves "nothing happened" true.
+	// fix=true: prep may repair what it finds, which today is the linger row alone
+	// -- enabling it for the invoking user needs no privilege, so it belongs with
+	// the mkdir/chown/login below rather than in a refusal (rootless.go).
+	if err := m.checkPodmanHost(ctx, true); err != nil {
+		return err
 	}
 
 	cb := m.Cfg.ContainerBlock(m.P)
 	m.logf("preparing data directory %s", cb.DataDir)
 	if err := m.R.Run(ctx, "mkdir", "-p", cb.DataDir); err != nil {
-		return fmt.Errorf("create data dir %q: %w", cb.DataDir, err)
+		return fmt.Errorf("create data dir %q: %w%s", cb.DataDir, err, m.dataDirHint(cb.DataDir))
 	}
 	if m.P == config.Podman && m.Cfg.Podman.Rootless {
 		// Rootless podman: the container's uid:gid maps through subuid/subgid, so
 		// enter the user namespace to apply the ownership the container will see.
 		if err := m.run(ctx, "unshare", "chown", cb.RunUser, cb.DataDir); err != nil {
-			return fmt.Errorf("chown data dir %q (rootless): %w", cb.DataDir, err)
-		}
-		if err := m.checkNoFile(ctx); err != nil {
-			return err
+			return fmt.Errorf("chown data dir %q (rootless): %w%s", cb.DataDir, err, m.dataDirHint(cb.DataDir))
 		}
 	} else if err := m.R.Run(ctx, "chown", cb.RunUser, cb.DataDir); err != nil {
 		return fmt.Errorf("chown data dir %q to %q: %w", cb.DataDir, cb.RunUser, err)
@@ -464,7 +491,7 @@ func (m *Manager) PrepHost(ctx context.Context) error {
 // configured. Containers have no analog of the k8s image-pull Secret, so without
 // this the credentials in the env file did nothing here and a private-registry pull
 // simply failed unauthenticated. The password is fed on stdin, so it never reaches
-// an argv or an echoed command (§3).
+// an argv or an echoed command.
 func (m *Manager) registryLogin(ctx context.Context) error {
 	user, pass := m.Cfg.Image.User, m.Cfg.Image.Pass
 	if user == "" && pass == "" {
@@ -545,13 +572,13 @@ func (m *Manager) prepareSecrets(ctx context.Context) error {
 		return err
 	}
 	if m.P == config.Podman {
-		return m.CreatePodmanSecrets(ctx, secrets)
+		return m.createPodmanSecrets(ctx, secrets)
 	}
 	return nil
 }
 
-// CreatePodmanSecrets loads each secret into podman's secret store, feeding the
-// value on stdin so it never reaches an argv or the dry-run echo (§3).
+// createPodmanSecrets loads each secret into podman's secret store, feeding the
+// value on stdin so it never reaches an argv or the echoed command.
 //
 // Remove-then-create, rather than `create --replace`, and the reason is the version
 // floor. `--replace` needs podman 4.7, while the rest of this wiring needs only 4.5
@@ -568,7 +595,7 @@ func (m *Manager) prepareSecrets(ctx context.Context) error {
 // path and then restarts the unit, to settle whether a quadlet re-reads the store
 // on start (deployPodman's ASSUMED, NOT VERIFIED branch). Going through Deploy
 // instead would exercise the branching rather than the question.
-func (m *Manager) CreatePodmanSecrets(ctx context.Context, secrets []render.ContainerSecret) error {
+func (m *Manager) createPodmanSecrets(ctx context.Context, secrets []render.ContainerSecret) error {
 	r, err := m.runtime()
 	if err != nil {
 		return err
@@ -586,6 +613,17 @@ func (m *Manager) CreatePodmanSecrets(ctx context.Context, secrets []render.Cont
 	return nil
 }
 
+// certBundlePath answers where podman's copy of the bundle lives and whether there is
+// one at all. Both halves of the guard say the same thing: the bundle is the private
+// key followed by the certificate, so a deployment missing either configures no broker
+// TLS and has no bundle to write or to remove.
+func (m *Manager) certBundlePath() (string, bool) {
+	if m.Cfg.TLS.Cert == "" || m.Cfg.TLS.CertKey == "" {
+		return "", false
+	}
+	return filepath.FromSlash(render.ServerCertBundlePath(m.Cfg)), true
+}
+
 // writeCertBundle writes podman's copy of the server-certificate bundle to the
 // host, returning whether it changed so deployPodman can fold that into the restart
 // decision. A deployment with no TLS configured writes nothing and reports no change.
@@ -593,7 +631,7 @@ func (m *Manager) CreatePodmanSecrets(ctx context.Context, secrets []render.Cont
 // The Echo guard sits HERE rather than being inherited from writeArtifact, and that
 // is load-bearing: writeArtifact's body is an ordinary argument, so the caller has
 // already evaluated it: broker.ServerCertBundle would have read both files before
-// writeArtifact could decline. A dry-run must stay possible before the certificate
+// writeArtifact could decline. A preview must stay possible before the certificate
 // exists on this host.
 //
 // Mode 0600 in a 0700 directory, and the chmod is explicit because os.WriteFile
@@ -601,12 +639,12 @@ func (m *Manager) CreatePodmanSecrets(ctx context.Context, secrets []render.Cont
 // 0644 by anything else would be truncated and rewritten still 0644, which for a
 // file containing a private key is not a mode to inherit.
 func (m *Manager) writeCertBundle() (bool, error) {
-	if m.Cfg.TLS.Cert == "" || m.Cfg.TLS.CertKey == "" {
+	path, ok := m.certBundlePath()
+	if !ok {
 		return false, nil
 	}
-	path := filepath.FromSlash(render.ServerCertBundlePath(m.Cfg))
 	if m.isEcho() {
-		m.progress().Info("would write server certificate bundle %s (skipped under dry-run).", path)
+		m.progress().Info("would write server certificate bundle %s (skipped in preview).", path)
 		return true, nil
 	}
 	bundle, err := broker.ServerCertBundle(m.Cfg)
@@ -634,12 +672,12 @@ func (m *Manager) writeCertBundle() (bool, error) {
 // nothing to remove. Only the FILE goes; the directory may hold other brokers'
 // bundles.
 func (m *Manager) removeCertBundle() error {
-	if m.Cfg.TLS.Cert == "" || m.Cfg.TLS.CertKey == "" {
+	path, ok := m.certBundlePath()
+	if !ok {
 		return nil
 	}
-	path := filepath.FromSlash(render.ServerCertBundlePath(m.Cfg))
 	if m.isEcho() {
-		m.progress().Info("would remove server certificate bundle %s (skipped under dry-run).", path)
+		m.progress().Info("would remove server certificate bundle %s (skipped in preview).", path)
 		return nil
 	}
 	if err := os.Remove(path); err != nil {
@@ -660,7 +698,7 @@ func (m *Manager) removeCertBundle() error {
 // counts as changed, so the preview shows the work a real run would do.
 func (m *Manager) writeArtifact(path string, body []byte, what string, dirMode os.FileMode) (bool, error) {
 	if m.isEcho() {
-		m.progress().Info("would write %s %s (skipped under dry-run).", what, path)
+		m.progress().Info("would write %s %s (skipped in preview).", what, path)
 		return true, nil
 	}
 	if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, body) {
@@ -783,7 +821,7 @@ func (m *Manager) deployDocker(ctx context.Context, id config.NodeIdentity) erro
 	//
 	// "no container at all" has to be ANSWERED, not assumed (M4): a `ps` that
 	// cannot run says nothing about whether the container exists, and reading that
-	// silence as "not running" -- containerRunning's own lossy shape -- would take
+	// silence as "not running" would take
 	// this branch and force-recreate a LIVE broker on a transient engine failure,
 	// with none of the consent the artifact-changed branch below requires for the
 	// identical action. containerRunningKnown is read directly so an unanswered
@@ -856,29 +894,17 @@ func (m *Manager) serviceState(ctx context.Context) (state string, answered bool
 // the broker possibly serving, so a teardown refuses rather than guessing.
 var stoppedStates = map[string]bool{"inactive": true, "failed": true, "unknown": true}
 
-// containerRunning reports whether this host's broker container is up,
-// collapsing a failed probe into the same "not running" answer as a genuine
-// absence. Nothing in this package reads it any more (M4): its one caller,
-// deployDocker, now reads containerRunningKnown directly, because a false
-// negative here used to be expensive -- Deploy would take the not-running
-// branch and force-recreate a live broker on a transient probe failure without
-// asking. Kept (not deleted) because TestContainerRunningMatchesNameExactly
-// still exercises it directly.
+// containerRunningKnown reports whether this host's broker container is up, plus the
+// two things a bare bool cannot express: whether the probe answered at all, and its own
+// error when it didn't.
 //
-// The name is matched in Go rather than by `--filter name=`, which both engines
-// treat as an unanchored REGEX: a bare name is a substring match, so a `solace`
-// deployment would see a running `solace-edge` as its own, and a name carrying '.'
-// (which the schema allows) would match any character there. Anchoring the pattern
-// fixes the first but leaves this decision resting on regex semantics that vary by
-// engine. Comparing the listed names exactly depends on nothing.
-func (m *Manager) containerRunning(ctx context.Context) bool {
-	running, _, _ := m.containerRunningKnown(ctx)
-	return running
-}
-
-// containerRunningKnown is containerRunning plus the two things containerRunning
-// cannot express: whether the probe answered at all, and its own error when it
-// didn't. A `ps` that could not run says nothing about the container, and a
+// The name is matched in Go rather than by `--filter name=`, which both engines treat as
+// an unanchored REGEX: a bare name is a substring match, so a `solace` deployment would
+// see a running `solace-edge` as its own, and a name carrying '.' (which the schema
+// allows) would match any character there. Anchoring the pattern fixes the first but
+// leaves the decision resting on regex semantics that vary by engine. Comparing the
+// listed names exactly depends on nothing.
+// A `ps` that could not run says nothing about the container, and a
 // caller that reads that silence as "not running" would act on a guess --
 // stopAndRemove refuses a teardown on it (the docker half of the systemd case
 // serviceState documents) and deployDocker refuses a force-recreate on it, for
@@ -887,16 +913,35 @@ func (m *Manager) containerRunningKnown(ctx context.Context) (running, answered 
 	if m.isEcho() {
 		return false, true, nil
 	}
-	out, err := m.output(ctx, "ps", "--filter", "status=running", "--format", "{{.Names}}")
+	running, err = m.psHasName(ctx, "--filter", "status=running")
 	if err != nil {
 		return false, false, err
 	}
+	return running, true, nil
+}
+
+// psHasName runs `<runtime> ps <filter...> --format {{.Names}}` and reports whether
+// this deployment's container is in the listing.
+//
+// The name is matched HERE, in Go, on an exact string, rather than through the engine's
+// own `--filter name=`: that filter is an unanchored REGEX on both engines, so a bare
+// name substring-matches a sibling deployment, and an unescaped '.' -- which the
+// container-name schema allows -- matches any character.
+func (m *Manager) psHasName(ctx context.Context, filter ...string) (bool, error) {
+	args := make([]string, 0, len(filter)+3)
+	args = append(args, "ps")
+	args = append(args, filter...)
+	args = append(args, "--format", "{{.Names}}")
+	out, err := m.output(ctx, args...)
+	if err != nil {
+		return false, err
+	}
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.TrimSpace(line) == m.name() {
-			return true, true, nil
+			return true, nil
 		}
 	}
-	return false, true, nil
+	return false, nil
 }
 
 // --- Delete -----------------------------------------------------------------
@@ -952,7 +997,7 @@ func (m *Manager) deletePodman(ctx context.Context) error {
 	}
 	unit := filepath.ToSlash(filepath.Join(m.Cfg.Podman.QuadletDir, m.name()+".container"))
 	if m.isEcho() {
-		m.progress().Info("would remove quadlet unit %s (skipped under dry-run).", unit)
+		m.progress().Info("would remove quadlet unit %s (skipped in preview).", unit)
 	} else if err := os.Remove(unit); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove quadlet unit %q: %w", unit, err)
 	} else {
@@ -970,7 +1015,7 @@ func (m *Manager) deletePodman(ctx context.Context) error {
 
 // removePodmanSecrets removes every secret this deployment loaded into podman's
 // secret store, using the same render.ContainerSecrets(m.Cfg, m.P) that
-// CreatePodmanSecrets reads them from -- so the create and remove lists cannot
+// createPodmanSecrets reads them from -- so the create and remove lists cannot
 // drift apart. It runs only after the container/unit is gone (deletePodman's
 // last step): a leftover secret must not fail a teardown that otherwise
 // succeeded, so a "not found" (or any other) rm failure is a warning, not an
@@ -986,10 +1031,10 @@ func (m *Manager) removePodmanSecrets(ctx context.Context) error {
 	}
 	for _, s := range secrets {
 		if m.isEcho() {
-			m.progress().Info("would remove podman secret %s (skipped under dry-run).", s.Name)
+			m.progress().Info("would remove podman secret %s (skipped in preview).", s.Name)
 			continue
 		}
-		// --ignore, matching CreatePodmanSecrets so one argv shape serves both call
+		// --ignore, matching createPodmanSecrets so one argv shape serves both call
 		// sites. It also makes the warning below honest: "already removed" stops
 		// being a plausible cause once a missing secret is a success, so what is
 		// left really is a failure worth naming.
@@ -1025,11 +1070,14 @@ func (m *Manager) stopAndRemove(ctx context.Context) error {
 		// engine is reachable, not that this container actually stopped. A probe
 		// that cannot answer counts as "still running" for the same reason it does
 		// there -- silence is not confirmation.
-		running, answered, _ := m.containerRunningKnown(ctx)
+		running, answered, probeErr := m.containerRunningKnown(ctx)
 		if running || !answered {
 			why := "it is still running"
 			if !answered {
-				why = "it could not be confirmed stopped (the `ps` probe itself failed)"
+				// The probe's own error is named, not discarded: this branch's message
+				// says the probe failed, and an operator diagnosing that needs to know
+				// WHY it failed -- deployDocker's near-identical check already wraps it.
+				why = fmt.Sprintf("it could not be confirmed stopped (the `ps` probe itself failed: %v)", probeErr)
 			}
 			return fmt.Errorf("stop container %s failed and %s; stop it by hand (check `%s ps`) "+
 				"and re-run: %w", m.name(), why, m.Cfg.ContainerRuntime(m.P).Name(), err)
@@ -1039,30 +1087,18 @@ func (m *Manager) stopAndRemove(ctx context.Context) error {
 	return m.run(ctx, "rm", m.name())
 }
 
-// containerExists reports whether this host has ANY container -- running or
-// stopped -- with this deployment's name, so stopAndRemove can no-op when
-// nothing was ever deployed instead of running stop/rm into a guaranteed
-// docker failure.
-//
-// Matched in Go against a `ps --all` listing rather than `--filter name=`,
-// for the same reason containerRunning is: that filter is an unanchored
-// regex on both engines, so a bare name substring-matches a sibling
-// deployment and an unescaped '.' (which the schema allows in a container
-// name) matches any character.
+// containerExists reports whether this host has ANY container -- running or stopped --
+// with this deployment's name, so stopAndRemove can no-op when nothing was ever
+// deployed instead of running stop/rm into a guaranteed docker failure.
 func (m *Manager) containerExists(ctx context.Context) bool {
 	if m.isEcho() {
 		return false // unreachable in practice: deleteDocker takes the compose branch under Echo
 	}
-	out, err := m.output(ctx, "ps", "--all", "--format", "{{.Names}}")
+	found, err := m.psHasName(ctx, "--all")
 	if err != nil {
 		return true // let stop/rm run and surface the real engine error rather than hiding it
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.TrimSpace(line) == m.name() {
-			return true
-		}
-	}
-	return false
+	return found
 }
 
 func (m *Manager) purgeData(ctx context.Context) error {
@@ -1230,7 +1266,11 @@ func solaceRows(s *output.Sink, raw string) []string {
 	// widens the column instead of running into the next one -- the fixed %-24s/%-48s
 	// this replaces did both, depending on the name.
 	s.Table([]string{"NAME", "IMAGE", "STATUS"}, rows)
-	if len(names) == 0 {
+	// len(rows), not len(names): names holds only the containers whose names passed the
+	// grammar check above, so a host running one Solace container under a name this tool
+	// will not hand back to the engine printed "none found" directly beneath a table
+	// listing it.
+	if len(rows) == 0 {
 		s.Line("  (no Solace broker containers on this host)")
 	}
 	return names
@@ -1306,10 +1346,8 @@ func (m *Manager) Describe(ctx context.Context) error {
 // tokens (-f, --tail, --since, --timestamps -- the spellings kubectl and both engines
 // share). It prints what is buffered and exits unless the caller asked to follow.
 //
-// It used to hard-code `-f` with no way to switch it off, which made
-// `solace-util logs broker` block until interrupted on docker and podman while the
-// kubernetes side could not follow at all: the two platforms were broken in opposite
-// directions.
+// Following is the CALLER's choice, never hard-coded here: a hard-coded `-f` blocks
+// until interrupted, and no way to ask for one cannot follow at all.
 //
 // `-p`/`--previous` is refused here as well as at pre-run, and that is not
 // belt-and-braces. checkFlagPlatforms walks only the flags the operator actually SET,
@@ -1323,7 +1361,14 @@ func (m *Manager) Logs(ctx context.Context, extra ...string) error {
 				"container's log, so there is nothing to read", m.P)
 		}
 	}
-	return m.run(ctx, append([]string{"logs"}, append(extra, m.name())...)...)
+	// Built into a fresh slice rather than appended onto extra: a `...`-expanded slice
+	// is forwarded by reference, so `append(extra, ...)` writes into the CALLER's
+	// backing array whenever it has spare capacity.
+	args := make([]string, 0, len(extra)+2)
+	args = append(args, "logs")
+	args = append(args, extra...)
+	args = append(args, m.name())
+	return m.run(ctx, args...)
 }
 
 // CopyFrom copies files out of the broker container into the working directory,
@@ -1334,20 +1379,32 @@ func (m *Manager) CopyFrom(ctx context.Context, files []string) error {
 		return fmt.Errorf("no files specified to copy from the broker")
 	}
 	t := NewTransport(m.R, m.Cfg, m.P)
-	var failed int
-	for _, f := range files {
+	return m.copyEach(files, "from", func(f string) error {
 		// config.BaseName, not path.Base -- see the same call in k8s.Cluster.CopyFrom.
 		local := config.BaseName(f)
 		m.logf("copying %s from container %s", f, m.name())
 		if err := t.Download(ctx, config.Primary, f, local); err != nil {
-			m.report().Fail("%s: %v", f, err)
-			failed++
-			continue
+			return err
 		}
 		m.report().OK("%s -> %s", f, local)
+		return nil
+	})
+}
+
+// copyEach is the per-file loop both copy verbs share: every file is attempted, each
+// outcome gets its own report line, and the command fails if ANY file did. Stopping at
+// the first failure would hide the files that did copy, which is the opposite of what
+// an operator retrieving diagnostics needs to know.
+func (m *Manager) copyEach(files []string, direction string, one func(f string) error) error {
+	var failed int
+	for _, f := range files {
+		if err := one(f); err != nil {
+			m.report().Fail("%s: %v", f, err)
+			failed++
+		}
 	}
 	if failed > 0 {
-		return fmt.Errorf("%d of %d file(s) failed to copy from the broker", failed, len(files))
+		return fmt.Errorf("%d of %d file(s) failed to copy %s the broker", failed, len(files), direction)
 	}
 	return nil
 }
@@ -1361,20 +1418,14 @@ func (m *Manager) CopyInto(ctx context.Context, files []string, destDir string) 
 		destDir = "."
 	}
 	t := NewTransport(m.R, m.Cfg, m.P)
-	var failed int
-	for _, f := range files {
+	return m.copyEach(files, "into", func(f string) error {
 		m.logf("copying %s into container %s:%s", f, m.name(), destDir)
 		if err := t.UploadFile(ctx, config.Primary, f, destDir); err != nil {
-			m.report().Fail("%s: %v", f, err)
-			failed++
-			continue
+			return err
 		}
 		m.report().OK("%s -> %s:%s", f, m.name(), destDir)
-	}
-	if failed > 0 {
-		return fmt.Errorf("%d of %d file(s) failed to copy into the broker", failed, len(files))
-	}
-	return nil
+		return nil
+	})
 }
 
 // CLI opens an interactive Solace CLI session inside the container.
@@ -1400,12 +1451,24 @@ func (m *Manager) Shell(ctx context.Context) error {
 // systemctl runs `systemctl [--user] args...` through the Runner, honoring the
 // rootless (`--user`) vs rootful mode derived in config.
 func (m *Manager) systemctl(ctx context.Context, args ...string) error {
+	// Every podman systemd path goes through here, not just validate and deploy:
+	// `broker start`/`stop`/`restart`/`remove`/`status` drive systemctl without ever
+	// calling PrepHost, and on rootless they need the same user bus. ensureUserSession
+	// is memoised, so this costs one probe per run (rootless.go).
+	if err := m.ensureUserSession(ctx); err != nil {
+		return err
+	}
 	return m.R.Run(ctx, "systemctl", m.systemctlArgs(args)...)
 }
 
 // systemctlOutput captures a systemctl subcommand's stdout, for the state probes
 // (`is-active`) whose answer picks the next step rather than being shown.
 func (m *Manager) systemctlOutput(ctx context.Context, args ...string) ([]byte, error) {
+	// Same reason as systemctl above: the state probes run from commands that never
+	// reach PrepHost, and a missing XDG_RUNTIME_DIR would read as "unit not found".
+	if err := m.ensureUserSession(ctx); err != nil {
+		return nil, err
+	}
 	return m.R.Output(ctx, "systemctl", m.systemctlArgs(args)...)
 }
 
@@ -1458,7 +1521,7 @@ func fileExists(p string) bool {
 // and nothing else. The filter value is a regex, so a bare name is a substring match
 // (a `solace` deployment would list a sibling `solace-edge`) and an unescaped '.' --
 // which the schema allows in a container name -- would match any character. Used for
-// the display listings only; containerRunning compares names in Go instead, because
+// the display listings only; containerRunningKnown compares names in Go instead, because
 // a decision must not rest on an engine's regex handling.
 func exactName(name string) string { return "^" + regexp.QuoteMeta(name) + "$" }
 
@@ -1470,14 +1533,16 @@ func platformTitle(p config.Platform) string {
 	return "Docker"
 }
 
-// orNone renders an empty string as "(none)" -- a package-local copy of the k8s
+// orValue renders an empty string as fallback -- a package-local copy of the k8s
 // report formatter (one small copy per package, not over-DRY'd across packages).
-func orNone(s string) string {
+func orValue(s, fallback string) string {
 	if s == "" {
-		return "(none)"
+		return fallback
 	}
 	return s
 }
+
+func orNone(s string) string { return orValue(s, "(none)") }
 
 // setOrMissing renders a secret's presence without echoing it.
 func setOrMissing(s string) string {

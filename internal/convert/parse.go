@@ -35,15 +35,22 @@ func newVars() *vars {
 	}
 }
 
+// record notes a name in first-assignment order, and clears any value it held under a
+// DIFFERENT type.
+//
+// A bash file may legitimately re-assign a name as another type (`X=a` then
+// `X=(a b)`), and each type lives in its own map here. Without the clear, the stale
+// entry survived in the old map and the accessors -- which check one map each -- could
+// still answer from the assignment the file had superseded.
 func (v *vars) record(name string) {
-	if _, dup := v.scalar[name]; dup {
-		return
-	}
-	if _, dup := v.array[name]; dup {
-		return
-	}
-	if _, dup := v.assoc[name]; dup {
-		return
+	_, wasScalar := v.scalar[name]
+	_, wasArray := v.array[name]
+	_, wasAssoc := v.assoc[name]
+	delete(v.scalar, name)
+	delete(v.array, name)
+	delete(v.assoc, name)
+	if wasScalar || wasArray || wasAssoc {
+		return // already in seen, in its original position
 	}
 	v.seen = append(v.seen, name)
 }
@@ -156,9 +163,18 @@ func parse(src string) (*vars, error) {
 		if isAssoc || allAssocEntries(toks) {
 			entries := map[string]string{}
 			for _, t := range toks {
-				if e := assocRE.FindStringSubmatch(t); e != nil {
-					entries[e[1]] = e[2]
+				e := assocRE.FindStringSubmatch(t)
+				if e == nil {
+					// A declared associative array whose entry is not `[key]=value` --
+					// a typo'd bracket, a missing '=', a stray bare word. Silently
+					// dropping it lost a real setting from the converted file with
+					// nothing said, which is the opposite of what this converter
+					// promises: it reads a file once, and every unconvertible thing in
+					// it has to be named.
+					return nil, fmt.Errorf("%s: entry %q is not the `[key]=value` form an associative "+
+						"array takes -- fix it in the source file, or remove it", name, t)
 				}
+				entries[e[1]] = e[2]
 			}
 			v.assoc[name] = entries
 			continue
@@ -285,8 +301,8 @@ func tokenizeSegments(s string) [][]segment {
 				continue
 			}
 			// Inside double quotes bash honours a backslash before exactly $, `,
-			// " and \, and leaves it LITERAL before anything else. Both halves of
-			// that matter here, and this used to strip it unconditionally:
+			// " and \, and leaves it LITERAL before anything else. Both halves
+			// matter -- stripping it unconditionally breaks two things:
 			//
 			//   - "C:\Users\me" lost its separators, silently corrupting any
 			//     Windows path a legacy env file happened to double-quote;

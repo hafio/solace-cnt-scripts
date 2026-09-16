@@ -305,7 +305,7 @@ const (
 // secret. Exactly one of Password/PasswordEnv must be set.
 type AdditionalUser struct {
 	Username    string `yaml:"username"`    // becomes username_<username>_password
-	AccessLevel string `yaml:"accessLevel"` // admin|read-write|read-only|none
+	AccessLevel string `yaml:"accessLevel"` // none|read-only|mesh-manager|read-write|admin (accessLevels)
 	Password    string `yaml:"password"`    // secret
 	PasswordEnv string `yaml:"passwordEnv"` // env var holding password instead
 }
@@ -382,8 +382,8 @@ type Scaling struct {
 // this block verbatim, with nothing reversed or paired up -- which is the whole reason
 // there is no `mate:` key and no per-site role.
 //
-// Replaces the dead REPL_* stub (mate/connSsl/psk), which nothing ever read.
-// internal/convert no longer carries those variables over; it reports them as dropped.
+// internal/convert does not carry the legacy REPL_* variables over: they describe ONE
+// mate, this block describes the pair, so it reports all three as dropped.
 type Replication struct {
 	Sites []ReplSite `yaml:"sites"` // exactly 2, or none at all
 	VPNs  []ReplVPN  `yaml:"vpns"`  // listed = replication enabled at both sites

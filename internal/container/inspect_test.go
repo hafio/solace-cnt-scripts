@@ -424,3 +424,21 @@ func kvValue(report, key string) string {
 	}
 	return ""
 }
+
+// TestPrintableStripsControlCharacters: image names, statuses, error text and mount paths
+// come out of `<runtime> inspect` -- data about a container this tool did not necessarily
+// create -- and land in a report a terminal renders. A terminal escape inside one would be
+// executed by the terminal reading it.
+func TestPrintableStripsControlCharacters(t *testing.T) {
+	for in, want := range map[string]string{
+		"solace/pubsub:10.10":   "solace/pubsub:10.10",
+		"exited\x1b[2J":         "exited[2J",
+		"a\x00b\x7fc":           "abc",
+		"line\nbreak":           "linebreak",
+		"":                      "",
+	} {
+		if got := printable(in); got != want {
+			t.Errorf("printable(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

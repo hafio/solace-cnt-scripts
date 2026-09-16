@@ -278,7 +278,7 @@ The full surface -- every command, argument, and flag with its default -- is
 | `broker configure data-replication` | all | Converge this broker to the `replication:` block -- mate addresses, which VPNs replicate, each one's role. Never contacts the mate |
 | `broker perform assert-leader` | all | Assert the config-sync leader (HA only) |
 | `broker perform redundancy-test` | all | Exercise a real failover and fail back (HA only; **disturbs the broker**) |
-| `broker perform gather-diagnostics` | all | Gather a support bundle into `broker.hostDiagnosticDir` (`--days`) |
+| `broker perform gather-diagnostics` | all | Gather a support bundle into `broker.hostDiagnosticDir` (`--days`, `--pod` narrows to one node) |
 | `broker perform semp-login-check` | all | Prove an authenticated SEMP request works |
 | `broker perform export-config` | all | Capture the broker's configuration as one artifact (`--vpn`, `--broker-only`, `-o`) |
 | `broker perform import-config <file>` | all | Apply a captured configuration back; **tears down and rebuilds an existing VPN** |

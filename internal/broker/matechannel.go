@@ -19,6 +19,13 @@ import (
 // Implementations are addressed by site, not by role. A site's HA group is ONE endpoint
 // here, because the replication role config-syncs within a site (`HA: yes` on every
 // replication command): reach the primary and the backup receives it.
+//
+// Config-sync is ASSUMED OPERATIONAL and deliberately never checked (operator-confirmed).
+// It is off by default and it can be oper-down, so the assumption is not free -- but an
+// HA group in service has it running, and probing it here would be this tool
+// second-guessing an invariant the operator maintains. The fact is appliance-proven from
+// the CLI reference's per-command CONFIG-SYNC blocks and verified on live software
+// brokers, which is why both broker types are treated identically.
 type MateChannel interface {
 	// Preflight proves the channel works and mutates nothing. Every flow calls it on
 	// BOTH channels before the first write, so an unreachable site stops the run while
@@ -45,7 +52,7 @@ type MateChannel interface {
 	// activity for its own HA group. A standalone broker is its own only node and
 	// reports true.
 	//
-	// A switch requires it at BOTH sites (operator, 2026-09-13). See
+	// A switch requires it at BOTH sites (operator-confirmed). See
 	// requirePrimaryActive for why that is a gate rather than a preference.
 	PrimaryActive(ctx context.Context) (bool, error)
 
@@ -109,7 +116,9 @@ func NewCLIMate(run CLIRunner, what string) MateChannel {
 // of that same problem); that is a real follow-on, not done here.
 func (o *Ops) NewLocalMate(role config.Role) MateChannel {
 	return NewCLIMate(func(ctx context.Context, name, script string) ([]byte, error) {
-		return o.runCLIRead(ctx, role, name, script)
+		// readCLI, not runCLIRead: this channel's methods are called repeatedly
+		// across a switchover, and each left its uploaded script on the broker.
+		return o.readCLI(ctx, role, name, script)
 	}, "this broker")
 }
 

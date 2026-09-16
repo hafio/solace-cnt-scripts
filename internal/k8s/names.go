@@ -84,21 +84,3 @@ func ProductKeyRoles(cfg *config.Config) []config.Role {
 	return []config.Role{config.Primary}
 }
 
-// roleName is the long-form role word used in this package's own progress lines --
-// "copying x from backup" reads where a bare letter would not. It lives beside the
-// other role helpers rather than in the file that happens to call it; it moved here
-// when the node-labelling prompt that first needed it was removed.
-//
-// It is a hand-rolled duplicate of config.Role.Word() and should be deleted in favour
-// of it, but its remaining call sites (ops.go) are outside this change's file scope,
-// so it stays until they move.
-func roleName(role config.Role) string {
-	switch role {
-	case config.Backup:
-		return "backup"
-	case config.Monitor:
-		return "monitor"
-	default:
-		return "primary"
-	}
-}

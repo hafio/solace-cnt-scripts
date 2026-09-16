@@ -121,38 +121,40 @@ func (e Exec) command(ctx context.Context, name string, args []string) (*exec.Cm
 	return exec.CommandContext(ctx, path, args...), nil
 }
 
-func (e Exec) Run(ctx context.Context, name string, args ...string) error {
+// run is the body all six Exec methods share: resolve, wire stdio, run, and wrap a
+// failure with the command's own name. They differ ONLY in how stdio is wired, which
+// is what the wire callback says -- so there is one definition of what running a
+// command means here rather than six copies that could drift a stream or a wrap apart.
+//
+// Both standard streams default to this process's own, and wire overrides what it
+// needs: a capture replaces Stdout, and stderr stays live everywhere, because an
+// engine's diagnostics belong in front of the operator whether or not its stdout is
+// being read.
+func (e Exec) run(ctx context.Context, name string, args []string, wire func(*exec.Cmd)) error {
 	cmd, err := e.command(ctx, name, args)
 	if err != nil {
 		return err
 	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	if wire != nil {
+		wire(cmd)
+	}
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%s: %w", name, err)
 	}
 	return nil
+}
+
+func (e Exec) Run(ctx context.Context, name string, args ...string) error {
+	return e.run(ctx, name, args, nil)
 }
 
 func (e Exec) RunInput(ctx context.Context, in []byte, name string, args ...string) error {
-	cmd, err := e.command(ctx, name, args)
-	if err != nil {
-		return err
-	}
-	cmd.Stdin = bytes.NewReader(in)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s: %w", name, err)
-	}
-	return nil
+	return e.run(ctx, name, args, func(c *exec.Cmd) { c.Stdin = bytes.NewReader(in) })
 }
 
 func (e Exec) RunEnv(ctx context.Context, extraEnv []string, name string, args ...string) error {
-	cmd, err := e.command(ctx, name, args)
-	if err != nil {
-		return err
-	}
 	// Inherit and extend: the child still needs PATH, HOME and DOCKER_* from this
 	// process, so this adds to the environment rather than replacing it. Appending
 	// also means a name that somehow collided with an inherited one would be a
@@ -160,56 +162,29 @@ func (e Exec) RunEnv(ctx context.Context, extraEnv []string, name string, args .
 	// produce a bare PATH/LD_PRELOAD name in the first place, since every variable
 	// here is a secret name carrying a fixed literal suffix (render.ContainerSecret;
 	// pinned by TestComposeSecretEnvNamesCannotBeSystemVars).
-	cmd.Env = append(os.Environ(), extraEnv...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s: %w", name, err)
-	}
-	return nil
+	return e.run(ctx, name, args, func(c *exec.Cmd) { c.Env = append(os.Environ(), extraEnv...) })
 }
 
 func (e Exec) RunInteractive(ctx context.Context, name string, args ...string) error {
-	cmd, err := e.command(ctx, name, args)
-	if err != nil {
-		return err
-	}
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s: %w", name, err)
-	}
-	return nil
+	return e.run(ctx, name, args, func(c *exec.Cmd) { c.Stdin = os.Stdin })
 }
 
+// Output returns whatever the child managed to write even when it failed: a broker CLI
+// or kubectl often says why in that same stream, and the callers that scan a transcript
+// need the text more than they need the error alone.
 func (e Exec) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd, err := e.command(ctx, name, args)
-	if err != nil {
-		return nil, err
-	}
 	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return out.Bytes(), fmt.Errorf("%s: %w", name, err)
-	}
-	return out.Bytes(), nil
+	err := e.run(ctx, name, args, func(c *exec.Cmd) { c.Stdout = &out })
+	return out.Bytes(), err
 }
 
 func (e Exec) OutputInput(ctx context.Context, in []byte, name string, args ...string) ([]byte, error) {
-	cmd, err := e.command(ctx, name, args)
-	if err != nil {
-		return nil, err
-	}
-	cmd.Stdin = bytes.NewReader(in)
 	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return out.Bytes(), fmt.Errorf("%s: %w", name, err)
-	}
-	return out.Bytes(), nil
+	err := e.run(ctx, name, args, func(c *exec.Cmd) {
+		c.Stdin = bytes.NewReader(in)
+		c.Stdout = &out
+	})
+	return out.Bytes(), err
 }
 
 // Echo prints the command it would run instead of running it. Output returns
@@ -229,19 +204,33 @@ func (e Echo) w() io.Writer {
 	return os.Stdout
 }
 
-func (e Echo) Run(_ context.Context, name string, args ...string) error {
+// echo prints the one line Run, RunInteractive and Output all show. What this runner
+// records is the argv, and an interactive session or a captured read issues the same
+// argv a plain run does -- so the three shared a body byte for byte.
+func (e Echo) echo(name string, args []string) {
 	fmt.Fprintln(e.w(), "+ "+Quote(name, args...))
+}
+
+// echoStdin is that line plus the SIZE of what would have been fed to the child. The
+// bytes themselves are never echoed: stdin is how a secret reaches a command without
+// passing through an argv, so echoing it would undo the reason it went there.
+func (e Echo) echoStdin(in []byte, name string, args []string) {
+	fmt.Fprintf(e.w(), "+ %s  <<< (%d bytes on stdin)\n", Quote(name, args...), len(in))
+}
+
+func (e Echo) Run(_ context.Context, name string, args ...string) error {
+	e.echo(name, args)
 	return nil
 }
 
 func (e Echo) RunInput(_ context.Context, in []byte, name string, args ...string) error {
-	fmt.Fprintf(e.w(), "+ %s  <<< (%d bytes on stdin)\n", Quote(name, args...), len(in))
+	e.echoStdin(in, name, args)
 	return nil
 }
 
 // RunEnv echoes the variable names it would set with their values masked: the
 // whole point of the environment is to carry secrets, and echoed output is
-// printed, logged and pasted into tickets (§3). The names are annotated AFTER the
+// printed, logged and pasted into tickets. The names are annotated AFTER the
 // command, the way RunInput annotates its stdin, so every echoed line still reads
 // as "+ <the command>".
 func (e Echo) RunEnv(ctx context.Context, extraEnv []string, name string, args ...string) error {
@@ -258,24 +247,31 @@ func (e Echo) RunEnv(ctx context.Context, extraEnv []string, name string, args .
 func MaskEnv(env []string) string {
 	masked := make([]string, 0, len(env))
 	for _, pair := range env {
-		key, _, _ := strings.Cut(pair, "=")
+		key, _, ok := strings.Cut(pair, "=")
+		if !ok {
+			// No '=' means no key to show, and echoing the whole entry as if it were
+			// one would print the very value this function exists to hide.
+			key = "<malformed>"
+		}
 		masked = append(masked, quoteTok(key)+"=***")
 	}
 	return strings.Join(masked, " ")
 }
 
 func (e Echo) RunInteractive(_ context.Context, name string, args ...string) error {
-	fmt.Fprintln(e.w(), "+ "+Quote(name, args...))
+	e.echo(name, args)
 	return nil
 }
 
+// Output returns nothing, so a caller that parses output degrades rather than reading
+// an echoed line as the command's answer.
 func (e Echo) Output(_ context.Context, name string, args ...string) ([]byte, error) {
-	fmt.Fprintln(e.w(), "+ "+Quote(name, args...))
+	e.echo(name, args)
 	return nil, nil
 }
 
 func (e Echo) OutputInput(_ context.Context, in []byte, name string, args ...string) ([]byte, error) {
-	fmt.Fprintf(e.w(), "+ %s  <<< (%d bytes on stdin)\n", Quote(name, args...), len(in))
+	e.echoStdin(in, name, args)
 	return nil, nil
 }
 

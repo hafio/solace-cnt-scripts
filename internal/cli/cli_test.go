@@ -933,9 +933,12 @@ func TestCtrExecCLIPathSeparator(t *testing.T) {
 }
 
 // TestCtrErrorPaths covers the actionable failures of the container config/check
-// steps on a container-standalone env over the echo seam: the cert and
-// product-key steps demand configuration that is absent, and a login over the
-// echo runner cannot succeed against a non-existent broker. None polls.
+// steps on a container-standalone env over the echo seam: the cert step demands
+// configuration that is absent, and a login over the echo runner cannot succeed
+// against a non-existent broker. None polls.
+//
+// product-keys is deliberately NOT here: with nothing configured it skips, the same
+// way domain-certs does (TestProductKeysWithNothingConfiguredSkips).
 func TestCtrErrorPaths(t *testing.T) {
 	path := writeCtrStandaloneEnv(t)
 	cases := []struct {
@@ -944,7 +947,6 @@ func TestCtrErrorPaths(t *testing.T) {
 		wantErr string
 	}{
 		{"config apply server-cert (no tls)", []string{"broker", "configure", "server-certs", "--platform", "docker"}, "must both be set"},
-		{"config apply product-keys (none)", []string{"broker", "configure", "product-keys", "--platform", "docker"}, "no product keys configured"},
 		{"check semp-login (echo runner)", []string{"broker", "perform", "semp-login-check", "--platform", "docker"}, "SEMP login failed"},
 	}
 	for _, tc := range cases {
@@ -2575,12 +2577,15 @@ func TestK8sPromptsNameNamespaceAndContext(t *testing.T) {
 		args []string
 		want []string
 	}{
-		{"remove broker", []string{"broker", "remove"}, []string{"broker dev-broker", "namespace solace", "context prod-cluster"}},
+		// The context is QUOTED: it comes from `kubectl config current-context`, not
+		// from the env file, and this lands in a prompt an operator reads before
+		// destroying something.
+		{"remove broker", []string{"broker", "remove"}, []string{"broker dev-broker", "namespace solace", `context "prod-cluster"`}},
 		// The operator is cluster-scoped and lives in ITS OWN namespace, so this
 		// prompt must not repeat the broker's -- naming the wrong location is
 		// worse than naming none.
-		{"remove operator", []string{"operator", "remove"}, []string{"operator in namespace pubsubplus-operator-system", "context prod-cluster"}},
-		{"restart broker", []string{"broker", "restart"}, []string{"namespace solace", "context prod-cluster"}},
+		{"remove operator", []string{"operator", "remove"}, []string{"operator in namespace pubsubplus-operator-system", `context "prod-cluster"`}},
+		{"restart broker", []string{"broker", "restart"}, []string{"namespace solace", `context "prod-cluster"`}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3302,12 +3307,22 @@ func TestRemoveProductKeysOverTheCLI(t *testing.T) {
 		}
 	})
 
-	t.Run("nothing configured is refused rather than reported as done", func(t *testing.T) {
+	// Nothing configured is a no-op on BOTH directions, matching domain-certs: each is
+	// reached unconditionally from a config-sourced slice that may legitimately be
+	// empty, so an empty one has nothing to say rather than something to refuse.
+	t.Run("nothing configured skips on both directions", func(t *testing.T) {
 		bare := writeCtrStandaloneEnv(t) // no broker.productKeys at all
-		_, err := runCtr(t, bare, "broker", "configure", "product-keys", "--remove",
-			"--no-prompt", "--platform", "docker")
-		if err == nil || !strings.Contains(err.Error(), "no product keys configured") {
-			t.Errorf("err = %v, want the same empty-list refusal the apply path gives", err)
+		for _, args := range [][]string{
+			{"broker", "configure", "product-keys", "--platform", "docker"},
+			{"broker", "configure", "product-keys", "--remove", "--no-prompt", "--platform", "docker"},
+		} {
+			out, err := runCtr(t, bare, args...)
+			if err != nil {
+				t.Fatalf("%v err = %v, want a skip rather than a refusal", args, err)
+			}
+			if strings.Contains(out, "product-keys") {
+				t.Errorf("%v issued a script with nothing configured:\n%s", args, out)
+			}
 		}
 	})
 }

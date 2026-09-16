@@ -127,7 +127,7 @@ func TestReplicationVPNLinesIsDeterministic(t *testing.T) {
 
 // TestReplicationVPNLinesSetsRoleWithoutCyclingReplication pins the rule that replaced a
 // wrong one: a role is set IN PLACE, with no shutdown around it, against a VPN that is up
-// and replicating (operator, 2026-09-14).
+// and replicating (operator-confirmed).
 //
 // The earlier draft cycled every listed VPN down and back up to change its role. That
 // interrupted replication on each one on EVERY run, including the ones where nothing about

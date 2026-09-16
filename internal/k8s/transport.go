@@ -104,9 +104,9 @@ func (k *kubectlTransport) Download(ctx context.Context, role config.Role, remot
 }
 
 // shSingleQuote wraps s in single quotes for safe use inside `sh -c`, escaping any
-// embedded single quote (' -> '\”). Defensive: the only value passed to it is a
+// embedded single quote (' -> '\''). Defensive: the only value passed to it is a
 // tool-generated, validName-checked destPath, but this guarantees no shell
-// metacharacter in a path can break out of the `cat >` redirect (§3).
+// metacharacter in a path can break out of the `cat >` redirect.
 func shSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

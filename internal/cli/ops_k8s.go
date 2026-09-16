@@ -71,9 +71,8 @@ func opK8sValidateOperator(a *App) error { return k8sCluster(a).ValidateOperator
 // cluster-scoped and shared between brokers, so installing it is not this broker's
 // business.
 //
-// Node labelling used to be the third prerequisite and is gone entirely; the env file's
-// placement labels are selectors the rendered CR carries, not labels this tool stamps
-// onto anyone's cluster.
+// This tool never labels nodes. The env file's placement labels are selectors the
+// rendered CR carries, not labels stamped onto anyone's cluster.
 func opK8sDeploy(a *App) error {
 	c := k8sCluster(a)
 	ctx := bg()
@@ -349,10 +348,19 @@ func resolveScript(a *App, file, kind string) (config.Role, string, error) {
 
 func opK8sVerifyRedundancy(a *App) error { return k8sOps(a).Redundancy(bg()) }
 
-// opK8sVerifyDiagnostics gathers show-command output and a diagnostics bundle from every
-// broker node into the configured diagnostics dir.
+// opK8sVerifyDiagnostics gathers show-command output and a diagnostics bundle into the
+// configured diagnostics dir -- from every broker node, or from the one --pod names.
+//
+// It registers --pod and ignored it: the flag narrowed nothing and every run gathered
+// the whole group, which is the accepted-and-silently-dropped shape this tree refuses
+// everywhere else. podRoles is the same narrowing the server-cert and product-key steps
+// already take, and it announces what it narrowed.
 func opK8sVerifyDiagnostics(a *App) error {
-	return k8sOps(a).Diagnostics(bg(), a.Cfg.Broker.HostDiagnosticDir, nowStamp(), a.days, k8s.HARoles(a.Cfg)...)
+	roles, err := podRoles(a, k8s.HARoles(a.Cfg))
+	if err != nil {
+		return err
+	}
+	return k8sOps(a).Diagnostics(bg(), a.Cfg.Broker.HostDiagnosticDir, nowStamp(), a.days, roles...)
 }
 
 func opK8sVerifyLogin(a *App, role config.Role) error {
@@ -509,34 +517,30 @@ func opK8sOperatorRemove(a *App) error {
 		return nil
 	}
 	c := k8sCluster(a)
-	deleteCRDs := a.deleteLayer
-	if !deleteCRDs {
-		// The CRD question is only worth asking when its answer is not already
-		// fixed. A broker still on the cluster fixes it: OperatorDelete refuses
-		// the CRD deletion outright there, so prompting would invite a "yes"
-		// this tool will not honour -- the worst kind of prompt. Say what was
-		// found instead, and keep the CRDs without asking.
-		//
-		// An explicit --delete-crd deliberately skips this and goes straight
-		// through to that refusal: an operator who named the flag has earned a
-		// loud failure naming the brokers in the way, not a silent downgrade to
-		// "kept".
-		// A listing failure is deliberately NOT fatal here. This call runs ahead of
-		// OperatorDelete's own Preflight, so failing on it would replace the
-		// preflight's actionable "you cannot delete X" with a confusing error about
-		// a query the operator never asked for. Falling through to the question
-		// costs nothing: refuseCRDDeleteIfBrokersExist re-asks authoritatively,
-		// after the preflight, and is what actually stops the cascade.
-		refs, err := c.BrokerCRs(bg())
-		switch {
-		case err != nil:
-			deleteCRDs = confirmLayer(a, layerCRD)
-		case len(refs) > 0:
-			warn("%d broker resource(s) still exist, so the operator CRDs are kept without asking "+
-				"(deleting them would cascade-delete every one): %s", len(refs), strings.Join(refs, ", "))
-		default:
-			deleteCRDs = confirmLayer(a, layerCRD)
-		}
+	// The CRDs are the retained layer, gated exactly as `broker remove --delete-data`
+	// gates the data: without --delete-crd they are kept and nothing is asked; with it,
+	// confirmLayer wants an exact "yes" or --no-prompt: the flag raises the question
+	// rather than answering it, for the one deletion that cascades to every
+	// PubSubPlusEventBroker in the cluster. OperatorDelete refuses outright while any
+	// broker exists, so a "yes" here is never honoured against a live broker.
+	//
+	// A broker still on the cluster fixes the answer, so the question is not asked
+	// then: without the flag the CRDs are kept with a warning naming the brokers; with
+	// it the request goes straight to OperatorDelete's refusal, which lists them --
+	// prompting first would invite a "yes" this tool will not honour. A listing failure
+	// is not fatal here: OperatorDelete's own preflight reports a permission problem
+	// better than a query the operator never asked for.
+	refs, listErr := c.BrokerCRs(bg())
+	brokersExist := listErr == nil && len(refs) > 0
+	deleteCRDs := false
+	switch {
+	case a.deleteLayer && brokersExist:
+		deleteCRDs = true
+	case a.deleteLayer:
+		deleteCRDs = confirmLayer(a, layerCRD)
+	case brokersExist:
+		warn("%d broker resource(s) still exist, so the operator CRDs are kept "+
+			"(deleting them would cascade-delete every one): %s", len(refs), strings.Join(refs, ", "))
 	}
 	return c.OperatorRelease(bg(), deleteCRDs)
 }
@@ -572,12 +576,11 @@ func opK8sOperatorLogs(a *App) error {
 // opK8sGenBroker renders the Secret manifests followed by the broker CR, joined as one
 // multi-document stream in APPLY ORDER.
 //
-// One command, not the two it used to be. `generate secrets broker` existed so the
-// credential-bearing half could be reviewed on its own, but the halves then had to be
-// applied in the right order by hand, and the ordering is the part that is easy to get
-// wrong -- the CR names Secrets that have to exist first. Emitting both in the order
-// `broker deploy` applies them makes this output the artifact rather than a description of
-// one.
+// ONE command, not a separate credential-bearing half. Split in two, the outputs would
+// have to be applied in the right order by hand, and that ordering is the part that is
+// easy to get wrong: the CR names Secrets that have to exist first. Emitting both in the
+// order `broker deploy` applies them makes this output the artifact rather than a
+// description of one.
 //
 // It therefore carries the admin password, the TLS private key and the registry
 // credential in base64. That is what makes Kubernetes the only platform whose generate
@@ -690,7 +693,9 @@ func k8sContext(a *App) string {
 	if a.kubeContext == "" {
 		return ""
 	}
-	return fmt.Sprintf(" (context %s)", a.kubeContext)
+	// %q: the context name came out of kubectl, not the env file, and this lands in
+	// a confirmation prompt.
+	return fmt.Sprintf(" (context %q)", a.kubeContext)
 }
 
 // domainCANames returns the CA names from an already-resolved certificate set

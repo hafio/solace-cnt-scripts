@@ -344,10 +344,12 @@ func TestApplyDefaultsK8s(t *testing.T) {
 	}
 }
 
-func assertContainerBlockDefaults(t *testing.T, b Container) {
+// wantRunUser is passed rather than assumed: it is the one knob in this block whose
+// default depends on the platform and, for podman, on rootless (load.go).
+func assertContainerBlockDefaults(t *testing.T, b Container, wantRunUser string) {
 	t.Helper()
-	if b.RunUser != "0:0" {
-		t.Errorf("RunUser = %q, want 0:0", b.RunUser)
+	if b.RunUser != wantRunUser {
+		t.Errorf("RunUser = %q, want %q", b.RunUser, wantRunUser)
 	}
 	if b.ShmSize != "1g" {
 		t.Errorf("ShmSize = %q, want 1g", b.ShmSize)
@@ -425,7 +427,9 @@ func TestApplyDefaultsDocker(t *testing.T) {
 	if c.Broker.CLIScriptsDir != "cli" {
 		t.Errorf("container CLIScriptsDir = %q, want cli", c.Broker.CLIScriptsDir)
 	}
-	assertContainerBlockDefaults(t, c.Docker.Container)
+	// Docker takes the image's own uid: its engine is privileged, so container uid 0
+	// would be host root.
+	assertContainerBlockDefaults(t, c.Docker.Container, ImageRunUser)
 	assertContainerScaling(t, c)
 }
 
@@ -443,7 +447,7 @@ func TestApplyDefaultsPodmanRootful(t *testing.T) {
 	if c.Podman.Container.Name != "solace" {
 		t.Errorf("Podman.Container.Name = %q, want solace", c.Podman.Container.Name)
 	}
-	assertContainerBlockDefaults(t, c.Podman.Container)
+	assertContainerBlockDefaults(t, c.Podman.Container, ImageRunUser)
 	assertContainerScaling(t, c)
 
 	if c.Podman.QuadletDir != "/etc/containers/systemd" {
@@ -474,6 +478,57 @@ func TestApplyDefaultsPodmanRootlessXDG(t *testing.T) {
 	}
 	if c.Podman.WantedBy != "default.target" {
 		t.Errorf("rootless WantedBy = %q, want default.target", c.Podman.WantedBy)
+	}
+	// The fourth knob rootless changes, and the only one that is not a systemd
+	// detail: the image's own 1000001 is unreachable inside a stock 65536-entry
+	// subuid range, so rootless takes a low id the default allocation covers.
+	if c.Podman.Container.RunUser != RootlessRunUser {
+		t.Errorf("rootless RunUser = %q, want %q", c.Podman.Container.RunUser, RootlessRunUser)
+	}
+}
+
+// TestRootlessRunUserFitsAStockSubuidRange is the arithmetic behind that choice,
+// pinned rather than left in a comment: a range has to reach the id itself, so the
+// image's uid would need 1000002 entries against the 65536 useradd allocates.
+func TestRootlessRunUserFitsAStockSubuidRange(t *testing.T) {
+	const stockSubuidCount = 65536
+
+	// splitIDs parses both constants the same way, so neither can be read with the
+	// wrong shape -- an earlier version Atoi'd the whole "uid:gid" string, discarded
+	// the error, and silently compared against 0.
+	splitIDs := func(name, v string) (uid, gid int) {
+		t.Helper()
+		u, g, ok := strings.Cut(v, ":")
+		if !ok {
+			t.Fatalf("%s %q must carry an explicit gid", name, v)
+		}
+		uid, err := strconv.Atoi(u)
+		if err != nil {
+			t.Fatalf("%s uid %q must be numeric: %v", name, u, err)
+		}
+		gid, err = strconv.Atoi(g)
+		if err != nil {
+			t.Fatalf("%s gid %q must be numeric: %v", name, g, err)
+		}
+		return uid, gid
+	}
+
+	rootlessUID, rootlessGID := splitIDs("RootlessRunUser", RootlessRunUser)
+	imageUID, imageGID := splitIDs("ImageRunUser", ImageRunUser)
+
+	// Gid 0 on both is the group the broker image expects, and the one gid that
+	// needs no subgid allocation: rootless maps container gid 0 to the invoking
+	// user's own primary group.
+	if rootlessGID != 0 || imageGID != 0 {
+		t.Errorf("both defaults must name gid 0, got rootless %d and image %d", rootlessGID, imageGID)
+	}
+	// A range has to reach the id itself, so the count is uid+1.
+	if rootlessUID+1 > stockSubuidCount {
+		t.Errorf("RootlessRunUser uid %d needs %d subuids, more than the stock %d",
+			rootlessUID, rootlessUID+1, stockSubuidCount)
+	}
+	if imageUID+1 <= stockSubuidCount {
+		t.Errorf("ImageRunUser uid %d now fits a stock range, so the rootless split may no longer be needed", imageUID)
 	}
 }
 
@@ -540,11 +595,6 @@ func TestValidateK8sBadUpdateStrategy(t *testing.T) {
 		t.Errorf("expected updateStrategy enum error, got: %v", err)
 	}
 }
-
-// TestValidateK8sAdminUserFixed is GONE with the admin.user key it pinned. It rejected a
-// non-default username on Kubernetes, where the operator reads the fixed
-// username_admin_password key. That is now true on EVERY platform -- the schema has no
-// username field at all -- so there is no disagreement left to reject.
 
 func validContainerConfig(p Platform, redundancy string) *Config {
 	c := haNodesConfig(redundancy)
@@ -1101,7 +1151,10 @@ func TestValidateK8sPorts(t *testing.T) {
 
 	// In order: the "name:port" typo (M11's motivating case, no '='), port 0,
 	// port 65536, a non-numeric port, a bad protocol, a port name over the
-	// 15-character cap, a duplicate port name, and a duplicate container port.
+	// 15-character cap, a duplicate port name, a duplicate container port, and a
+	// duplicate SERVICE port -- the last of which the function's own doc comment
+	// promised and the code did not check, so two entries publishing one service
+	// port reached the CR and silently collapsed to one.
 	bad := []struct {
 		entries []string
 		want    string
@@ -1114,6 +1167,7 @@ func TestValidateK8sPorts(t *testing.T) {
 		{[]string{"this-name-is-too-long=8008"}, "at most 15 characters"},
 		{[]string{"tcp-web=8008", "tcp-web=9008"}, "names must be unique"},
 		{[]string{"tcp-web=8008", "tls-web=8008"}, "ports must be unique"},
+		{[]string{"tcp-web=8008:9008", "tls-web=8009:9008"}, "service port 9008 is also used"},
 	}
 	for _, tc := range bad {
 		t.Run(strings.Join(tc.entries, ","), func(t *testing.T) {
@@ -1668,6 +1722,7 @@ func TestValidateAdditionalUsers(t *testing.T) {
 // It is docker-specific for a reason worth stating: on Kubernetes the stricter username
 // rule rejects a '-' or '.' outright, so the pair can never be formed there in the first
 // place. This used to live in the shared table and stopped meaning anything on the k8s half.
+// TestAdditionalUserNamesDoNotCollideOnKubernetes is the other half of that.
 func TestAdditionalUserNamesCollideOnDocker(t *testing.T) {
 	c := validContainerConfig(Docker, "false")
 	c.SEMP.AdditionalUsers = []AdditionalUser{
@@ -1683,22 +1738,31 @@ func TestAdditionalUserNamesCollideOnDocker(t *testing.T) {
 	}
 }
 
-// TestValidateAdditionalUserPasswordCharsetIsK8sOnly is GONE, and its replacement is
-// TestAdditionalUserPasswordCharsAreFreeOnKubernetes above.
-//
-// It pinned the opposite of what is now true: Kubernetes used to create these users over
-// the broker CLI, so their passwords could not carry the characters the CLI rejects inside
-// a quoted value. They go into a Secret now, base64-encoded and never interpolated into a
-// CLI line, so that restriction was lifted rather than moved -- and a test asserting a
-// removed rule is worse than no test, because it blocks the change that removed it.
+// TestAdditionalUserNamesDoNotCollideOnKubernetes: the fold is a docker concern and the
+// check now says so. Kubernetes projects these as Secret keys one-to-one into the
+// environment with no folding, so `SVC_A` and `svc_a` are two distinct variables there --
+// and the rule, applied unconditionally, refused a configuration that would have worked.
+func TestAdditionalUserNamesDoNotCollideOnKubernetes(t *testing.T) {
+	c := validK8sConfig()
+	c.SEMP.AdditionalUsers = []AdditionalUser{
+		{Username: "SVC_A", AccessLevel: "none", Password: "pw"},
+		{Username: "svc_a", AccessLevel: "none", Password: "pw"},
+	}
+	if err := c.Validate(K8s); err != nil {
+		t.Errorf("two case-distinct usernames are distinct environment variables on Kubernetes: %v", err)
+	}
+}
+
+// An additional user's password is NOT charset-restricted on Kubernetes, and that is
+// deliberate rather than an omission (TestAdditionalUserPasswordCharsAreFreeOnKubernetes
+// above pins it). The password goes into a Secret, base64-encoded, and is never
+// interpolated into a broker CLI line, so the CLI's quoting rules do not reach it.
 
 // TestValidateAdditionalUserClashesWithABuiltIn: `admin` and `monitor` are the broker's
 // own accounts, with their own keys (semp.adminPass, semp.monitorPass), so listing one
-// under additionalUsers would produce two secrets feeding a single broker setting.
-//
-// It used to test a name matching a CONFIGURED admin.user. That key is gone -- the admin
-// user is `admin` everywhere now -- so the clash is against a fixed pair, and a name like
-// `operator` that once collided is simply a legal username.
+// under additionalUsers would produce two secrets feeding a single broker setting. The
+// clash is against that fixed pair and nothing else: the admin user is `admin` on every
+// platform, so there is no configured name for a username to collide with.
 func TestValidateAdditionalUserClashesWithABuiltIn(t *testing.T) {
 	for _, name := range []string{AdminUser, MonitorUser} {
 		c := validContainerConfig(Docker, "false")
@@ -1740,6 +1804,7 @@ func TestValidateCredentialControlChars(t *testing.T) {
 		{"semp.monitorPass", func(c *Config, v string) { c.SEMP.MonitorPass = v }},
 		{"redundancy.psk", func(c *Config, v string) { c.Redundancy.PSK = v }},
 		{"tls.certPassphrase", func(c *Config, v string) { c.TLS.CertPassphrase = v }},
+		{"image.pass", func(c *Config, v string) { c.Image.Pass = v }},
 	}
 	for _, f := range fields {
 		for _, bc := range controlCharCases {

@@ -12,15 +12,15 @@ import (
 
 // showVPNName is the uploaded name of the VPN listing script. Both default-VPN
 // directions run it as their confirmation and the default-user path runs it to learn
-// which VPNs exist, so the name is written once: runCLIRead and removeCLI must agree on
-// it or a script is left behind in the broker's cliscripts dir.
+// which VPNs exist, so the name is written once. readCLI pairs the upload with its own
+// removal, so the two can no longer disagree about it.
 const showVPNName = "show-vpn"
 
 // ServerCert loads the TLS server certificate into each of roles over the Solace
 // CLI, porting the CLI branch of 051 (the $SOLBK_SVR_SECRET k8s-secret fast path
 // is handled by the k8s platform, not here). It concatenates key + cert + CAs
 // into the tls-<dt>.crt.key file the broker loads. The private key rides Upload's
-// stdin, so it never appears in an argv or an echoed command (§3).
+// stdin, so it never appears in an argv or an echoed command.
 func (o *Ops) ServerCert(ctx context.Context, dt string, roles ...config.Role) error {
 	// The key+cert pair comes from ServerCertBundle so its ORDER has one definition
 	// shared with the bundle the container platforms mount. The CAs are appended
@@ -60,8 +60,8 @@ func (o *Ops) ServerCert(ctx context.Context, dt string, roles ...config.Role) e
 // full host path to read the certificate from -- no folder to join it onto any
 // more, since the resolver has already done that.
 //
-// Every name is validated BEFORE anything is uploaded (rule F: fail loud
-// before upload), matching the discipline ProductKeys documents. What used to
+// Every name is validated BEFORE anything is uploaded, matching the discipline
+// ProductKeys documents. What used to
 // be a second validName call on the host-side FILENAME is gone: that value is
 // now a full host path (broker.validName's charset would refuse the first '/'
 // or '\' in it), and it is no longer either a CLI operand or an in-broker
@@ -117,14 +117,11 @@ func (o *Ops) defaultVPN(ctx context.Context, role config.Role, script, body str
 	if _, err := o.RunCLI(ctx, role, script, body); err != nil {
 		return err
 	}
-	out, err := o.runCLIRead(ctx, role, showVPNName, showVPNScript())
+	out, err := o.readCLI(ctx, role, showVPNName, showVPNScript())
 	if err != nil {
 		return err
 	}
 	o.show(out)
-	// Only showVPNName needs cleanup here: script ran through the wrapped RunCLI
-	// above, which cleans up its own broker-side files on exit.
-	o.removeCLI(ctx, role, showVPNName)
 	return nil
 }
 
@@ -147,19 +144,27 @@ func (o *Ops) EnableDefaultUsers(ctx context.Context, role config.Role) error {
 // warning; build turns the parsed VPN names into the script.
 func (o *Ops) defaultUsers(ctx context.Context, role config.Role, verb, script string,
 	build func([]string) string) error {
-	list, err := o.runCLIRead(ctx, role, showVPNName, showVPNBareScript())
+	list, err := o.readCLI(ctx, role, showVPNName, showVPNBareScript())
 	if err != nil {
 		return err
 	}
-	o.removeCLI(ctx, role, showVPNName)
 	vpns := parseVPNNames(string(list))
 	if len(vpns) == 0 {
 		o.progress().Warn("no message-VPNs parsed from broker output -- nothing to %s.", verb)
 		return nil
 	}
-	// script runs through the wrapped RunCLI, which cleans up its own broker-side
-	// files on exit and now fails loud if the broker rejects a line -- this used to
-	// have no detection at all.
+	// These names came out of the broker, not the env file, and each is quoted into a
+	// CLI script that runs with admin enabled -- the same operand position every
+	// config-sourced VPN name is validated for. Refused loud rather than skipped: a
+	// skipped VPN keeps its default users, silently.
+	for _, v := range vpns {
+		if err := validVPNName(v); err != nil {
+			return fmt.Errorf("refusing to %s default users: the broker reported a message-VPN name this "+
+				"tool will not place in a CLI script: %w", verb, err)
+		}
+	}
+	// RunCLI cleans up its own broker-side files on exit and fails loud if the broker
+	// rejects a line.
 	out, err := o.RunCLI(ctx, role, script, build(vpns))
 	if err != nil {
 		return err
@@ -171,28 +176,53 @@ func (o *Ops) defaultUsers(ctx context.Context, role config.Role, verb, script s
 // ProductKeys applies keys to each of roles (Primary, plus Backup in HA),
 // porting 057. It fails loud if the broker rejects a key.
 //
-// The rejection scan used to be a whole-transcript containsAnyFold("error",
-// "fail") run once over every role's combined output. That is gone: RunCLI's own
-// stop-on-error wrapper now scans each role's own transcript as it runs (against
-// failKeywords, the vetted list -- a bare "error"/"fail" false-positives on an
-// object legitimately named e.g. "error-events") and returns an error immediately,
-// so a rejection on the Primary now stops before the Backup is ever touched
-// instead of being merged into a combined buffer and checked at the end.
+// RunCLI's stop-on-error wrapper scans each role's own transcript as it runs and
+// returns immediately, so a key the Primary refuses stops the run before the Backup is
+// touched. It scans against failKeywords rather than a bare "error"/"fail", which
+// false-positives on an object legitimately named something like "error-events".
 func (o *Ops) ProductKeys(ctx context.Context, keys []string, roles ...config.Role) error {
-	if len(keys) == 0 {
-		return fmt.Errorf("no product keys configured")
+	run, err := o.checkProductKeys(keys)
+	if !run || err != nil {
+		return err
 	}
-	// Each key is interpolated into a line of a CLI script that runs with admin
-	// already enabled, so it is checked before anything is uploaded -- the sibling
-	// DomainCerts does the same for CA names and filenames.
+	return o.eachRole(ctx, roles, "product-keys", "Applying product key(s) to %q node...",
+		productKeysScript(keys))
+}
+
+// checkProductKeys is the guard both product-key ops run before anything is uploaded,
+// and it is why they are mirror images rather than two implementations.
+//
+// An empty list logs and skips, matching DomainCerts: the CLI reaches both
+// unconditionally with a config-sourced slice that may legitimately be empty, so an
+// empty one is a no-op with nothing to say rather than a failure. Every key is then
+// checked because it is interpolated into a line of a CLI script that runs with admin
+// already enabled.
+//
+// run is false for the skip, which is not an error -- so a caller returns err either way
+// and only proceeds when run is true.
+func (o *Ops) checkProductKeys(keys []string) (run bool, err error) {
+	if len(keys) == 0 {
+		o.logf("No product keys configured -- skipping.")
+		return false, nil
+	}
 	for _, k := range keys {
 		if err := validCLILine("product key", k); err != nil {
-			return err
+			return false, err
 		}
 	}
+	return true, nil
+}
+
+// eachRole runs one CLI script against every role in turn, narrating with doing (a
+// format string taking the role) before each and showing what came back.
+//
+// It stops at the FIRST rejection rather than merging every role's transcript and
+// scanning once at the end, which is what makes a key the primary refuses stop the run
+// before the backup is touched. RunCLI's own stop-on-error wrapper is what detects it.
+func (o *Ops) eachRole(ctx context.Context, roles []config.Role, name, doing, body string) error {
 	for _, role := range roles {
-		o.logf("Applying product key(s) to %q node...", role)
-		out, err := o.RunCLI(ctx, role, "product-keys", productKeysScript(keys))
+		o.logf(doing, role)
+		out, err := o.RunCLI(ctx, role, name, body)
 		if err != nil {
 			return err
 		}
@@ -201,14 +231,14 @@ func (o *Ops) ProductKeys(ctx context.Context, keys []string, roles ...config.Ro
 	return nil
 }
 
-// AdditionalUsers, the op that created these users over the broker CLI, is GONE.
+// There is no op here for semp.additionalUsers: those users are DECLARED, not created.
+// Kubernetes projects them from k8s.AdditionalUsersSecret and the container platforms
+// mount each password as a file, so they exist from the broker's first boot.
 //
-// It was kept unwired through the command-tree overhaul as a placeholder, on the note that
-// the replacement would deliver the same schema as a Secret surfaced to the broker as
-// environment variables. That is what k8s.AdditionalUsersSecret now does, so the
-// placeholder has served its purpose. Both properties that made the CLI route awkward go
-// with it: it was not re-runnable (`create username` fails on a user that exists) and its
-// transcript repeated every password, so it could never show its own output.
+// Driving the broker CLI instead cannot work, which is worth stating because it looks
+// like the obvious route: `create username` fails on a user that already exists, so the
+// op would not be re-runnable, and its transcript repeats every password, so it could
+// never show its own output.
 
 // ExecCLI uploads a local Solace CLI script and runs it in the node, porting 059.
 // The remote name is the file's basename, validated to keep it out of shell/CLI
@@ -249,12 +279,16 @@ func (o *Ops) ExecCLI(ctx context.Context, role config.Role, localPath string) e
 		return fmt.Errorf("run cli script %q: %w", name, err)
 	}
 	if bad := rejectionIn(out); bad != "" {
-		o.progress().Warn("errors detected in CLI output.")
+		// Wrapped in ErrCLIRejected, as RunCLI's own rejection is. Both detect the same
+		// failure with the same scan, and a caller asking errors.Is about one of them
+		// must not get a different answer depending on which entry point it came
+		// through -- `configure dr` already distinguishes a rejection (the broker
+		// stopped at a known line) from a lost connection (what applied is unknowable).
 		// The keyword only, never the line: like the removed additional-users op, a
 		// CLI transcript can carry passwords.
-		return fmt.Errorf("cli script %q rejected: the transcript carries %q; because of "+
+		return fmt.Errorf("%w: cli script %q -- the transcript carries %q; because of "+
 			"stop-on-error the rest of the script did not run -- see the output above for detail",
-			name, bad)
+			ErrCLIRejected, name, bad)
 	}
 	return nil
 }
@@ -309,7 +343,7 @@ func (o *Ops) ExecShellScript(ctx context.Context, role config.Role, localPath s
 // RemoveDomainCerts deletes each domain certificate authority from the node,
 // porting 150 (k8s teardown domain-certs). cas are the CA names to remove; they
 // are sorted for deterministic output and validated to keep them out of CLI
-// injection range (§3). Empty input is a no-op with a log line.
+// injection range. Empty input is a no-op with a log line.
 func (o *Ops) RemoveDomainCerts(ctx context.Context, role config.Role, cas []string) error {
 	if len(cas) == 0 {
 		o.logf("No domain certificate authorities configured -- nothing to remove.")
@@ -346,16 +380,9 @@ func (o *Ops) RemoveDomainCerts(ctx context.Context, role config.Role, cas []str
 // kubernetes.tlsServerSecret, the operator owns the mount and would put the certificate
 // straight back. The CLI refuses that combination rather than starting a fight it loses.
 func (o *Ops) RemoveServerCerts(ctx context.Context, roles ...config.Role) error {
-	for _, role := range roles {
-		o.logf("Removing the server certificate from %q node...", role)
-		// RunCLI cleans up its own broker-side files on exit; no separate removeCLI.
-		out, err := o.RunCLI(ctx, role, "remove-server-certs", removeServerCertScript())
-		if err != nil {
-			return err
-		}
-		o.show(out)
-	}
-	return nil
+	// RunCLI cleans up its own broker-side files on exit; no separate removeCLI.
+	return o.eachRole(ctx, roles, "remove-server-certs",
+		"Removing the server certificate from %q node...", removeServerCertScript())
 }
 
 // RemoveProductKeys revokes each configured product key (`no product-key <key>`), the
@@ -367,32 +394,19 @@ func (o *Ops) RemoveServerCerts(ctx context.Context, roles ...config.Role) error
 // key the broker does not hold, or naming one it will not parse, is the kind of thing a
 // CLI reports in prose and returns zero for -- so a removal that silently did nothing
 // would read as success and the operator would believe an entitlement was gone when it is
-// not. RunCLI's own stop-on-error wrapper and failKeywords scan (the vetted list, not the
-// bare "error"/"fail" this used to scan a combined transcript for) is what turns that
-// into a failed command, per role, as it happens -- rather than merging every role's
-// output and checking it once at the end.
+// not. RunCLI's stop-on-error wrapper and its failKeywords scan turn that into a failed
+// command, per role, as it happens.
 //
 // Removing every key can leave the broker UNLICENSED, which is an outage whose cause
 // points nowhere near this command. The gate for that lives in internal/cli with every
 // other destructive confirmation; this stays the mechanism.
 func (o *Ops) RemoveProductKeys(ctx context.Context, keys []string, roles ...config.Role) error {
-	if len(keys) == 0 {
-		return fmt.Errorf("no product keys configured")
+	run, err := o.checkProductKeys(keys)
+	if !run || err != nil {
+		return err
 	}
-	for _, k := range keys {
-		if err := validCLILine("product key", k); err != nil {
-			return err
-		}
-	}
-	for _, role := range roles {
-		o.logf("Removing product key(s) from %q node...", role)
-		out, err := o.RunCLI(ctx, role, "remove-product-keys", removeProductKeysScript(keys))
-		if err != nil {
-			return err
-		}
-		o.show(out)
-	}
-	return nil
+	return o.eachRole(ctx, roles, "remove-product-keys", "Removing product key(s) from %q node...",
+		removeProductKeysScript(keys))
 }
 
 // ServerCertBundle is the broker's server certificate as one PEM: the private KEY

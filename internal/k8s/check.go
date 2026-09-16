@@ -37,7 +37,7 @@ func (c *Cluster) Check(ctx context.Context) error { return c.Validate(ctx) }
 // to an actual server round-trip). The Echo runner returns no error, so a preview
 // passes this and shows the command it would have run.
 func (c *Cluster) Reachable(ctx context.Context) error {
-	if _, err := c.output(ctx, "version", "-o", "json"); err != nil {
+	if _, err := c.kubectlOutput(ctx, "version", "-o", "json"); err != nil {
 		return fmt.Errorf("cannot reach the Kubernetes API server (check kubeconfig/context): %w", err)
 	}
 	return nil
@@ -73,7 +73,7 @@ func (c *Cluster) resolveStorageClass(ctx context.Context) (string, error) {
 	if c.Cfg.K8s.Storage.Class != "" {
 		return c.Cfg.K8s.Storage.Class, nil
 	}
-	out, err := c.output(ctx, "get", "sc", "-o", defaultSCJSONPath)
+	out, err := c.kubectlOutput(ctx, "get", "sc", "-o", defaultSCJSONPath)
 	if err != nil {
 		return "", fmt.Errorf("resolving default StorageClass: %w", err)
 	}
@@ -91,7 +91,7 @@ func (c *Cluster) resolveStorageClass(ctx context.Context) (string, error) {
 // "<none>" (not empty) for an absent field, which is preserved so the caller can
 // report it rather than mistaking it for a missing class.
 func (c *Cluster) scColumn(ctx context.Context, name, field string) (string, error) {
-	out, err := c.output(ctx, "get", "sc", name, "-o", "custom-columns=V:"+field, "--no-headers")
+	out, err := c.kubectlOutput(ctx, "get", "sc", name, "-o", "custom-columns=V:"+field, "--no-headers")
 	if err != nil {
 		return "", err
 	}
@@ -100,19 +100,16 @@ func (c *Cluster) scColumn(ctx context.Context, name, field string) (string, err
 
 // --- small report formatters ------------------------------------------------
 
-func orNone(s string) string {
-	if s == "" {
-		return "(none)"
-	}
-	return s
-}
-
+// orValue renders an empty string as fallback. Every "(none)"/"(unknown)" placeholder
+// in a report goes through it, so an empty value never reads as a blank column.
 func orValue(s, fallback string) string {
 	if s == "" {
 		return fallback
 	}
 	return s
 }
+
+func orNone(s string) string { return orValue(s, "(none)") }
 
 func setOrMissing(s string) string {
 	if s == "" {

@@ -45,7 +45,7 @@ var all = []struct {
 	short string
 	file  string
 }{
-	{"kubernetes", "minimal standalone Kubernetes env file", "assets/kubernetes.yaml"},
+	{"kubernetes", "minimal standalone kubernetes env file", "assets/kubernetes.yaml"},
 	{"docker", "minimal standalone docker env file", "assets/docker.yaml"},
 	{"podman", "minimal standalone podman env file", "assets/podman.yaml"},
 	{FullName, "every key the schema accepts, annotated with each default", "assets/full.yaml"},

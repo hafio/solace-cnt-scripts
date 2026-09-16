@@ -19,10 +19,32 @@ import (
 // going, and setting both at once is a usage error caught by the pair's own reader instead
 // of by whichever handler happened to look first.
 
+// addRemoveFlags wires the confirmation contract onto a command that asks before it acts.
+// --no-prompt answers yes to every question that IS asked, so a script needs one thing
+// switched off rather than one per question.
+//
+// l is the retained layer, or nil for a command that has none. The two flags answer
+// DIFFERENT questions and compose rather than conflict:
+//
+//	--delete-data / --delete-crd   RAISES the layer question. Without it the layer is
+//	                               kept and no question about it is asked at all.
+//	--no-prompt                    answers yes to whatever was asked.
+//
+// So --no-prompt alone keeps the data, because no data question was raised; a fully
+// unattended wipe is `--delete-data --no-prompt`. That is the inverse of the earlier
+// design, where the layer flag SILENCED a question that was always asked -- which made
+// --delete-data both the request and its own confirmation.
+//
+// The help text follows l for that reason. Seven commands pass nil (`broker restart`,
+// `operator stop`, the four `broker configure` leaves), and telling their operator that
+// "without a --delete-* flag the layer is still kept" names a flag those commands do not
+// have, about a layer they do not touch.
 func addRemoveFlags(c *cobra.Command, app *App, l *layer) {
-	c.Flags().BoolVar(&app.noPrompt, "no-prompt", false,
-		"do not ask: answer yes to every question this command would ask. It does not RAISE "+
-			"a question -- without a --delete-* flag the expensive layer is still kept")
+	usage := "do not ask: answer yes to every question this command would ask"
+	if l != nil {
+		usage += ". It does not RAISE a question -- without --" + l.flag + ", " + l.what + " is still kept"
+	}
+	c.Flags().BoolVar(&app.noPrompt, "no-prompt", false, usage)
 	if l != nil {
 		c.Flags().BoolVar(&app.deleteLayer, l.flag, false, l.usage)
 	}
@@ -31,7 +53,6 @@ func addRemoveFlags(c *cobra.Command, app *App, l *layer) {
 // addApplyRemoveFlags wires the direction pair for a `broker configure` leaf whose
 // default is to apply: --apply is the default and accepted explicitly, --remove is the
 // other way. Both at once is a usage error.
-
 func addApplyRemoveFlags(c *cobra.Command, app *App) {
 	c.Flags().BoolVar(&app.flagApply, "apply", false,
 		"apply what the env file configures (the default; accepted explicitly so a script can say so)")
@@ -41,7 +62,6 @@ func addApplyRemoveFlags(c *cobra.Command, app *App) {
 
 // addDisableEnableFlags wires the direction pair for a hardening leaf, whose default is
 // to disable: --disable is the default and accepted explicitly, --enable reverses it.
-
 func addDisableEnableFlags(c *cobra.Command, app *App) {
 	c.Flags().BoolVar(&app.flagDisable, "disable", false,
 		"shut it down (the default; accepted explicitly so a script can say so)")
@@ -51,7 +71,6 @@ func addDisableEnableFlags(c *cobra.Command, app *App) {
 
 // wantRemove reports whether an --apply/--remove leaf should remove. It is the one place
 // the pair is read, so two leaves cannot decide the precedence differently.
-
 func wantRemove(a *App) (bool, error) {
 	if a.flagApply && a.flagRemove {
 		return false, usagef("--apply and --remove ask for opposite things; pass one or neither " +
@@ -61,7 +80,6 @@ func wantRemove(a *App) (bool, error) {
 }
 
 // wantEnable reports whether a --disable/--enable leaf should enable.
-
 func wantEnable(a *App) (bool, error) {
 	if a.flagDisable && a.flagEnable {
 		return false, usagef("--disable and --enable ask for opposite things; pass one or neither " +
@@ -70,22 +88,18 @@ func wantEnable(a *App) (bool, error) {
 	return a.flagEnable, nil
 }
 
-// confirmLayer decides whether the retained layer goes with the removal.
+// addExportFlags wires the scope flags onto `broker perform export-config`.
 //
-//	--delete-*  --no-prompt  TTY   outcome
-//	no          any          any   KEPT, nothing asked
-//	yes         yes          any   deleted
-//	yes         no           yes   strict prompt: an exact "yes" deletes, anything else keeps
-//	yes         no           no    KEPT, with a loud warning naming --no-prompt
+// Scope is expressed by the PRESENCE of a value rather than by a --scope enum, which is
+// the same grammar --pod already uses: a value narrows, absence means the default set. A
+// `--scope total|broker|vpn` enum plus a --vpn list would leave three overlaps to memorise
+// (--scope vpn with no --vpn, --vpn with --scope total, --scope broker --vpn x); this
+// leaves exactly one, and exportScope refuses it.
 //
-// The layer flag RAISES the question rather than silencing it, so asking for the deletion
-// and confirming it stay two separate acts -- and an operator who never asked is never
-// asked. Keeping is the answer in every direction that is not an explicit yes.
-//
-// The last row refuses the LAYER, not the command: the removal itself still proceeds. An
-// abort partway through would leave a half-removed broker, which is worse than a reported
-// keep, and it is the same shape confirmAction already takes on a non-TTY.
-
+// --vpn takes no completer that reads the broker, and cannot: completion never loads the
+// env file, which is what stops a TAB press from parsing untrusted YAML
+// (TestCompletionNeverReadsTheEnvFile). So it is NoFileCompletions -- a VPN name is not a
+// path, and falling back to filename completion would offer nonsense.
 func addExportFlags(c *cobra.Command, app *App) {
 	c.Flags().StringArrayVar(&app.vpns, "vpn", nil,
 		"capture only this message-VPN, repeatable for several; omit it and every VPN is captured")
@@ -97,7 +111,6 @@ func addExportFlags(c *cobra.Command, app *App) {
 // exportScope reads the two scope flags as one decision, the way wantRemove and
 // wantEnable already read the configure direction flags: the refusal lives here
 // once rather than in each caller.
-
 func exportScope(a *App) ([]string, bool, error) {
 	if a.brokerOnly && len(a.vpns) > 0 {
 		return nil, false, usagef("--broker-only excludes every message-VPN, so naming --vpn %s "+
@@ -114,23 +127,17 @@ func exportScope(a *App) ([]string, bool, error) {
 	return a.vpns, a.brokerOnly, nil
 }
 
-// confirmActionStrict is confirmAction with promptYes in place of promptYesNo: the
-// same gate, but a lenient "y" is not enough and only an exact "yes" proceeds.
+// addOutFlags wires --out/-o (and the --no-prompt that answers its one question) onto a
+// command whose output is an artifact you keep rather than read.
 //
-// It exists for one case that the three existing gates could not describe honestly.
-// confirmLayer already sets this bar, and rightly -- but it gates on a.deleteLayer
-// and its refusal says "refusing to DELETE", so reusing it for an import would
-// misdescribe the action, which confirmAction's own comment says is worse than no
-// prompt at all. And confirmAction's [y/N] is too weak here: importing over an
-// existing message-VPN tears it down first, which destroys the messages spooled in
-// every one of its queues. That is the same irreversible data loss --delete-data
-// asks about, so it earns the same exact-"yes".
-//
-// --no-prompt still answers it. One silencer per command beats two flags whose
-// overlap has to be memorised, so `import-config <file> --no-prompt` is what a
-// fully unattended overwrite looks like -- reading exactly as
-// `--delete-data --no-prompt` already does.
-
+// It exists because redirection is not portable. `broker generate > x.yaml` in Windows
+// PowerShell 5.1 re-encodes this tool's plain ASCII as UTF-16LE with a BOM, and kubectl
+// then refuses the file with an error that points at the YAML rather than at the shell --
+// the corruption happens after this process has exited, so nothing inside it can prevent
+// it. Writing the file here is the only fix, and it buys three smaller things too: the
+// file appears only if the render SUCCEEDED (a shell truncates it before the command even
+// runs), the secret-bearing Kubernetes stream stays out of terminal scrollback, and the
+// file is created 0600 rather than inheriting whatever the shell would have used.
 func addOutFlags(c *cobra.Command, app *App) {
 	c.Flags().StringVarP(&app.out, "out", "o", "", "write the artifact to this file instead of stdout")
 	// Meaningful only alongside --out, and accepted without it rather than refused: a
@@ -141,26 +148,26 @@ func addOutFlags(c *cobra.Command, app *App) {
 	registerFlagCompletion(c, "out", cobra.FixedCompletions(nil, cobra.ShellCompDirectiveDefault))
 }
 
-// emitOrWrite sends body to stdout, or to app.out when --out named a file.
-//
-// The overwrite question is asked the same way every destructive question in this tree is
-// asked (confirmAction): an exact prompt when there is a terminal, yes under --no-prompt,
-// and a refusal that names the flag when there is neither. `what` describes the artifact
-// for the confirmation line, since "overwrite x.yaml?" is more useful when it says what is
-// about to be written over it.
-
+// addRestartFlag wires --restart onto the deploy command. Deliberately separate from
+// --no-prompt: bouncing a live broker to apply a changed artifact is its own explicit
+// decision, the same way deleting its data is.
 func addRestartFlag(c *cobra.Command, app *App) {
 	c.Flags().BoolVar(&app.restart, "restart", false,
 		"restart an already-running broker when the deploy artifact changed (otherwise you are asked, and a non-interactive run leaves it running)")
 }
 
-// confirmRestart asks whether a running broker may be bounced to apply a changed
-// deploy artifact. A non-interactive session declines: the caller then leaves the
-// new artifact in place and warns, so a scripted deploy never drops messaging
-// traffic unattended.
-// It takes the App so the prompt goes through the same seams as the other confirm
-// helpers; ops_container wires it to Manager.Confirm as a closure.
-
+// addAllowCommandFlag wires --allow-command onto one command that executes. It is the
+// operator's escape hatch for the execution-guard allowlist (config/execguard.go): a
+// binary this tool does not drive by default -- a `microk8s kubectl`, a site wrapper --
+// runs only when the person at the keyboard names it, for that one invocation. It cannot
+// approve a privilege-escalation wrapper at all: elevate this tool when you run it
+// (`sudo solace-util ...`), never through an env file.
+//
+// It is a CLI flag and NOTHING else on purpose. There is no config key for it, no
+// environment variable, and no binding layer that could give an env file a way to set it:
+// an env file that could approve its own binary would make the allowlist decorative.
+// wireExec adds it to each command that runs something rather than to root, so
+// `solace-util convert --allow-command ...` is a usage error too.
 func addAllowCommandFlag(c *cobra.Command, app *App) {
 	c.Flags().StringArrayVar(&app.AllowCommand, "allow-command", nil,
 		"approve one extra binary for the config's platform command, for this run only "+
@@ -176,7 +183,6 @@ func addAllowCommandFlag(c *cobra.Command, app *App) {
 // applies to runs that DO execute. Hand-rolled rather than cobra's flag groups for
 // the same reason checkGenFlags is: the flag is declared on the platform command and
 // validated against the leaf that inherited it, which lets the error name the leaf.
-
 func checkAllowCommand(cmd *cobra.Command, app *App) error {
 	if len(app.AllowCommand) == 0 || app.willExecute(cmd) {
 		return nil
@@ -184,5 +190,3 @@ func checkAllowCommand(cmd *cobra.Command, app *App) error {
 	return usagef("--allow-command is only valid on a command that runs something, and %q renders "+
 		"without executing; drop the flag", cmd.CommandPath())
 }
-
-// opFunc is a leaf handler that needs only the app context.

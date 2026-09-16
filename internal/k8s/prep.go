@@ -168,7 +168,7 @@ func GenSecrets(cfg *config.Config) ([]byte, error) {
 }
 
 // CreateSecrets applies the GenSecrets manifest on stdin, keeping every secret
-// value off the argv and out of an echoed command (§3). The whole manifest is
+// value off the argv and out of an echoed command. The whole manifest is
 // built before the first apply, so a builder error aborts cleanly without leaving
 // a partially-applied secret set.
 func (c *Cluster) CreateSecrets(ctx context.Context) error {
@@ -227,7 +227,7 @@ func (c *Cluster) DeleteSecrets(ctx context.Context) error {
 // certificate files and applies it on stdin, porting the secret-managed path of
 // 051-load-server-cert.sh (051:28-38). Applying on stdin replaces the bash
 // `create secret tls --dry-run|apply`, so the private key never reaches an argv or
-// an echoed command (§3). The broker re-reads the secret; no pod restart here.
+// an echoed command. The broker re-reads the secret; no pod restart here.
 func (c *Cluster) UpdateServerCertSecret(ctx context.Context) error {
 	if c.Cfg.K8s.TLSServerSecret == "" {
 		return fmt.Errorf("kubernetes.tlsServerSecret must be set to update the server-certificate secret")

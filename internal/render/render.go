@@ -460,9 +460,9 @@ func writeLBAnnotations(b *strings.Builder, lb config.LoadBalancer) {
 // mapping entry. These configured forms (loadBalancer.annotations,
 // placement.labels*) are free text, so pasting them in verbatim would let a value
 // carrying a colon, a quote or a leading '@' silently corrupt the document;
-// quoting both halves keeps the structure intact whatever the value is (§4a:
-// escape anything landing in a structured format). Validate has
-// already rejected an entry with no key at all.
+// quoting both halves keeps the structure intact whatever the value is -- anything
+// landing in a structured format gets escaped. Validate has already rejected an
+// entry with no key at all.
 func writeKeyValueEntry(b *strings.Builder, indent, entry string) {
 	key, value := cut(entry, ":")
 	fmt.Fprintf(b, "%s%q: %q\n", indent, strings.TrimSpace(key), strings.TrimSpace(value))
@@ -735,7 +735,7 @@ func ServerCertBundlePath(c *config.Config) string {
 //
 // No secret value is here: each one is externalized (ContainerSecrets) and this
 // list only points the broker at the file it will be mounted as, so it is safe to
-// print in full (§3).
+// print in full.
 func EnvPairs(c *config.Config, id config.NodeIdentity) []EnvPair {
 	// TZ is the same cross-platform timezone the k8s CR uses, and it is optional:
 	// an unset one leaves the container on the image default, so the pair is
@@ -766,7 +766,11 @@ func EnvPairs(c *config.Config, id config.NodeIdentity) []EnvPair {
 			EnvPair{groupKey(n.Monitor.Name, "connectvia"), n.Monitor.Addr},
 			EnvPair{groupKey(n.Monitor.Name, "nodetype"), "monitoring"},
 		)
-		if c.TLS.Cert != "" {
+		// Cert AND CertKey, the same guard ContainerSecrets and Quadlet apply. They
+		// are what create and mount the file these settings point at, so a cert with
+		// no key would enable mate-link TLS against a certificate that was never
+		// delivered -- and the broker would fail to come up rather than say so here.
+		if c.TLS.Cert != "" && c.TLS.CertKey != "" {
 			pairs = append(pairs,
 				EnvPair{"configsync_tls_enable", "yes"},
 				EnvPair{"redundancy_matelink_tls_enable", "yes"},
@@ -776,7 +780,7 @@ func EnvPairs(c *config.Config, id config.NodeIdentity) []EnvPair {
 		pairs = append(pairs, EnvPair{"redundancy_enable", "no"})
 	}
 
-	if c.TLS.Cert != "" {
+	if c.TLS.Cert != "" && c.TLS.CertKey != "" {
 		pairs = append(pairs, EnvPair{certFilePathKey, certMount})
 	}
 
@@ -812,7 +816,7 @@ func EnvPairs(c *config.Config, id config.NodeIdentity) []EnvPair {
 
 	// Point each secret-bearing setting at the file the engine mounts it as. The
 	// path derives from the setting, not from the per-host secret name, so both
-	// engines emit exactly these lines and the value stays out of the artifact (§3).
+	// engines emit exactly these lines and the value stays out of the artifact.
 	for _, s := range containerSecretSpecs(c) {
 		pairs = append(pairs, EnvPair{s.envKey + filePathSuffix, secretFilePath(s.envKey)})
 	}

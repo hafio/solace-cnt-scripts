@@ -163,9 +163,9 @@ func (o *Ops) LeaderLocal(ctx context.Context, roleArg string) error {
 	// downgrades to a warning -- the leader assertion itself is local, and a
 	// backup still holding activity surfaces in the poll below -- but a reachable
 	// mate refusing the RPC is a real error, not a skip.
-	if err := o.MateSEMPPreflight(ctx); err != nil {
+	if err := o.BackupSEMPPreflight(ctx); err != nil {
 		o.progress().Warn("cannot reach the mate's SEMP service; skipping the revert-activity step: %v", err)
-	} else if err := o.MateRevertActivity(ctx); err != nil {
+	} else if err := o.BackupRevertActivity(ctx); err != nil {
 		return err
 	}
 
@@ -177,7 +177,7 @@ func (o *Ops) LeaderLocal(ctx context.Context, roleArg string) error {
 		}
 		return primaryRedundancyUp(out), nil
 	}); err != nil {
-		if detail, dErr := o.runCLIRead(ctx, role, "show-redundancy-detail", showRedundancyDetailScript()); dErr == nil {
+		if detail, dErr := o.readCLI(ctx, role, "show-redundancy-detail", showRedundancyDetailScript()); dErr == nil {
 			o.show(detail)
 		}
 		return err
@@ -226,7 +226,7 @@ func (o *Ops) RedundancyCoordinated(ctx context.Context, roleArg string) error {
 
 	// Reach the mate BEFORE the first mutation: failing here leaves the group
 	// undisturbed, failing after a release would strand the Backup active.
-	if err := o.MateSEMPPreflight(ctx); err != nil {
+	if err := o.BackupSEMPPreflight(ctx); err != nil {
 		return err
 	}
 
@@ -251,7 +251,7 @@ func (o *Ops) RedundancyCoordinated(ctx context.Context, roleArg string) error {
 	}
 	o.progress().Info("Detected Backup node is active (Mate Active on the Primary).")
 
-	if err := o.MateRevertActivity(ctx); err != nil {
+	if err := o.BackupRevertActivity(ctx); err != nil {
 		return err
 	}
 	if err := o.poll(ctx, "Primary to become active", func(ctx context.Context) (bool, error) {

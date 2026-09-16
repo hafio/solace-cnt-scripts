@@ -137,7 +137,7 @@ func TestCreateSecretsAdminOnly(t *testing.T) {
 }
 
 // TestCreateSecretsAllThree: admin + TLS + pull secret join into one multi-doc
-// manifest applied on stdin, and no secret value ever reaches the argv (§3).
+// manifest applied on stdin, and no secret value ever reaches the argv.
 func TestCreateSecretsAllThree(t *testing.T) {
 	dir := t.TempDir()
 	crt := filepath.Join(dir, "tls.crt")

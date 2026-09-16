@@ -7,7 +7,7 @@ After=network-online.target
 Image=registry.example.com/solace-pubsub-standard:10.26.0.5
 ContainerName=solace
 HostName=solace-primary
-User=0
+User=1000001
 Group=0
 PodmanArgs=--cpus=2
 Memory=6898m

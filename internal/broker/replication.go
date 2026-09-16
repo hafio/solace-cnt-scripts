@@ -76,7 +76,7 @@ func cliTransport(t string) (string, error) {
 // keyword and it is the routing spelling of ssl, but neither report in hand ever emits
 // it and the reply schema's six-entry cap only works if the vocabulary is three words.
 // Mapping it silently would hide a broker that really did behave differently; refusing
-// it by name is the fail-loud choice (S4a).
+// it by name is the fail-loud choice.
 func schemaTransport(cli string) (string, error) {
 	switch strings.Trim(strings.TrimSpace(cli), `"`) {
 	case "", cliPlainText, "plaintext":
@@ -262,7 +262,17 @@ func normTransport(t string) string {
 	return t
 }
 
-func sortedSet(m map[string]bool) []string {
+func sortedSet(m map[string]bool) []string { return sortedKeys(m) }
+
+// sortedKeys renders any string-keyed map's keys in a stable order. It replaced three
+// byte-identical functions -- sortedSet here, sortedVPNs (replicationops.go) and
+// sortedSiteNames (switchplan.go) -- that differed only in the map's VALUE type, which
+// is exactly what a type parameter is for.
+//
+// Stable rather than incidental: these orders reach generated CLI scripts and error
+// messages, and Go randomises map iteration, so without the sort a re-run would emit a
+// different script for an unchanged deployment.
+func sortedKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
@@ -440,7 +450,7 @@ func parseShowReplicationAppliance(lines []string) (MateConfig, error) {
 		// A mate NAMED but with no Connect-Via is not an unconfigured broker -- it is
 		// this reader on the wrong report. Software prints no Connect-Via at all, so
 		// feeding it here would otherwise yield a cheerful empty result and a caller
-		// that concludes the mate is unconfigured. Fail loudly instead (S4a).
+		// that concludes the mate is unconfigured. Fail loudly instead.
 		if m.VirtualRouterName != "" {
 			return MateConfig{}, fmt.Errorf("`show replication` names mate %q but reports no "+
 				"Connect-Via. An appliance always prints one; a report without it is the software "+
@@ -675,6 +685,14 @@ func ParseVPNReplication(out []byte) (map[string]VPNRepl, error) {
 		name := strings.TrimSpace(sliceSpan(line, spans[0]))
 		if name == "" {
 			continue
+		}
+		// Every name read here is later quoted into a CLI script (the mate-convergence
+		// and unlisted-VPN shutdowns), so it is held to the same rule as a name from
+		// the env file. A broker that reports one this tool cannot quote safely fails
+		// the parse rather than reaching a script.
+		if err := validVPNName(name); err != nil {
+			return nil, fmt.Errorf("`show message-vpn * replication` reported a name this tool will not "+
+				"place in a CLI script: %w", err)
 		}
 		admin, ok := flagByte(sliceSpan(line, spans[adminCol]), adminFlags)
 		if !ok {

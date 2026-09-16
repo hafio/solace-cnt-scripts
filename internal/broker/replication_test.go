@@ -535,6 +535,9 @@ func TestParseVPNReplicationRejectsUnreadable(t *testing.T) {
 		{"unknown admin flag", "Message VPN   A C\n-----------   - -\ndefault       X A\n", "not one of U, D or -"},
 		{"unknown role flag", "Message VPN   A C\n-----------   - -\ndefault       U Z\n", "not one of A, S or -"},
 		{"no rows", "Message VPN   A C\n-----------   - -\n", "listed no message-VPNs"},
+		// A name this tool would later quote into a CLI script fails the parse: these
+		// names come from the broker, and a double quote would end the operand.
+		{"quoted name", "Message VPN   A C\n-----------   - -\nbad\"vpn       U A\n", "will not place in a CLI script"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

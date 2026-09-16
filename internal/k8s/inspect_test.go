@@ -12,7 +12,7 @@ import (
 )
 
 // The fixtures under testdata/ are REAL objects, captured from a live minikube
-// deployment on 2026-08-21 (operator 1.4.2, broker 10.26.0.8755) and trimmed to
+// deployment (operator 1.4.2, broker 10.26.0.8755) and trimmed to
 // the fields these decoders read; only the private registry host was generalised.
 // That matters: the shapes here are not what the schema documentation suggests --
 // the broker CR publishes ServiceReady/NoWarnings/HAReady rather than a

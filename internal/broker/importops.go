@@ -49,7 +49,7 @@ var applianceModelRE = regexp.MustCompile(`Solace PubSub\+ [0-9]{3,5} Version`)
 //
 // Every `cli -Apes` invocation echoes the banner before the script's own output,
 // so the type is available from ANY CLI round trip and no dedicated command is
-// needed. Verified against real output (2026-09-11): a software broker opens
+// needed. Verified against real output: a software broker opens
 // "Solace Event Broker Software Enterprise Version 10.26.0.8827" and cites
 // http://www.solace.com/license-software; an appliance opens
 // "Solace PubSub+ 3560 Version 10.25.0.200" and cites license-hardware.
@@ -144,7 +144,7 @@ func (o *Ops) ExportConfig(ctx context.Context, role config.Role, vpns []string,
 	if brokerOnly {
 		// RegionBroker only: the create-VPN pass must go too, or a broker-only artifact
 		// would still create every message-VPN on the target.
-		c.Blocks = keepRegions(c.Blocks, RegionBroker)
+		c.Blocks = keepRegion(c.Blocks, RegionBroker)
 	}
 	c.Blocks, c.Omitted = omitAtExport(c.Blocks)
 	return Annotate(c, describeScope(vpns, brokerOnly), stamp), nil
@@ -264,8 +264,7 @@ func (o *Ops) captureScope(ctx context.Context, role config.Role, vpns []string)
 // cannot tell those apart cannot express "the artifact says X and the target says
 // Y", which is the only interesting case the plan has.
 func (o *Ops) runCapture(ctx context.Context, role config.Role, name, vpn string, remove bool) ([]byte, BrokerType, error) {
-	out, err := o.runCLIRead(ctx, role, name, currentConfigScript(vpn, remove))
-	o.removeCLI(ctx, role, name)
+	out, err := o.readCLI(ctx, role, name, currentConfigScript(vpn, remove))
 	if err != nil {
 		return nil, BrokerUnknown, err
 	}
@@ -322,13 +321,9 @@ func (p *ImportPlan) ExistingList() string { return quoteList(p.Existing) }
 // NewList renders the VPNs that will be created.
 func (p *ImportPlan) NewList() string { return quoteList(p.NewVPNs) }
 
-func quoteList(names []string) string {
-	q := make([]string, len(names))
-	for i, n := range names {
-		q[i] = fmt.Sprintf("%q", n)
-	}
-	return strings.Join(q, ", ")
-}
+// quoteList is replVPNList with no empty-case wording: the callers here wrap an empty
+// result in orNone themselves, so there is one quoting rule rather than two.
+func quoteList(names []string) string { return replVPNList(names, "") }
 
 // omittedList renders the sections export removed, for the import plan report.
 func omittedList(oms []Omission) string {
@@ -581,7 +576,7 @@ type ImportResult struct {
 // one. `default` cannot be deleted, and neither can the `default` client-profile,
 // acl-profile or client-username inside any VPN -- which is why this repo's
 // `broker configure default-vpn` SHUTS THE VPN DOWN rather than removing it.
-// VERIFIED ON A LIVE BROKER (2026-09-11): the generated `remove` script simply does
+// VERIFIED ON A LIVE BROKER: the generated `remove` script simply does
 // not emit lines for the VPN itself or for its undeletable objects, so it empties
 // `default` and leaves it present. A synthesised teardown would have had to carry a
 // list of reserved names and keep it correct forever; the broker already knows.
@@ -589,6 +584,13 @@ type ImportResult struct {
 // The artifact then applies onto an emptied-but-present VPN, and its
 // `create message-vpn "default"` line is covered by the broker's own
 // `! pragma:interpreter:ignore-already-exists` wrapper.
+//
+// Two things are still NEEDS VERIFICATION ON A LIVE BROKER rather than asserted. That a
+// `remove` capture for a NON-DEFAULT VPN removes the VPN itself and leaves no residue --
+// the default case above is confirmed, the general one is not, and they are not the same
+// question because `default` is the VPN that cannot be deleted. And that a VPN-scoped
+// import does not intersect what `render.BrokerCR` owns on Kubernetes, where the operator
+// reconciles the CR and would put back whatever it believes it owns.
 //
 // The apply itself is CHUNKED and runs entirely inside the broker. Everything the
 // artifact needs is rendered into one generated shell script (driver.go) that is
@@ -1022,15 +1024,12 @@ func importIgnore(p *ImportPlan) func(Block, string) bool {
 	}
 }
 
-// keepRegions filters blocks to the named regions.
-func keepRegions(blocks []Block, keep ...Region) []Block {
-	want := map[Region]bool{}
-	for _, r := range keep {
-		want[r] = true
-	}
+// keepRegion filters blocks to one region. It was variadic, and built a set to test
+// membership of, for a single call site passing a single region.
+func keepRegion(blocks []Block, keep Region) []Block {
 	out := make([]Block, 0, len(blocks))
 	for _, b := range blocks {
-		if want[b.Region] {
+		if b.Region == keep {
 			out = append(out, b)
 		}
 	}
@@ -1051,7 +1050,7 @@ func describeScope(vpns []string, brokerOnly bool) string {
 	}
 }
 
-// Report renders the export summary. It is called only when --out freed stdout.
+// ExportReport renders the export summary. It is called only when --out freed stdout.
 func (o *Ops) ExportReport(r *output.Sink, vpns []string, brokerOnly bool, size int) {
 	r.Section("Configuration export")
 	r.KVBlock([]output.KV{

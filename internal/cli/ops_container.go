@@ -63,11 +63,11 @@ func opCtrCheck(a *App) error { return ctrManager(a).Check(bg()) }
 //
 // PrepHost is folded in rather than being its own `broker deploy` verb, because every step
 // it takes is idempotent and none of them has a side effect worth a separate command:
-// mkdir -p, chown, a DNS check, a registry login. It used to have one -- generating the
-// redundancy pre-shared key and writing it back into the env file on a first HA run -- and
-// that is gone: the key is the operator's to make (`openssl rand -base64 32`, the same
-// value on all three hosts), config refuses an env file without one, and nothing here
-// edits the file it was handed.
+// mkdir -p, chown, a DNS check, a registry login.
+//
+// Nothing here generates the redundancy pre-shared key either. It is the operator's to
+// make (`openssl rand -base64 32`, the same value on all three hosts), config refuses an
+// HA env file without one, and nothing in this tool edits the file it was handed.
 func opCtrDeployHost(a *App) error {
 	role, err := containerRole(a)
 	if err != nil {
@@ -334,12 +334,6 @@ func opCtrCopyInto(a *App, files []string) error {
 	return ctrManager(a).CopyInto(bg(), files, a.destDir)
 }
 
-// opCtrTeardownDomainCerts removes the configured domain CAs from this host's
-// broker. The operation is platform-agnostic and already ran over this transport
-// for the loading half; domainCANames is shared with the k8s handler.
-
-// opCtrGenArtifact renders this host's deploy artifact (podman quadlet / docker
-// compose file) without applying it.
 // opCtrGenArtifact renders this host's deploy artifact and nothing else.
 //
 // No secret value appears, and none can: a compose file references its secrets as
@@ -367,11 +361,10 @@ func opCtrGenArtifact(a *App) error {
 // create them in its store; docker: export the variables compose reads). It gets
 // the same preflight the real deploy does -- printing a script that would create an
 // empty secret is worse than refusing.
-// `generate secrets broker` is gone, and with it the secret-creation script this rendered.
-// On both container platforms a secret cannot be part of the deploy artifact, so the only
-// thing such a command could print was the VALUES -- and `broker deploy` creates them
-// itself, so nothing needed the script. render.SecretScript went with it;
-// container.ResolveSecretValues stays, because deploy uses it.
+//
+// There is no secret-rendering command on these platforms. A secret cannot be part of a
+// container deploy artifact, so the only thing such a command could print is the VALUES,
+// and `broker deploy` creates them itself.
 
 // opCtrRemoveBroker is the prompted teardown of this host's broker: the container, its
 // artifact, its engine secrets and the server-certificate bundle, then -- only if asked
@@ -388,10 +381,8 @@ func opCtrRemoveBroker(a *App) error {
 	return ctrManager(a).Delete(bg(), confirmLayer(a, layerData))
 }
 
-// opCtrDeployAll runs the full node-local bring-up: check -> prep host -> deploy.
-// The cross-host config-sync leader (HA, primary-only) is a separate explicit step.
-// `deploy all` / `remove all` are gone: opCtrDeployHost carries the whole per-host
-// lifecycle, and there is no third noun to sequence.
+// opCtrDeployHost carries the whole per-host bring-up: check, prep host, deploy. The
+// cross-host config-sync leader (HA, primary-only) is a separate explicit step.
 
 // containerRole resolves which node of a redundancy group THIS host is, for the
 // commands whose --pod is a node identity rather than a pod selector (broker deploy,

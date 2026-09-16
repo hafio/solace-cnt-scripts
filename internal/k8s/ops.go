@@ -82,7 +82,7 @@ func (c *Cluster) CopyFrom(ctx context.Context, role config.Role, files []string
 		// a backslash would keep its directory component and become a local
 		// filename with a separator in it.
 		local := config.BaseName(f)
-		c.logf("copying %s from %s", f, roleName(role))
+		c.logf("copying %s from %s", f, role.Word())
 		if err := t.Download(ctx, role, f, local); err != nil {
 			c.report().Fail("%s: %v", f, err)
 			failed++
@@ -109,13 +109,13 @@ func (c *Cluster) CopyInto(ctx context.Context, role config.Role, files []string
 	t := NewTransport(c.R, c.Cfg)
 	var failed int
 	for _, f := range files {
-		c.logf("copying %s into %s:%s", f, roleName(role), destDir)
+		c.logf("copying %s into %s:%s", f, role.Word(), destDir)
 		if err := t.UploadFile(ctx, role, f, destDir); err != nil {
 			c.report().Fail("%s: %v", f, err)
 			failed++
 			continue
 		}
-		c.report().OK("%s -> %s:%s", f, roleName(role), destDir)
+		c.report().OK("%s -> %s:%s", f, role.Word(), destDir)
 	}
 	if failed > 0 {
 		return fmt.Errorf("%d of %d file(s) failed to copy into the broker", failed, len(files))
@@ -123,11 +123,6 @@ func (c *Cluster) CopyInto(ctx context.Context, role config.Role, files []string
 	return nil
 }
 
-// ReplicasStart scales each broker StatefulSet up to one replica and waits for it to
-// become ready before moving on, porting replicas-start-broker.sh. It scales the roles
-// in order (primary, then backup, then monitor in HA), so the primary is ready before
-// the backup joins; unlike the bash original it also waits on the monitor, and the
-// wait is bounded by rolloutTimeout instead of an unbounded busy-wait.
 // RestartPod deletes a role's broker pod so the StatefulSet controller recreates it
 // against the pod template the operator has already updated. This is the step
 // kubernetes.updateStrategy=manualPodRestart requires after `deploy` changes image.tag:

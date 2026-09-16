@@ -45,7 +45,7 @@ build/test/scan command. The workflows call task names only, so local runs match
 | `regen` | Rewrite the committed goldens -- see [Goldens](#goldens). Deliberately **outside** `all`/`full`, since a gate must not rewrite what it compares against |
 | `cov` | Coverage profile -> `coverage/coverage.html` + `.out`, prints the total |
 | `scan` | `go tool govulncheck -format json` (version pinned in `go.mod`/`go.sum`), judged by [internal/tools/vulnjudge](../internal/tools/vulnjudge) -- **fatal** on a fixable vulnerability this module calls, **warns and passes** on one with no released fix. Raw stream kept at `scripts/logs/scan.json` |
-| `dist` | Local convenience: cross-compile all four release targets into `dist/` |
+| `dist` | Local convenience: cross-compile all four release targets into `dist/`. Also accepted as `binaries` |
 | `graphify` | Refresh `graphify-out/`. Local only; skipped when `CI` is set |
 | `all` | `build vet test` -- the fast inner loop; CI runs `all scan` |
 | `full` | `all` + `cov scan graphify` -- the pre-tag sweep |
@@ -106,8 +106,8 @@ container engine or a live broker rather than to this code.
 ## Toolchain pin
 
 The Go toolchain is pinned by the `toolchain` line in [go.mod](../go.mod), not just the `go`
-line: `go 1.26` is a minimum, so a machine with an older Go would otherwise build against
-the *oldest* 1.26 patch and ship its unpatched standard library. Both dev scripts export
+line: `go 1.27` is a minimum, so a machine with an older Go would otherwise build against
+the *oldest* 1.27 patch and ship its unpatched standard library. Both dev scripts export
 `GOTOOLCHAIN` from that line unless you set it yourself, so an exported `GOTOOLCHAIN=local`
 cannot quietly bypass the pin. `scan` reports standard library vulnerabilities like any
 other -- when it does, raise that `toolchain` line to the release that fixes them and

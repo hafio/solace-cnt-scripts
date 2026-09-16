@@ -169,7 +169,7 @@ run-everything command that would stop partway through a second run. On a fresh 
 3. `broker configure domain-certs` (when any `broker.domainCerts.dirs` or `.files` are listed)
 4. `broker configure default-vpn`
 5. `broker configure default-users`
-6. `broker configure product-keys` (when any are listed)
+6. `broker configure product-keys` (a no-op when none are listed, like `domain-certs`)
 
 `broker configure data-replication` belongs to that phase too, but only when this broker is
 half of a DR pair, and it is run at both sites -- see
@@ -199,7 +199,9 @@ so it needs the same directories to still be readable; if a directory has been r
 remaining ones under `files`) before removing. `product-keys` is never applied to the monitor node, which
 carries no message spool -- `--pod` narrows it to one node and warns, since a partly-licensed
 redundancy group is usually a mistake -- and the broker's CLI output is scanned for errors so
-a rejected or nonexistent key is reported as a failure rather than silently accepted.
+a rejected or nonexistent key is reported as a failure rather than silently accepted. With no
+keys configured it says so and does nothing, on both directions, exactly as `domain-certs`
+does; the script never echoes the keys back, since the transcript is shown.
 `default-vpn` does not touch the default client-username -- that is `default-users`, which
 covers every VPN rather than only this one -- and in HA, config-sync replicates both, so
 either only needs to run on one node. `default-users` reads the VPN list live from the
@@ -235,8 +237,11 @@ downgrades an unreachable mate to a warning, since its own job is local. `semp-l
 passes credentials on stdin as a curl config file so the password never reaches an argv,
 process list or log, and a failed login is reported as a failure of the login itself -- the
 request was made and answered, and the answer was no. `gather-diagnostics` deletes the
-helper scripts it uploads and the in-broker archive afterwards; a cleanup failure only warns
-rather than failing the collection. `cli-script`'s in-broker name is the file's own base name
+helper scripts it uploads on every path out, and the in-broker archive once it is safely
+downloaded; a cleanup failure only warns rather than failing the collection, but a failed
+DOWNLOAD fails the command and leaves the bundle on the broker, naming the path to fetch it
+from -- deleting it there would destroy the only copy of what was asked for. `--pod` narrows
+collection to one node. `cli-script`'s in-broker name is the file's own base name
 (split on both path separators), so one env file cannot name two different files depending on
 which host drove it. `shell-script` deletes the script it uploaded once the run finishes,
 even when it failed, and a script that echoes a secret prints it in the output; neither
@@ -403,6 +408,157 @@ configured; using this host's name: <host>`. It is settled once, at load, so the
 report, the DNS check, the rendered artifact and `validate` all name the same broker. HA
 is the opposite and stays mandatory in all three: each name keys that node's entry in a
 group table every host renders, and no host can fill in another machine's.
+
+### Which user the broker runs as
+
+Both artifacts always carry a `-u` equivalent -- quadlet `User=`/`Group=`, compose `user:` --
+so `container.runUser` overrides whatever USER the image declares. The default is chosen by
+platform, and for podman by `rootless`:
+
+| Deployment | Default `runUser` | Why |
+| --- | --- | --- |
+| docker | `1000001:0` | the image's own user and group. The engine is privileged, so container uid 0 would be **host root** |
+| podman, rootful | `1000001:0` | same reason |
+| podman, rootless | `1000:0` | the image's uid is unreachable here (below), so a low id the stock subuid allocation covers |
+
+The rootless split is arithmetic, not preference. A rootless container's uids are drawn from
+the invoking user's subuid range, and a range has to reach the id itself -- so uid `1000001`
+would need **1000002** entries against the 65536 `useradd` allocates by default. `1000` needs
+1001, which a stock range covers.
+
+**The gid is 0 everywhere**, which is the group the broker image expects and also the one gid
+that costs nothing on either side: rootful maps it to the root group, and rootless maps
+container gid 0 to the invoking user's own primary group. So a rootless deployment needs a
+**subuid** allocation but no subgid one.
+
+It is worth being explicit about what uid 0 means in each mode, because it is the usual
+source of confusion:
+
+| Container id | Rootful host id | Rootless host id |
+| --- | --- | --- |
+| uid `0` | **root** | the invoking user -- unprivileged |
+| uid `1000` | 1000 | `subuid_start + 999`, e.g. 100999 |
+| uid `1000001` | 1000001 | needs a hand-allocated range |
+| gid `0` | the root group | the invoking user's own primary group -- no subgid needed |
+
+So `runUser: "0:0"` is genuinely safe on rootless (it is just you) and is the setting to
+reach for if you want the bind-mounted data directory readable from the host without
+`podman unshare`. It needs no subuid allocation at all. The cost is that the broker runs as
+container-root, with no in-container isolation.
+
+Changing `runUser` on an existing deployment changes who owns the data directory. `broker
+deploy` re-chowns it on every run, so a redeploy heals it -- but the broker must be restarted
+to pick the new identity up, and on rootless the host-side ownership moves into the subuid
+range.
+
+### Rootless podman prerequisites
+
+`podman.rootless: true` deploys as an ordinary user, and a rootless host needs preparation
+most of which this tool deliberately does **not** perform. `validate` and the first step of
+`broker deploy` read the same block, so there is one definition of a ready host; they differ
+only in what they are allowed to do about it. `validate` never changes anything, as its help
+promises:
+
+| Row | What it asserts | If it fails |
+| --- | --- | --- |
+| `euid` | not root when `rootless: true`, root when `false` | every row below is skipped -- probed as root they would answer about the wrong account |
+| `user session` | `XDG_RUNTIME_DIR` names a directory that exists | you are under `sudo`/`su`/cron, or the user has no session |
+| `id mapping` | this user has a subuid/subgid allocation **and** it reaches `container.runUser` | an administrator allocates or widens it (below), then you run `podman system migrate` |
+| `linger` | `loginctl show-user <uid> --property=Linger` reports `yes` | **`broker deploy` enables it for you**; `validate` reports it |
+| `user systemd` | `systemctl --user` answers | `systemctl --user start podman.socket` |
+| `data dir` | `container.dataDir`'s nearest existing parent is writable | move `dataDir`, or pre-create and chown it |
+| `nofile` | the hard limit covers `container.ulimits.nofile` | [File descriptors on rootless podman](#file-descriptors-on-rootless-podman) |
+
+**What decides whether a row is repaired: the privilege it needs, not how easy it is.** The
+tool already performs several unprivileged host changes during prep -- `mkdir -p`, `chown`,
+`podman unshare chown`, `podman login` -- and enabling linger for the invoking user is in
+exactly that class. The rows it will not touch are the ones that would need root, because a
+tool that escalated on your behalf would defeat the point of running rootless at all. Note
+which way round the privileges actually go:
+
+| Operation | Privilege |
+| --- | --- |
+| `podman unshare chown` (what prep runs) | must **not** be root -- it enters the user namespace rootless podman already runs in |
+| `loginctl show-user ... --property=Linger` (what the check runs) | none; a D-Bus read of your own user |
+| `loginctl enable-linger`, no username (**what prep runs**) | none in the ordinary case: it targets the caller's own account, which polkit's `set-self-linger` grants to an active session |
+| `loginctl enable-linger <other-user>` | admin authentication -- and prep never issues this form, because it passes no username at all |
+| widening `/etc/subuid`, `/etc/security/limits.d` | root, so these are reported and refused |
+
+polkit can still decline the self form -- a session that is not active under some SSH and cron
+setups, or a distribution that has tightened `org.freedesktop.login1.set-self-linger`. Prep
+says so when that happens, and names the administrator's `loginctl enable-linger <user>` as
+the way round it.
+
+**Where subuid ranges come from.** Usually nowhere you have to think about: `useradd`
+allocates one at account-creation time from `/etc/login.defs` (`SUB_UID_MIN` 100000,
+`SUB_UID_COUNT` 65536 by default), so an ordinary interactive account already has
+`you:100000:65536` and covers the `1000:1000` default with room to spare. The accounts that
+arrive with **nothing** are worth knowing before you go asking: those made with `useradd
+--system` (a plausible way to create a broker service account), directory accounts from
+LDAP/AD/SSSD, which are not in `/etc/subuid` at all, and accounts predating the distribution
+enabling auto-allocation. The `id mapping` row reports that case as a failure rather than
+skipping it, because podman then maps only container id 0 and every non-zero `runUser`
+becomes unusable with nothing on screen to explain it.
+
+**What to hand an administrator.** The rows that need root print these, naming your account
+literally so the command can be forwarded as-is; they are collected here so you can send them
+on without re-running anything. First, as yourself, see what you have:
+
+```
+grep "^$(id -un):" /etc/subuid /etc/subgid
+ulimit -Hn
+```
+
+Then the privileged steps, if those came up short:
+
+```
+# subuid/subgid range -- the failing row prints this line with the range and account
+# already filled in; it reads /etc/subuid and /etc/subgid and proposes the next FREE
+# block, so it does not overlap another account
+sudo usermod --add-subuids <start>-<end> --add-subgids <start>-<end> <user>
+
+# file-descriptor ceiling, in /etc/security/limits.d/99-solace.conf; needs a fresh login to take effect
+<user> hard nofile 1048576
+<user> soft nofile 2448
+
+# only if container.dataDir is somewhere this user cannot create
+sudo mkdir -p /opt/solace/data && sudo chown <user> /opt/solace/data
+```
+
+And finally, back as the rootless user, with no root at all:
+
+```
+podman system migrate
+```
+
+`podman system migrate` is what makes a changed subuid range take effect for containers and
+storage that already exist. Setting `podman.container.dataDir` to something under your own
+home (`~/solace/data`) removes the third step entirely.
+
+**The session variables are set for you too.** `systemctl --user` and
+`loginctl` reach the user bus through `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`, and
+both are unset under `sudo`, `su` and bare cron. Those describe *this invocation* rather than
+the host, so when either is empty it is derived -- `XDG_RUNTIME_DIR=/run/user/<uid>` and
+`DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus`. A value you already set is never
+overwritten, and the report says which half came from where:
+
+```
+[ OK ] user session: XDG_RUNTIME_DIR=/run/user/1000 (derived) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus (derived)
+```
+
+The runtime directory is proven to exist **before** either variable is exported, because a
+derived path to a directory that is not there turns a clear "you are under sudo, or this user
+has no session" into an obscure systemctl failure several rows later. Every podman command
+that drives systemd gets the same treatment, not just `validate` and `deploy` -- `broker
+start`, `stop`, `restart`, `remove` and `status` never call the prep step but need the same
+bus.
+
+Boot-start is where linger bites hardest, and why prep enables it rather than asking: the
+quadlet carries `WantedBy=default.target`, but without lingering systemd tears the user's
+instance down at logout and starts nothing at boot, so the broker simply disappears when you
+log out. It is worth knowing that linger is scoped to the **account**, not to this
+deployment -- it makes every one of that user's services survive logout, and `broker remove`
+does not turn it off again.
 
 ### Re-deploying is safe and explicit
 
@@ -706,8 +862,8 @@ the operator is cluster-scoped and may be serving brokers this env file knows no
 
 ### Every destructive command confirms
 
-`broker remove`, `operator remove` and `broker restart` all ask before acting -- `restart`
-included, because it drops every in-flight connection (it deletes pods on Kubernetes so the
+`broker remove`, `operator remove`, `operator stop` and `broker restart` all ask before
+acting -- `restart` included, because it drops every in-flight connection (it deletes pods on Kubernetes so the
 StatefulSet recreates them, and bounces the container on Docker/Podman). So do
 `broker configure default-vpn` and `broker configure default-users` when disabling (never
 when enabling: bringing something back up needs no gate), since each drops client
@@ -738,8 +894,9 @@ the startup preamble prints `==> kube-context: <name>` beside the `==> using kub
 line, read from `kubectl config current-context` -- a kubeconfig read, not a cluster round
 trip, so it costs nothing and still prints against an unreachable cluster. Second, the prompt
 repeats both facts: `broker remove` and `broker restart` read "... in namespace `<ns>`
-(context `<ctx>`)". The namespace question names its own namespace as part of the sentence and
-appends only the `(context <ctx>)` clause. `operator remove` names the **operator's own**
+(context `"<ctx>"`)". The context is quoted because it comes from `kubectl config
+current-context` rather than from the env file. The namespace question names its own
+namespace as part of the sentence and appends only the context clause. `operator remove` names the **operator's own**
 namespace rather than repeating the broker's, since the two can differ and naming the wrong
 one would be worse than naming none. The context clause is dropped entirely, never rendered as
 an empty `(context )`, on a kubeconfig with no current context or on a non-Kubernetes platform.

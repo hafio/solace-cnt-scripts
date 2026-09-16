@@ -40,7 +40,7 @@ func (c *Cluster) now() time.Time {
 // fails is returned as-is: the caller decides whether a kind it cannot list is
 // fatal (it is not, for a report) or worth reporting.
 func (c *Cluster) getJSON(ctx context.Context, v any, args ...string) error {
-	raw, err := c.output(ctx, append(append([]string{"get"}, args...), "-o", "json")...)
+	raw, err := c.kubectlOutput(ctx, append(append([]string{"get"}, args...), "-o", "json")...)
 	if err != nil {
 		return err
 	}
@@ -100,7 +100,7 @@ type objectMeta struct {
 
 // condition is one entry of the broker CR's status.conditions.
 //
-// VERIFIED on 2026-08-21 against operator CRD pubsubplus.solace.com/v1beta1: the
+// VERIFIED against operator CRD pubsubplus.solace.com/v1beta1: the
 // types this operator publishes are ServiceReady, NoWarnings and HAReady -- NOT
 // the conventional "Ready". Reading only a "Ready" condition would therefore find
 // nothing and report a perfectly healthy broker as unknown, so the type names are
@@ -337,6 +337,21 @@ func conditionLevel(conds []condition, want string) (output.Level, string) {
 	default:
 		return output.LevelInfo, fmt.Sprintf("status %q: %s", c.Status, msg)
 	}
+}
+
+// anyKnownCondition reports whether a status carries at least one condition this build
+// recognises. It is what separates "the operator has not reported yet" from "the
+// operator reported something newer than this tool knows about": both leave
+// brokerConditionRows raising nothing, and the cluster listing used to read the second
+// as a confident "ready".
+func anyKnownCondition(conds []condition) bool {
+	for _, c := range conds {
+		switch c.Type {
+		case condServiceReady, condHAReady, condNoWarnings:
+			return true
+		}
+	}
+	return false
 }
 
 // brokerConditionRows renders the three conditions this operator publishes, in

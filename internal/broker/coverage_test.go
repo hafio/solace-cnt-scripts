@@ -231,31 +231,31 @@ func TestLastLinesEqualCount(t *testing.T) {
 
 // --- ExecCLI branches ------------------------------------------------------
 
-// TestExecCLIWarnsAndFailsOnErrorOutput closes the rejected-line branch: the
-// broker still gets the per-run warning for context, but the run itself now
-// fails once the script finished -- a CLI script is a sequence of independent
-// commands, so the whole thing still ran, but a caller checking the exit code
-// alone must be able to tell a clean run from a half-applied one.
-func TestExecCLIWarnsAndFailsOnErrorOutput(t *testing.T) {
+// TestExecCLIFailsOnErrorOutput closes the rejected-line branch. A CLI script is a
+// sequence of independent commands, so the whole thing still ran, but a caller checking
+// the exit code alone must be able to tell a clean run from a half-applied one.
+//
+// The error now wraps ErrCLIRejected, as RunCLI's own rejection does: both detect the
+// same failure with the same scan, and a caller asking errors.Is must not get a different
+// answer depending on which entry point it came through. The separate "[WARN] errors
+// detected" line went with it -- the error says more, and saying it twice said less.
+func TestExecCLIFailsOnErrorOutput(t *testing.T) {
 	local := filepath.Join(t.TempDir(), "script.cli")
 	ft := &fakeTransport{responder: func(_ config.Role, _ []string, _ []byte) ([]byte, error) {
 		return []byte("invalid command detected\n"), nil
 	}}
-	var logs []string
-	o := &Ops{
-		T:            ft,
-		Cfg:          &config.Config{},
-		Out:          &bytes.Buffer{},
-		PollInterval: 0,
-		Log:          func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) },
-	}
+	out := &bytes.Buffer{}
+	o := &Ops{T: ft, Cfg: &config.Config{}, Out: out, PollInterval: 0}
 	err := o.ExecCLI(context.Background(), config.Primary, local)
 	if err == nil {
 		t.Fatal("ExecCLI should fail once rejected-looking output was detected")
 	}
-	joined := strings.Join(logs, "\n")
-	if !strings.Contains(joined, "[WARN] errors detected") {
-		t.Errorf("ExecCLI should still warn on error-looking output, got %v", logs)
+	if !errors.Is(err, ErrCLIRejected) {
+		t.Errorf("ExecCLI rejection = %v, want it to wrap ErrCLIRejected like RunCLI's does", err)
+	}
+	// The transcript is shown, which is what the error's "see the output above" promises.
+	if !strings.Contains(out.String(), "invalid command detected") {
+		t.Errorf("ExecCLI should show the transcript it is pointing at, got %q", out)
 	}
 }
 
@@ -301,12 +301,9 @@ func TestServerCertCAReadError(t *testing.T) {
 
 // --- DomainCerts: a full host path is accepted, not a filename branch ------
 //
-// This used to be TestDomainCertsBadFilename, pinning validName's rejection of
-// a certificate FILENAME containing a space -- config_ops.go's own second
-// validName call, which the shape change deletes outright. The value is no
-// longer an in-broker path or a CLI operand, only a local argument to
-// UploadFile, so a path with a space in it (which config.CheckHostPath already
-// refuses at load, long before this is ever called) must be ACCEPTED here.
+// A DomainCert's Path is a HOST path, not an in-broker path and not a CLI operand --
+// only a local argument to UploadFile. So a space in it must be ACCEPTED here;
+// config.CheckHostPath is what refuses a bad one, at load, long before this runs.
 
 func TestDomainCertsAcceptsAPathWithSpaces(t *testing.T) {
 	ft := &fakeTransport{}
@@ -587,9 +584,14 @@ func TestDisableDefaultVPNDisableError(t *testing.T) {
 	}
 }
 
-// TestDisableDefaultVPNShowError closes the show-vpn confirmation-read error
-// branch: a failed readback must surface rather than being swallowed as
-// success, and cleanup of the uploaded scripts must not run.
+// TestDisableDefaultVPNShowError closes the show-vpn confirmation-read error branch: a
+// failed readback must surface rather than being swallowed as success.
+//
+// The cleanup DOES run now, and that is the change worth stating. This read goes through
+// readCLI, which pairs every upload with its own removal and does so even when the read
+// failed -- the upload usually succeeded, so skipping the removal was how a `.show-vpn.cli`
+// came to be left on the broker after every failed readback. `rm -f` makes the removal
+// harmless when the upload is what failed.
 func TestDisableDefaultVPNShowError(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		if matchCLI(argv, "show-vpn") {
@@ -601,8 +603,8 @@ func TestDisableDefaultVPNShowError(t *testing.T) {
 	if err := o.DisableDefaultVPN(context.Background(), config.Primary); err == nil {
 		t.Error("DisableDefaultVPN should return the show-vpn error")
 	}
-	if ranContains(ft, "rm", "-f") {
-		t.Error("DisableDefaultVPN must not clean up its cli scripts when show-vpn fails")
+	if !ranContains(ft, "rm", "-f") {
+		t.Error("readCLI must still remove the script it uploaded when the read itself failed")
 	}
 }
 
@@ -1041,10 +1043,12 @@ func TestGatherNodeDownloadError(t *testing.T) {
 	}
 }
 
-// TestGatherNodeBundleDownloadWarnsOnly closes gatherNode's one deliberately
-// best-effort branch: a missing/unreadable diagnostics bundle must WARN, not
-// fail the whole node's pull, since the main zip archive already succeeded.
-func TestGatherNodeBundleDownloadWarnsOnly(t *testing.T) {
+// TestGatherNodeBundleDownloadIsFatalAndKeepsTheBundle inverts what this used to
+// assert. A failed bundle download WARNED and returned nil, and the very next line
+// deleted that bundle from the broker -- so the one copy of what `gather-diagnostics`
+// exists to retrieve was destroyed, and the run reported success. It now fails, names
+// the remote path, and leaves the bundle where an operator can fetch it by hand.
+func TestGatherNodeBundleDownloadIsFatalAndKeepsTheBundle(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "diag")
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		switch {
@@ -1055,23 +1059,35 @@ func TestGatherNodeBundleDownloadWarnsOnly(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	dt := &downloadErrTransport{fakeTransport: ft, err: errors.New("bundle download boom"), match: JailRoot + "/logs/diag-node1.tgz"}
-	var logs []string
-	o := &Ops{T: dt, Cfg: &config.Config{}, Out: &bytes.Buffer{}, PollInterval: 0,
-		Log: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}
-	if err := o.Diagnostics(context.Background(), dest, "20260731", 3, config.Primary); err != nil {
-		t.Fatalf("Diagnostics should still succeed when only the bundle download fails: %v", err)
+	const remote = JailRoot + "/logs/diag-node1.tgz"
+	dt := &downloadErrTransport{fakeTransport: ft, err: errors.New("bundle download boom"), match: remote}
+	o := &Ops{T: dt, Cfg: &config.Config{}, Out: &bytes.Buffer{}, PollInterval: 0}
+	err := o.Diagnostics(context.Background(), dest, "20260731", 3, config.Primary)
+	if err == nil {
+		t.Fatal("a failed bundle download must fail the run rather than report success")
 	}
-	joined := strings.Join(logs, "\n")
-	if !strings.Contains(joined, "[WARN]") || !strings.Contains(joined, "diag-node1.tgz") {
-		t.Errorf("Diagnostics should warn naming the bundle, got %v", logs)
+	if !strings.Contains(err.Error(), remote) {
+		t.Errorf("err = %v, want it to name the path the bundle was left at", err)
+	}
+	// The bundle must NOT be among the paths removed: that removal is what used to
+	// destroy the only copy.
+	for _, r := range ft.runs {
+		if len(r.argv) == 0 || r.argv[0] != "rm" {
+			continue
+		}
+		for _, a := range r.argv {
+			if a == remote {
+				t.Errorf("the bundle was deleted after its download failed: %v", r.argv)
+			}
+		}
 	}
 }
 
-// TestGatherNodeBundleCleanupWarnsOnly closes gatherNode's other best-effort
-// branch: a failed cleanup rm of the bundle artifacts must WARN, not fail the
-// whole node's pull -- losing this (e.g. someone "fixes" it to propagate)
-// would break diagnostics collection on a transient cleanup hiccup.
+// TestGatherNodeBundleCleanupWarnsOnly closes gatherNode's remaining best-effort
+// branch: once the bundle is safely downloaded, a failed cleanup rm must WARN rather
+// than fail the whole node's pull -- losing this (e.g. someone "fixes" it to propagate)
+// would break diagnostics collection on a transient cleanup hiccup. The DOWNLOAD's own
+// failure is fatal, which is the test above.
 func TestGatherNodeBundleCleanupWarnsOnly(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "diag")
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
@@ -1098,7 +1114,7 @@ func TestGatherNodeBundleCleanupWarnsOnly(t *testing.T) {
 		t.Fatalf("Diagnostics should still succeed when only the bundle cleanup fails: %v", err)
 	}
 	joined := strings.Join(logs, "\n")
-	if !strings.Contains(joined, "[WARN]") || !strings.Contains(joined, "clean up diagnostics artifacts") {
+	if !strings.Contains(joined, "[WARN]") || !strings.Contains(joined, "diagnostics bundle") {
 		t.Errorf("Diagnostics should warn about the failed cleanup, got %v", logs)
 	}
 }

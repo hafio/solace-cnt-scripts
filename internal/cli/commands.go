@@ -14,18 +14,15 @@ import (
 // no-implicit-actions rule, and it is also what keeps the abbreviations safe -- `br` and
 // `op` alone destroy nothing, so `br rm` needs the verb spelled before anything happens.
 //
-// It used to be the other way round (`deploy broker`, `remove operator`), and the
-// inversion bought three things:
+// Three rules follow from the noun owning its verbs:
 //
-//   - One lifecycle per noun. `prepare` is gone: every prerequisite a deploy needs is
-//     applied BY the deploy, idempotently, and removed by the removal. There is no
-//     longer a right order to learn.
-//   - No third noun. `deploy all` / `remove all` went with it. The operator is
-//     cluster-scoped and shared, so it is deployed and removed on its own -- and now
-//     says so by being a noun rather than a word under someone else's verb.
-//   - One home per kind of work. The live-broker actions split into `broker configure`
-//     (settings the env file describes) and `broker perform` (imperative one-shots that
-//     act now and are not configuration at all).
+//   - One lifecycle per noun. Every prerequisite a deploy needs is applied BY the
+//     deploy, idempotently, and removed by the removal. There is no order to learn.
+//   - Two nouns, never a third. The operator is cluster-scoped and shared, so it is
+//     deployed and removed on its own rather than as a word under someone else's verb.
+//   - One home per kind of work. `broker configure` applies settings the env file
+//     describes; `broker perform` runs imperative one-shots that act now and are not
+//     configuration at all.
 //
 // Two rules carry over. There is ONE tree, not one per platform: the shape is identical
 // everywhere and applicability is enforced at pre-run (onlyOn / flagOnlyOn) rather than
@@ -386,8 +383,7 @@ func newConfigureDataReplicationCmd(app *App) *cobra.Command {
 	c := withLong(dispatchLeaf(app, "data-replication",
 		"Converge this broker to the replication: block",
 		platformOps(opK8sConfigureReplication, opCtrConfigureReplication)), configureDataReplicationLong)
-	c.Flags().BoolVar(&app.noPrompt, "no-prompt", false,
-		"answer yes to the confirmation")
+	addRemoveFlags(c, app, nil)
 	addPodFlag(c, app, config.K8s)
 	return c
 }
@@ -513,8 +509,7 @@ func newPerformDataReplicationCmd(app *App) *cobra.Command {
 	c := withLong(dispatchLeaf(app, "data-replication",
 		"Move replication roles across the DR pair",
 		platformOps(opK8sPerformReplication, opCtrPerformReplication)), performDataReplicationLong)
-	c.Flags().BoolVar(&app.noPrompt, "no-prompt", false,
-		"answer yes to the role-change confirmation")
+	addRemoveFlags(c, app, nil)
 	addPodFlag(c, app, config.K8s)
 	return c
 }
@@ -602,8 +597,7 @@ func newPerformImportConfigCmd(app *App) *cobra.Command {
 				func(a *App) error { return opCtrImportConfig(a, args[0]) }), app)
 		},
 	})
-	c.Flags().BoolVar(&app.noPrompt, "no-prompt", false,
-		"answer yes to the tear-down confirmation")
+	addRemoveFlags(c, app, nil)
 	addPodFlag(c, app, config.K8s)
 	return c
 }

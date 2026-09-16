@@ -542,6 +542,11 @@ func TestClearExistingNestedCoversAllThreeVerbs(t *testing.T) {
 // hostname one despite the identical shape: a client CA is removed only when the
 // target HAS it and this artifact re-creates it.
 //
+// It drives ClearExistingNested's client-CA leg, which is what PrepareForApply calls.
+// A standalone ClearExistingClientCAs used to exist for this test alone and has been
+// deleted -- a second entry point to the same three lines, reachable from no
+// production path, is a thing that can drift from the one that runs.
+//
 // Without the target half the removal errors on an absent CA; without the artifact
 // half the import deletes trust material the TARGET's operator added and this
 // artifact never mentions -- and a client CA decides which clients the broker
@@ -563,14 +568,15 @@ func TestClearExistingClientCAsIntersects(t *testing.T) {
 	}
 
 	// Target has the first CA and one of its own that the artifact does not carry.
-	got := removals(ClearExistingClientCAs(c.Blocks, []string{artifact[0], "a-ca-only-the-target-has"}))
+	got := removals(ClearExistingNested(c.Blocks,
+		TargetState{ClientCAs: []string{artifact[0], "a-ca-only-the-target-has"}}))
 	want := `no ` + verbClientCA + ` "` + artifact[0] + `"`
 	if len(got) != 1 || got[0] != want {
 		t.Errorf("removals = %v, want exactly [%q] -- the target's own CA must be left alone", got, want)
 	}
 
 	// Target has none: nothing to clear, because the removal would error.
-	if r := removals(ClearExistingClientCAs(c.Blocks, nil)); len(r) != 0 {
+	if r := removals(ClearExistingNested(c.Blocks, TargetState{})); len(r) != 0 {
 		t.Errorf("removals = %v, want none when the target carries no client CA", r)
 	}
 }

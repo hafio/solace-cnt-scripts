@@ -49,7 +49,9 @@ func runImport(a *App, o *broker.Ops, role config.Role, file string) error {
 	if err != nil {
 		// The operator chose this path, so a bad one is a usage error rather than a
 		// runtime failure: no retry and no different broker state would help.
-		return usagef("read the configuration artifact %q: %v", file, err)
+		// %w, not %v: the underlying *fs.PathError stays reachable through the usage
+		// wrapper, so errors.Is(err, os.ErrNotExist) still answers.
+		return usagef("read the configuration artifact %q: %w", file, err)
 	}
 
 	plan, err := o.ImportPlan(bg(), role, artifact)

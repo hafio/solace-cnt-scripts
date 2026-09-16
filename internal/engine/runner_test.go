@@ -244,6 +244,9 @@ func TestMaskEnv(t *testing.T) {
 		{"valueWithEquals", []string{"A=b=c"}, "A=***"},
 		{"emptyValue", []string{"A="}, "A=***"},
 		{"oddName", []string{"A B=c"}, "'A B'=***"},
+		// No '=' at all: the entry must not be echoed as if it were a key, since the
+		// whole entry may be the value this function exists to hide.
+		{"noEquals", []string{"hunter2"}, "'<malformed>'=***"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -463,7 +466,7 @@ func TestExecOutputInputFail(t *testing.T) {
 // TestEchoOutputInput is the dry-run half of OutputInput, the same
 // credential-bearing call RunInput backs (curl -K - with a password on
 // stdin): the byte count must be visible but the stdin body must never reach
-// dry-run output, which is printed, logged and pasted into tickets (S3).
+// dry-run output, which is printed, logged and pasted into tickets.
 func TestEchoOutputInput(t *testing.T) {
 	var buf bytes.Buffer
 	e := Echo{W: &buf}

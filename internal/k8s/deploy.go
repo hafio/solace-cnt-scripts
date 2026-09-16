@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -64,7 +65,7 @@ func (c *Cluster) DeployBroker(ctx context.Context, keepYAML bool) error {
 // nobody answered -- which is true of every silent runner, not just engine.Echo.
 func (c *Cluster) ConfirmBrokerApplied(ctx context.Context) error {
 	name := c.Cfg.K8s.Name
-	raw, err := c.output(ctx, "get", brokerResource, name, "-n", c.ns(), "-o", "json")
+	raw, err := c.kubectlOutput(ctx, "get", brokerResource, name, "-n", c.ns(), "-o", "json")
 	if err != nil {
 		return fmt.Errorf("applied broker %q but could not read it back in namespace %q: %w\n"+
 			"  Check it with `solace-util broker validate`", name, c.ns(), err)
@@ -128,7 +129,7 @@ func (c *Cluster) DeleteBroker(ctx context.Context, purge bool) error {
 		return nil
 	}
 	var failed []string
-	var lastErr error
+	var errs []error
 	var kept []string
 	for _, role := range HARoles(c.Cfg) {
 		// A custom volume mount names a claim the OPERATOR did not provision and this
@@ -151,12 +152,15 @@ func (c *Cluster) DeleteBroker(ctx context.Context, purge bool) error {
 			// though the loop keeps going to give every role a chance to delete.
 			c.progress().Warn("could not delete PVC %s: %v", pvc, err)
 			failed = append(failed, pvc)
-			lastErr = err
+			errs = append(errs, fmt.Errorf("%s: %w", pvc, err))
 		}
 	}
 	if len(failed) > 0 {
+		// errors.Join, not the last error alone: the roles can fail for DIFFERENT
+		// reasons -- one on RBAC, another on a stuck finalizer -- and keeping only the
+		// last one hid the first from both the message and errors.Is.
 		return fmt.Errorf("PVCs not deleted: %s (persistent data survives; check RBAC or a stuck finalizer): %w",
-			strings.Join(failed, ", "), lastErr)
+			strings.Join(failed, ", "), errors.Join(errs...))
 	}
 	switch {
 	case len(kept) > 0 && len(kept) == len(HARoles(c.Cfg)):

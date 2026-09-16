@@ -18,8 +18,10 @@ import (
 // leaves host state the operator now has to reason about; failing first keeps
 // "nothing happened" true.
 //
-// There is deliberately no skip flag -- the only legitimate reason to skip it is
-// previewing without an engine, which is the Echo runner and takes the branch below.
+// There is deliberately no skip flag. The one caller that has no engine to probe is the
+// Echo runner, which is a TEST seam rather than anything an operator can reach -- there is
+// no --dry-run, and `generate` is how you look before leaping -- so it takes the branch
+// below and nothing user-facing needs a flag.
 // It never starts the daemon or logs anyone in: both are the operator's decisions,
 // made with privileges this tool should not be exercising on their behalf.
 func (m *Manager) Preflight(ctx context.Context) error {
@@ -53,8 +55,16 @@ func (m *Manager) Preflight(ctx context.Context) error {
 func (m *Manager) engineHint() string {
 	if m.P == config.Podman {
 		if m.Cfg.Podman.Rootless {
+			// The three things a rootless `info` fails on, in the order they are worth
+			// trying. The subuid line is here because podman refuses outright on an
+			// account with no allocation, which is how a `useradd --system` or a
+			// directory account arrives -- and that failure lands HERE rather than on
+			// the id-mapping row, which never gets to run.
 			return "start the rootless user service: `systemctl --user start podman.socket` " +
-				"(and `loginctl enable-linger $USER` so it survives logout) -- do NOT use sudo, " +
+				"(and `loginctl enable-linger` so it survives logout); if podman named /etc/subuid, " +
+				"this account has no subuid range and an administrator has to allocate one " +
+				"(`sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $(id -un)`, " +
+				"then `podman system migrate`) -- do NOT use sudo for podman itself, " +
 				"podman.rootless=true deploys as this user"
 		}
 		return "start the engine: `sudo systemctl start podman.socket`, and re-run with the privileges " +

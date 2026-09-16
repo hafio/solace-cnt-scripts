@@ -28,12 +28,11 @@ import (
 // forward slashes there would be a rule with no purpose: the value is never argv[0],
 // so the bare-name rule that motivates the token ban does not apply.
 //
-// The tilde used to be removed here too, for the 8.3 short name a GitHub Windows
-// runner really hands out (`C:\Users\RUNNER~1\...`). It no longer has to be: the
-// token charset stopped carrying `~` at all, because a command token's tilde is now
-// refused POSITIONALLY (execguard.go's checkToken refuses a leading one and admits an
-// embedded one) -- which is the rule host paths were already using, so both sides of
-// the derivation now say the same thing about this character.
+// The tilde is not removed here, because the token charset does not carry it: a command
+// token's tilde is refused POSITIONALLY (execguard.go's checkToken refuses a leading one
+// and admits an embedded one), which is the rule host paths already used. That is what
+// lets an 8.3 short name through -- `C:\Users\RUNNER~1\...` is what a GitHub Windows
+// runner really hands out.
 //
 // A colon needs no removal: unsafeTokenChars never contained one, because
 // `--server=https://host:6443` is a legitimate command token. It is called out here
@@ -52,11 +51,9 @@ var hostPathUnsafe = strings.Map(func(r rune) rune {
 // Named so the test can assert the relationship against one definition instead of
 // repeating the list.
 //
-// It is just the backslash now. The tilde used to be here too, removed from the
-// token charset by this same derivation; it left when `~` stopped being in
-// unsafeTokenChars at all -- a command token's tilde is now refused POSITIONALLY
-// (checkToken refuses a leading one, admits an 8.3 short name's embedded one), which
-// is the rule host paths were already using, so there is nothing left to remove.
+// It is just the backslash. The tilde is not in unsafeTokenChars at all -- a command
+// token's tilde is refused POSITIONALLY (checkToken refuses a leading one, admits an 8.3
+// short name's embedded one) -- so there is nothing to remove here.
 const hostPathAdmits = `\`
 
 // CheckHostPath is the single definition of what a host filesystem path may be in
@@ -134,7 +131,7 @@ func IsAbsHostPath(p string) bool {
 	if p == "" {
 		return false
 	}
-	if p[0] == '/' || p[0] == '\\' {
+	if isPathSep(p[0]) {
 		return true
 	}
 	// A drive-letter root: C:\ or C:/, and the bare C: form, which names a
@@ -159,7 +156,7 @@ func IsAbsHostPath(p string) bool {
 // copy-from paths, filepath.Base in the CLI-script upload, and a hand-rolled
 // strings.ContainsAny(file, "/\\") in two command files.
 func BaseName(p string) string {
-	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+	if i := strings.LastIndexAny(p, pathSeparators); i >= 0 {
 		return p[i+1:]
 	}
 	return p
@@ -171,8 +168,14 @@ func BaseName(p string) string {
 // typed, and it must answer the same way on both operating systems for the same
 // env file.
 func HasPathSeparator(p string) bool {
-	return strings.ContainsAny(p, `/\`)
+	return strings.ContainsAny(p, pathSeparators)
 }
+
+// isPathSep is the same question about ONE byte, for the callers examining a known
+// position rather than searching. Both read the separator set from the one constant
+// (execguard.go's pathSeparators), so a path rule and a command rule cannot come to
+// disagree about what a separator is.
+func isPathSep(b byte) bool { return strings.IndexByte(pathSeparators, b) >= 0 }
 
 // BaseDir is the directory of the env file this Config was loaded from, or empty
 // for a Config that never went through Load. Exported for error messages and for
@@ -227,14 +230,10 @@ func (c *Config) rebaseHostPaths() {
 	//                              moving what gets deleted is not a fix.
 	//   broker.productKeys      -- Solace licence strings, not paths.
 	//
-	// broker.domainCerts.files USED to be listed here as deliberately absent, on
-	// the grounds that "each value is simultaneously the host-side filename AND
-	// the in-broker name, so validName already forbids a separator and there is
-	// nothing to rebase". That is no longer true: a files value is now a FULL
-	// host path (the CA name, not the value, is the in-broker filename), so it
-	// -- and every broker.domainCerts.dirs[i].path -- IS rebased, below, in its
-	// own loop: map values are not addressable, so they cannot join the []*string
-	// loop the way a struct field can.
+	// broker.domainCerts.files and every broker.domainCerts.dirs[i].path ARE rebased,
+	// below, in a loop of their own: a files value is a FULL host path (the CA name,
+	// not the value, is the in-broker filename), and map values are not addressable,
+	// so they cannot join the []*string loop a struct field can.
 	for _, p := range []*string{
 		&c.TLS.Cert,
 		&c.TLS.CertKey,
@@ -454,7 +453,7 @@ func tildeHome(p string, homeDir func() (string, error)) (string, error) {
 		return p, nil
 	}
 	rest := p[1:]
-	if rest != "" && rest[0] != '/' && rest[0] != '\\' {
+	if rest != "" && !isPathSep(rest[0]) {
 		return "", fmt.Errorf("%q names another user's home directory (a `~user/...` form), which this "+
 			"tool does not support -- write the path out in full", p)
 	}

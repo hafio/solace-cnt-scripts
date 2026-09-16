@@ -47,7 +47,7 @@ func ctrCfg(p config.Platform, redundancy string) *config.Config {
 	case config.Podman:
 		c.Podman.Command = config.Command{"podman"}
 		c.Podman.Container.Name = "sol-pod"
-		c.Podman.Container.RunUser = "1000:1000"
+		c.Podman.Container.RunUser = "1000:0" // config.RootlessRunUser, which ctrCfg skips deriving
 		c.Podman.Container.Mem = "6898m"
 		c.Podman.Container.DataDir = "/opt/solace/data"
 		c.Podman.QuadletDir = "/etc/containers/systemd"
@@ -84,6 +84,12 @@ func newCapMgr(cfg *config.Config, p config.Platform) (*Manager, *capRunner, *by
 	rr := &capRunner{}
 	m := NewManager(rr, cfg, p, func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) }, buf)
 	m.Resolve = func(string) bool { return true }
+	// Never the real process environment: ensureUserSession WRITES XDG_RUNTIME_DIR
+	// and DBUS_SESSION_BUS_ADDRESS, and a test that mutated the test binary's own
+	// environment would leak into every test after it. fakeEnv (rootless_test.go)
+	// replaces this with a map a test can seed and inspect.
+	m.Getenv = func(string) string { return "" }
+	m.Setenv = func(string, string) error { return nil }
 	return m, rr, buf
 }
 
@@ -184,10 +190,13 @@ func TestManagerPrepHostRootlessUsesUnshareChown(t *testing.T) {
 	cfg.Podman.Rootless = true
 	m, rr, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 1000 } // rootless as non-root: euid guard passes
+	// PrepHost runs the whole podman host-readiness block first (rootless.go), so
+	// every one of its probes has to answer before the chown is ever reached.
+	rr.outFor = healthyRootlessOut("1048576\n")
 	if err := m.PrepHost(context.Background()); err != nil {
 		t.Fatalf("PrepHost: %v", err)
 	}
-	if !hasCall(rr, "podman", []string{"unshare", "chown", "1000:1000", "/opt/solace/data"}) {
+	if !hasCall(rr, "podman", []string{"unshare", "chown", "1000:0", "/opt/solace/data"}) {
 		t.Errorf("rootless PrepHost should chown via `podman unshare`:\n%+v", rr.calls)
 	}
 }
@@ -203,16 +212,21 @@ func setNoFile(cfg *config.Config, p config.Platform, v string) {
 }
 
 // rootlessNoFileMgr builds a rootless podman Manager whose `ulimit -Hn` probe
-// answers hardLimit. capRunner returns one canned stdout for every Output call,
-// which `podman info` also receives -- harmless, since Preflight reads only its
-// error.
+// answers hardLimit and whose every OTHER rootless probe answers healthily, so
+// these tests fail on the nofile limit alone. A single canned stdout cannot do
+// that any more: PrepHost now runs the whole podman host-readiness block, whose
+// id-mapping, linger and systemd rows each read a differently-shaped answer
+// (healthyRootlessOut, rootless_test.go).
 func rootlessNoFileMgr(want, hardLimit string) (*Manager, *capRunner, *bytes.Buffer) {
 	cfg := ctrCfg(config.Podman, "false") // standalone -> the PSK step is skipped
 	cfg.Podman.Rootless = true
+	cfg.Podman.SystemctlUser = "--user" // derived by ApplyDefaults, which ctrCfg skips
+	cfg.Podman.WantedBy = "default.target"
 	setNoFile(cfg, config.Podman, want)
 	m, rr, buf := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 1000 } // rootless as non-root: euid guard passes
 	rr.out = []byte(hardLimit)
+	rr.outFor = healthyRootlessOut(hardLimit)
 	return m, rr, buf
 }
 
@@ -297,7 +311,12 @@ func TestPrepHostRootfulSkipsNoFile(t *testing.T) {
 	}
 }
 
-func TestPrepHostRootlessNoFileDryRun(t *testing.T) {
+// TestPrepHostRootlessDryRunSkipsTheReadinessBlock: the nofile probe is one row of
+// the podman host-readiness block now (rootless.go), and the block skips as a whole
+// under the Echo runner rather than row by row. Nothing it asserts can be answered
+// without a real host, so one honest skip beats seven echoed probes and seven
+// skipped assertions -- the same shape Preflight uses, one level up.
+func TestPrepHostRootlessDryRunSkipsTheReadinessBlock(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.Rootless = true
 	setNoFile(cfg, config.Podman, "2448:1048576")
@@ -305,14 +324,13 @@ func TestPrepHostRootlessNoFileDryRun(t *testing.T) {
 	if err := m.PrepHost(context.Background()); err != nil {
 		t.Fatalf("PrepHost: %v", err)
 	}
-	// The Echo runner answers nothing, so the probe is shown and the assertion
-	// skipped -- the same shape Preflight uses.
 	out := buf.String()
-	if !strings.Contains(out, "ulimit -Hn") {
-		t.Errorf("dry-run should echo the probe:\n%s", out)
+	if !strings.Contains(out, "podman host") || !strings.Contains(out, "skipped (preview)") {
+		t.Errorf("dry-run should say the whole block was skipped:\n%s", out)
 	}
-	if !strings.Contains(out, "nofile          : skipped (preview)") {
-		t.Errorf("dry-run should say the assertion was skipped:\n%s", out)
+	// And prep still previews the work it would do after the block passes.
+	if !strings.Contains(out, "mkdir") {
+		t.Errorf("dry-run should still echo the prep commands:\n%s", out)
 	}
 }
 
@@ -735,7 +753,7 @@ func TestManagerDeployDockerPassesSecretsAsEnv(t *testing.T) {
 			t.Errorf("compose environment should carry %q, got %v", want, maskedKeys(up.env))
 		}
 	}
-	// The values may reach the environment and nothing else (§3).
+	// The values may reach the environment and nothing else.
 	for _, c := range rr.calls {
 		for _, a := range c.args {
 			for _, leak := range []string{"secret-pass", "test-psk"} {
@@ -818,7 +836,7 @@ func TestManagerDeployPodmanCreatesSecrets(t *testing.T) {
 			t.Errorf("no argv may carry --replace, which would raise the podman floor to 4.7: %v", c.args)
 		}
 	}
-	// The values ride stdin, so they must never appear in an argv (§3).
+	// The values ride stdin, so they must never appear in an argv.
 	for _, c := range rr.calls {
 		for _, a := range c.args {
 			for _, leak := range []string{"secret-pass", "test-psk"} {
@@ -1067,9 +1085,9 @@ func TestManagerDeletePodmanStopFailsStateUnknownBlocksRemoval(t *testing.T) {
 }
 
 // TestManagerDeletePodmanRemovesSecrets covers M5: nothing ever removed the
-// secrets CreatePodmanSecrets loaded into podman's own store, so they outlived
+// secrets createPodmanSecrets loaded into podman's own store, so they outlived
 // `remove all --delete-data`. deletePodman must remove every one of them (by
-// the same render.ContainerSecrets list CreatePodmanSecrets uses), and a
+// the same render.ContainerSecrets list createPodmanSecrets uses), and a
 // failing removal must warn rather than fail a teardown that otherwise
 // succeeded.
 func TestManagerDeletePodmanRemovesSecrets(t *testing.T) {
@@ -1191,7 +1209,7 @@ func TestManagerStopAndRemoveStopFailsContainerRunningBlocks(t *testing.T) {
 	cfg.Docker.ComposeFile = filepath.Join(dir, "absent.yml")
 	m, rr, _ := newCapMgr(cfg, config.Docker)
 	rr.fail = failOn("stop")
-	rr.out = []byte("solace\n") // seen by both containerExists (ps -a) and containerRunning (ps --filter running)
+	rr.out = []byte("solace\n") // seen by both containerExists (ps -a) and containerRunningKnown (ps --filter running)
 	err := m.Delete(context.Background(), false)
 	if err == nil {
 		t.Fatal("Delete must fail when stop fails and the container is still running")
@@ -1207,7 +1225,7 @@ func TestManagerStopAndRemoveStopFailsContainerRunningBlocks(t *testing.T) {
 // TestManagerStopAndRemoveStopFailsProbeUnansweredBlocks is the docker twin of
 // TestManagerDeletePodmanStopFailsStateUnknownBlocksRemoval: the stop failed and
 // the running-probe could not answer either. Silence is not confirmation, so
-// this must refuse rather than fall through to `rm` -- containerRunning alone
+// this must refuse rather than fall through to `rm` -- a bare running bool alone
 // answers "false" here, which is the deferred M4 hazard and the reason
 // stopAndRemove reads containerRunningKnown's second value instead.
 func TestManagerStopAndRemoveStopFailsProbeUnansweredBlocks(t *testing.T) {
@@ -1722,13 +1740,16 @@ func TestManagerRedeployPodmanUnchangedRestartsForRotation(t *testing.T) {
 	}
 }
 
-// TestContainerRunningMatchesNameExactly guards the name-matching logic shared by
-// containerRunning and containerRunningKnown: `ps --filter name=` is an unanchored
-// regex on both engines, so a sibling deployment on the same host would otherwise
-// be mistaken for this one. Getting it wrong in either direction is expensive -- a
-// false positive skips the deploy, a false negative used to force-recreate a live
-// broker without asking (deployDocker no longer reads this lossy form for that
-// decision -- see TestManagerDeployDockerProbeUnansweredErrors).
+// TestContainerRunningMatchesNameExactly guards containerRunningKnown's name matching:
+// `ps --filter name=` is an unanchored regex on both engines, so a sibling deployment on
+// the same host would otherwise be mistaken for this one. Getting it wrong in either
+// direction is expensive -- a false positive skips the deploy, a false negative
+// force-recreates a live broker without asking.
+//
+// It drove a containerRunning wrapper that collapsed the probe's three answers into one
+// bool. That wrapper lost its last production caller when deployDocker began reading the
+// answered flag (TestManagerDeployDockerProbeUnansweredErrors), so it has been deleted and
+// this reads the same returns directly.
 func TestContainerRunningMatchesNameExactly(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -1747,21 +1768,26 @@ func TestContainerRunningMatchesNameExactly(t *testing.T) {
 			cfg := ctrCfg(config.Docker, "false") // container.name is "solace"
 			m, rr, _ := newCapMgr(cfg, config.Docker)
 			rr.out = []byte(tc.listing)
-			if got := m.containerRunning(context.Background()); got != tc.want {
-				t.Errorf("containerRunning(%q) = %v, want %v", tc.listing, got, tc.want)
+			got, answered, err := m.containerRunningKnown(context.Background())
+			if err != nil || !answered {
+				t.Fatalf("probe should have answered: answered=%v err=%v", answered, err)
+			}
+			if got != tc.want {
+				t.Errorf("containerRunningKnown(%q) = %v, want %v", tc.listing, got, tc.want)
 			}
 		})
 	}
 
-	// containerRunning itself still collapses a failed probe into "not running" --
-	// that lossy shape is exactly why deployDocker (M4) no longer calls it and
-	// reads containerRunningKnown's answered flag directly instead.
+	// A failed probe answers NEITHER way, and says so. The collapsed bool this used to
+	// assert against is what made "not running" look like a fact.
 	t.Run("probe fails", func(t *testing.T) {
 		m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 		rr.out = []byte("solace\n")
 		rr.outErr = fmt.Errorf("engine unreachable")
-		if m.containerRunning(context.Background()) {
-			t.Error("a failed probe must not report the container as running")
+		running, answered, err := m.containerRunningKnown(context.Background())
+		if running || answered || err == nil {
+			t.Errorf("failed probe = (running=%v answered=%v err=%v), want (false, false, an error)",
+				running, answered, err)
 		}
 	})
 }
@@ -2065,7 +2091,7 @@ func TestManagerPrepHostRootlessAsRootFailsHard(t *testing.T) {
 	if hasCall(rr, "mkdir", []string{"-p", "/opt/solace/data"}) {
 		t.Errorf("PrepHost must not mkdir before the euid guard, got:\n%+v", rr.calls)
 	}
-	if hasCall(rr, "podman", []string{"unshare", "chown", "1000:1000", "/opt/solace/data"}) {
+	if hasCall(rr, "podman", []string{"unshare", "chown", "1000:0", "/opt/solace/data"}) {
 		t.Errorf("PrepHost must not chown before the euid guard, got:\n%+v", rr.calls)
 	}
 }

@@ -24,7 +24,7 @@ import (
 // So it has to be simultaneously a legal CLI operand, a legal filename, and stable
 // across runs -- a name that changed between two runs would create a second CA rather
 // than update the first. Letters, digits, underscore, dash and period, capped at
-// CANameMax, is the intersection that satisfies all three (operator, 2026-09-14).
+// CANameMax, is the intersection that satisfies all three (operator-confirmed).
 //
 // An explicitly named certificate under `files:` is NOT derived: the operator chose the
 // name and it is used verbatim, checked against the same rules.
@@ -77,7 +77,7 @@ func sanitiseCAPart(s string) string {
 
 // DeriveCAName builds the CA name for a certificate found under a directory: the
 // sanitised last element of the directory, an underscore, and the sanitised filename
-// with its extension (operator, 2026-09-14).
+// with its extension (operator-confirmed).
 //
 // The DIRECTORY component is what keeps two certificates apart when the same filename
 // appears under two of the configured dirs -- `ca.pem` under `prod-cas` and under
@@ -208,7 +208,7 @@ func MatchesCertExt(file string, exts []string) bool {
 // machine must not fail `generate`, `convert`, or a deploy that never touches
 // domain certificates. It is called from the CLI ops (opK8sConfigDomainCerts /
 // opCtrConfigDomainCerts), immediately before anything is uploaded, which is
-// exactly rule F's "fail loud before anything is uploaded" -- not "at load".
+// exactly the fail-loud-before-upload rule -- not "at load".
 
 // DirReader lists the entries directly inside dir, without descending into any
 // subdirectory (rule B: the walk is one level deep). It is the seam
@@ -236,7 +236,7 @@ type DomainCert struct {
 //
 // Every check runs before anything is returned, so a caller never has to
 // upload a partial set: a dir that cannot be read is a hard failure naming the
-// dir (rule F -- a MISSING dir is not skipped, and neither is a permission
+// dir (a MISSING dir is not skipped, and neither is a permission
 // error); and two certificates resolving to one CA name is a hard failure
 // naming both source paths, across three distinct collision shapes -- two dirs
 // sharing a last path element (DeriveCAName uses only that element, so

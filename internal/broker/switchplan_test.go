@@ -320,7 +320,7 @@ func TestSwitchPreflightHealthyPair(t *testing.T) {
 	}
 }
 
-// TestSwitchPreflightRequiresThePrimaryActive is the operator's gate (2026-09-13): a
+// TestSwitchPreflightRequiresThePrimaryActive is the operator's gate: a
 // switch runs only when each site is on its own PRIMARY HA node.
 //
 // The replication role is config-synced, so this is not about where a write lands -- it

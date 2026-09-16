@@ -104,6 +104,16 @@ func TestCheckCommandAccepts(t *testing.T) {
 		// A bare "-" is a flag by shape; kubectl and docker both use it for stdin.
 		{"lone dash", clusterRules(), Command{"kubectl", "-"}, nil},
 
+		// The subword is accepted LAST after any prefix that already validated -- the
+		// tokens before it do not have to be an allowed binary. This is the tool's own
+		// derived default: with `docker.command: docker --context prod`, ComposeCommand
+		// appends `compose`, and requiring `prod` to be an allowed binary refused a
+		// valid docker deployment at load, with an error about a subcommand position
+		// the operator never wrote. TestCheckCommandRejects still holds the other
+		// half: `docker compose up` has a token this tool did not append.
+		{"compose after a flag value", composeRules(), Command{"docker", "--context", "prod", "compose"}, nil},
+		{"compose after a joined flag", composeRules(), Command{"docker", "--log-level=error", "compose"}, nil},
+
 		// An EMBEDDED tilde is an 8.3 short name, which is what a real Windows home
 		// directory routinely is -- and therefore what expandCommandHomes itself
 		// produces there, so refusing it would refuse this tool's own expansion. Only
@@ -139,7 +149,7 @@ func TestCheckCommandAccepts(t *testing.T) {
 
 // TestCheckCommandRejects is the reject half. Every case carries the substring the
 // message must contain, because an error that does not name the offending token and
-// the way out is a failed error, not a passed test (§4a).
+// the way out is a failed error, not a passed test.
 func TestCheckCommandRejects(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -592,7 +602,8 @@ func TestAllowCommandsRejects(t *testing.T) {
 // refused, not the word: blocking `sudo` while allowing `doas` would be a control in
 // name only.
 func TestAllowCommandsRejectsEscalation(t *testing.T) {
-	for _, name := range []string{"sudo", "doas", "su", "pkexec", "run0", "runas", "gsudo", "sudo.exe", "gsudo.EXE"} {
+	for _, name := range []string{"sudo", "sudoedit", "doas", "su", "pkexec", "run0", "systemd-run", "machinectl",
+		"setpriv", "capsh", "unshare", "nsenter", "runas", "gsudo", "sudo.exe", "gsudo.EXE"} {
 		t.Run(name, func(t *testing.T) {
 			c := &Config{}
 			err := c.AllowCommands([]string{name})

@@ -15,8 +15,8 @@ import (
 
 // App is the shared context threaded through every command: the parsed global
 // flags, the resolved config, and the Runner used for all external commands.
-// It replaces the bash "source 000-env.sh" bootstrap — one load, reused by the
-// whole command tree (§4: explicit context, no globals).
+// It replaces the bash "source 000-env.sh" bootstrap -- one load, reused by the
+// whole command tree. Explicit context, never a global.
 type App struct {
 	EnvName string // -e/--env value: an env file name, or a path
 	BaseDir string // dir searched for the env file, and holding env/ (defaults to CWD)
@@ -226,7 +226,7 @@ func (a *App) announceKubeContext() {
 	out, err := a.Runner.Output(bg(), kc.Name(), kc.Args("config", "current-context")...)
 	if ctx := strings.TrimSpace(string(out)); err == nil && ctx != "" {
 		a.kubeContext = ctx
-		step("kube-context: %s", ctx)
+		step("kube-context: %q", ctx) // engine output, so quoted before it reaches a terminal
 	}
 }
 
@@ -276,7 +276,7 @@ func (a *App) announceCommands() {
 // progress is the stderr sink every line this package narrates goes through, so
 // the `==> ` and `[TAG ] ` shapes are defined once, in internal/output, rather
 // than at each call site. It is a function rather than a package variable
-// because a Sink holds nothing worth caching (§4a: no global state), and the
+// because a Sink holds nothing worth caching and nothing here is global, and the
 // helpers below need one from call sites that have no *App in scope.
 func progress() *output.Sink { return output.New(os.Stderr) }
 

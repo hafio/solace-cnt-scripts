@@ -281,7 +281,7 @@ kubernetes:
                                     # mounts one that already exists
     class: standard                 # StorageClass; omit to use the cluster default
     msgNodeSize: 30Gi               # mandatory unless customVolumeMount covers every node
-    monNodeSize: 5Gi
+  # monNodeSize: 5Gi               # monitor-node PVC; the monitor holds no spool
   #   customVolumeMount:            # mount PVCs YOU created. Every node in the
   #     primary: solace-primary-pvc # redundancy group or none; entries for nodes a
   #     backup: solace-backup-pvc   # standalone file does not deploy are ignored.
@@ -357,7 +357,9 @@ docker:
                                     # `broker remove --delete-data` deletes recursively
   #   name: solace                  # container name; also prefixes this host's secret
                                     # names, so two brokers on one host cannot clash
-  #   runUser: "0:0"                # uid:gid the container runs as
+  #   runUser: "1000001:0"          # uid:gid the container runs as; defaults to the
+                                    # broker image's own user and group. "0:0" would be
+                                    # host root here, since docker's engine is privileged
   #   shmSize: 1g
   #   mem: 6898m                    # docker's b|k|m|g suffix, NOT the Mi/Gi
                                     # kubernetes.msgNode.mem takes. Defaults to the
@@ -385,7 +387,8 @@ docker:
 
 podman:
   # command: podman                 # same rules as docker.command; only `podman`
-  rootless: false                   # true = user systemd + `podman unshare` chown
+  rootless: false                   # true = user systemd + `podman unshare` chown, and
+                                    # runUser defaults to 1000:0 instead of 1000001:0
   # quadletDir: /etc/containers/systemd   # rootless: $XDG_CONFIG_HOME/containers/systemd
   baseDir: /opt/solace              # mandatory, must be ABSOLUTE. Host directory for
                                     # files this tool writes for podman -- today the
@@ -396,7 +399,14 @@ podman:
   container:
     dataDir: /opt/solace/data       # mandatory, must be ABSOLUTE (see docker above)
   #   name: solace
-  #   runUser: "0:0"
+  #   runUser: "1000:0"             # rootful defaults to the image's own 1000001:0;
+                                    # ROOTLESS defaults to 1000:0, because a rootless
+                                    # container's uids come out of this user's subuid
+                                    # range and 1000001 would need 1000002 entries
+                                    # against a stock 65536. Needs >= 1001 subuids, but
+                                    # NO subgids: gid 0 maps to your own group. "0:0"
+                                    # needs neither and maps container root to you, at
+                                    # the cost of in-container isolation
   #   shmSize: 1g
   #   mem: 6898m                    # same rules as docker.container.mem
   #   ulimits:

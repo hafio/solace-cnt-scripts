@@ -59,7 +59,7 @@ func NewMateChannel(r engine.Runner, cfg *config.Config, site config.ReplSite,
 	run := func(ctx context.Context, name, script string) ([]byte, error) {
 		// Upload on stdin, never as an argument: a replication script carries no
 		// secret today, but the body-on-stdin rule is the transport's and is not
-		// worth a local exception (S3).
+		// worth a local exception.
 		shcmd := "cat > " + shSingleQuote(broker.CLIScriptPath(name))
 		if _, err := r.OutputInput(ctx, []byte(script), cmd.Name(),
 			cmd.Args(execArgs(k.Namespace, pod, true, []string{"sh", "-c", shcmd})...)...); err != nil {

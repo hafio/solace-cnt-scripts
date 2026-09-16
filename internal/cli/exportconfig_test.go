@@ -273,7 +273,7 @@ func runImportConfirmation(t *testing.T, path, artifact string, targetVPNs []str
 // TestExportConfigScopeConflictIsUsageError covers the --vpn/--broker-only
 // conflict end to end through the command, not just exportScope in isolation.
 //
-// RISK (CLAUDE.md S5): bad input must be rejected AND the downstream call must
+// RISK: bad input must be rejected AND the downstream call must
 // not be made -- a usage error that still reached the broker would be worse than
 // no validation at all, since it would look like the flag combination was
 // silently reinterpreted as something else.

@@ -17,8 +17,8 @@ import (
 // sends to the mate's SEMP service, addressed by redundancy.backup.addr. Every helper
 // here execs curl with role config.Primary -- the only role the container
 // transport reaches -- and reaches the mate by URL, never by role. Credentials
-// and request bodies ride a curl config file on stdin (curl -K -), never argv
-// (S3), mirroring Login.
+// and request bodies ride a curl config file on stdin (curl -K -), never argv,
+// mirroring Login.
 
 // defaultSEMPPort is the broker's own plaintext SEMP port, the fallback used
 // only when no TLS port can be resolved (TLS is preferred; plaintext with a
@@ -137,7 +137,7 @@ func (o *Ops) LocalAdmin() Credential {
 
 // sempCurl execs curl in THIS host's broker container against url, with cred plus the
 // caller's extra config lines (e.g. a POST body) on stdin via `curl -K -` -- nothing
-// secret reaches argv or an echoed command (S3).
+// secret reaches argv or an echoed command.
 //
 // The role is always config.Primary: the request is issued FROM this host, and which
 // broker it reaches is decided by the URL alone. That is what lets one primitive serve
@@ -147,6 +147,12 @@ func (o *Ops) LocalAdmin() Credential {
 // own through extraLines and rely on curl's behaviour for a repeated key, which is
 // unspecified for this case and would make which password was sent depend on ordering.
 func (o *Ops) sempCurl(ctx context.Context, url string, cred Credential, extraLines ...string) ([]byte, error) {
+	// config refuses control characters in every credential it loads, so this is the
+	// last line of defence rather than the first: a line break in a curl -K value ends
+	// the directive and starts another, and no escaping in curlConfigLine can express it.
+	if strings.ContainsAny(cred.User+cred.Pass, "\r\n") {
+		return nil, fmt.Errorf("SEMP credential for %s contains a line break, which a curl config cannot carry", url)
+	}
 	cfg := curlConfigLine("user", cred.User+":"+cred.Pass) + strings.Join(extraLines, "")
 	out, err := o.T.OutputInput(ctx, config.Primary, []byte(cfg), "curl", "-is", "-K", "-", url)
 	if err != nil {
@@ -155,18 +161,18 @@ func (o *Ops) sempCurl(ctx context.Context, url string, cred Credential, extraLi
 	return out, nil
 }
 
-// mateTarget is how a coordinated flow reaches the mate's SEMP service: the
+// backupTarget is how a coordinated flow reaches the mate's SEMP service: the
 // base URL, any extra curl -K lines the TLS leg needs (cacert/insecure), and a
 // warning the caller must log BEFORE issuing the request whenever the
 // admin credentials are about to cross the wire less than fully verified.
-type mateTarget struct {
+type backupTarget struct {
 	url      string
 	curlOpts []string
 	warn     string
 }
 
-// mateSEMPTarget resolves redundancy.backup.addr and the mate's SEMP port into a
-// mateTarget, preferring TLS: without it, the admin password crosses the
+// backupSEMPTarget resolves redundancy.backup.addr and the mate's SEMP port into a
+// backupTarget, preferring TLS: without it, the admin password crosses the
 // network to the mate in cleartext. A mapped TLS port with tls.cas configured
 // verifies the mate's certificate against them; a mapped TLS port with no CAs
 // configured falls back to curl's insecure mode instead of refusing outright -- a
@@ -177,18 +183,18 @@ type mateTarget struct {
 // which really is hardcoded to http://localhost where nothing leaves the
 // machine, this request crosses the network between hosts, so the plaintext
 // case always carries a warning naming the fix.
-func (o *Ops) mateSEMPTarget() (mateTarget, error) {
+func (o *Ops) backupSEMPTarget() (backupTarget, error) {
 	ip := o.Cfg.Redundancy.Backup.Addr
 	if ip == "" {
-		return mateTarget{}, fmt.Errorf("redundancy.backup.addr is not set; the coordinated redundancy/leader steps need it to reach " +
+		return backupTarget{}, fmt.Errorf("redundancy.backup.addr is not set; the coordinated redundancy/leader steps need it to reach " +
 			"the mate's SEMP service (see env/sample.yaml)")
 	}
 	port, tls, err := sempPort(o.Cfg, o.Platform)
 	if err != nil {
-		return mateTarget{}, err
+		return backupTarget{}, err
 	}
 	if !tls {
-		return mateTarget{
+		return backupTarget{
 			url: fmt.Sprintf("http://%s:%d", ip, port),
 			warn: fmt.Sprintf("sending the admin credentials to the mate's SEMP service at %s:%d over PLAINTEXT HTTP "+
 				"-- they cross the network unencrypted. To encrypt this channel the broker needs a server "+
@@ -211,7 +217,7 @@ func (o *Ops) mateSEMPTarget() (mateTarget, error) {
 	// directory it is an absolute host path that certainly does not exist there.
 	// So the honest shape is one branch, always warning, rather than a verified
 	// branch that never verified.
-	return mateTarget{
+	return backupTarget{
 		url:      fmt.Sprintf("https://%s:%d", ip, port),
 		curlOpts: []string{curlConfigFlag("insecure")},
 		warn: fmt.Sprintf("not verifying the mate's TLS certificate at %s:%d -- the admin credentials are "+
@@ -220,7 +226,7 @@ func (o *Ops) mateSEMPTarget() (mateTarget, error) {
 	}, nil
 }
 
-// MateSEMPPreflight is the read-only reachability check every coordinated flow
+// BackupSEMPPreflight is the read-only reachability check every coordinated flow
 // runs before its first mutation: the same GET Login sends to localhost, aimed
 // at the mate. It is exported so a caller can run it standalone --
 // the claim that this path and the port resolution behind it are right has never
@@ -232,8 +238,8 @@ func (o *Ops) mateSEMPTarget() (mateTarget, error) {
 // can be firewalled while failover works; finding that out here, while the
 // group is still undisturbed, is the point. One attempt, no retry: repeated
 // failed logins can trip the broker's brute-force lockout on the mate.
-func (o *Ops) MateSEMPPreflight(ctx context.Context) error {
-	target, err := o.mateSEMPTarget()
+func (o *Ops) BackupSEMPPreflight(ctx context.Context) error {
+	target, err := o.backupSEMPTarget()
 	if err != nil {
 		return err
 	}
@@ -253,23 +259,23 @@ func (o *Ops) MateSEMPPreflight(ctx context.Context) error {
 	return nil
 }
 
-// MateRevertActivity sends the one cross-host mutation the coordinated flows
+// BackupRevertActivity sends the one cross-host mutation the coordinated flows
 // need (everything else runs on the primary, matching the k8s sequences):
 // admin-level `redundancy revert-activity` on the mate, over SEMP v1.
 //
 // Exported so it can be driven against a mate that is ALREADY
-// standby -- the case revertActivityMateBody's own comment flags as unverified,
+// standby -- the case revertActivityBackupBody's own comment flags as unverified,
 // and the only way to learn whether this RPC is idempotent without moving
 // activity on a live group. A caller doing that must confirm the mate is standby
-// first (ShowRedundancy + MateActivityState); sending it to an active mate is a
+// first (showRD + backupActivityState); sending it to an active mate is a
 // real failover.
 //
-// Callers run MateSEMPPreflight before their own first mutation -- not here, so
+// Callers run BackupSEMPPreflight before their own first mutation -- not here, so
 // the check happens while the group is still undisturbed. Single shot, never
 // inside poll(): retrying a failed login risks the mate's brute-force lockout,
 // and the caller's own show-redundancy poll is what confirms the revert took.
-func (o *Ops) MateRevertActivity(ctx context.Context) error {
-	target, err := o.mateSEMPTarget()
+func (o *Ops) BackupRevertActivity(ctx context.Context) error {
+	target, err := o.backupSEMPTarget()
 	if err != nil {
 		return err
 	}
@@ -278,7 +284,7 @@ func (o *Ops) MateRevertActivity(ctx context.Context) error {
 	}
 	url := target.url + "/SEMP"
 	out, err := o.sempCurl(ctx, url, o.LocalAdmin(),
-		append(target.curlOpts, curlConfigLine("data", revertActivityMateBody()))...)
+		append(target.curlOpts, curlConfigLine("data", revertActivityBackupBody()))...)
 	if err != nil {
 		return err
 	}
@@ -292,7 +298,7 @@ func (o *Ops) MateRevertActivity(ctx context.Context) error {
 	return nil
 }
 
-// revertActivityMateBody is the SEMP v1 RPC equivalent of the CLI's admin-level
+// revertActivityBackupBody is the SEMP v1 RPC equivalent of the CLI's admin-level
 // `redundancy revert-activity` (revertActivityConfigureScript), POSTed to the
 // mate's /SEMP endpoint.
 //
@@ -310,7 +316,7 @@ func (o *Ops) MateRevertActivity(ctx context.Context) error {
 // describe the payload, not the endpoint), and whether reverting a mate that is
 // ALREADY standby returns code="ok" (idempotent) or a benign failure needing a
 // carve-out here.
-func revertActivityMateBody() string {
+func revertActivityBackupBody() string {
 	return "<rpc><admin><redundancy><revert-activity/></redundancy></admin></rpc>"
 }
 

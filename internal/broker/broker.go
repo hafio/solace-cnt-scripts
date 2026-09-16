@@ -92,12 +92,7 @@ func (o *Ops) show(b []byte) { _, _ = o.out().Write(b) }
 // sleep waits PollInterval, honoring context cancellation. A zero interval (in
 // tests) returns immediately without allocating a timer.
 func (o *Ops) sleep(ctx context.Context) error {
-	return o.wait(ctx, o.PollInterval)
-}
-
-// wait blocks for d, honoring context cancellation. A non-positive d returns
-// immediately without allocating a timer.
-func (o *Ops) wait(ctx context.Context, d time.Duration) error {
+	d := o.PollInterval
 	if d <= 0 {
 		return ctx.Err()
 	}
@@ -171,10 +166,29 @@ func (o *Ops) RunCLI(ctx context.Context, role config.Role, name, body string) (
 	// Sound here for the reason stated above: stop-on-error means a rejection, if
 	// there is one, is the last thing in it.
 	if bad := rejectionIn(out); bad != "" {
+		// Shown HERE, not left to the caller. The message sends the operator to "the
+		// output above", and every caller but ExecCLI returned this error without
+		// printing the transcript -- so the one thing that says which line the broker
+		// stopped on was named and then withheld. Showing it at the point the
+		// rejection is detected keeps the promise for all of them at once.
+		o.show(out)
 		return out, fmt.Errorf("%w: cli script %q -- the transcript carries %q; see the output above for detail",
 			ErrCLIRejected, name, bad)
 	}
 	return out, nil
+}
+
+// readCLI is runCLIRead plus the cleanup its caller owes: upload, run, remove.
+//
+// Every read here wants both halves, and four callers only ever did the first --
+// NewLocalMate's CLIRunner and replicationops' RouterName, readMateConfig,
+// readVPNReplication and replicationStatus -- so a `.<name>.cli` script accumulated on
+// the broker on every replication read. Removal is best-effort (rm -f) and runs even
+// when the run failed, because the upload that precedes it usually succeeded.
+func (o *Ops) readCLI(ctx context.Context, role config.Role, name, body string) ([]byte, error) {
+	out, err := o.runCLIRead(ctx, role, name, body)
+	o.removeCLI(ctx, role, name)
+	return out, err
 }
 
 // runCLIRead is RunCLI's unwrapped sibling for `show`-style reads: upload body as
@@ -189,8 +203,8 @@ func (o *Ops) RunCLI(ctx context.Context, role config.Role, name, body string) (
 // verify_local.go make of `show redundancy` output. So every capture read
 // (runCapture), every replication read (readMateConfig, readVPNReplication,
 // replicationStatus, RouterName), and the cliMate CLIRunner behind NewLocalMate
-// all go through this instead of RunCLI. The caller owns its own cleanup
-// (removeCLI), exactly as before this change -- this function does not self-clean.
+// all go through this instead of RunCLI. This function does NOT self-clean; readCLI
+// above is the pairing every caller wants, and the one to reach for.
 func (o *Ops) runCLIRead(ctx context.Context, role config.Role, name, body string) ([]byte, error) {
 	if err := validName("cli script name", name); err != nil {
 		return nil, err
@@ -322,7 +336,7 @@ func countContains(output, label, needle string) int {
 
 // nameRE constrains user-influenced identifiers that reach a shell or the CLI
 // (cli script names, domain CA names, uploaded filenames) to a safe character
-// set, the §3 boundary validation this port owns (the bash scripts had none).
+// set. It is the boundary validation this port owns; the bash scripts had none.
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 func validName(kind, s string) error {
@@ -373,7 +387,7 @@ func validVPNName(s string) error {
 // product key is an opaque vendor string and its alphabet is not ours to decide --
 // but it rejects the one thing that changes the script's meaning: a control
 // character. A newline would turn a single `product-key <k>` line into extra
-// commands run in the already-elevated session (§3 boundary validation).
+// commands run in the already-elevated session.
 func validCLILine(kind, s string) error {
 	if strings.TrimSpace(s) == "" {
 		return fmt.Errorf("invalid %s: must not be empty", kind)

@@ -2,8 +2,8 @@ module solace
 
 go 1.27
 
-// Pinned so builds use a patched stdlib. `go 1.26` alone is only a floor, so
-// GOTOOLCHAIN=auto selects go1.26.0 on a machine with an older Go -- which is
+// Pinned so builds use a patched stdlib. `go 1.27` alone is only a floor, so
+// GOTOOLCHAIN=auto selects go1.27.0 on a machine with an older Go -- which is
 // what CI has, and what shipped a net panic bug into release binaries. Bump
 // this whenever `scan` reports a standard-library vulnerability.
 toolchain go1.27.0

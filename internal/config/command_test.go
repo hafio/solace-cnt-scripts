@@ -261,7 +261,7 @@ func TestValidateProbeCommandRejects(t *testing.T) {
 				t.Fatalf("validateProbeCommand(%q) accepted a value it must reject", tc.cmd)
 			}
 			// The message names the field and the offending index, so the user
-			// can find it in the env file (§4a).
+			// can find it in the env file.
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error = %v, want it to contain %q", err, tc.want)
 			}

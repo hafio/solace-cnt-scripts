@@ -126,7 +126,7 @@ func (c *containerTransport) Download(ctx context.Context, _ config.Role, remote
 // shSingleQuote wraps s in single quotes for safe use inside `sh -c`, escaping any
 // embedded single quote (' -> '\''). Defensive: the only value passed to it is a
 // tool-generated, validName-checked destPath, but this guarantees no shell
-// metacharacter in a path can break out of the `cat >` redirect (§3). A
+// metacharacter in a path can break out of the `cat >` redirect. A
 // package-local copy of the k8s helper -- deliberately not over-DRY'd across
 // packages, matching the house style of one small copy per transport.
 func shSingleQuote(s string) string {

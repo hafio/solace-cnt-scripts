@@ -83,6 +83,23 @@ func containerMem(k8sMem string) string {
 // An out-of-tier maxConnections leaves both alone: validateScalingTier rejects
 // it moments later, and inventing a footprint for a tier that does not exist
 // would bury that error under a plausible-looking artifact.
+// applyScalingDefaults fills the scaling knobs, taking the only two whose default
+// differs by platform as arguments.
+//
+// Every knob reaches every platform -- a container gets each one as an environment
+// variable, Kubernetes through the CR -- and the four below are deliberately the SAME
+// number on both, so one env file sizes the same broker whichever platform runs it.
+// Writing the two lists out separately is what let that claim quietly stop being true,
+// so the difference is now the argument list and nothing else.
+func (c *Config) applyScalingDefaults(maxConnections, maxSpoolUsageMB int) {
+	setDefaultInt(&c.Scaling.MaxConnections, maxConnections)
+	setDefaultInt(&c.Scaling.MaxSpoolUsageMB, maxSpoolUsageMB)
+	setDefaultInt(&c.Scaling.MaxQueueMessages, 100)
+	setDefaultInt(&c.Scaling.MaxBridges, 25)
+	setDefaultInt(&c.Scaling.MaxSubscriptions, 50000)
+	setDefaultInt(&c.Scaling.MaxGuaranteedMsgMB, 10)
+}
+
 func (c *Config) applyScalingTierDefaults(p Platform) {
 	t, ok := tierFor(c.Scaling.MaxConnections)
 	if !ok {

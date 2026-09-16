@@ -12,7 +12,8 @@
 //	go tool govulncheck -format json ./... > scan.json
 //	go run ./internal/tools/vulnjudge scan.json
 //
-// Exit codes: 0 nothing to act on, 1 a fixable called vulnerability, 2 bad input.
+// Exit codes: 0 nothing fixable (it may still print no-released-fix warnings), 1 a
+// fixable called vulnerability, 2 bad input.
 package main
 
 import (

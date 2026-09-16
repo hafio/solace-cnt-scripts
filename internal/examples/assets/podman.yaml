@@ -28,7 +28,8 @@ semp:
   adminPass: CHANGE-ME-admin        # secret, mandatory
 
 podman:
-  rootless: false                   # true = rootless: user systemd + `podman unshare`
+  rootless: false                   # true = rootless: user systemd, `podman unshare`,
+                                    # and runUser 1000:0 instead of 1000001:0
   baseDir: /opt/solace              # mandatory, absolute: where this tool writes the
                                     # server-certificate bundle (contains the PRIVATE
                                     # KEY). Docker needs no equivalent

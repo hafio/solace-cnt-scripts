@@ -14,8 +14,8 @@ import (
 // Namespace in its delete set. It removes the broker's own objects, then asks what is
 // left, and offers the namespace for removal only when the answer is "nothing".
 //
-// This is a port of the same gate in the sibling solmq-conn-util (docs/cross-platform.md
-// section 7, "occupancy-gated namespace prompt"): probe a FIXED set of kinds in one call,
+// This is a port of the same gate in the sibling project solmq-conn-util, which calls it
+// the occupancy-gated namespace prompt: probe a FIXED set of kinds in one call,
 // discount the objects Kubernetes puts in every namespace, treat an unreadable answer as
 // occupied, and never remove a cluster namespace.
 //
@@ -71,7 +71,7 @@ var ignoredKinds = map[string]bool{
 // empty gets cascade-deleted, while one wrongly reported occupied merely stays.
 func (c *Cluster) NamespaceContents(ctx context.Context) ([]string, error) {
 	ns := c.ns()
-	raw, err := c.output(ctx, "get", strings.Join(occupancyKinds, ","), "-n", ns,
+	raw, err := c.kubectlOutput(ctx, "get", strings.Join(occupancyKinds, ","), "-n", ns,
 		"--ignore-not-found", "-o", "name")
 	if err != nil {
 		return nil, fmt.Errorf("could not list what is left in namespace %q: %w\n"+

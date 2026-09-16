@@ -49,8 +49,7 @@ type Cluster struct {
 	// This is the ONLY question this package asks, and it is a func rather than a
 	// reader/writer pair on purpose: internal/cli owns the terminal, so every other
 	// confirmation -- including the removal prompts and the namespace question -- is
-	// asked there and reaches here as a decision already made. The In/Err pair this
-	// struct once carried existed for the interactive node picker and went with it.
+	// asked there and reaches here as a decision already made.
 	Confirm func(question string) bool
 }
 
@@ -108,7 +107,7 @@ func (c *Cluster) kubectl(ctx context.Context, args ...string) error {
 }
 
 // apply pipes a rendered manifest to `kubectl apply -f -` on stdin (never a temp
-// file, so secret-bearing manifests stay off disk -- §3).
+// file, so secret-bearing manifests stay off disk).
 func (c *Cluster) apply(ctx context.Context, manifest []byte) error {
 	k, err := c.cmd()
 	if err != nil {
@@ -128,7 +127,7 @@ func (c *Cluster) deleteStdin(ctx context.Context, manifest []byte) error {
 }
 
 // output runs `kubectl args...` and returns captured stdout.
-func (c *Cluster) output(ctx context.Context, args ...string) ([]byte, error) {
+func (c *Cluster) kubectlOutput(ctx context.Context, args ...string) ([]byte, error) {
 	k, err := c.cmd()
 	if err != nil {
 		return nil, err
@@ -147,15 +146,12 @@ func (c *Cluster) operatorNS(ctx context.Context) string {
 // operatorNSOrigin is the one definition of that two-branch rule, and also names
 // where the value came from; only the `check` report needs the origin.
 //
-// It used to have a third branch between them, which searched the cluster: it
-// listed Deployments in EVERY namespace and took the namespace of the first line
-// CONTAINING the operator's deployment name -- an unanchored substring match,
-// with no label, owner or uniqueness check, and its errors swallowed so an RBAC
-// denial and an absent operator arrived here identically. On a cluster running
-// two operator installs it could resolve to another team's, and `remove operator`
-// would then delete the one the operator answering the prompt never saw named.
-// So the search is gone. deploy and remove now resolve the SAME namespace from
-// the SAME two local rules, and this tool never looks at a namespace the env file
+// There is deliberately no third branch that SEARCHES the cluster for the operator.
+// Matching a Deployment by name across every namespace is unanchored and unowned: on a
+// cluster running two operator installs it can resolve to another team's, and `remove
+// operator` would then delete the one the person answering the prompt never saw named.
+// deploy and remove resolve the SAME namespace from the SAME two local rules, and this
+// tool never looks at a namespace the env file
 // did not name or the default did not imply.
 //
 // ctx is retained only to keep this and operatorNS interchangeable with the

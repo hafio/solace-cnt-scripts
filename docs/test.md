@@ -5,7 +5,7 @@ what each one proves. Use it to find existing coverage before adding a test, and
 what is *not* covered.
 
 This file is maintained by hand. When you add, rename, or delete a test, update the matching
-row in the same change (CLAUDE.md S6).
+row in the same change as the test.
 
 ## Running the tests
 
@@ -55,7 +55,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-80 test files, 1308 test functions. Three of those are not tests. Two are os/exec
+80 test files, 1315 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -66,11 +66,11 @@ launched from.
 
 | Package | Files | Tests |
 | --- | --- | --- |
-| internal/k8s | 18 | 208 |
-| internal/broker | 22 | 426 |
+| internal/k8s | 18 | 210 |
+| internal/broker | 22 | 429 |
 | internal/cli | 11 | 190 |
-| internal/config | 14 | 212 |
-| internal/container | 6 | 132 |
+| internal/config | 14 | 213 |
+| internal/container | 6 | 133 |
 | internal/convert | 1 | 37 |
 | internal/render | 2 | 33 |
 | internal/engine | 2 | 27 |
@@ -78,14 +78,43 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **80** | **1308** |
+| **Total** | **80** | **1315** |
 
 
 ## Coverage
 
-Last recorded run, from `scripts/logs/cov.log` (2026-09-11), total **94.5%**. Re-run `cov`
+Last recorded run, from `scripts/logs/cov.log` (2026-09-16), total **93.0%**. Re-run `cov`
 after any change; these figures go stale the moment tests move, and the previous total is
 the floor the next run has to hold.
+
+**92.9% -> 93.0%, and the move is a consolidation in both directions.** The shrink pass
+deleted dead code and collapsed duplicated bodies onto one definition. That raises the
+ratio where the surviving definition was already covered and lowers it where a deleted
+function carried tests of its own, and both show up: `internal/container` 94.7% -> 95.5%
+and `internal/convert` 97.2% -> 97.4% from the collapsed probe, copy and writer bodies,
+against `internal/config` 96.5% -> 96.4% and `internal/cli` 82.9% -> 82.8% where a
+removed branch took its own coverage with it. No test was added or removed across the
+shrink and the brevity pass -- 80 files and 1315 functions on both sides of them -- so
+every move here is the denominator changing, not a behaviour going untested.
+
+**94.5% -> 92.9%, and the 1.6pp is code that landed after 94.5% was recorded, not a
+regression in it.** The data-replication feature (commit 18854f0, 2026-09-14) added
+`internal/cli/replication.go` and the broker's `matechannel.go`, `sempmate.go`,
+`switchplan.go`, `replication.go` and `replicationops.go` -- roughly 2500 lines -- three
+days after the 2026-09-11 run this supersedes. Ten of `replication.go`'s fifteen functions
+have no coverage at all, which is `internal/cli`'s 90.1% -> 82.9% on its own; the broker's
+95.0% -> 93.2% is the same feature's other half. Adding uncovered code lowers the ratio
+exactly as the export/import import-then-close below did, and the close has not been done
+for this one. It is its own piece of work: those files are the DR switchover path, which
+needs a fake mate channel on both legs before any of it can be driven.
+
+The bug-fix pass this run gated is net neutral. Every function it changed reads at or near
+100% -- `RunCLI`, `readCLI`, `DecodeStrict`, `checkFlagShape`, `MaskEnv`, `scalar`,
+`anyKnownCondition`, `installedOperatorImage`, `solaceRows`, `ProductKeys` -- and the
+branches it added came with tests of their own (`parseVPNNames`'s repeated-rule skip,
+`printable`, `record`'s type-map clear). What it leaves uncovered is `emitOrWrite`'s
+temp-file error paths and its symlink refusal, which needs a symlink the test process may
+not be permitted to create on Windows.
 
 **94.1%/94.2% -> 94.5%, and the move is a coverage-import-then-close, not a regression.**
 The config-export/import feature added roughly 2300 lines of new code to `internal/broker`
@@ -120,13 +149,13 @@ path that actually runs.
 | internal/abbrev | 100.0% |
 | internal/output | 100.0% |
 | internal/tools/vulnjudge | 98.9% |
-| internal/config | 97.8% |
-| internal/render | 97.4% |
-| internal/convert | 97.5% |
-| internal/broker | 95.0% |
-| internal/container | 94.8% |
-| internal/k8s | 92.6% |
-| internal/cli | 90.1% |
+| internal/config | 96.4% |
+| internal/render | 97.5% |
+| internal/convert | 97.4% |
+| internal/broker | 93.2% |
+| internal/container | 95.5% |
+| internal/k8s | 92.8% |
+| internal/cli | 82.8% |
 | internal/examples | 90.0% |
 | internal/engine | see below |
 
@@ -178,7 +207,7 @@ type behind the platform CLI overrides and the execution guard that decides what
 `Command` may be, the scaling block that sizes the broker on every platform, and the
 platform vocabulary the CLI resolves against, the host-path rules every file-valued
 key is held to, and the two storage stories a Kubernetes deployment may tell.
-211 tests across 14 files.
+213 tests across 14 files.
 
 ### command_test.go
 
@@ -215,7 +244,7 @@ validator and every executor enforce it from one definition.
 | `TestExecutorRejectsWithoutValidate` | The reason the check runs twice: a `Config` built in code, which never went through `config.Load`, is still refused by `ClusterCommand`, `RuntimeCommand` and `ComposeCommand` |
 | `TestAllowCommandsAccepts` | `--allow-command` is repeatable, each value extends the same set, and `.exe` folds to one entry |
 | `TestAllowCommandsRejects` | A bad hatch value is a usage error naming the flag: paths (so the hatch cannot reintroduce the path form layer 2 refuses), metacharacters, whitespace, control characters, empty |
-| `TestAllowCommandsRejectsEscalation` | The escape hatch has a floor: `sudo`, `doas`, `su`, `pkexec`, `run0`, `runas`, `gsudo` and their `.exe` spellings can be approved by nobody. Granting one elevates every command the tool issues for the life of an env file, where `sudo solace-util ...` elevates one invocation the operator chose -- so the message must name that alternative, and the name must not be recorded despite the failure |
+| `TestAllowCommandsRejectsEscalation` | The escape hatch has a floor: `sudo`, `sudoedit`, `doas`, `su`, `pkexec`, `run0`, `systemd-run`, `machinectl`, `setpriv`, `capsh`, `unshare`, `nsenter`, `runas`, `gsudo` and their `.exe` spellings can be approved by nobody. Granting one elevates every command the tool issues for the life of an env file, where `sudo solace-util ...` elevates one invocation the operator chose -- so the message must name that alternative, and the name must not be recorded despite the failure |
 | `TestEscalationCannotBeAllowedByAnyRoute` | The structural backstop: even with an escalation wrapper forced into the allow-set (a future edit to `execBinaries`, or a caller populating `extraAllowed` directly), `allowed()` strips the category back out -- while a legitimate wrapper in the same forced set still works, proving it is a deny-list and not a broken allow-set |
 | `TestAllowedBinaryIsNotGloballyAllowed` | An approval is per-`Config`, so it cannot leak into a second config in the same process |
 | `TestComposeCommandDerivation` | `docker.compose` defaults to the runtime's own `compose` subcommand, and `ApplyDefaults` stores exactly what `ComposeCommand` derives -- the two definitions cannot drift |
@@ -255,14 +284,15 @@ validator and every executor enforce it from one definition.
 | `TestValidateContainerMissingMandatory` | The BULK missing-fields message: one run names every empty mandatory field (image, admin, all three node name/addr pairs) rather than making the operator fix them one at a time. `redundancy.psk` is deliberately NOT in that list and is set in the fixture so it does not fire -- it gets its own error ahead of this one, because it is the single field nothing else will fill in and it needs the `openssl` command rather than a place in a list (see `TestPSKIsMandatoryOnContainers`) |
 | `TestValidateContainerBridge` | `network.mode=bridge` without ports errors; with ports it passes |
 | `TestValidateContainerIdentifiers` | Container and node names that reach the compose/quadlet artifact in structural positions are format-checked, so a colon, '=', space or newline is an error instead of a broken artifact. Empty backup/monitor names stay legal in standalone |
-| `TestValidateContainerRunUser` | runUser keeps its own `uid[:gid]` pattern -- the default "0:0" carries a colon the identifier check would reject |
+| `TestValidateContainerRunUser` | runUser keeps its own `uid[:gid]` pattern -- the rootless default `1000:1000` carries a colon the identifier check would reject, and the privileged default `1000001` is the bare-uid form the same rule must accept |
+| `TestRootlessRunUserFitsAStockSubuidRange` | The arithmetic behind the rootless/privileged split, pinned rather than left in a comment: a subuid range must reach the id itself, so `RootlessRunUser` needs 1001 entries (inside the 65536 `useradd` allocates) while `ImageRunUser` would need 1000002. It also pins gid 0 on both -- the group the image expects, and the only gid needing no subgid allocation since rootless maps container gid 0 to the invoking user's own group -- and fails if `ImageRunUser` ever becomes small enough to fit, since the split would then be unnecessary. Both constants are parsed through one helper, after an earlier version `Atoi`'d the whole `uid:gid` string, discarded the error and silently compared against 0 |
 | `TestValidateK8sKeyValueEntries` | The "key: value" fragments (loadBalancer.annotations, placement.labels*) must carry a key; a value holding a colon is fine because the renderer quotes both halves |
 | `TestValidatePullPolicy` | `kubernetes.imagePullPolicy` enum, including the empty case that keeps the renderer's own IfNotPresent |
 | `TestValidateK8sDNSLabels` | The two DNS-1123 shapes Kubernetes really enforces: `kubernetes.namespace`/`name`/`operator.namespace` must be a single LABEL (no dot, 63-char cap), while the three secret-name fields (`adminSecret`/`tlsServerSecret`/`imagePullSecret`) get the looser SUBDOMAIN rule (dots allowed, 253-char cap) that lets `prod.solace-admin-secret` -- accepted by kubectl today -- keep validating; a shared bad-case set (uppercase, leading hyphen, an embedded YAML document separator, colon, space) is rejected by both |
 | `TestValidateK8sOptionalSecretNamesStayOptional` | The regression the DNS-1123 hardening could have introduced: the three secret-name fields and `operator.namespace` were never mandatory, so leaving one blank must still validate exactly as before |
 | `TestValidatePlacementAffinity` | The additive affinity blocks: unknown operator, missing key, In without values, and a pod term with no topologyKey each fail naming the field; a full valid set passes |
 | `TestDefaultK8sPortsMatchesOperator` | The built-in port list is the operator's own 17 entries, including the tcp-ssh entry, with no duplicate names |
-| `TestValidateK8sPorts` | `kubernetes.ports` entry shapes `parsePort` accepts (name=container, an explicit service port, an explicit protocol) all validate; the "name:port" typo with no `=`, port 0, port 65536, a non-numeric port, a bad protocol, an over-length port name, a duplicate name, and a duplicate container port each fail naming the offending entry |
+| `TestValidateK8sPorts` | `kubernetes.ports` entry shapes `parsePort` accepts (name=container, an explicit service port, an explicit protocol) all validate; the "name:port" typo with no `=`, port 0, port 65536, a non-numeric port, a bad protocol, an over-length port name, a duplicate name, a duplicate container port, and a duplicate SERVICE port each fail naming the offending entry. The last was promised by the function's own doc comment and not checked, so two entries publishing one service port reached the CR and collapsed to one |
 | `TestApplyBridgePortDefaults` | Bridge mode with no ports defaults to the k8s set as host:container pairs on both platforms; host mode and an explicit list are untouched |
 | `TestImageTagVersion` | Tag parsing behind the health-check gate: dotted versions, a `-rc1` suffix, and a two-part tag parse; `latest`, empty, a bare major and a non-numeric tag report *unknown* rather than guessing; `AtLeast` compares major before minor |
 | `TestValidateHealthCheck` | The opt-in probe: with no cmd it uses the built-in readiness endpoint, so 10.26+ is accepted while an older tag and an unidentifiable one are both refused (naming the explicit-cmd escape hatch); an explicit cmd skips the version gate but keeps the exec-boundary check; disabled stays legal on any tag |
@@ -291,6 +321,7 @@ validator and every executor enforce it from one definition.
 | `TestAdditionalUserPasswordCharsAreFreeOnKubernetes` | A restriction this change LIFTED. Kubernetes used to create these users over the broker CLI, so their passwords could not carry the characters the CLI rejects in a quoted value. They go into a Secret now, base64-encoded and never interpolated into a CLI line, so a password that was refused before must load |
 | `TestValidateAdditionalUsers` | On k8s and docker alike: a valid entry passes, and missing/invalid/duplicate usernames, the built-in `admin`/`monitor` names, a missing or invalid access level, and an empty password all fail |
 | `TestAdditionalUserNamesCollideOnDocker` | Two usernames differing only in `.`/`_`/`-` fold to ONE docker host variable name, which would feed one user's password to both. Docker-specific for a reason: on Kubernetes the stricter username rule rejects a `-` or `.` outright, so the pair can never be formed there. It used to live in the shared table and stopped meaning anything on the k8s half |
+| `TestAdditionalUserNamesDoNotCollideOnKubernetes` | The other half: Kubernetes projects these as Secret keys one-to-one into the environment with no folding, so `SVC_A` and `svc_a` are two distinct variables there. Applied unconditionally, the fold rule refused a configuration that would have worked |
 | `TestValidateAdditionalUserClashesWithABuiltIn` | `admin` and `monitor` are the broker's own accounts, with their own keys (`semp.adminPass`, `semp.monitorPass`), so listing one under additionalUsers would produce two secrets feeding a single broker setting. It used to test a name matching a CONFIGURED `admin.user`; that key is gone, so the clash is against a fixed pair -- and it also pins that a name like `operator`, which only collided because the key could be set to it, is now an ordinary username |
 | `TestValidateCredentialControlChars` | `semp.adminPass`/`semp.monitorPass`/`redundancy.psk`/`tls.certPassphrase` each reject a control character (naming the field, never echoing the value), driven off the shared `controlCharCases` table |
 | `TestValidateAdditionalUserControlChars` | The same control-character rule for `semp.additionalUsers[].password`. A control character in a credential is a malformed value on every platform -- it reaches a mounted file on containers and a Secret data value on Kubernetes -- so this one is not platform-scoped |
@@ -382,7 +413,7 @@ setting.
 | `TestValidateK8sMsgNodeCPURemoved` | `kubernetes.msgNode.cpu` still decodes but fails validation, so the operator gets a reason naming `scaling.maxConnections` and noting `mem` is unaffected, rather than a bare unknown-field error |
 | `TestValidateMaxPoolRemoved` | `maxPool` would name the same broker setting as `maxSpoolUsageMB` under a platform-specific name; it is rejected on all three platforms naming the replacement, and an unset (zero) value does not trip the sentinel |
 | `TestValidateContainerMem` | `container.mem` takes docker's and podman's own `b\|k\|m\|g` suffix: the likely mistake (a `Mi` quantity copied from `kubernetes.msgNode.mem`) is refused naming that trap, alongside bare numbers, decimals and unknown suffixes, while every legal form and the unset case pass |
-| `TestScalingDualSpellingAliasesTheSameField` | Every scaling setting is settable under EITHER its friendly name or its destination broker setting, both writing the one typed field -- including the new `maxDMRLinks`/`max-dmr-links` pair -- and an explicit 0 survives decode (defaulting is `ApplyDefaults`' job, not the decoder's) |
+| `TestScalingDualSpellingAliasesTheSameField` | Every scaling setting is settable under EITHER its friendly name or its destination broker setting, both writing the one typed field, and an explicit 0 survives decode (defaulting is `ApplyDefaults`' job, not the decoder's) |
 | `TestScalingUnknownKeyFailsAtLoad` | The property a custom `UnmarshalYAML` is most likely to have silently destroyed: a typo (`maxConections`) and a REAL broker setting this tool does not map (`system_scaling_maxtransactedsessioncount`) both still fail at load, keeping the `parse env file` schema-error shape rather than becoming open passthrough |
 | `TestScalingBothSpellingsAtOnceFails` | Setting one setting under both its friendly and destination spelling in the same file fails to load naming both keys, rather than letting the second silently win |
 | `TestScalingSameKeyTwiceFails` | Walking the mapping by hand gives up yaml.v3's own duplicate-key rejection for this block, so `Scaling.UnmarshalYAML` re-implements it, with wording distinct from the two-spellings case |
@@ -570,7 +601,7 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 | `TestRemoveProductKeysOverTheCLI` | The last direction that was a placeholder. `--no-prompt` revokes every configured key; an interactive `n` issues nothing; and an env file with no `broker.productKeys` is refused rather than reported as done. It asks at all because revoking every key can leave the broker UNLICENSED -- an outage whose cause points nowhere near the command |
 | `TestRemoveServerCertsRefusedOnASecretManagedDeployment` | With `kubernetes.tlsServerSecret` set the operator mounts the certificate and would reconcile it straight back, so a CLI removal would report success over a broker that still presents it. The refusal names the Secret, the key to clear and the reconcile that would undo it -- "not supported here" would leave an operator with no next move |
 | `TestConfigureServerCertsRefusesASecretItDoesNotOwn` | The three-way routing. Keying the Secret branch on `ManagesTLSSecret` sent a bring-your-own deployment down the pod-exec CLI path, where it died on a generic "tls.cert and tls.certKey must both be set" -- pointing the operator at fields that, if they set them, would make this tool overwrite a cert-manager Secret. The named Secret is what selects the Secret route; whether we can rebuild it is `UpdateServerCertSecret`'s question, and its tailored refusal was unreachable until this |
-| `TestCtrErrorPaths` | Container `config apply` failures are actionable: no TLS configured for server-cert, no product keys configured, and a failed `broker perform semp-login-check` |
+| `TestCtrErrorPaths` | Container `config apply` failures are actionable: no TLS configured for server-cert, and a failed `broker perform semp-login-check`. product-keys is deliberately absent -- with nothing configured it SKIPS, like its domain-certs sibling |
 | `TestCtrDiagnosticsDryRun` | Container `diagnostics` echoes its node-local gather/download sequence over the echo seam (isolated because it creates a diag dir) |
 | `TestCtrRoleArgCount` | Role-taking commands reject a second positional argument |
 | `TestCtrRoleHelp` | Role-taking commands expose `--help` without loading an env |
@@ -614,7 +645,7 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 | `TestBashEnvGivenToEnvFlag` | Pointing `-e` at a legacy bash file reports not-valid-YAML and names `solace-util convert` |
 | `TestExecute` | `Execute()` builds the tree and runs `--help` without error |
 | `TestK8sConfirmDeclined` | Every removal declines unattended: `broker remove`/`all`/`secrets`/`namespace`/`operator` without `--no-prompt` make zero cluster calls, using the App.Interactive seam instead of ambient stdin. secrets and namespace confirm like every other removal, and `remove namespace` takes everything living in the namespace, not only what this env file put there |
-| `TestK8sPromptsNameNamespaceAndContext` | Table-driven over `broker remove`/`secrets`/`namespace`/`all`/`operator` and `broker restart`, with `a.kubeContext` set directly (the same seam as `App.Interactive`): every prompt now names the namespace and repeats the `(context <name>)` clause, except `operator remove`, which names the OPERATOR's own namespace (`k8s.OperatorNamespace`) instead of the broker's |
+| `TestK8sPromptsNameNamespaceAndContext` | Table-driven over `broker remove`/`secrets`/`namespace`/`all`/`operator` and `broker restart`, with `a.kubeContext` set directly (the same seam as `App.Interactive`): every prompt now names the namespace and repeats the `(context "<name>")` clause -- quoted, since the value comes from kubectl rather than the env file -- except `operator remove`, which names the OPERATOR's own namespace (`k8s.OperatorNamespace`) instead of the broker's |
 | `TestK8sPromptsOmitAnUnknownContext` | The other half: with `kubeContext` left empty, as an unresolved `announceKubeContext` lookup leaves it, `broker remove`'s prompt still names the namespace but drops the context clause entirely rather than rendering an empty `(context )` |
 | `TestK8sRestartRollsOrTargetsOnePod` | H2 regression guard: `opK8sRestart` must keep reading `app.pod` RAW rather than through `podRole`, whose empty-defaults-to-primary would silently turn "restart every pod" into "restart the primary pod alone" -- no `--pod` rolls monitor/backup/primary in order, `--pod backup` touches only that one pod |
 | `TestK8sRestartConfirmGate` | a non-interactive `broker restart` (rolling, or one `--pod` role) bounces nothing, and a bad `--pod` role is rejected before any prompt |
@@ -643,6 +674,7 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 | `TestRemoveDomainCertsOverTheCLI` | `domain-certs --remove` now confirms like its `server-certs`/`product-keys` siblings: `--no-prompt` runs the removal, an interactive `n` issues nothing, no terminal and no `--no-prompt` keeps the certificates, and `--apply` (the enable direction) still runs unconfirmed |
 | `TestDisableDefaultVPNConfirmGate` | `default-vpn`'s newly confirmed disable direction: it stops every client connection using the VPN, so it takes the same four-way gate (`--no-prompt` shuts it down, decline changes nothing, no terminal keeps it up, `--enable` runs unconfirmed) |
 | `TestDisableDefaultUsersConfirmGate` | `default-users`' matching disable gate. `DisableDefaultUsers` reads the broker's VPN list before it can build the disable script, so the echo seam's canned empty reply means the script itself never runs either way -- the property distinguishing a confirmed run from a declined one is the upload-and-run of the `show-vpn` probe, which only a confirmed (or `--enable`) run reaches |
+| `TestMousetrapIsDisabled` | Cobra's Windows double-click guard stays off. Behaviourally it must: the hook prints "this is a command line application" and DECLINES to run when it decides the binary came from Explorer, which is not a failure mode a tool driven from terminals, scripts and CI should have. It is also the largest single cost in this package's suite -- the check walks the OS process table on every `Execute`, measured at 37% of the whole run, 10.6s of 13.8s, against 1.8s for the commands under test. Nothing else would notice it returning: every test would still pass, only slower |
 
 ### aliases_test.go
 
@@ -661,7 +693,6 @@ and are covered in `internal/abbrev`.
 | `TestAliasesDoNotCollide` | Walks the real tree and proves no two siblings answer to the same word (name or alias). `applyAliases` already panics on a collision at construction, so this is the second line of defence -- the one that would also catch a collision introduced by a command's own hand-written `Aliases` rather than by the table |
 | `TestEveryAliasEntryIsLive` | Catches the quiet failure mode of a name-keyed table: every canonical name in `commandAbbrev` must be a command actually present in the tree, so a renamed command's alias cannot silently stop applying while the set still claims to provide it |
 | `TestNounGroupsRunNothing` | The safety property behind offering short forms at all, inverted with the tree. It used to be the VERB that had to run nothing, because `rm` was reachable at the top level; the tree is noun-first now, so `rm` only exists under a noun and the NOUN is what must be inert. `broker`, `operator`, `broker copy`, `broker configure` and `broker perform` all carry subcommands and no `RunE`, so `br` and `op` act on nothing. A `RunE` added to one later fails here |
-| `TestMousetrapIsDisabled` | Cobra's Windows double-click guard stays off. Behaviourally it must: the hook prints "this is a command line application" and DECLINES to run when it decides the binary came from Explorer, which is not a failure mode a tool driven from terminals, scripts and CI should have. It is also the largest single cost in this package's suite -- the check walks the OS process table on every `Execute`, measured at 37% of the whole run, 10.6s of 13.8s, against 1.8s for the commands under test. Nothing else would notice it returning: every test would still pass, only slower |
 | `TestGroupsRejectAnUnknownVerb` | Why a group is runnable at all. Cobra answers a NON-runnable command by printing help and exiting 0 whatever arguments it got, so `broker remvoe` would report success having done nothing and a script would never notice. The mistyped word is the VERB now the tree is noun-first. Bare still prints help and succeeds; an unknown verb fails loudly |
 | `TestStartStopHaveNoAlias` | Pins the one deliberate omission: `start` and `stop` get no two-letter form at all, in the set and on the actual tree commands, because any short spelling would be ambiguous with the other (and with `status`) at the exact place where guessing wrong costs an outage. Both must be DECLARED with no short form and with a note saying why -- an omission and a decision read the same otherwise, and the note is what a later reader finds when they wonder |
 
@@ -715,7 +746,6 @@ the destructive-confirmation tests use.
 | `TestRolePositionalTeachesPodFlag` | The likelier half of the H2 migration: an operator on KUBERNETES typing the OLD documented spelling (`shell backup`, `broker logs monitor`, `cli primary`, `broker status backup`, `broker restart backup`, `broker perform semp-login-check backup`) gets an error naming both `--pod` and the role typed, rather than cobra's bare "unknown command" hiding the fact that it merely moved. A `shell typo` subtest pins the other side: a word that is not a role keeps cobra's own wording and never offers the `--pod` hint, since a typo is not a migration |
 | `TestPlatformIsAnnouncedInThePreamble` | The platform is inferred rather than typed by the operator, so it is stated in the preamble -- otherwise the one fact the operator does not type themselves would also be the one they cannot see |
 | `TestCompletionNeverReadsTheEnvFile` | The invariant that decided where the pre-run hook lives. Cobra runs the NEAREST ancestor's `PersistentPreRunE` and `__complete` is root's own child, so a hook on root would parse an untrusted env file on every TAB press; keeping it per-command prevents that, proven by completing with an env file that does not exist |
-| `TestCompletionHelpKeepsTheLoadingInstructions` | The one thing this command exists to tell you, which has gone missing before: a completion script is useless without the line that loads it, and that line differs per shell in a way nobody remembers. Pins that each shell shows BOTH the current-shell one-liner and the permanent form, that each actually shows a command rather than just promising one (the powershell help said "source it from your profile" for a while without giving the line), and that the parent lists the permanent form for all four so one help screen is enough. No other completion test would notice: they drive the generator and check the SCRIPT, which is unaffected by the help around it |
 | `TestPlatformFlagIsOnRoot` | `--platform` is a root persistent flag inherited by every command including `convert`, which is what lets one word mean one thing across the whole CLI |
 | `TestScopedCommandsSaySoInHelp` | The tree is one static shape, so help text is the only place to learn a command does not apply before running it; a command that applies everywhere carries no scope tail |
 | `TestPlatformOpsCoversEveryPlatform` | The builder pinned against `Platforms()`. Every other consumer of an ops map already walks `Platforms()`, so `platformOps` is the one place a fourth platform would be dropped silently: with both halves non-nil it would still return three entries, `supported()` would omit the new name, `onlyOn` would tag the command for three platforms, and the new one would refuse every command that has a perfectly good implementation -- and the refusal would look deliberate |
@@ -767,6 +797,7 @@ that does not exist.)
 | `TestNoArgsLeafOffersNoFiles` | A command built by `leaf` offers nothing, stopping cobra's filename fallback across the tree. The file-path commands (`broker copy from`/`into`, `broker perform cli-script`/`shell-script`, `convert`) are excluded, since a path is exactly what they take |
 | `TestAllowCommandOffersNoFiles` | `--allow-command` offers no files: the value is a bare binary name, and paths are what its own help text warns against |
 | `TestFlagCompletionsRegistered` | The drift gate: every flag that should have a completion function still has one, since a renamed flag silently reverts to filename completion at a TAB press and no other test would notice |
+| `TestCompletionHelpKeepsTheLoadingInstructions` | The one thing this command exists to tell you, which has gone missing before: a completion script is useless without the line that loads it, and that line differs per shell in a way nobody remembers. Pins that each shell shows BOTH the current-shell one-liner and the permanent form, that each actually shows a command rather than just promising one (the powershell help said "source it from your profile" for a while without giving the line), and that the parent lists the permanent form for all four so one help screen is enough. No other completion test would notice: they drive the generator and check the SCRIPT, which is unaffected by the help around it |
 
 ### examples_test.go
 
@@ -900,7 +931,7 @@ mapping, and the YAML emitter. 37 tests.
 | `TestParseCRLF` | CRLF line endings parse the same as LF, including multi-line arrays |
 | `TestParseEscapedQuote` | `\"` inside a double-quoted value survives |
 | `TestUnmappedTracksFileOrder` | Unmapped variables are reported in file order, not map order |
-| `TestScalarQuoting` | Values a YAML reader could misread (bools, null, numbers, paths, `:`, `#`, quotes, backslashes) are quoted; plain identifiers are not |
+| `TestScalarQuoting` | Values a YAML reader could misread (bools, null, numbers, paths, `:`, `#`, quotes, backslashes) are quoted; plain identifiers are not; every control character is escaped, so an ANSI sequence inside a bash-file password cannot reach the YAML raw |
 | `TestEmptyBlocksOmitted` | Blocks with no content are left out entirely |
 | `TestGeneratedHeader` | The output carries the provenance header naming the source file |
 
@@ -912,7 +943,7 @@ Broker CLI operations over an injected transport: script generation, config step
 state machines, the primary-driven container HA variants, the SEMP mate channel, and the
 config-export/import feature's block parser, marker layer, section classification, shutdown
 injection, verification diff, replay transformations and the generated apply
-driver, and the replication mate renderers and readers. 426 tests across 22 files.
+driver, and the replication mate renderers and readers. 429 tests across 22 files.
 
 `blocks_test.go`, `sections_test.go`, `inject_test.go`, `diff_test.go`, `annotate_test.go`
 and `importops_test.go` share one fixture: `testdata/currentconfig_sample.cli`, a
@@ -1017,9 +1048,10 @@ fixture itself.
 | `TestDisableDefaultVPN` | The hardening script is uploaded and its scripts are cleaned up with one `rm -f` |
 | `TestDisableDefaultUsers` | Every parsed VPN gets a `client-username default` line |
 | `TestDisableDefaultUsersNoVPNs` | Unparseable VPN output means the step does not run |
+| `TestDisableDefaultUsersRefusesAQuotedVPNName` | A VPN name the broker reports with a double quote is refused before any script is built: the names are quoted into an admin-enabled CLI script, so they meet the same rule as names from the env file. Refused loud rather than skipped, since a skipped VPN would keep its default users silently |
 | `TestProductKeys` | The generated product-key script is uploaded verbatim |
 | `TestProductKeysDetectsError` | A broker-reported failure in the output fails loud |
-| `TestProductKeysEmpty` | No keys configured is an error |
+| `TestProductKeysEmptySkips` | No keys configured is a no-op, not a failure, and nothing reaches the broker. Both this and `DomainCerts` are reached unconditionally from a config-sourced slice that may legitimately be empty, so the two now answer the same way -- this one used to refuse while its sibling skipped |
 | `TestProductKeysRejectsMultilineKey` | A product key with a newline or CR is rejected before anything is uploaded -- it would append commands to a CLI script already running as admin -- while an opaque vendor key with `+`, `/` or `=` is accepted, since a key's alphabet is not this tool's to constrain |
 | `TestRemoveDomainCerts` | The removal half of the domain-CA pair emits a script naming the CA, reachable from both platforms |
 | `TestRemoveDomainCertsRejectsBadName` | A CA name with a space is rejected before any upload |
@@ -1028,7 +1060,7 @@ fixture itself.
 | `TestRemoveServerCertsSpansEveryRole` | Every role it is given gets the script. The apply path loads the certificate onto the whole group, so a removal that reached one node would leave a half state that survives a failover |
 | `TestRemoveServerCertsRunCLIError` | A failure on one node aborts the loop and shows nothing -- half a removal reported as success is the outcome worth preventing |
 | `TestRemoveProductKeys` | The revocation half, a loud placeholder until `no product-key <key>` was confirmed. `ProductKeys`' mirror image by design, so the same properties are asserted of it |
-| `TestRemoveProductKeysRefusesAnEmptyList` | Nothing configured means nothing to revoke -- reporting success for having done nothing is what the apply path already refuses |
+| `TestRemoveProductKeysEmptySkips` | The removal half of the row above: nothing configured means nothing to revoke, and both directions say so the same way |
 | `TestRemoveProductKeysValidatesBeforeUploading` | Each key is checked before anything reaches the broker, since it is interpolated into a CLI line that runs with admin already enabled -- the same order `ProductKeys` and `DomainCerts` use |
 | `TestRemoveProductKeysScansTheOutput` | The property that matters most: revoking a key the broker does not hold is the kind of thing a CLI reports in prose and returns zero for, so without the `error`/`fail` scan the command would report success while the entitlement is still there |
 | `TestExecCLI` | A local script is uploaded under its base name and cleaned up afterwards |
@@ -1065,11 +1097,11 @@ Branch coverage for the paths the happy-path tests in `broker_test.go` cannot re
 | `TestRemoveCLIWarnsOnFailure` | Failed cleanup warns instead of erroring, and still issues `rm -f` for every path |
 | `TestFieldLabelWithoutColon` | A label line with no colon-space separator yields empty |
 | `TestLastLinesEqualCount` | `lastLines` when n equals the line count |
-| `TestExecCLIWarnsAndFailsOnErrorOutput` | L2: error-looking CLI output still logs the `[WARN]`, but ExecCLI now also fails once the script has finished running, rather than warning and reporting success |
+| `TestExecCLIFailsOnErrorOutput` | L2: a rejected line fails the run once the script has finished, and the error wraps `ErrCLIRejected` exactly as `RunCLI`'s does -- both detect the same failure with the same scan, so `errors.Is` must not answer differently depending on the entry point. The separate `[WARN] errors detected` line went with it: the transcript is now shown and the error says more |
 | `TestExecCLIRunError` | A failed run errors, and cleanup is still attempted |
 | `TestServerCertBundleReadError` | Unreadable cert/key files error |
 | `TestServerCertCAReadError` | An unreadable CA file errors |
-| `TestDomainCertsAcceptsAPathWithSpaces` | Replaces `TestDomainCertsBadFilename`: the certificate value is now a full host path, not an in-broker filename or CLI operand, so a path with a space (already gated by `config.CheckHostPath` at load) must be ACCEPTED here, not rejected |
+| `TestDomainCertsAcceptsAPathWithSpaces` | The certificate value is a full host path, not an in-broker filename and not a CLI operand, so a path with a space (already gated by `config.CheckHostPath` at load) must be ACCEPTED here, not rejected |
 | `TestDiagnosticsTwoRolesNoBundle` | Output with no "Diagnostics saved" line pulls only the configs zip, once per role |
 | `TestDiagnosticsRunError` | A transport `Run` failure surfaces |
 | `TestLeaderPollCondError` | A failing `show redundancy` propagates, and the detail dump still runs |
@@ -1083,7 +1115,7 @@ Branch coverage for the paths the happy-path tests in `broker_test.go` cannot re
 | `TestDomainCertsUploadFileError` | DomainCerts stops before load-domain-certs when a CA file upload fails |
 | `TestDomainCertsRunCLIError` | DomainCerts returns the load-domain-certs error and never shows output |
 | `TestDisableDefaultVPNDisableError` | DisableDefaultVPN stops before reading back show-vpn when disabling the VPN fails |
-| `TestDisableDefaultVPNShowError` | DisableDefaultVPN surfaces a failed show-vpn readback and skips cli-script cleanup |
+| `TestDisableDefaultVPNShowError` | DisableDefaultVPN surfaces a failed show-vpn readback, and the cleanup still runs: `readCLI` pairs every upload with its own removal even when the read failed, since the upload usually succeeded. Skipping it was how a `.show-vpn.cli` came to be left on the broker after every failed readback |
 | `TestDisableDefaultUsersShowVPNError` | DisableDefaultUsers stops before disabling anything when the VPN listing fails |
 | `TestDisableDefaultUsersDisableError` | DisableDefaultUsers surfaces a failed disable-default-usernames call rather than reporting success |
 | `TestProductKeysRunCLIErrorStopsLoop` | ProductKeys stops its per-role loop on a transport failure and never touches the remaining role |
@@ -1103,7 +1135,7 @@ Branch coverage for the paths the happy-path tests in `broker_test.go` cannot re
 | `TestShowRDPairPrimaryError` | showRDPair returns empty strings and the Primary's error without ever querying the Backup |
 | `TestDiagnosticsMkdirError` | Diagnostics fails loud with the destination path when it cannot create the diagnostics dir |
 | `TestGatherNodeDownloadError` | a failed main-archive Download fails the whole node's diagnostics gather with no local file produced |
-| `TestGatherNodeBundleDownloadWarnsOnly` | a failed diagnostics-bundle download only WARNs, naming the bundle, and Diagnostics still succeeds |
+| `TestGatherNodeBundleDownloadIsFatalAndKeepsTheBundle` | Inverts what this used to assert. A failed bundle download WARNED and returned nil, and the next line deleted that bundle from the broker -- so the one copy of what the command exists to retrieve was destroyed and the run reported success. It now fails, names the remote path, and leaves the bundle for the operator to fetch by hand |
 | `TestGatherNodeBundleCleanupWarnsOnly` | a failed bundle-cleanup rm only WARNs and Diagnostics still succeeds overall |
 
 ### diff_test.go
@@ -1180,7 +1212,7 @@ broker at all.
 | `TestImportOpsImportApplySeparatesFirstSectionFromMain` | A `First` section ("Create logging", which ends the CLI session) runs in its OWN `RunCLI` invocation, never sharing one with the rest -- sharing would mean whatever follows the logging change in that same script never runs |
 | `TestBuildChunksCreatesVPNsBeforeBrokerSections` | The create-VPN pass runs before every broker-level chunk, as it does in the artifact, and is not duplicated into the per-VPN chunk. Chunking had folded it into each VPN's own chunk, which runs LAST -- so a broker-level line naming a message-VPN applied before that VPN existed. The single-script apply it replaced had this right only by rendering in artifact order |
 | `TestTornDownRecordsOnlyAppliedTeardowns` | `TornDown` names VPNs the driver reported as actually torn down, not ones whose teardown was merely CAPTURED. It used to record at capture time, so every pre-driver failure told the operator their VPN was emptied and its spooled messages destroyed when nothing had been applied -- sending them to recover data that was still there |
-| `TestImportOpsImportApplyTransportFailureIsNotAConfigRejection` | The distinction `applyScript`'s error text draws: a transport failure means the CLI never ran, a different failure from the broker rejecting a configuration line -- conflating the two points an operator at the wrong next step |
+| `TestImportOpsImportApplyTransportFailureIsNotAConfigRejection` | The distinction the import driver's error text draws: a transport failure means the CLI never ran, a different failure from the broker rejecting a configuration line -- conflating the two points an operator at the wrong next step |
 | `TestImportOpsImportVerifyReExportsAndDiffs` | `ImportVerify`'s whole contract, the ONLY error detection this feature has: re-export the target with NO scope filter (verification has to see the whole broker back even though teardown ran per-VPN), strip this tool's own markers before comparing, and route the comparison through `importIgnore` so a deliberately-skipped section does not read as a failure |
 | `TestImportOpsImportVerifyWrapsFailureContext` | The two ways `ImportVerify` can fail before `DiffBlocks` ever runs -- the broker capture failing, and the re-export not parsing -- each wrapped naming which step failed, since the fix for each is completely different |
 | `TestImportOpsRenderScriptAppliesPreambleAndDropsFilteredLines` | An applied script carries the mode preamble (home/enable/configure) but not a header comment, and an apply-filtered rule's excluded line (`"Configure Routing"` dropping `interface "intf0"`) is dropped from the rendered body even though the rest of the block is kept |
@@ -1276,7 +1308,7 @@ section only when an older or hand-edited artifact still carries one.
 | `TestParseVPNReplication` | The spaces-in-names test above all else: splitting this fixed-width flag table on whitespace renames `A VPN WITH LONG NAME AND SPACES` to `A` AND shifts every flag one column, so the admin state is read out of the name. Three of the six rows would be wrong. The column rule defines the fields and is read rather than assumed. It also pins the `Q` (queue) column, and that table is the evidence for the rule the re-enable keyword rests on: `default` is admin-UP WITH a queue and `vpn-01` is admin-UP with NONE, so queue existence cannot be derived from enablement |
 | `TestVPNReplStateIsTwoFacts` | Admin state and role are two independent facts: a shut-down VPN still reports a role sitting at its default, so reading the role alone misreports every VPN on a broker where replication was never turned on. `n/a` stays `n/a` rather than folding into standby, which would let a switch promote against a VPN it cannot see, and `Replicating()` is true only for enabled-with-a-real-role |
 | `TestParseVPNReplicationReadsColumnOrderFromTheHeader` | The flags are located by their header LETTER, not by position. A broker that reordered or inserted a flag column would otherwise have its admin state read as its role -- silently, with both values still looking valid, which is the one misreading that could send a switchover the wrong way |
-| `TestParseVPNReplicationRejectsUnreadable` | Five reports that must fail loudly rather than return a partial map: no column rule, no A/C columns, an unknown admin flag, an unknown role flag, and a table with no rows (every broker has a default VPN, so an empty table means the report was not understood) |
+| `TestParseVPNReplicationRejectsUnreadable` | Six reports that must fail loudly rather than return a partial map: no column rule, no A/C columns, an unknown admin flag, an unknown role flag, a table with no rows (every broker has a default VPN, so an empty table means the report was not understood), and a VPN name carrying a double quote, which the phase scripts would otherwise quote into a CLI operand |
 | `TestParseVPNReplicationIgnoresTheEchoedPrompt` | A trailing CLI prompt is not a row -- it is too short to reach the flag columns. Matching it by text instead would have dropped a real row, because the capture contains a VPN NAMED after the router |
 | `TestParseVPNReplicationIgnoresRepeatedHeaders` | A paginated report repeats the header and rule partway down, and the repeated RULE parses as a row: its name column trims to a run of dashes and its flag columns are literal `-`, decoding to n/a for both. Left in, a phantom VPN named `--------------------------------` joins the map |
 | `TestParseVPNReplicationToleratesALongPrompt` | The other half of the prompt story: a broker whose router name is longer than the name column produces a prompt that DOES reach the flag columns, and without the gutter check its characters fail to decode and turn an ordinary successful report into a hard parse error. The gutter -- the space always preceding a flag column in a padded row -- tells the two apart |
@@ -1320,11 +1352,13 @@ Pins the generated broker CLI script text -- these strings are what the broker e
 | `TestDomainCertsScriptSorted` | The caller's order is emitted as given (no internal sort any more), with the right prefix/suffix, and the `certificate file` operand is the CA NAME itself -- the upload destination is `certPath(name)`, so the name IS the in-broker filename the operand resolves against |
 | `TestDisableDefaultUsersScriptQuoting` | A VPN name containing a space stays one quoted token |
 | `TestRemoveProductKeysScript` | The revocation form confirmed on a live broker, whole: `no product-key <key>` under the same preamble |
-| `TestProductKeyScriptsShareAPreamble` | Apply and remove open with the same `home`/`enable`/`admin` and close with the same `show product-key`. A removal that reached `no product-key` from a different CLI context than the apply reached `product-key` from would fail in a way no test comparing only its own literal would catch |
+| `TestProductKeyScriptsShareAPreamble` | Apply and remove open with the same `home`/`enable`/`admin`, and neither ends with a `show product-key`: the transcript reaches the terminal, so the show would print every licence key back. A removal that reached `no product-key` from a different CLI context than the apply would fail in a way no test comparing only its own literal would catch |
 | `TestProductKeysScript` | Exact script text for a list of keys |
 | `TestDisableDefaultVPNScript` | The script shuts the VPN down and nothing else, asserted in both directions. It used to also shut down the default client-username, all twelve services and the plaintext downgrade -- two of which were wrong to bundle in: the default client-username belongs to `broker configure default-users`, which shuts it down in EVERY VPN rather than only this one, and disabling the plaintext downgrade is a broker-wide TLS decision that also made the operation unreversible |
 | `TestEnableDefaultVPNScript` | The inverse, and the reason the disable script was narrowed: an operation that changed six things could not be undone by one that changes one. `no shutdown` restores exactly what `shutdown` took away, and must not re-open the plaintext downgrade |
 | `TestParseVPNNames` | Column-based VPN parsing skips the legend, header, separator, comments, and blank lines |
+| `TestParseVPNNamesSkipsARepeatedRule` | The regression the column-width rewrite nearly shipped. Reading the rule once and treating every later line as data means a REPEATED rule -- what a paginated report prints partway down -- is read as a row: its name column trims to a run of dashes, so a VPN literally named `-----...` joins the list. `ParseVPNReplication` documents the identical hazard, and this skips the repeated rule and the repeated header the same way |
+| `TestParseVPNNamesKeepsAMultiWordName` | The name column's width is read from the rule rather than cut at a hardcoded column 32, and the whole column is the name rather than each whitespace field of it. `A VPN WITH LONG NAME AND SPACES` used to arrive as six VPNs matching nothing, so the real VPN's default client-username was never shut down and nothing said so |
 | `TestParseVPNNamesNoSeparator` | Output without a separator row yields no names |
 | `TestGatherConfigsScript` | Prefix, first show command, `gather-diagnostics` with days substituted, and one line per configured show |
 | `TestZipConfigsScript` | The zip command is present |
@@ -1379,18 +1413,18 @@ group working unchanged.
 | `TestSempV1OKRejectsErrorReply` | A code="fail" reply, a reply with no execute-result, and an empty reply are all not ok |
 | `TestHTTPBodyStripsHeaders` | The header block is stripped for both CRLF and LF separators; a body with no separator passes through |
 | `TestLastHTTPStatus` | The final status line wins (100 Continue tolerated); no status reads as a named placeholder |
-| `TestMateSEMPPreflightSuccess` | With a server certificate configured and no `tls.cas`, the mate is reached over https on 1943 with certificate verification disabled and a warning naming `tls.cas` as the fix; exactly one call |
-| `TestMateSEMPPreflightPlaintextWarns` | With no server certificate the mate is reached over plain http on 8080 exactly as before this change, but a warning fires first naming that the admin credentials cross the network unencrypted |
-| `TestMateSEMPPreflightMissingIP` | An empty redundancy.backup.addr refuses before any transport call, naming the field |
-| `TestMateSEMPPreflightNon2xx` | A non-2xx reply fails naming the status and the actionable causes |
-| `TestMateSEMPPreflightTransportError` | A transport error is wrapped with the host-to-host reachability hint |
-| `TestMateRevertActivitySuccess` | With a server certificate configured and no `tls.cas`: exact argv (`curl -is -K - https://<mate>:1943/SEMP`) with the user, data and insecure config lines on stdin, a warning naming `tls.cas`, and one call -- callers own the preflight |
-| `TestMateRevertActivityCredsAndBodyNeverInArgv` | The S3 boundary: no argv token carries the password or the RPC body |
-| `TestMateRevertActivityNon2xx` | A non-2xx reply fails on the status even when the body says ok |
-| `TestMateRevertActivityRPCNotOK` | A 2xx reply without code="ok" fails, dumping the header-stripped reply |
-| `TestMateRevertActivityBridgePlaintextOnly` | The last-resort branch: a bridge mapping only 8080 (1943 unmapped, even with a certificate configured) keeps today's plain http:// on the mapped port, but now warns first that the credentials are crossing the wire unencrypted |
-| `TestMateRevertActivityBridgeTLSNoCA` | A bridge mapping exposing 1943 is preferred over a mapped 8080; with no `tls.cas` configured, verification is disabled (self-signed broker cert is the normal case) and a warning names `tls.cas` |
-| `TestMateRevertActivityTLSIgnoresTLSCAs` | The opposite of what the row here used to claim. There was a "fully verified" branch passing `tls.cas[0]` to curl's `--cacert`, and it could not have worked: curl is exec'd INSIDE the broker container while `tls.cas` names files on the HOST running this tool, and nothing mounts CA material into the broker -- domain CAs go into the broker's own trust store via `broker configure domain-certs`, not onto a path curl can read. Now that host paths resolve against the env file's directory the value is unambiguously a host path, so the branch is gone rather than silently pointing curl at a file that is not there, and the warning is required even with CAs configured: the channel is encrypted, the mate's identity is not checked |
+| `TestBackupSEMPPreflightSuccess` | With a server certificate configured and no `tls.cas`, the mate is reached over https on 1943 with certificate verification disabled and a warning naming `tls.cas` as the fix; exactly one call |
+| `TestBackupSEMPPreflightPlaintextWarns` | With no server certificate the mate is reached over plain http on 8080 exactly as before this change, but a warning fires first naming that the admin credentials cross the network unencrypted |
+| `TestBackupSEMPPreflightMissingIP` | An empty redundancy.backup.addr refuses before any transport call, naming the field |
+| `TestBackupSEMPPreflightNon2xx` | A non-2xx reply fails naming the status and the actionable causes |
+| `TestBackupSEMPPreflightTransportError` | A transport error is wrapped with the host-to-host reachability hint |
+| `TestBackupRevertActivitySuccess` | With a server certificate configured and no `tls.cas`: exact argv (`curl -is -K - https://<mate>:1943/SEMP`) with the user, data and insecure config lines on stdin, a warning naming `tls.cas`, and one call -- callers own the preflight |
+| `TestBackupRevertActivityCredsAndBodyNeverInArgv` | The S3 boundary: no argv token carries the password or the RPC body |
+| `TestBackupRevertActivityNon2xx` | A non-2xx reply fails on the status even when the body says ok |
+| `TestBackupRevertActivityRPCNotOK` | A 2xx reply without code="ok" fails, dumping the header-stripped reply |
+| `TestBackupRevertActivityBridgePlaintextOnly` | The last-resort branch: a bridge mapping only 8080 (1943 unmapped, even with a certificate configured) keeps today's plain http:// on the mapped port, but now warns first that the credentials are crossing the wire unencrypted |
+| `TestBackupRevertActivityBridgeTLSNoCA` | A bridge mapping exposing 1943 is preferred over a mapped 8080; with no `tls.cas` configured, verification is disabled (self-signed broker cert is the normal case) and a warning names `tls.cas` |
+| `TestBackupRevertActivityTLSIgnoresTLSCAs` | The opposite of what the row here used to claim. There was a "fully verified" branch passing `tls.cas[0]` to curl's `--cacert`, and it could not have worked: curl is exec'd INSIDE the broker container while `tls.cas` names files on the HOST running this tool, and nothing mounts CA material into the broker -- domain CAs go into the broker's own trust store via `broker configure domain-certs`, not onto a path curl can read. Now that host paths resolve against the env file's directory the value is unambiguously a host path, so the branch is gone rather than silently pointing curl at a file that is not there, and the warning is required even with CAs configured: the channel is encrypted, the mate's identity is not checked |
 | `TestSempCurlSendsTheCallersCredential` | The SEMP login is a parameter, not a field read off the local config. It used to be hardcoded to `config.AdminUser` + `semp.adminPass`, which was correct while the only remote was the HA mate -- same deployment, same password -- but a REPLICATION mate is a different broker with its own credential, so leaving it hardcoded would send this deployment's admin password across a WAN. The check is two-sided: the caller's password present, the LOCAL one absent, and exactly one `user` line |
 | `TestLocalAdminIsTheDeploymentsOwnLogin` | `LocalAdmin()` is `config.AdminUser` + `semp.adminPass`, pinning what the HA callers pass so the credential lift cannot quietly change the login those paths have always used |
 
@@ -1497,8 +1531,8 @@ failover exercise whose only cross-host touch is the SEMP revert-activity.
 | `TestLeaderLocalBadRoleArg` | LeaderLocal propagates an invalid explicit role arg before the primary-only guard runs, making no transport calls |
 | `TestLeaderLocalPollCondError` | LeaderLocal aborts on a mid-poll transport error while still dumping show-redundancy-detail, closing an asymmetry with the k8s Leader |
 | `TestLeaderLocalAssertLeaderError` | LeaderLocal returns the assert-leader error after a healthy poll without showing output |
-| `TestMateActivityStateReadsTheMateColumn` | `MateActivityState` reads the `Activity Status` line for exactly "Mate Active"; local-active, standby, empty output, and the phrase appearing under an unrelated label all read false |
-| `TestShowRedundancyIsReadOnly` | The exported `ShowRedundancy` wrapper issues exactly one `show redundancy` CLI script on the named role and nothing else, since a probe calls it to decide whether a mutation is safe |
+| `TestBackupActivityStateReadsTheMateColumn` | `backupActivityState` reads the `Activity Status` line for exactly "Mate Active"; local-active, standby, empty output, and the phrase appearing under an unrelated label all read false |
+| `TestShowRedundancyIsReadOnly` | The `showRD` read issues exactly one `show redundancy` CLI script on the named role and nothing else, since a probe calls it to decide whether a mutation is safe |
 
 ### appliance_test.go
 
@@ -1574,7 +1608,7 @@ Everything driven through `kubectl`: the read-only permission preflight, prep, d
 operator, day-2 ops, secrets, and the pod transport, plus the operator's watch-list
 algebra and the namespace occupancy gate, plus the mate channel that reaches a
 replication site in another cluster, and the Secret read that supplies a mate's
-password. 208 tests across 18 files.
+password. 210 tests across 18 files.
 
 ### matechannel_test.go
 
@@ -1621,6 +1655,8 @@ it, and that broker simply stopped reconciling.
 | `TestSubtractWatchPreservesOrder` | The same rolling-the-pod-for-nothing concern, on the removal path |
 | `TestReconcileWatchDecidesWhatToApply` | Every branch of the deploy-side decision: first install, an operator already watching everything, a union that adds nothing, and one that adds our namespace |
 | `TestReconcileWatchFlagsAWideningAsAQuestion` | Going from a named list to every namespace hands a shared operator the whole cluster, so the plan marks it for confirmation rather than applying it as a side effect of a deploy |
+| `TestAmbiguousOperatorIsNotFoldedIntoNotInstalled` | The half that matters most. `installedOperatorImage` answers `""` for a read that did not happen, because a first install has no operator namespace and must not alarm -- but `""` also means "nothing installed", which makes the downgrade confirmation skip itself. Folding the AMBIGUITY error in there would disable the guard using the very condition it was added to catch, so that one error is returned and every other still folds |
+| `TestFindOperatorDeploymentIsScopedByNamespace` | The lookup two decisions rest on -- widening the watch list and the downgrade check -- is scoped by namespace, not name alone: the Deployment in the resolved operator namespace wins over a same-named impostor listed first, one elsewhere is still found for the installed-somewhere-else warning, two elsewhere is an error naming both, and none is nil |
 | `TestOperatorReleaseNarrowsInsteadOfRemoving` | Why `operator remove` is not just a delete: with another namespace still in the watch list the operator is KEPT and the list narrowed, via `set env` rather than a bundle re-apply -- a removal has no business changing the operator image another env file depends on |
 | `TestSetWatchRefusesAnEmptyList` | The trap the design exists around, guarded at the writing function as well as the call site: writing an empty `WATCH_NAMESPACE` would leave the operator with WIDER scope than it started with |
 
@@ -1647,7 +1683,7 @@ one wrongly reported occupied merely stays. The gate is built to fail toward "oc
 
 | Test | What it covers |
 | --- | --- |
-| `TestClusterHonoursRuntime` | Every `Cluster` helper (`kubectl`, `apply`, `deleteStdin`, `output`, `interactiveExec`) runs argv[0] from `kubernetes.command` and places its leading arguments ahead of the subcommand |
+| `TestClusterHonoursRuntime` | Every `Cluster` helper (`kubectl`, `apply`, `deleteStdin`, `kubectlOutput`, `interactiveExec`) runs argv[0] from `kubernetes.command` and places its leading arguments ahead of the subcommand |
 | `TestTransportHonoursRuntime` | The pod transport does the same for `exec`, `exec -i`, the stdin `Upload`, and both `cp` directions |
 | `TestExecutorRefusesUnapprovedRuntime` | The executor half of enforce-twice: a `Cluster` and a transport built straight from a `*config.Config` that never went through `config.Load` still refuse an unapproved `microk8s kubectl`, on all eleven paths that could reach exec -- and hand the runner nothing at all, since refusing after the call would mean the binary already ran |
 | `TestRuntimeDefaultArgvUnchanged` | With the default runtime the argv is exactly `kubectl ...` with no extra tokens -- the regression guard for every existing `+ kubectl ...` assertion |
@@ -1665,15 +1701,12 @@ one wrongly reported occupied merely stays. The gate is built to fail toward "oc
 
 `check.go` itself now owns only the reachability probe and the storage-class resolution;
 the grouped report (secret-free config echo, the sparse-config wording, the skip notes
-under a preview) moved to `checkreport.go` and is covered in `checkreport_test.go` below --
-`TestCheckEnvNoSecretLeak`, `TestCheckStorageClass`, `TestCheckDryRun` and
-`TestCheckEnvSparseConfig` were removed from here for exactly that reason, and their
-coverage is named again on the successor row that replaced each one.
+under a preview) lives in `checkreport.go` and is covered in `checkreport_test.go` below.
 
 | Test | What it covers |
 | --- | --- |
 | `TestReachable` | The API-server probe argv, and failure when it errors |
-| `TestCheckStopsProbingWhenUnreachable` | Successor to `TestCheckAbortsWhenUnreachable`: Check still fails when the API server is unreachable, but now as a `[FAIL] api server` ROW in the report (naming "cannot reach") rather than only a returned error, every check that needs the cluster reports `[SKIP]` instead of being silently omitted or repeating the same failure, and no further probe runs after the one Reachable call |
+| `TestCheckStopsProbingWhenUnreachable` | Check fails when the API server is unreachable, and does so as a `[FAIL] api server` ROW in the report (naming "cannot reach") rather than only a returned error, every check that needs the cluster reports `[SKIP]` instead of being silently omitted or repeating the same failure, and no further probe runs after the one Reachable call |
 | `TestResolveStorageClass` | A configured class short-circuits; a single default resolves; multiple defaults error; no default returns empty |
 
 ### checkreport_test.go
@@ -1685,14 +1718,14 @@ instead of the first.
 
 | Test | What it covers |
 | --- | --- |
-| `TestValidateNeverPrintsASecret` | Successor to `TestCheckEnvNoSecretLeak`: the admin, monitor and registry passwords never reach the report, which shows only `admin=set`/`monitor=set` |
+| `TestValidateNeverPrintsASecret` | The admin, monitor and registry passwords never reach the report, which shows only `admin=set`/`monitor=set` |
 | `TestValidateReadsDeploymentsOnce` | The fetch-once rule: the watch row and the operator rows want two different facts about the SAME operator Deployment, and each used to issue its own cluster-wide `get deployment --all-namespaces`, so every healthy `validate` paid for a full list twice. It asserts EXACTLY one, not at most one -- at most would also pass if the fetch stopped happening, so a report that silently skipped both rows would read as a successful optimisation. The verdict is ignored on purpose: against a fake that answers nothing some rows legitimately come back failed, and the call count is the same either way |
 | `TestValidateGroupsAndOrdersSections` | Pins the layout: sections render in the agreed order (Deployment, Operator, Broker, Credentials, Placement), the four leading rows (namespace, name, image, image pull) lead in order, and cpu/mem are never crammed into one compound row |
 | `TestValidateTagsEchoedConfigAsINFO` | Successor to `TestCheckDryRun`: config read back from the env file is tagged `[INFO]`, never `[ OK ]` (a report that tagged unverified config as OK would claim verification nobody did), and a preview reports every cluster-dependent check as `[SKIP]` |
 | `TestValidateSparseConfigExplainsItself` | Successor to `TestCheckEnvSparseConfig`: an empty watch list explains itself as "watches ALL namespaces" rather than the reassuring opposite, and unset TLS/admin password read `(not configured)`/`MISSING` |
 | `TestValidateReportsEveryFailureInOneRun` | The behaviour change worth having: a refused permission is the first failure, but the run continues and still renders every section after it, and the returned error counts the failures rather than wrapping only the first |
 | `TestCheckReportFailedCounts` | `checkReport.failed()` sums the FAIL rows across every section; an empty report counts zero |
-| `TestStorageRows` | Successor to `TestCheckStorageClass`, exercising the `storageRows` section builder directly: a suitable configured class is OK with no default lookup; Immediate binding or no expansion is FAIL; missing attributes report `<none>` and FAIL; the actionable message names the fix without the old bash script number; and every read failure along the way (default resolution, the first attribute column, the second after the first succeeds) surfaces its own FAIL row rather than being swallowed |
+| `TestStorageRows` | Exercises the `Cluster.storageRows` section builder directly: a suitable configured class is OK with no default lookup; Immediate binding or no expansion is FAIL; missing attributes report `<none>` and FAIL; the actionable message names the fix; and every read failure along the way (default resolution, the first attribute column, the second after the first succeeds) surfaces its own FAIL row rather than being swallowed |
 | `TestValidateReportsResolvedPorts` | M11: an explicit `kubernetes.ports` resolves into the new leading Config section as a `ports (N)` count plus the `name=port` pairs, readable straight off the report with no need to deploy or run `broker generate` |
 | `TestValidateReportsDefaultPorts` | M11: leaving `kubernetes.ports` unset is not "no ports configured" -- `ApplyDefaults`'s 17-entry default is what actually renders into the broker CR, so the Config section shows `ports (17)` and both the first and last default port; a precondition assertion fails loud if defaulting itself ever stopped happening, rather than passing vacuously on an empty list |
 | `TestPortRowsNeverFail` | M11: `portRows` produces only `[ OK ]` rows at every wrap boundary (0, 1, a full chunk, one over, and the 17-port default) -- `validate` is read-only and must never stop a deploy over how many ports there are to print |
@@ -1700,7 +1733,7 @@ instead of the first.
 | `TestValidateReportsThePreSharedKeyChoice` | On Kubernetes an empty pre-shared key is a legitimate deployment rather than a gap -- the operator generates and distributes one -- so the report has to say WHICH of the two keys the group will end up using; nothing else shows it, since neither the CR nor the Secret exists until deploy. A configured key is reported by naming the Secret entry it becomes and never the value itself, and a standalone broker gets no row at all |
 | `TestValidateSaysWhoOwnsTheTLSSecret` | Naming a Secret and supplying the files it is built from are separate decisions, and the report is the only place the difference shows before a deploy: read as "this tool will create it" in the case where it will not, a missing Secret is first discovered by a pod that will not mount. Covers both origins, plus the `tls.certPassphrase` warning -- the CRD's `spec.tls` has no passphrase field, so an encrypted key cannot be used on this platform -- and that the passphrase itself never reaches the output |
 | `TestValidateReportsTheDerivedImagePullSecretName` | The "image pull" row's own version of the test above: the row now prints `cfg.ImagePullSecretName()`, not `cfg.K8s.ImagePullSecret` directly, so it must show the Secret that will actually exist -- including the DERIVED default -- rather than only what the env file spelled out, or an operator reading a name matching nothing they configured would read it as a bug instead of the default it is. Covers all three states: a configured name (reported as-is), credentials present with no name (the derived default), and neither (`(none)`/`(none)`) |
-| `TestValidateSkipsTheStorageClassWhenEveryNodeIsCustomMounted` | Closes a gap the shared name hid: there are two `storageRows`, and only the config-side one branched on custom mounts. It drives a recording runner rather than `engine.Echo` on purpose -- the Echo path short-circuits every cluster-backed row to "skipped (preview)" before `storageRows` is reached, so a preview cannot see this either way, and a test written over Echo asserts nothing. The cluster-side namesake ran the class check regardless -- and since `validateStorage` refuses class and `customVolumeMount` together, it always fell through to the cluster default. On a cluster with no default (bare metal, static provisioning -- exactly why someone pre-creates PVCs) that FAILED the whole report over a class the deploy never touches, and advised setting a key `config.Load` then refuses. Also guards that dead-end advice against coming back |
+| `TestValidateSkipsTheStorageClassWhenEveryNodeIsCustomMounted` | Closes a gap a shared name hid: the config-side builder branched on custom mounts and the cluster-side one did not, and both were called `storageRows` -- the config-only one is `storageInfoRows` now. It drives a recording runner rather than `engine.Echo` on purpose -- the Echo path short-circuits every cluster-backed row to "skipped (preview)" before `storageRows` is reached, so a preview cannot see this either way, and a test written over Echo asserts nothing. The cluster-side namesake ran the class check regardless -- and since `validateStorage` refuses class and `customVolumeMount` together, it always fell through to the cluster default. On a cluster with no default (bare metal, static provisioning -- exactly why someone pre-creates PVCs) that FAILED the whole report over a class the deploy never touches, and advised setting a key `config.Load` then refuses. Also guards that dead-end advice against coming back |
 | `TestValidateStillChecksTheClassWhenOnlySomeNodesAreMounted` | The guard asks per role rather than off `UsesCustomMounts`, so a partly covered group -- which still has claims to bind -- keeps being checked. `validateStorage` forbids that state today; this is what stops the check silently disappearing if the rule is ever relaxed |
 | `TestCheckReportSkipsEmptySections` | A section with no rows (e.g. Placement on a standalone config) prints no header at all, rather than an empty block |
 
@@ -1814,11 +1847,8 @@ an explicit yes -- the same shape as the container platforms' rotation-consent p
 ### ops_test.go
 
 `Status`/`DescribeBroker`/`DescribeLB`/day-2 ops (`ops.go`) keep their direct kubectl-argv
-coverage here. The read-only survey these tests used to cover --
-`TestShowAll`/`TestShowAllDetailAddsStaticArtifacts`/`TestSurveyScopesToTheBrokerNamespace`/
-`TestShowAllReportsAndContinuesOnGetError` -- was replaced by the rendering `statusreport.go`
-now owns; their successors (`TestBrokerReportRunningPicture` and neighbours) are in
-`statusreport_test.go` below.
+coverage here. The read-only survey's rendering lives in `statusreport.go` and is covered
+in `statusreport_test.go` below (`TestBrokerReportRunningPicture` and neighbours).
 
 | Test | What it covers |
 | --- | --- |
@@ -1930,7 +1960,7 @@ AGE column is reproducible.
 The host-local Docker/Podman manager, its node-local transport, and the engine
 preflight that precedes every mutating operation, plus the engine `inspect` decode
 behind `broker status` and the server-certificate delivery each engine needs.
-132 tests across 6 files.
+133 tests across 6 files.
 
 ### runtime_test.go
 
@@ -1964,14 +1994,14 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestManagerCheckDryRun` | Preflight report for docker/podman x HA/standalone: title, mode line, runtime version probe, dry-run skip note |
 | `TestManagerCheckDNSFailsLoudInHA` | An unresolvable redundancy host fails the check and is named |
 | `TestManagerCheckStandaloneDNSWarnsOnly` | Standalone tolerates an unresolved name |
-| `TestManagerPrepHostRootlessUsesUnshareChown` | Rootless podman chowns via `podman unshare` |
+| `TestManagerPrepHostRootlessUsesUnshareChown` | Rootless podman chowns via `podman unshare`, once the whole host-readiness block ahead of it has passed (`healthyRootlessOut`, rootless_test.go) |
 | `TestPrepHostRootlessNoFileSufficient` | Rootless prep probes this user's hard `nofile` limit with `sh -c 'ulimit -Hn'` and reports the value when it covers `container.ulimits.nofile` |
 | `TestPrepHostRootlessNoFileTooLow` | The point of the check: a rootless container cannot raise `nofile` past the user's hard limit, so prep stops rather than deploying a broker that would run under-provisioned. The message carries both numbers and the exact `limits.d` drop-in, including the re-login that re-reads it |
 | `TestPrepHostRootlessNoFileUnlimited` | An unlimited hard limit satisfies any configured value |
 | `TestPrepHostRootlessNoFileUnreadable` | A limit that will not parse fails loud rather than being assumed adequate |
 | `TestPrepHostRootlessNoFileUnsetSkips` | With no configured `nofile` there is nothing to assert against, so the probe never runs -- the hand-built config the executors are handed |
 | `TestPrepHostRootfulSkipsNoFile` | Docker and rootful podman never probe: their privileged engine raises the limit itself, so the invoking user's hard limit does not bound the container |
-| `TestPrepHostRootlessNoFileDryRun` | `--dry-run` echoes the probe and skips the assertion, the same shape `Preflight` uses, since the Echo runner answers nothing |
+| `TestPrepHostRootlessDryRunSkipsTheReadinessBlock` | The nofile probe is one row of the podman host-readiness block now, and the block skips as a WHOLE under the Echo runner rather than row by row: nothing it asserts can be answered without a real host, so one honest skip beats seven echoed probes and seven skipped assertions. Prep still previews the work that follows the block |
 | `TestSplitLimit` | The `soft:hard` ulimit parser: a pair, a single value meaning both, surrounding whitespace, and the values that mean "nothing to assert" (`-1`, empty, non-numeric) |
 | `TestManagerDeployDockerComposeWritesFile` | Deploy writes the compose file and runs `compose up -d --force-recreate` |
 | `TestManagerDockerComposeCommandOverride` | A `docker.compose` override (the standalone `docker-compose` binary) is what every compose call goes through |
@@ -1995,14 +2025,14 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestManagerDeletePodmanStopFailsServiceActiveBlocksRemoval` | A failed `systemctl stop` proves nothing by itself (`podman info`/Preflight only shows the engine is reachable), so when `serviceState` still reports the unit `active`, Delete blocks the unit removal, the daemon-reload, and (via the purge gate) the data-directory rm, instead of reporting success over a broker still serving traffic |
 | `TestManagerDeletePodmanStopFailsServiceInactiveProceeds` | The same failed stop, but `serviceState` confirms the unit is already `inactive` -- the benign "already stopped" case still proceeds exactly as before |
 | `TestManagerDeletePodmanStopFailsStateUnknownBlocksRemoval` | The case the guard exists for: the stop failed AND `systemctl is-active` answered nothing, which is what an unreachable rootless systemd user session looks like while `podman info` still succeeds on the engine socket. `is-active` exits non-zero for every state but `active`, so the exit code cannot tell "stopped" from "could not ask" -- only the state text can, and no text means refuse. Pins that silence is never read as "already stopped" |
-| `TestManagerDeletePodmanRemovesSecrets` | Delete now removes every secret `CreatePodmanSecrets` loaded into podman's own store (the same `render.ContainerSecrets` list), so they no longer outlive a `broker remove --delete-data`; a failing removal warns rather than failing a teardown that otherwise succeeded |
+| `TestManagerDeletePodmanRemovesSecrets` | Delete removes every secret `createPodmanSecrets` loaded into podman's own store (the same `render.ContainerSecrets` list), so they no longer outlive a `broker remove --delete-data`; a failing removal warns rather than failing a teardown that otherwise succeeded |
 | `TestManagerDeletePodmanPurgeRootless` | Rootless purge removes the data dir via `podman unshare` |
 | `TestManagerDeleteDockerComposeDownWhenFileExists` | With a compose file present, delete runs `compose down` |
 | `TestManagerDeleteDockerPurgeRemovesDataDir` | Delete runs `compose down` and, with purge, removes the data dir |
 | `TestManagerDeleteDockerComposeNoFileFallsBackToStopRm` | A missing compose file falls back to stop+rm |
 | `TestManagerStopAndRemoveContainerAbsentNoOp` | `docker rm` on a name never deployed exits non-zero, which used to turn "reset after a failed deploy" into an error; `containerExists` (matched against a `ps --all` listing, not the unanchored `--filter name=` regex) makes the no-compose-file fallback no-op like every other removal path in the tool |
 | `TestManagerStopAndRemoveStopFailsContainerRunningBlocks` | The docker half of the same stop-failure check as podman's: `docker info`/Preflight proves the engine is reachable, not that the container stopped, so a failed stop with the container still running blocks `rm` instead of falling through to it |
-| `TestManagerStopAndRemoveStopFailsProbeUnansweredBlocks` | The docker twin of `...StateUnknownBlocksRemoval`: the stop failed and the `ps` running-probe could not answer either. `containerRunning` alone answers "false" here -- the deferred M4 hazard -- which is why `stopAndRemove` reads `containerRunningKnown`'s second return value and refuses on an unanswered probe rather than falling through to `rm` |
+| `TestManagerStopAndRemoveStopFailsProbeUnansweredBlocks` | The docker twin of `...StateUnknownBlocksRemoval`: the stop failed and the `ps` running-probe could not answer either. A probe that answered with a bare bool would say "false" here -- the M4 hazard -- which is why `stopAndRemove` reads `containerRunningKnown`'s second return value and refuses on an unanswered probe rather than falling through to `rm` |
 | `TestManagerLifecyclePodmanSystemctl` | `Start`/`Stop`/`Restart` on podman drive `systemctl {start\|stop\|restart} <name>.service` rather than the engine directly, since the quadlet unit owns the container's lifecycle -- covered rootful and rootless, since only rootless prepends `--user` |
 | `TestStatusAllFindsBrokersByImage` | The container answer to `--all`: discovery is by IMAGE, not by the configured container name, so a broker deployed by hand still appears and an unrelated container never does. A config-scoped listing cannot answer "what is actually running on this host", which is the whole reason the flag exists |
 | `TestStatusAllReportsNothingFound` | An empty result says so in words. This is the ordinary case on a host not yet deployed to, where a bare header would read as though the command failed to look |
@@ -2046,6 +2076,62 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestManagerDeployPodmanSecretError` | BOTH halves of the store write, because loading a secret is two commands rather than one (`secret rm --ignore` then `secret create`). Either failing must stop the deploy and name the CONFIG KEY behind the secret, so the operator learns which env-file field to look at rather than which podman verb failed. The `rm` half is deliberately fatal: `--ignore` already absorbs the only benign case (nothing in the store yet), so a failure that survives it is real, and creating a secret beside one that could not be removed would leave the store in a state nobody chose |
 | `TestManagerNilSinks` | Nil log and output sinks fall back to discard and stdout without erroring |
 
+### rootless_test.go
+
+Fixtures: `healthyRootlessOut(hardLimit)` answers every probe in the podman host-readiness
+block the way a correctly prepared host would, keyed by the SHAPE of each call rather than by
+index, so a row can be added or reordered without re-teaching it -- `manager_test.go`'s
+`rootlessNoFileMgr` shares it, since those tests are about the `nofile` limit and every other
+row has to pass for the failure they assert to be the one they mean. `fakeEnv(m, initial)`
+replaces the `Getenv`/`Setenv` seams with a map, because `ensureUserSession` WRITES
+`XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` and an `os.Setenv` would leak into every test
+after it; `newCapMgr` installs an inert pair for the same reason. `rootlessMgr()` is the
+healthy host each case then breaks in exactly one place, and `failOnCall` fails one captured
+`Output` call while leaving the rest healthy, which is what makes a row's failure attributable.
+`lingerOff(hardLimit)` is `healthyRootlessOut` with the one repairable row turned off, which is
+what separates the read-only caller from the mutating one.
+
+`rootlessMgr` sets `Podman.SystemctlUser` and `Podman.WantedBy` by hand for the same reason
+`ctrCfg` sets `Scaling.CPU`: the fixture skips `ApplyDefaults`, which is where the two knobs
+derived from `Rootless` come from. Leaving `SystemctlUser` empty sends every rootless probe to
+the SYSTEM bus -- the one thing these rows exist to prove does not happen -- which is exactly
+how the first version of `TestCheckPodmanHostHealthyReportsEveryRow` failed.
+
+| Test | What it covers |
+| --- | --- |
+| `TestCheckPodmanHostHealthyReportsEveryRow` | All seven rows report, and the exact argv of each probe (`loginctl show-user <uid> --property=Linger`, `systemctl --user show --property=Version`, the nearest-writable walk, `ulimit -Hn`) -- a renamed flag is caught here rather than on a host nobody can reproduce |
+| `TestCheckPodmanHostIsReadOnly` | `validate`'s own promise, asserted with linger OFF -- the one row the block CAN repair, so the read-only caller reporting it and leaving it alone is the whole test. Every call is `Output`, and none is `enable-linger`, `mkdir`, `chown` or `unshare` |
+| `TestCheckPodmanHostSkipsDockerAndPreview` | Docker probes nothing at all here, and the Echo runner reports `skipped (preview)` rather than asserting against answers it cannot get |
+| `TestCheckPodmanHostRootfulStopsAtEUID` | Rootful podman runs the euid row and nothing else: a privileged engine owns the id mapping, raises `nofile` itself, and installs units under the system systemd instance |
+| `TestCheckPodmanHostEUIDMismatchSkipsTheRest` | The reachability-first rule (k8s `verifyRows`' shape): probed as root, a rootless block would read the WRONG user's linger, runtime directory and limit, so those rows are honest skips and nothing is probed at all |
+| `TestEnsureUserSessionDerivesBothWhenUnset` | The sudo/su/cron case: both variables derived from the euid, the runtime dir probed with `test -d` first, and the report saying `(derived)` |
+| `TestEnsureUserSessionNeverOverwritesInherited` | An operator who set one meant it -- neither value is touched, and the report says `(inherited)` |
+| `TestEnsureUserSessionDerivesEachHalfIndependently` | The middle ground where one survives and the other does not: the derived bus is built from the INHERITED runtime dir, and both origins are named |
+| `TestEnsureUserSessionExportsNothingWhenTheDirIsMissing` | The ordering the function exists for: nothing is exported once the directory is known absent, because a derived path to a directory that is not there turns a clear cause into an obscure failure later. The bus-dependent rows are skipped, the bus-INDEPENDENT ones still report, and the error names sudo, `enable-linger` and the path |
+| `TestEnsureUserSessionProbesOncePerRun` | Memoisation: every systemctl call funnels through it, so three calls cost one probe |
+| `TestSystemctlCarriesTheSessionWithoutPrepHost` | Why the call lives on `systemctl` rather than only in the readiness block: `broker start`/`stop`/`restart`/`remove`/`status` drive systemd without ever calling `PrepHost` and need the same bus |
+| `TestCheckIDMappingRefusesAnUnmappedRunUser` | A `runUser` outside this user's subuid range is refused, naming the id, the range and the two commands that fix it -- replacing the bare `invalid argument` `podman unshare chown` would otherwise report. The mechanism is documented rather than restated in the error |
+| `TestCheckIDMappingSkipsNamedRunUser` | `config` accepts account NAMES here, which name accounts inside the container image and cannot be resolved from the host, so the row skips and says why |
+| `TestCheckIDMappingRefusesWhenNothingIsAllocated` | The shape a `useradd --system` or a directory (LDAP/AD) account arrives in. The process ALREADY runs as the account the container will use, so an empty list is an answer about that account rather than a gap in what was asked -- podman then maps only container id 0 and every non-zero `runUser` is unusable with nothing on screen to say why. Reported, not skipped |
+| `TestIDMappingCommandsNameTheAccountLiterally` | The privileged line is meant to be FORWARDED to an administrator, so `$(id -un)` in it would resolve to whoever ends up running it rather than to the account needing the range |
+| `TestSuggestSubIDRangeAvoidsExistingAllocations` | Why the range is computed from `/etc/subuid` + `/etc/subgid` rather than hardcoded: two accounts sharing a subuid range map to the same host uids, which is a containment hole, and only newer shadow-utils refuse to create one. Covers an empty host, one existing account, out-of-order entries, junk lines, and a need larger than the conventional 65536 block |
+| `TestSuggestSubIDRangeSaysWhenItIsGuessing` | An unreadable `/etc/subuid` makes the proposal a convention rather than an answer, so the command carries an inline `# check this does not overlap` -- otherwise an administrator applies an overlapping range believing it was checked |
+| `TestIDMappingErrProposesTheNextFreeBlock` | Ties the computation to the command an operator actually forwards, and pins that a COMPUTED range carries no caveat comment |
+| `TestHostUserNameFallsBackToTheUID` | `id -un` is authoritative (it sees the directory accounts an `/etc/passwd` read would miss), but `usermod` takes a numeric uid too, so a failed lookup still yields a usable command |
+| `TestCheckLingerRefusesWhenDisabled` | The footgun the whole block exists for, on the READ-ONLY caller. The error carries the consequence in one clause and the command; why systemd behaves this way is documented rather than restated |
+| `TestPrepHostEnablesLinger` | The point of the `fix` flag: enabling linger for the INVOKING user needs no privilege (polkit's `set-self-linger`), so it belongs with prep's other unprivileged preparations rather than in a refusal. The argv is pinned exactly, and the ABSENCE of a username argument separately -- `enable-linger <user>` is the variant needing admin auth, and prep must be unable to issue it. Prep then carries on to the mkdir |
+| `TestPrepHostSkipsLingerWhenAlreadyEnabled` | The common case costs one read and no write, so re-running deploy does not keep poking logind |
+| `TestPrepHostLingerEnableFailureIsActionable` | The case the privilege argument does NOT cover: polkit can still decline on a non-active session or a tightened `set-self-linger`. That leaves exactly one thing to do, so the error carries only the administrator's form, naming the account. Nothing is created once the repair itself failed |
+| `TestValidateReportsLingerAndPrepFixesIt` | The two callers reading the SAME block differently: one definition of a ready host, two dispositions. `fix=false` reports and issues nothing; `fix=true` repairs and passes |
+| `TestCheckLingerRefusesWhenLoginctlCannotRun` | Quadlet is a systemd generator, so a host whose logind does not answer cannot run this deployment however the other rows read -- a failure, not a skip, and reached only once the session row has passed so it can no longer fail merely for a missing bus address |
+| `TestCheckUserSystemdRefusesWhenTheBusIsDead` | The promise deploy's own `daemon-reload` cannot keep, because the unit is on disk by then: the bus is proven before anything is written, and the error names `podman.socket`, `enable-linger` and that sudo is the wrong answer |
+| `TestCheckDataDirRefusesAnUnwritableParent` | The ordinary first run as a non-root user, since `dataDir` defaults under `/opt`, which no unprivileged user can write to, and that default does not change for rootless. The row names the EXISTING directory at fault rather than only the configured one, and the handed-over `chown` targets THIS user rather than `runUser` -- prep's own `podman unshare chown` sets the in-namespace ownership afterwards |
+| `TestCheckPodmanHostReportsEveryFailureInOnePass` | What `validate`'s own help promises, and why the errors are joined rather than returned at the first: two broken rows both survive into the error |
+| `TestPrepHostRefusesBeforeTouchingTheHost` | The integration of the read-only property: an unready host stops prep with no `mkdir`, `chown` or `unshare` having run. The unready row is deliberately the DATA DIR rather than linger, since linger is the one thing prep repairs and using it would assert the opposite |
+| `TestPrepHostMkdirFailureExplainsRootless` | The guidance the legacy bash carried (`002-host-prep.sh`) and the Go port dropped -- unreachable in practice now, so this covers the race where ownership changes between the check and the create |
+| `TestPrepHostMkdirHintIsRootlessOnly` | Rootful podman and docker create the directory as root, so the rootless advice would be wrong there |
+| `TestCheckReportsDNSAndPodmanHostTogether` | The one-pass promise at the `Check` level: a DNS failure must not hide a host-readiness failure or the reverse, and both causes survive into the joined error |
+
 ### transport_test.go
 
 | Test | What it covers |
@@ -2077,6 +2163,7 @@ between an unknown answer and a confident wrong one.
 | `TestRestartCountDoesNotAttributeOurUnitToAnotherContainer` | `broker status --all` discovers containers BY IMAGE, so it reaches brokers this env file knows nothing about -- and this env file's unit restart count is not their number |
 | `TestRestartCountUnknownRatherThanZero` | systemd not answering (unit not installed, rootless/rootful mismatch) reads as unknown. A zero there claims "this broker has never restarted", which this tool has no basis for |
 | `TestRestartCountUnknownWhenSystemctlFails` | The other way systemd declines to answer -- the command itself fails rather than answering unreadably. Both must read as unknown, never as zero |
+| `TestPrintableStripsControlCharacters` | Image names, statuses, error text and mount paths come out of `<runtime> inspect` -- data about a container this tool did not necessarily create -- and land in a report a terminal renders, so a terminal escape inside one would be executed by the terminal reading it |
 | `TestReportStateNeverPrintsTheEnvironment` | On docker the compose secrets are environment-sourced, so a report that dumped the container's environment would put the admin password on a terminal, into scrollback, and into whatever ticket the output is pasted into. Secrets appear only as mount PATHS |
 | `TestReportStateOnAStoppedContainer` | The half of the report an operator only reads when something has gone wrong: no start time worth printing, but the three facts that say why it stopped -- finish time, exit code, and the engine's own reason. It also pins that a writable mount is labelled `rw` and a read-only one `ro`, so a secret mount that turned up writable is a real finding |
 | `TestReportStateOnAHealthyRunningContainer` | The ordinary case and the mirror of the above: health under docker's spelling with no failing-streak noise, a start time, and no exit code invented for a container that has not exited |
@@ -2126,7 +2213,7 @@ quoting, PATH resolution, and the pre-exec announcement. 27 tests across 2 files
 | `TestEchoRunInput` | `RunInput` shows stdin as a byte count, never its contents |
 | `TestEchoRunEnv` | `RunEnv` echoes the command first and annotates the variables it would set after it (`<<< (env: NAME=***)`), so `+ <cmd>` stays greppable and no value is printed |
 | `TestEchoRunEnvNoEnv` | With nothing to annotate the line is exactly what `Run` prints, not a dangling `(env: )` |
-| `TestMaskEnv` | The masking helper keeps names (quoting an odd one) and drops values, including a value holding `=` and an empty one |
+| `TestMaskEnv` | The masking helper keeps names (quoting an odd one) and drops values, including a value holding `=`, an empty one, and an entry with no `=` at all -- which is shown as `<malformed>` rather than echoed, since the whole entry may be the value |
 | `TestEchoOutput` | `Output` echoes and returns nil bytes |
 | `TestEchoDefaultWriter` | A zero-value `Echo` writes to stdout |
 | `TestExecOutput` | `Output` captures a child process's stdout |
@@ -2204,7 +2291,7 @@ would bless away.
 | Test | What it covers |
 | --- | --- |
 | `TestServerCertFilePathKeyKeepsItsUnderscore` | A spelling neither engine nor broker would complain about getting wrong. Every credential setting appends a BARE `filepath`; the server certificate's carries an underscore, so deriving it from the generic suffix would produce a setting the broker does not read -- and nothing errors on an unknown environment key, so TLS would simply be off with nothing pointing at the cause |
-| `TestServerCertIsADockerOnlySecret` | The one place the secret list differs by platform, and why it must. Docker can source a secret from the compose child's environment, so the bundle reaches the container with nothing written to this host; a quadlet unit cannot inline content, so podman gets the same bytes as a bind-mounted host file. If the certificate appeared in podman's list, `CreatePodmanSecrets` would load a PRIVATE KEY into podman's secret store |
+| `TestServerCertIsADockerOnlySecret` | The one place the secret list differs by platform, and why it must. Docker can source a secret from the compose child's environment, so the bundle reaches the container with nothing written to this host; a quadlet unit cannot inline content, so podman gets the same bytes as a bind-mounted host file. If the certificate appeared in podman's list, `createPodmanSecrets` would load a PRIVATE KEY into podman's secret store |
 | `TestServerCertificateReachesTheContainerOnBothEngines` | The named regression test for a property that previously had only goldens behind it -- a golden break is routinely answered with `-update`, which would silently bless the certificate disappearing from an artifact altogether |
 | `TestServerCertBundlePathIsPosixAndUnderBaseDir` | The one expression the quadlet renderer and the Manager's writer must share. If they drifted, podman would find no file at the source and create a DIRECTORY there instead, and the broker would start with no certificate and no error anywhere |
 | `TestFileBackedSecretIsExemptFromSecretPreflight` | A message that would otherwise be a lie: `SecretPreflight` blames an empty value with "set it in the env file", which for the certificate is wrong -- `tls.cert` IS set, the bytes just live on the host. Readability is enforced where the files are read instead |
@@ -2361,7 +2448,7 @@ new fake.
 | internal/broker | `uploadErrTransport`, `downloadErrTransport`, `runErrMatchTransport` (coverage_test.go) | The same embed-and-override shape for the transport methods `fakeTransport` always succeeds at: failing `Upload`/`UploadFile`, failing `Download` (optionally only for one remote path, so a bundle fetch can fail while the archive succeeds), and failing `Run` only when an argv predicate matches (isolating a best-effort cleanup failure from an earlier fail-loud one). Each still records the call |
 | internal/broker | `removed` (broker_test.go) | Whether an uploaded script was deleted afterwards -- `removeCLI` issues `rm -f` through `Run`, so removals land in `runs`, not `outputs`. Matters for any script whose body carries a secret |
 | internal/broker | `seqTransport`, `newLocalOps`, `rd`, `sempOK`, `isCurl`, `curlCalls` (verify_local_test.go) | Scripts a sequence of `show redundancy` readings for the primary-driven HA ops; the responder's curl branch answers the mate SEMP channel with the canned `sempOK` reply, and `curlCalls` extracts the recorded SEMP execs for URL/stdin assertions. `localCfg` carries the mate IPs and admin creds the channel needs |
-| internal/broker | `serverCert` (semp_test.go) | The `config.TLS{Cert, CertKey}` pair that makes `sempPort`/`MateSEMPPreflight`/`MateRevertActivity` prefer the mate's TLS listener; every TLS-expecting case sets it explicitly since a plaintext broker is what every other test already covers |
+| internal/broker | `serverCert` (semp_test.go) | The `config.TLS{Cert, CertKey}` pair that makes `sempPort`/`BackupSEMPPreflight`/`BackupRevertActivity` prefer the mate's TLS listener; every TLS-expecting case sets it explicitly since a plaintext broker is what every other test already covers |
 | internal/broker | `assertNoPasswordInArgv` (semp_test.go) | The shared S3 boundary check reused by every mate-SEMP test (plaintext and TLS alike): no argv token may carry the admin password or the RPC body |
 | internal/k8s | `recRunner` / `rrCall` (transport_test.go) | Capturing `engine.Runner` with `outQueue` and `runErrQueue` for scripting multi-step ops, plus `outErrQueue` (per-`Output` errors, so one read in an op can fail while an earlier one succeeds) and `runInputErr` (fails `apply -f -` / `delete -f -`). Both queues fall back to the blanket `outErr`/`runErr` once drained, so a test that sets only those behaves as before. `canI`/`canIErr` answer `Cluster.Preflight`'s `auth can-i` probe out of band (default: permitted) so it never consumes a queued read written for a different call, and `afterPreflight` asserts the probe came first and returns the calls after it |
 | internal/k8s | `haCfg`, `saCfg` (names_test.go), `adminCfg` (prep_test.go), `loadK8s` (secrets_test.go) | Config builders |
@@ -2402,6 +2489,7 @@ Override them on the struct after construction:
 | --- | --- | --- |
 | `Manager.Resolve` | `net.LookupHost` | internal/container -- DNS probes in `Check`/`PrepHost` |
 | `Manager.Geteuid` | `os.Geteuid` | internal/container -- the rootless/rootful guard (returns -1 on Windows, which skips it) |
+| `Manager.Getenv` / `Manager.Setenv` | `os.Getenv` / `os.Setenv` | internal/container -- `ensureUserSession`'s `XDG_RUNTIME_DIR` / `DBUS_SESSION_BUS_ADDRESS` derivation. A seam rather than `t.Setenv` because the code WRITES the environment: a real `os.Setenv` would leak into every test after it, and `newCapMgr` installs an inert pair so no test can reach the real one by accident |
 | `Ops.Hostname` | `os.Hostname` | internal/broker -- node-role detection in `LocalRole` |
 | `Ops.Platform` | `""` (zero value) | internal/broker -- resolves the mate's SEMP port from the bridge network.ports mapping (`sempPort`); set by `ctrOps`, left zero on k8s, which never uses the SEMP channel |
 | `App.Interactive` | `stdinCanAnswer()` -- stdin is usable at all | internal/cli -- whether a run may ASK. Gates `confirmDelete`/`confirmLayer`/`confirmRestart`, so every prompt branch guarding a destructive action is testable -- including the one that KEEPS a layer when nobody answers. Whether the question was ANSWERED is a separate fact, reported by `promptLine`'s second return |

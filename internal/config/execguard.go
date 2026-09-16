@@ -25,7 +25,7 @@ import (
 //
 // The whole check is one function, CheckCommand, called from BOTH Validate and
 // every executor immediately before argv is built (k8s.Cluster.clusterCmd,
-// container.Manager.runtimeCmd, and the two transports). A hostile env file is
+// container.Manager.runtime and composeCmd, and the two transports). A hostile env file is
 // therefore inert even if nobody ran validation first, and the two enforcement
 // points cannot drift because there is only one definition to drift from.
 //
@@ -89,13 +89,22 @@ var execBinaries = map[Platform][]string{
 // Refusing the category rather than the word: a list that blocked only `sudo` while
 // allowing `doas` or `pkexec` would be a control in name only.
 var neverAllowed = map[string]string{
-	"sudo":   "sudo",
-	"doas":   "doas",
-	"su":     "su",
-	"pkexec": "pkexec",
-	"run0":   "run0",
-	"runas":  "runas", // Windows
-	"gsudo":  "gsudo", // Windows
+	"sudo":     "sudo",
+	"sudoedit": "sudoedit",
+	"doas":     "doas",
+	"su":       "su",
+	"pkexec":   "pkexec",
+	"run0":     "run0",
+	// Not privilege escalators by name, but each runs a command as another user, in
+	// another namespace or with altered capabilities, which is the same power.
+	"systemd-run": "systemd-run",
+	"machinectl":  "machinectl",
+	"setpriv":     "setpriv",
+	"capsh":       "capsh",
+	"unshare":     "unshare",
+	"nsenter":     "nsenter",
+	"runas":       "runas", // Windows
+	"gsudo":       "gsudo", // Windows
 }
 
 // unsafeTokenChars are the characters no command token may carry. Under argv exec
@@ -104,7 +113,7 @@ var neverAllowed = map[string]string{
 // long as it stays in an argv. These same tokens reach log lines, echoed output
 // pasted into tickets, and the rendered compose/quadlet artifacts, so they are
 // refused at the boundary instead of being escaped correctly by every consumer
-// forever (S3: validate at the boundary AND sanitize at the shell layer).
+// forever: validate at the boundary AND sanitize at the shell layer.
 //
 // Backslash is included, which means a Windows path cannot appear in any token.
 // That is not a loss for argv[0], which may not be a path at all, and a flag value
@@ -323,12 +332,20 @@ func checkFlagShape(r commandRules, cmd Command, allowed map[string]bool) error 
 				"positional argument ahead of the subcommand this tool appends -- remove it", r.field, i)
 		case strings.HasPrefix(tok, "-"):
 		case allowed[execBase(tok)]:
-		case r.subword != "" && tok == r.subword && i == len(cmd)-1 && allowed[execBase(cmd[i-1])]:
+		case r.subword != "" && tok == r.subword && i == len(cmd)-1:
 			// The field's one permitted subcommand, and only in the one position
-			// where it means what the field says: last, directly after an allowed
-			// binary. That covers `docker compose` and, with lima approved,
-			// `lima nerdctl compose` -- while `docker rm` is still a bare word
-			// and `docker compose up` still has a token this tool did not append.
+			// where it means what the field says: LAST, after a prefix that has
+			// already validated. Reaching index i means every token before it
+			// passed as a flag, a flag's value or an allowed binary, because this
+			// loop returns on the first that did not -- so "last" is the whole
+			// rule, and `docker rm` is still a bare word while `docker compose up`
+			// still has a token this tool did not append.
+			//
+			// The PRECEDING token is deliberately not constrained. With
+			// `docker.command: docker --context prod`, ComposeCommand derives
+			// `docker --context prod compose`, whose preceding token is the flag
+			// value `prod` -- requiring an allowed binary there would refuse this
+			// tool's own derived default.
 		case strings.HasPrefix(cmd[i-1], "-") && !strings.Contains(cmd[i-1], "="):
 			// The value of the preceding flag. Unvalidatable beyond the charset:
 			// arity is unknowable without modelling every flag of every allowed
@@ -432,6 +449,23 @@ func (c *Config) AllowCommands(names []string) error {
 	return nil
 }
 
+// guardedCmd pairs one command VALUE with the rules it is checked against, so
+// validateExecCommands can build its per-platform list in one place and check it in
+// one loop. cmdField below is the expansion pass's counterpart and deliberately
+// carries a POINTER and a field name instead: one gate reads a value, the other
+// rewrites a field and has to name it in an error.
+type guardedCmd struct {
+	rules commandRules
+	cmd   Command
+}
+
+// cmdField names one command field and points at it, for the pass that rewrites
+// tokens in place.
+type cmdField struct {
+	field string
+	cmd   *Command
+}
+
 // validateExecCommands runs the guard over every command field this tool executes
 // on the platform being validated. It is the validator half of layer 5.
 //
@@ -444,27 +478,18 @@ func (c *Config) AllowCommands(names []string) error {
 // the time it is asked, an empty command means an empty argv -- so CheckCommand
 // itself still refuses one, and that is what actually protects exec.
 func (c *Config) validateExecCommands(p Platform) error {
-	fields := []struct {
-		rules commandRules
-		cmd   Command
-	}{
+	fields := []guardedCmd{
 		// kubernetes.command is checked on every platform: ApplyDefaults fills it
 		// everywhere, and it is printable from any code path.
 		{clusterRules(), c.K8s.Command},
 	}
 	if p.IsContainer() {
-		fields = append(fields, struct {
-			rules commandRules
-			cmd   Command
-		}{runtimeRules(p), c.ContainerRuntime(p)})
+		fields = append(fields, guardedCmd{runtimeRules(p), c.ContainerRuntime(p)})
 	}
 	if p == Docker {
 		// ComposeCommand owns the "unset -> <runtime> compose" derivation, so what
 		// is checked here is exactly what Manager.compose will run.
-		fields = append(fields, struct {
-			rules commandRules
-			cmd   Command
-		}{composeRules(), c.composeOrDerived()})
+		fields = append(fields, guardedCmd{composeRules(), c.composeOrDerived()})
 	}
 	// A replication site's own cluster CLI is config text that reaches os/exec exactly
 	// like kubernetes.command, so it goes through the same guard on every platform --
@@ -475,10 +500,7 @@ func (c *Config) validateExecCommands(p Platform) error {
 		if s.Via.Kubernetes == nil {
 			continue
 		}
-		fields = append(fields, struct {
-			rules commandRules
-			cmd   Command
-		}{siteRules(strconv.Itoa(i)), s.Via.Kubernetes.Command})
+		fields = append(fields, guardedCmd{siteRules(strconv.Itoa(i)), s.Via.Kubernetes.Command})
 	}
 	for _, f := range fields {
 		if len(f.cmd) == 0 {
@@ -517,10 +539,7 @@ func (c *Config) validateExecCommands(p Platform) error {
 // token, so the failure is loud. TestCommandTildeExpansion covers each field by name.
 func (c *Config) expandCommandHomes(p Platform) error {
 	home := c.home()
-	fields := []struct {
-		field string
-		cmd   *Command
-	}{
+	fields := []cmdField{
 		// Every platform, matching validateExecCommands: ApplyDefaults fills
 		// kubernetes.command everywhere and only k8s reads it.
 		{"kubernetes.command", &c.K8s.Command},
@@ -528,33 +547,21 @@ func (c *Config) expandCommandHomes(p Platform) error {
 	switch p {
 	case Docker:
 		fields = append(fields,
-			struct {
-				field string
-				cmd   *Command
-			}{"docker.command", &c.Docker.Command},
+			cmdField{"docker.command", &c.Docker.Command},
 			// The stored field only. An UNSET compose is derived from
 			// docker.command by composeOrDerived, which reads the expanded value
 			// above and appends the bare word `compose`.
-			struct {
-				field string
-				cmd   *Command
-			}{"docker.compose", &c.Docker.Compose},
+			cmdField{"docker.compose", &c.Docker.Compose},
 		)
 	case Podman:
-		fields = append(fields, struct {
-			field string
-			cmd   *Command
-		}{"podman.command", &c.Podman.Command})
+		fields = append(fields, cmdField{"podman.command", &c.Podman.Command})
 	}
 	for i := range c.Replication.Sites {
 		via := c.Replication.Sites[i].Via.Kubernetes
 		if via == nil {
 			continue
 		}
-		fields = append(fields, struct {
-			field string
-			cmd   *Command
-		}{fmt.Sprintf("replication.sites[%d].via.kubernetes.command", i), &via.Command})
+		fields = append(fields, cmdField{fmt.Sprintf("replication.sites[%d].via.kubernetes.command", i), &via.Command})
 	}
 	for _, f := range fields {
 		cmd := *f.cmd

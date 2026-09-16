@@ -19,13 +19,15 @@ param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Tasks)
 $ErrorActionPreference = 'Continue'
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+# Captured HERE, at script scope: inside a function $MyInvocation names the FUNCTION, so
+# reading it there would print "Show-Usage". dev.sh uses ${0##*/} for the same reason --
+# whatever name the script was actually invoked as, including through a wrapper.
+$ScriptName = Split-Path -Leaf $MyInvocation.MyCommand.Path
 $RepoRoot  = Split-Path -Parent $ScriptDir
 $LogDir    = Join-Path $ScriptDir 'logs'
 $DistDir   = Join-Path $RepoRoot  'dist'
 $CovDir    = Join-Path $RepoRoot  'coverage'
 $BinName   = 'solace-util'
-# ItestName is the dev-only live-probe harness, named distinctly from BinName so
-# nothing in dist/ is ambiguous about which binary is shippable.
 
 # Version stamp: on a tag push git describe is exactly the pushed tag, so
 # `solace-util version` matches the GitHub release. --always falls back to the
@@ -119,7 +121,9 @@ function Cap {
   $code = $LASTEXITCODE
   $clean = $out -replace "\x1b\[[0-9;?]*[a-zA-Z]", ""
   Add-Content -Path $script:LogFile -Value $clean -Encoding utf8
-  if ($out.Trim().Length -gt 0) { Write-Host $out.TrimEnd() }
+  # $clean, not $out: dev.sh strips ANSI from the console stream as well as the log,
+  # so the two scripts show the same thing. The Go tooling here emits none anyway.
+  if ($clean.Trim().Length -gt 0) { Write-Host $clean.TrimEnd() }
   return $code
 }
 
@@ -203,7 +207,8 @@ function Task-cov {
   $total = (& go tool cover "-func=$prof" | Select-Object -Last 1)
   Add-Content -Path $script:LogFile -Value $total -Encoding utf8
   Write-Host $total
-  Ok "coverage -> $html"
+  # The trailing tab-delimited percentage, matching dev.sh's `${total##*$'\t'}`.
+  Ok "coverage -> $html  ($($total -replace '.*\t', ''))"
   return 0
 }
 
@@ -265,9 +270,9 @@ function Show-Usage {
   $raceDesc = ($RaceFlag -join ' ')
   $targetsDesc = (($DistTargets | ForEach-Object { "$($_.os)/$($_.arch)" }) -join ', ')
   Write-Host @"
-dev.ps1 - build/test/scan tooling for the solace-util CLI
+$ScriptName - build/test/scan tooling for the solace-util CLI
 
-Usage: dev.ps1 <task> [task...]
+Usage: $ScriptName <task> [task...]
 
 Tasks:
   tidy     go mod tidy
@@ -312,7 +317,7 @@ foreach ($t in $Tasks) {
 
 foreach ($task in $queue) {
   if (-not (Get-Command "Task-$task" -ErrorAction SilentlyContinue)) {
-    Die "unknown task: $task (try: dev.ps1 help)"
+    Die "unknown task: $task (try: $ScriptName help)"
   }
   Step $task
   Start-TaskLog $task

@@ -116,12 +116,11 @@ var namespaceKindRE = regexp.MustCompile(`(?m)^kind:[ \t]*Namespace[ \t]*$`)
 // ORDER, without contacting the cluster: the bundle's own Namespace document, then the
 // image-pull secret when one is configured, then the rest of the bundle.
 //
-// One command, not two. There used to be a `generate secrets operator` beside this, so
-// the credential-bearing document could be reviewed separately -- but the two outputs
-// then had to be applied in the right order by hand, and the ordering is exactly the
-// thing that is easy to get wrong (the regcred is namespaced, and its namespace only
-// exists inside the bundle). Emitting the same three documents in the same order
-// OperatorApply uses makes this output the artifact rather than a description of one:
+// ONE command, not a separate credential-bearing half. Split in two, the outputs would
+// have to be applied in the right order by hand, and that ordering is exactly the thing
+// that is easy to get wrong: the regcred is namespaced and its namespace only exists
+// inside the bundle. Emitting the same three documents in the same order OperatorApply
+// uses makes this output the artifact rather than a description of one:
 // `solace-util operator generate | kubectl apply -f -` is equivalent to
 // `solace-util operator deploy`, minus the preflight and the watch-list reconciliation.
 //
@@ -402,9 +401,9 @@ func (c *Cluster) refuseCRDDeleteIfBrokersExist(ctx context.Context) error {
 // have created it -- so it is not something to remove as a side effect of removing an
 // operator. The command to finish the job by hand is logged instead.
 //
-// That makes the regcred Secret its own delete: it used to be reaped as namespace
-// content, so leaving the namespace in place would otherwise leave a registry
-// credential behind after every teardown.
+// That makes the regcred Secret its own delete. Nothing else reaps it, so leaving the
+// namespace in place would otherwise leave a registry credential behind after every
+// teardown.
 //
 // The operator Deployment/RBAC removal (rest) always runs before the CRD layer is
 // even considered, and its own error return is unaffected by whatever the CRD
@@ -527,11 +526,11 @@ func (c *Cluster) OperatorScale(ctx context.Context, replicas int) error {
 // advice, and the only caller uses this to decide whether to warn before a deploy
 // that would otherwise fail confusingly. A false here is never fatal on its own.
 func (c *Cluster) OperatorInstalled(ctx context.Context) bool {
-	if _, err := c.output(ctx, "get", "crd", brokerResource); err != nil {
+	if _, err := c.kubectlOutput(ctx, "get", "crd", brokerResource); err != nil {
 		return false
 	}
 	opNS := c.operatorNS(ctx)
-	_, err := c.output(ctx, "get", "deployment", operatorDeployment, "-n", opNS)
+	_, err := c.kubectlOutput(ctx, "get", "deployment", operatorDeployment, "-n", opNS)
 	return err == nil
 }
 

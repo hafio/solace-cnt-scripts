@@ -604,8 +604,8 @@ func TestContainerHostDirsExpandATilde(t *testing.T) {
 // deliberately does NOT inherit that default. broker.configure domain-certs' own
 // no-op ("no domain certificate authorities configured -- skipping") depends on
 // dirs and files both being empty for a file that configures neither; defaulting
-// dirs would turn that no-op into a hard failure (rule F: an unreadable configured
-// dir is an error) for every deployment that has no ./certs directory beside its
+// dirs would turn that no-op into a hard failure -- an unreadable configured dir is
+// an error -- for every deployment that has no ./certs directory beside its
 // env file.
 func TestDomainCertsDirsAreNotDefaulted(t *testing.T) {
 	for _, p := range Platforms() {
@@ -692,12 +692,6 @@ func TestExpandHomePathsRunsBeforeRebaseAndDoesNotDependOnBaseDir(t *testing.T) 
 		}
 	}
 }
-
-// TestAdminUserIsFormatCheckedOnContainers is GONE with the admin.user key it pinned.
-// It held a configurable admin username to identRE because the value reached a Secret
-// key, a compose `target:`, a podman `target=` and the broker setting
-// username_<u>_globalaccesslevel. The username is the constant config.AdminUser now, on
-// every platform, so none of those positions carries operator input any more.
 
 // TestContainerCertRequiresKey pins a deliberate TIGHTENING: an env file setting
 // tls.cert without tls.certKey loads today and will stop loading on docker and

@@ -38,7 +38,7 @@ import (
 // What is NOT read is as deliberate: the environment. On docker the compose secrets
 // are environment-sourced, so a report that dumped it would put the admin password
 // on a terminal, into scrollback, and into whatever ticket the output is pasted
-// into (S3). Secrets appear here only as MOUNT PATHS -- named, never read.
+// into. Secrets appear here only as MOUNT PATHS -- named, never read.
 
 // containerState is the subset of `<runtime> inspect` this tool reports. Every
 // field is optional as far as the decoder is concerned: an engine version that
@@ -157,9 +157,9 @@ func (m *Manager) restartCount(ctx context.Context, s containerState) (int, bool
 // has no exit code worth printing.
 func (m *Manager) stateRows(ctx context.Context, s containerState) []output.KV {
 	rows := []output.KV{
-		{Key: "name", Value: s.containerName()},
-		{Key: "image", Value: s.Config.Image},
-		{Key: "state", Value: orUnknown(s.State.Status)},
+		{Key: "name", Value: printable(s.containerName())},
+		{Key: "image", Value: printable(s.Config.Image)},
+		{Key: "state", Value: orUnknown(printable(s.State.Status))},
 	}
 	if status, configured := s.health(); configured {
 		rows = append(rows, output.KV{Key: "health", Value: status})
@@ -180,7 +180,7 @@ func (m *Manager) stateRows(ctx context.Context, s containerState) []output.KV {
 			output.KV{Key: "finished", Value: orUnknown(s.State.FinishedAt)},
 			output.KV{Key: "exit code", Value: strconv.Itoa(s.State.ExitCode)})
 		if s.State.Error != "" {
-			rows = append(rows, output.KV{Key: "error", Value: s.State.Error})
+			rows = append(rows, output.KV{Key: "error", Value: printable(s.State.Error)})
 		}
 	}
 	return rows
@@ -210,7 +210,7 @@ func (m *Manager) reportState(ctx context.Context, s containerState) {
 		if mt.RW {
 			mode = "rw"
 		}
-		r.Line("    - %s -> %s (%s)", mt.Source, mt.Destination, mode)
+		r.Line("    - %s -> %s (%s)", printable(mt.Source), printable(mt.Destination), mode)
 	}
 }
 
@@ -226,9 +226,17 @@ func (m *Manager) inspectAndReport(ctx context.Context, name string) error {
 	return nil
 }
 
-func orUnknown(s string) string {
-	if s == "" {
-		return "(unknown)"
-	}
-	return s
+// printable strips control characters from a string the ENGINE reported before it
+// reaches a terminal: an image name, a status, an error text or a mount path is data
+// about a container this tool did not necessarily create, and a terminal escape inside
+// one would be executed by the terminal reading the report.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
 }
+
+func orUnknown(s string) string { return orValue(s, "(unknown)") }

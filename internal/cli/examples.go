@@ -15,31 +15,20 @@ import (
 // It stays at the top level because it acts on no deployment: there is no cluster, no
 // runtime and no existing env file, so every ancestor a noun would give it is dead weight.
 //
-// It takes no positional argument. The template used to be named by one (`examples docker`,
-// `examples full`), which meant three of the four words were platform names in a position
-// nothing else in the tree uses for a platform. --platform names the platform here as it
-// does everywhere else, and bare `examples` gives the full schema.
+// It takes no positional argument: --platform names the platform here as it does
+// everywhere else in the tree, and bare `examples` gives the full schema.
 func newExamplesCmd(app *App) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "examples",
 		Short: "Print a sample env file to start from",
-		Long: "`examples` on its own prints the FULL annotated schema: every key the loader accepts,\n" +
-			"the default each omitted one takes, and all three platform sections at once. That is\n" +
-			"the file to read when you want to know what is configurable.\n" +
+		Long: "Bare `examples` prints the FULL annotated schema: every key the loader accepts and\n" +
+			"the default each omitted one takes.\n" +
 			"\n" +
-			"--platform writes a minimal STARTER instead: a standalone env file carrying only the\n" +
-			"keys that platform cannot default, and declaring only its own section -- so the file it\n" +
-			"writes needs no --platform of its own afterwards.\n" +
+			"--platform writes a minimal STARTER instead -- only the keys that platform cannot\n" +
+			"default, declaring only its own section, so the file it writes needs no --platform\n" +
+			"afterwards. It reads no env file and contacts nothing.\n" +
 			"\n" +
-			"This is the one command that takes --platform without an env file to resolve it\n" +
-			"against, because it is what produces the env file. The abbreviations work here too\n" +
-			"(kube, dk, pm), expanded by the same parser every other --platform value goes through.\n" +
-			"\n" +
-			"Nothing here reads an env file or contacts anything, so -e/--env is ignored and no\n" +
-			"cluster or container runtime has to exist yet.\n" +
-			"\n" +
-			"Every secret in the output is a CHANGE-ME placeholder: an unedited file is refused by\n" +
-			"the broker rather than deployed with a password that is public in this repo. Each one\n" +
+			"Every secret is a CHANGE-ME placeholder the broker refuses until you edit it. Each\n" +
 			"has a sibling *Env key naming a variable to read instead, which is what keeps a\n" +
 			"committed env file secret-free.\n" +
 			"\n" +

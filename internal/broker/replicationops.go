@@ -14,7 +14,7 @@ import (
 // replicationops.go is `broker configure data-replication`: it converges THIS broker to
 // the env file's replication block.
 //
-// It is local-only by design (operator, 2026-09-13). It never reads and never writes the
+// It is local-only by design (operator-confirmed). It never reads and never writes the
 // mate, so it works on every platform, needs no site access block, and cannot be blocked
 // by a WAN outage. The accepted consequence, which its help text and docs/operations.md
 // both have to state: this is the ONE path in the feature that can produce two actives --
@@ -24,8 +24,7 @@ import (
 // THE APPLY IS TWO PHASES, IN TWO SEPARATE RunCLI CALLS, because the broker enforces a
 // precondition the single-script apply this replaced did not respect: mate configuration
 // (the address lines and the virtual-router-name) can only be changed while EVERY VPN on
-// the broker has replication disabled. CONFIRMED by the operator (2026-09-14), having been
-// carried as an assumption since 2026-09-13.
+// the broker has replication disabled. CONFIRMED by the operator.
 //
 // Worth recording that it was NOT derivable from the documentation: neither
 // `enable configure replication mate connect-port` nor `... virtual-router-name` states a
@@ -52,7 +51,7 @@ import (
 //	broker still has enabled. One RunCLI call, run whether or not phase 1 ran.
 //
 // A ROLE IS SET IN PLACE, with no shutdown around it, against a VPN that is up and
-// replicating (operator, 2026-09-14): `message-vpn <n>` -> `replication` ->
+// replicating (operator-confirmed): `message-vpn <n>` -> `replication` ->
 // `state <active|standby>` is the whole of it. An earlier draft of phase 2 cycled every
 // listed VPN down and back up to change its role, on the assumption that a role could
 // only move while replication was disabled. That assumption was wrong, and the cost was
@@ -252,10 +251,12 @@ func (o *Ops) runMatePhase(ctx context.Context, role config.Role, stopped, remov
 	lines = append(lines, mateLines...)
 	script := cliHome + "enable\nconfigure\n" + strings.Join(lines, "\n") + newlineIf(lines)
 
-	out, err := o.RunCLI(ctx, role, scriptConfigureReplMate, script)
+	// The transcript is discarded here: RunCLI shows it itself when it detects a
+	// rejection, which is what the error's "see the output above" refers to.
+	_, err := o.RunCLI(ctx, role, scriptConfigureReplMate, script)
 	if err != nil {
 		if isRunCLIRejection(err) {
-			return replPhase1Rejected(err, out, stopped)
+			return replPhase1Rejected(err, stopped)
 		}
 		return replTransportFailure(1, "mate convergence", err)
 	}
@@ -269,10 +270,10 @@ func (o *Ops) runMatePhase(ctx context.Context, role config.Role, stopped, remov
 func (o *Ops) runVPNPhase(ctx context.Context, role config.Role, vpnLines []string,
 	mateApplied bool, stopped, listed []string) error {
 	script := cliHome + "enable\nconfigure\n" + strings.Join(vpnLines, "\n") + newlineIf(vpnLines)
-	out, err := o.RunCLI(ctx, role, scriptConfigureReplVPNs, script)
+	_, err := o.RunCLI(ctx, role, scriptConfigureReplVPNs, script)
 	if err != nil {
 		if isRunCLIRejection(err) {
-			return replPhase2Rejected(err, out, mateApplied, stopped, listed)
+			return replPhase2Rejected(err, mateApplied, stopped, listed)
 		}
 		return replTransportFailure(2, "per-VPN replication state", err)
 	}
@@ -306,42 +307,23 @@ func isRunCLIRejection(err error) bool {
 	return errors.Is(err, ErrCLIRejected)
 }
 
-// replTranscriptTail returns the last driverTailLines lines of a CLI transcript -- the
-// same bound rejectionIn already scans, reused here rather than a second constant, so a
-// phase error can show what the broker actually said instead of pointing at output that,
-// on this path, nothing else prints (RunCLI's own message says "see the output above for
-// detail", which is only true for a caller that shows it on success; a failing
-// ConfigureReplication returns before anything is shown).
-//
-// Safe to include here where it would not be for the import driver: a replication script
-// carries mate addresses, VPN names and roles and no credential at all -- the replication
-// PSK is deliberately not applied by this tool -- so the secrets-in-errors constraint
-// import's driver has to guard against does not apply.
-func replTranscriptTail(out []byte) string {
-	lines := strings.Split(strings.ReplaceAll(string(out), "\r\n", "\n"), "\n")
-	if len(lines) > driverTailLines {
-		lines = lines[len(lines)-driverTailLines:]
-	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
-}
+// Neither builder below embeds a transcript tail: RunCLI shows the transcript itself
+// where it detects a rejection, so a tail here would print the same lines twice.
 
 // replPhase1Rejected reports a rejected mate-convergence chunk. Phase 2 is NEVER sent in
 // this case (ConfigureReplication returns before reaching it), and nothing from phase 1
 // is rolled back: whatever it shut down to satisfy the broker's precondition stays down.
-func replPhase1Rejected(err error, out []byte, stopped []string) error {
-	return fmt.Errorf("phase 1 (mate convergence) was rejected by the broker: %w\n%s\n\n"+
-		"The broker stopped at that line under stop-on-error, so the rest of phase 1 was not "+
-		"applied and phase 2 (the per-VPN state) was never sent. Nothing is rolled back.\n\n"+
-		"Phase 1 sends, in order: a replication shutdown for each of these VPNs, then the "+
-		"mate removals, then the new mate address lines -- so WHERE it stopped decides what "+
-		"is true now, and only the broker can tell you. Some or all of these have replication "+
-		"disabled and will NOT have it turned back on by this run: %s. The VPNs themselves "+
-		"are untouched and their clients are still connected; what stopped is the feed to the "+
-		"mate. If it stopped after the removals, this broker now holds NO mate configuration "+
-		"at all.\n\n"+
-		"Run %s to see exactly what landed before doing anything else, then fix what the "+
-		"broker refused and run this command again.",
-		err, replTranscriptTail(out),
+func replPhase1Rejected(err error, stopped []string) error {
+	return fmt.Errorf("phase 1 (mate convergence) was rejected by the broker: %w\n\n"+
+		"Nothing is rolled back, and phase 2 (the per-VPN state) was never sent. Phase 1 "+
+		"sends, in order: a replication shutdown for each listed VPN, the mate removals, "+
+		"then the new mate address lines -- so WHERE it stopped decides what is true now, "+
+		"and only the broker can say. If it stopped after the removals, this broker holds "+
+		"NO mate configuration at all.\n\n"+
+		"These have replication disabled and will NOT have it turned back on by this run: "+
+		"%s. The VPNs themselves are untouched and their clients are still connected.\n\n"+
+		"Run %s to see what landed, fix what the broker refused, then run this again.",
+		err,
 		replVPNList(stopped, "(none -- this broker had replication enabled on no VPN)"),
 		showReplicationHint)
 }
@@ -367,7 +349,7 @@ func replVPNList(names []string, ifEmpty string) string {
 // mate is already converged and every VPN it shut down for that is NOT rolled back; if it
 // was skipped (the mate already matched), nothing has touched the mate at all and only
 // the per-VPN chunk itself is in an unknown state.
-func replPhase2Rejected(err error, out []byte, mateApplied bool, stopped, listed []string) error {
+func replPhase2Rejected(err error, mateApplied bool, stopped, listed []string) error {
 	lead := "Phase 1 (mate convergence) was skipped because the mate configuration already " +
 		"matched the env file, so it shut nothing down."
 	if mateApplied {
@@ -391,13 +373,12 @@ func replPhase2Rejected(err error, out []byte, mateApplied bool, stopped, listed
 		body = "Phase 2 had no listed VPNs to apply, so all it sends is a replication " +
 			"shutdown for each VPN the env file does not name."
 	}
-	return fmt.Errorf("phase 2 (per-VPN replication state) was rejected by the broker: %w\n%s\n\n"+
-		"%s\n\n%s The broker stopped at the rejected line under stop-on-error, so the VPN it "+
-		"was on and every one after it are left with replication shut down; nothing is rolled "+
-		"back. Run %s to see which, before doing anything else.\n\n"+
-		"Fix what the broker refused, then run this command again. The mate now matches, so the "+
+	return fmt.Errorf("phase 2 (per-VPN replication state) was rejected by the broker: %w\n\n"+
+		"%s\n\n%s The VPN it stopped on and every one after it are left with replication "+
+		"shut down. Nothing is rolled back. Run %s to see which.\n\n"+
+		"Fix what the broker refused, then run this again. The mate now matches, so the "+
 		"re-run skips phase 1 and shuts nothing down for it.",
-		err, replTranscriptTail(out), lead, body, showReplicationHint)
+		err, lead, body, showReplicationHint)
 }
 
 // replTransportFailure reports a failure to reach the broker at all -- a killed
@@ -406,12 +387,11 @@ func replPhase2Rejected(err error, out []byte, mateApplied bool, stopped, listed
 // applied, or not started at all; nothing here can tell which, because nothing read the
 // broker back after the connection died.
 func replTransportFailure(phase int, name string, err error) error {
-	return fmt.Errorf("phase %d (%s) could not be run to completion: %w. This is a "+
-		"failure to reach the broker, not a rejected configuration line, so how much of "+
-		"this phase the broker actually applied is NOT known -- the script this command "+
-		"uploads keeps running inside the broker even after this process loses the "+
-		"connection to it. Replication may be shut down on any of this broker's VPNs "+
-		"right now. Read %s before doing anything else.",
+	return fmt.Errorf("phase %d (%s) could not be run to completion: %w. This is a failure "+
+		"to REACH the broker, not a rejected configuration line, so how much of the phase "+
+		"applied is NOT known: the uploaded script keeps running inside the broker after "+
+		"this process loses the connection. Replication may be shut down on any of this "+
+		"broker's VPNs right now. Read %s.",
 		phase, name, err, showReplicationHint)
 }
 
@@ -436,7 +416,7 @@ var routerNameRE = regexp.MustCompile(`(?m)^!\s*Router:\s*"([^"]*)"`)
 // If a `show router-name` capture turns up later, this is the one function to change: the
 // callers want a name, not a mechanism.
 func (o *Ops) RouterName(ctx context.Context, role config.Role) (string, error) {
-	out, err := o.runCLIRead(ctx, role, scriptRouterName, currentConfigScript("default", false))
+	out, err := o.readCLI(ctx, role, scriptRouterName, currentConfigScript("default", false))
 	if err != nil {
 		return "", err
 	}
@@ -466,7 +446,7 @@ func newlineIf(lines []string) string {
 // ConfigureReplication used to spend a separate dedicated banner call on that
 // (the removed Ops.brokerType); now it is free.
 func (o *Ops) readMateConfig(ctx context.Context, role config.Role) (MateConfig, BrokerType, error) {
-	out, err := o.runCLIRead(ctx, role, scriptShowReplication, showReplicationScript())
+	out, err := o.readCLI(ctx, role, scriptShowReplication, showReplicationScript())
 	if err != nil {
 		return MateConfig{}, BrokerUnknown, err
 	}
@@ -488,7 +468,7 @@ func (o *Ops) readMateConfig(ctx context.Context, role config.Role) (MateConfig,
 // unlisted VPNs are replicating in the first place, and phase 1's own mate-convergence
 // shutdown needs to know every VPN that is admin-enabled, listed or not.
 func (o *Ops) readVPNReplication(ctx context.Context, role config.Role) (map[string]VPNRepl, error) {
-	out, err := o.runCLIRead(ctx, role, scriptShowVPN, showVPNReplicationScript())
+	out, err := o.readCLI(ctx, role, scriptShowVPN, showVPNReplicationScript())
 	if err != nil {
 		return nil, err
 	}
@@ -497,11 +477,11 @@ func (o *Ops) readVPNReplication(ctx context.Context, role config.Role) (map[str
 
 // replicationStatus runs the two closing reports and returns them verbatim.
 func (o *Ops) replicationStatus(ctx context.Context, role config.Role) (string, error) {
-	mate, err := o.runCLIRead(ctx, role, scriptReplStatus, showReplicationScript())
+	mate, err := o.readCLI(ctx, role, scriptReplStatus, showReplicationScript())
 	if err != nil {
 		return "", err
 	}
-	vpns, err := o.runCLIRead(ctx, role, scriptShowVPN, showVPNReplicationScript())
+	vpns, err := o.readCLI(ctx, role, scriptShowVPN, showVPNReplicationScript())
 	if err != nil {
 		return "", err
 	}
@@ -574,12 +554,10 @@ func mateConvergenceShutdowns(state map[string]VPNRepl) []string {
 // replicationVPNLines renders phase 2's body and records what it decided.
 //
 // A ROLE IS SET IN PLACE. `message-vpn <n>` -> `replication` -> `state <role>` is all it
-// takes, against a VPN that is up and replicating, with no shutdown around it (operator,
-// 2026-09-14). That is also what `setReplicationRoleScript` has always done for
-// `perform dr`'s switchover, so the two paths now agree; an earlier draft of this
-// function cycled every listed VPN down and back up to change its role, which interrupted
-// replication on each one for no reason on every run where the mate had not changed --
-// that is, on every re-run after the first.
+// takes, against a VPN that is up and replicating, with no shutdown around it
+// (operator-confirmed). `setReplicationRoleScript` does the same for `perform dr`'s
+// switchover, so the two paths agree. Cycling a VPN down and back up to change its
+// role would interrupt replication on every run where the mate had not changed.
 //
 // So a listed VPN is NEVER shut down here. It gets `state <role>`, and `no shutdown` only
 // when it actually needs enabling, which is either of two cases:
@@ -688,14 +666,7 @@ func reenableLine(cur VPNRepl) string {
 	return "no shutdown"
 }
 
-func sortedVPNs(m map[string]VPNRepl) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
+func sortedVPNs(m map[string]VPNRepl) []string { return sortedKeys(m) }
 
 // vpnReplicationBlock wraps commands in one VPN's replication node. The name is quoted
 // because real VPN names contain spaces; the indentation mirrors a capture's own, which

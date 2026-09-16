@@ -393,9 +393,14 @@ func (c *Cluster) ClusterReport(ctx context.Context, detail bool) error {
 		// read as unreported rather than as the same OK/"ready" a verified
 		// broker gets, since brokerConditionRows only ever RAISES the seed and
 		// LevelInfo ("not reported by the operator") sits below LevelOK.
+		//
+		// "No conditions" is not the only unreported case: a status carrying only
+		// conditions this tool does not recognise (an operator newer than this build)
+		// raised nothing either, and read as the same confident "ready". Both now
+		// resolve to Info.
 		lvl := output.LevelOK
 		detailText := "ready"
-		if len(it.Status.Conditions) == 0 {
+		if !anyKnownCondition(it.Status.Conditions) {
 			lvl, detailText = output.LevelInfo, "not yet reported by the operator"
 		} else {
 			for _, row := range brokerConditionRows(it.Status.Conditions, ha) {

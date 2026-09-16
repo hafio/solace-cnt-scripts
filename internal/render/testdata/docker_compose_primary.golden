@@ -4,7 +4,7 @@ services:
     image: registry.example.com/solace-pubsub-standard:10.26.0.8755
     container_name: "solace"
     hostname: "solace-primary"
-    user: "0:0"
+    user: "1000001:0"
     restart: always
     cpus: "2"
     mem_limit: 6898m

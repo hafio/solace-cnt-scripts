@@ -11,7 +11,7 @@ import (
 // reaches a shell, so this check is about actionable errors rather than injection:
 // it catches `passEnv: ${FOO}` and `passEnv: my secret` -- the two ways an
 // operator mistakes the reference key for the value key -- before the lookup
-// silently fails (§4a).
+// silently fails.
 var envVarRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // secretRef pairs one secret field with the sibling *Env key that may supply it
@@ -65,7 +65,7 @@ func (c *Config) secretRefs() []secretRef {
 // the operator meant is exactly the kind of silently-wrong password that only
 // surfaces much later as a broker login failure. An unset or empty variable is the
 // same kind of error: deploying a broker with a blank password is worse than
-// refusing to deploy (§4a fail-loud). No message ever carries a value.
+// refusing to deploy. No message ever carries a value.
 func (c *Config) resolveSecretRefs() error {
 	for _, r := range c.secretRefs() {
 		if r.envVar == "" {

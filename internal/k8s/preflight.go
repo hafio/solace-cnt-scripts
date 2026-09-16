@@ -67,7 +67,7 @@ func (c *Cluster) preflightOne(ctx context.Context, p probe) error {
 		return nil
 	}
 
-	out, err := c.output(ctx, args...)
+	out, err := c.kubectlOutput(ctx, args...)
 	answer := canIAnswer(out)
 	switch {
 	case err == nil && answer == "yes":

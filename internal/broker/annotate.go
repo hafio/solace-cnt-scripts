@@ -91,7 +91,12 @@ func readMarker(c *Capture, trimmed string) {
 func applyMetaField(c *Capture, key, value string) {
 	switch key {
 	case "broker-type":
-		c.Type = BrokerType(value)
+		// Fill, never override, and only with a type this tool knows: the cross-type
+		// import refusal trusts this field, and the marker is a comment anyone can
+		// edit. The broker's own header (blocks.go) is parsed first and wins.
+		if t := BrokerType(value); c.Type == BrokerUnknown && (t == BrokerSoftware || t == BrokerAppliance) {
+			c.Type = t
+		}
 	case "semp-schema":
 		c.SEMPSchema = value
 		if c.Type == BrokerUnknown {

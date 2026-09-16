@@ -402,7 +402,7 @@ Also available as: dr
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--no-prompt` | `false` | answer yes to the confirmation |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 
 
@@ -424,7 +424,7 @@ solace-util broker configure default-users [flags]
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 | `--disable` | `false` | shut it down (the default; accepted explicitly so a script can say so) |
 | `--enable` | `false` | start it back up instead of shutting it down |
-| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 
 
@@ -445,7 +445,7 @@ solace-util broker configure default-vpn [flags]
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 | `--disable` | `false` | shut it down (the default; accepted explicitly so a script can say so) |
 | `--enable` | `false` | start it back up instead of shutting it down |
-| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 
 
@@ -467,7 +467,7 @@ solace-util broker configure domain-certs [flags]
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 | `--apply` | `false` | apply what the env file configures (the default; accepted explicitly so a script can say so) |
-| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 | `--remove` | `false` | remove it from the broker instead of applying it |
 
@@ -489,7 +489,7 @@ solace-util broker configure product-keys [flags]
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 | `--apply` | `false` | apply what the env file configures (the default; accepted explicitly so a script can say so) |
-| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 | `--remove` | `false` | remove it from the broker instead of applying it |
 
@@ -512,7 +512,7 @@ solace-util broker configure server-certs [flags]
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 | `--apply` | `false` | apply what the env file configures (the default; accepted explicitly so a script can say so) |
-| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 | `--remove` | `false` | remove it from the broker instead of applying it |
 
@@ -729,7 +729,7 @@ Also available as: dr
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--no-prompt` | `false` | answer yes to the role-change confirmation |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 
 
@@ -798,7 +798,7 @@ solace-util broker perform import-config <file> [flags]
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--no-prompt` | `false` | answer yes to the tear-down confirmation |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 
 
@@ -880,7 +880,7 @@ Also available as: rm
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 | `--delete-data` | `false` | delete the broker's persistent data too (Kubernetes PVCs / the container data directory). Without it the data is kept |
-| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without --delete-data, persistent data is still kept |
 
 
 ### solace-util broker restart
@@ -904,7 +904,7 @@ Also available as: rs
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 
 
@@ -1045,23 +1045,14 @@ Also available as: cv
 
 Print a sample env file to start from
 
-`examples` on its own prints the FULL annotated schema: every key the loader accepts,
-the default each omitted one takes, and all three platform sections at once. That is
-the file to read when you want to know what is configurable.
+Bare `examples` prints the FULL annotated schema: every key the loader accepts and
+the default each omitted one takes.
 
---platform writes a minimal STARTER instead: a standalone env file carrying only the
-keys that platform cannot default, and declaring only its own section -- so the file it
-writes needs no --platform of its own afterwards.
+--platform writes a minimal STARTER instead -- only the keys that platform cannot
+default, declaring only its own section, so the file it writes needs no --platform
+afterwards. It reads no env file and contacts nothing.
 
-This is the one command that takes --platform without an env file to resolve it
-against, because it is what produces the env file. The abbreviations work here too
-(kube, dk, pm), expanded by the same parser every other --platform value goes through.
-
-Nothing here reads an env file or contacts anything, so -e/--env is ignored and no
-cluster or container runtime has to exist yet.
-
-Every secret in the output is a CHANGE-ME placeholder: an unedited file is refused by
-the broker rather than deployed with a password that is public in this repo. Each one
+Every secret is a CHANGE-ME placeholder the broker refuses until you edit it. Each
 has a sibling *Env key naming a variable to read instead, which is what keeps a
 committed env file secret-free.
 
@@ -1199,7 +1190,7 @@ Applies to: kubernetes. On any other platform this command fails rather than doi
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 | `--delete-crd` | `false` | delete the operator's CustomResourceDefinitions too. Without it they are kept, so existing brokers survive |
-| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without --delete-crd, the operator CRDs is still kept |
 
 
 ### solace-util operator restart
@@ -1284,7 +1275,7 @@ Applies to: kubernetes. On any other platform this command fails rather than doi
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without a --delete-* flag the expensive layer is still kept |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask |
 
 
 ### solace-util operator validate

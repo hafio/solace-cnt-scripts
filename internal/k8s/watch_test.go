@@ -3,6 +3,7 @@ package k8s
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -244,6 +245,99 @@ func TestReconcileWatchDecidesWhatToApply(t *testing.T) {
 				t.Errorf("widening = %v, want %v", plan.widening, tc.wantWidening)
 			}
 		})
+	}
+}
+
+// operatorItem renders one Deployment item carrying the operator's name, for fixtures that
+// need more than the single item deployJSON builds.
+func operatorItem(ns, image, watch string) string {
+	return `{"metadata":{"name":"pubsubplus-eventbroker-operator","namespace":"` + ns + `"},` +
+		`"spec":{"template":{"spec":{"containers":[{"image":"` + image + `",` +
+		`"env":[{"name":"WATCH_NAMESPACE","value":"` + watch + `"}]}]}}}}`
+}
+
+// TestFindOperatorDeploymentIsScopedByNamespace is the guard on the lookup two decisions
+// rest on -- whether the watch list is widened, and whether a deploy is a downgrade. A
+// name-only match across every namespace let a same-named Deployment ANYWHERE answer for
+// the operator. The resolved namespace wins outright; an install elsewhere counts only
+// when nothing is there and it is the sole candidate; two elsewhere is an error.
+func TestFindOperatorDeploymentIsScopedByNamespace(t *testing.T) {
+	const resolved = "pubsubplus-operator-system" // the default operatorNS resolves to
+	for _, tc := range []struct {
+		name      string
+		items     []string
+		wantNS    string // "" = nil result
+		wantErr   string
+		wantImage string
+	}{
+		{"resolved wins over an impostor listed first",
+			[]string{operatorItem("attacker", "evil/op:9.9.9", ""), operatorItem(resolved, "solace/op:1.4.2", "team-a")},
+			resolved, "", "solace/op:1.4.2"},
+		{"one elsewhere is still found, for the installed-somewhere-else warning",
+			[]string{operatorItem("ops-team", "solace/op:1.4.2", "team-a")},
+			"ops-team", "", "solace/op:1.4.2"},
+		{"two elsewhere cannot be told apart",
+			[]string{operatorItem("ns-a", "solace/op:1.4.2", ""), operatorItem("ns-b", "solace/op:1.5.0", "")},
+			"", "ns-a, ns-b", ""},
+		{"none installed", nil, "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.K8s.Command = config.Command{"kubectl"}
+			cfg.K8s.Namespace = "solace"
+			rr := &recRunner{out: []byte(`{"items":[` + strings.Join(tc.items, ",") + `]}`)}
+			buf := &bytes.Buffer{}
+			c := &Cluster{R: rr, Cfg: cfg, Out: buf,
+				Log: func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) }}
+			dep, err := c.findOperatorDeployment(context.Background())
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want it to name %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("findOperatorDeployment: %v", err)
+			}
+			if tc.wantNS == "" {
+				if dep != nil {
+					t.Fatalf("got a Deployment in %q, want none", dep.Metadata.Namespace)
+				}
+				return
+			}
+			if dep == nil || dep.Metadata.Namespace != tc.wantNS {
+				t.Fatalf("got %+v, want the Deployment in %q", dep, tc.wantNS)
+			}
+			if got := imageFromDeployment(dep); got != tc.wantImage {
+				t.Errorf("image = %q, want %q", got, tc.wantImage)
+			}
+		})
+	}
+}
+
+// TestAmbiguousOperatorIsNotFoldedIntoNotInstalled is the second half of the namespace
+// scoping, and the half that matters most. installedOperatorImage deliberately answers ""
+// for a read that did not happen -- a first install has no operator namespace and must not
+// alarm -- but "" also means "nothing installed", which makes confirmNoDowngrade skip the
+// question entirely. Folding the AMBIGUITY error in there would disable the downgrade
+// guard using the very condition it was added to catch, so that one error is returned.
+func TestAmbiguousOperatorIsNotFoldedIntoNotInstalled(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.K8s.Command = config.Command{"kubectl"}
+	cfg.K8s.Namespace = "solace"
+	items := operatorItem("ns-a", "solace/op:1.4.2", "") + "," + operatorItem("ns-b", "solace/op:1.5.0", "")
+	rr := &recRunner{out: []byte(`{"items":[` + items + `]}`)}
+	c := &Cluster{R: rr, Cfg: cfg, Out: &bytes.Buffer{}}
+
+	if _, err := c.installedOperatorImage(context.Background()); !errors.Is(err, errAmbiguousOperator) {
+		t.Fatalf("installedOperatorImage err = %v, want it to carry errAmbiguousOperator", err)
+	}
+	// A transport failure still folds to "", which is what keeps a first install quiet.
+	rr2 := &recRunner{outErrQueue: []error{errFake}}
+	c2 := &Cluster{R: rr2, Cfg: cfg, Out: &bytes.Buffer{}}
+	img, err := c2.installedOperatorImage(context.Background())
+	if err != nil || img != "" {
+		t.Errorf("a failed read = (%q, %v), want (\"\", nil) so a first install does not alarm", img, err)
 	}
 }
 

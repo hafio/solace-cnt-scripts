@@ -23,7 +23,7 @@ import (
 // vpnServiceRE matches a VPN-level service port line and splits it into the parts
 // the shutdown form is built from:
 //
-//	1 "no "  2 rest-direction  3 service  4 " ssl"  5 " web"
+//	1 indent  2 "no "  3 rest-direction  4 service  5 " ssl"  6 " web"
 //
 // The port VALUE is optional because a real capture carries both forms -- the
 // enabling `service mqtt listen-port 1883` and the clearing `no service mqtt
@@ -544,20 +544,6 @@ func intersect(a, b []string) []string {
 	return out
 }
 
-// ClearExistingClientCAs removes a client CA only when the target HAS it and this
-// artifact re-creates it.
-//
-// The intersection is the whole rule. Without the target half, a `no
-// client-certificate-authority` for a CA the target does not have is itself an
-// error; without the artifact half, the import would delete trust material the
-// TARGET's own operator added and this artifact simply does not mention -- and a
-// client CA is what decides which clients the broker will accept, so removing one
-// nobody asked about locks those clients out.
-func ClearExistingClientCAs(blocks []Block, targetClientCAs []string) []Block {
-	return clearNestedObjects(blocks, verbClientCA,
-		intersect(nestedArtifactNames(blocks, verbClientCA), targetClientCAs))
-}
-
 // ClearExistingNested removes every nested object the TARGET already has and this
 // artifact re-creates, across the three sections that create one.
 //
@@ -569,7 +555,7 @@ func ClearExistingClientCAs(blocks []Block, targetClientCAs []string) []Block {
 // anywhere.
 //
 // The LDAP authorisation groups in `Create Authentication` are deliberately NOT here
-// (operator, 2026-09-12): `create group` inside `authentication > access-level >
+// (operator-confirmed): `create group` inside `authentication > access-level >
 // ldap` is not one of the objects that needs clearing, even though it reads like the
 // same shape at a glance.
 //

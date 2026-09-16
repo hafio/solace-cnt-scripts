@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -15,7 +14,6 @@ import (
 // rather than under a platform because it loads no config of its own: the file
 // it reads is the argument, not -e/--env, so the app context stays unused.
 func newConvertCmd(app *App) *cobra.Command {
-	var ()
 	cmd := &cobra.Command{
 		Use:   "convert <bash-env-file>",
 		Short: "Convert a legacy bash env file into a YAML env file",
@@ -55,7 +53,10 @@ func runConvert(a *App, src, platform string) error {
 	}
 	raw, err := os.ReadFile(src)
 	if err != nil {
-		return fmt.Errorf("read bash env file %q: %w", src, err)
+		// The operator chose this path, so a bad one is exit 2 -- the same reading
+		// import-config's own source-file failure takes. No retry and no different
+		// broker state would help.
+		return usagef("read bash env file %q: %w", src, err)
 	}
 	res, err := convert.Convert(raw, src, p)
 	if err != nil {
@@ -68,6 +69,11 @@ func runConvert(a *App, src, platform string) error {
 	// emitOrWrite owns stdout-vs-file, the overwrite confirmation and the 0600 mode. The
 	// converted file carries the same secrets as the source, which is why the mode matters
 	// and why replacing one is worth confirming.
+	if a.out == "" {
+		// Said BEFORE the write on the path where it matters most: stdout is a
+		// terminal, a pipe or a log, none of which is 0600.
+		warn("the converted file carries every secret from %s verbatim; prefer -o <file> to a shared terminal", src)
+	}
 	if err := emitOrWrite(a, res.YAML, "converted env file"); err != nil {
 		return err
 	}

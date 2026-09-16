@@ -191,17 +191,17 @@ func TestLastHTTPStatus(t *testing.T) {
 
 // --- preflight -----------------------------------------------------------------
 
-// TestMateSEMPPreflightSuccess covers host networking with a server certificate:
+// TestBackupSEMPPreflightSuccess covers host networking with a server certificate:
 // the broker serves a TLS SEMP listener, so the mate is reached over https on the
 // TLS port, with the mate's certificate NOT verified and a warning saying so. The
 // certificate is set explicitly because it is the precondition -- without it the
-// answer is plaintext, which TestMateSEMPPreflightPlaintextWarns covers.
+// answer is plaintext, which TestBackupSEMPPreflightPlaintextWarns covers.
 //
 // The warning explains that tls.cas cannot help here rather than offering it as
 // the fix: those are host files and this request is made by a curl running inside
-// the broker container. TestMateRevertActivityTLSIgnoresTLSCAs pins that setting
+// the broker container. TestBackupRevertActivityTLSIgnoresTLSCAs pins that setting
 // them changes nothing.
-func TestMateSEMPPreflightSuccess(t *testing.T) {
+func TestBackupSEMPPreflightSuccess(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte(sempOK), nil
 	}}
@@ -209,8 +209,8 @@ func TestMateSEMPPreflightSuccess(t *testing.T) {
 	o.Cfg.TLS = serverCert
 	var logs []string
 	o.Log = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
-	if err := o.MateSEMPPreflight(context.Background()); err != nil {
-		t.Fatalf("MateSEMPPreflight error: %v", err)
+	if err := o.BackupSEMPPreflight(context.Background()); err != nil {
+		t.Fatalf("BackupSEMPPreflight error: %v", err)
 	}
 	calls := curlCalls(ft)
 	if len(calls) != 1 || calls[0].argv[len(calls[0].argv)-1] != "https://10.0.0.12:1943/SEMP/v2/monitor" {
@@ -225,20 +225,20 @@ func TestMateSEMPPreflightSuccess(t *testing.T) {
 	assertNoPasswordInArgv(t, ft, "adminpw")
 }
 
-// TestMateSEMPPreflightPlaintextWarns is the other half, and the one that keeps
+// TestBackupSEMPPreflightPlaintextWarns is the other half, and the one that keeps
 // existing HA groups working: with no server certificate the broker has no TLS
 // listener, so the mate is reached over http on 8080 exactly as before this
 // change -- but the operator is told, before the request goes out, that the
 // admin credentials are crossing the network unencrypted.
-func TestMateSEMPPreflightPlaintextWarns(t *testing.T) {
+func TestBackupSEMPPreflightPlaintextWarns(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte(sempOK), nil
 	}}
 	o, _ := newTestOps(t, localCfg("true"), ft) // no TLS configured
 	var logs []string
 	o.Log = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
-	if err := o.MateSEMPPreflight(context.Background()); err != nil {
-		t.Fatalf("MateSEMPPreflight error: %v", err)
+	if err := o.BackupSEMPPreflight(context.Background()); err != nil {
+		t.Fatalf("BackupSEMPPreflight error: %v", err)
 	}
 	calls := curlCalls(ft)
 	if len(calls) != 1 || calls[0].argv[len(calls[0].argv)-1] != "http://10.0.0.12:8080/SEMP/v2/monitor" {
@@ -254,48 +254,48 @@ func TestMateSEMPPreflightPlaintextWarns(t *testing.T) {
 	assertNoPasswordInArgv(t, ft, "adminpw")
 }
 
-func TestMateSEMPPreflightMissingIP(t *testing.T) {
+func TestBackupSEMPPreflightMissingIP(t *testing.T) {
 	ft := &fakeTransport{}
 	o, _ := newTestOps(t, localCfg("true"), ft)
 	o.Cfg.Redundancy.Backup.Addr = ""
-	err := o.MateSEMPPreflight(context.Background())
+	err := o.BackupSEMPPreflight(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "redundancy.backup.addr") {
-		t.Errorf("MateSEMPPreflight missing-IP err = %v, want it to name redundancy.backup.addr", err)
+		t.Errorf("BackupSEMPPreflight missing-IP err = %v, want it to name redundancy.backup.addr", err)
 	}
 	if len(ft.outputs) != 0 {
-		t.Error("MateSEMPPreflight must refuse before any transport call without a mate address")
+		t.Error("BackupSEMPPreflight must refuse before any transport call without a mate address")
 	}
 }
 
-func TestMateSEMPPreflightNon2xx(t *testing.T) {
+func TestBackupSEMPPreflightNon2xx(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte("HTTP/1.1 401 Unauthorized\r\n\r\n"), nil
 	}}
 	o, _ := newTestOps(t, localCfg("true"), ft)
-	err := o.MateSEMPPreflight(context.Background())
+	err := o.BackupSEMPPreflight(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "redundancy.backup.addr") {
-		t.Errorf("MateSEMPPreflight non-2xx err = %v, want the status and the actionable causes", err)
+		t.Errorf("BackupSEMPPreflight non-2xx err = %v, want the status and the actionable causes", err)
 	}
 }
 
-func TestMateSEMPPreflightTransportError(t *testing.T) {
+func TestBackupSEMPPreflightTransportError(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return nil, errors.New("connection refused")
 	}}
 	o, _ := newTestOps(t, localCfg("true"), ft)
-	err := o.MateSEMPPreflight(context.Background())
+	err := o.BackupSEMPPreflight(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "connection refused") ||
 		!strings.Contains(err.Error(), "host-to-host") {
-		t.Errorf("MateSEMPPreflight transport err = %v, want the cause and the host-to-host hint", err)
+		t.Errorf("BackupSEMPPreflight transport err = %v, want the cause and the host-to-host hint", err)
 	}
 }
 
 // --- revert-activity -------------------------------------------------------------
 
-// TestMateRevertActivitySuccess covers host networking with a server certificate
+// TestBackupRevertActivitySuccess covers host networking with a server certificate
 // and no tls.cas: TLS preferred, verification disabled, and a warning naming
-// tls.cas as the fix -- matching TestMateSEMPPreflightSuccess.
-func TestMateRevertActivitySuccess(t *testing.T) {
+// tls.cas as the fix -- matching TestBackupSEMPPreflightSuccess.
+func TestBackupRevertActivitySuccess(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte(sempOK), nil
 	}}
@@ -303,30 +303,30 @@ func TestMateRevertActivitySuccess(t *testing.T) {
 	o.Cfg.TLS = serverCert
 	var logs []string
 	o.Log = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
-	if err := o.MateRevertActivity(context.Background()); err != nil {
-		t.Fatalf("MateRevertActivity error: %v", err)
+	if err := o.BackupRevertActivity(context.Background()); err != nil {
+		t.Fatalf("BackupRevertActivity error: %v", err)
 	}
 	calls := curlCalls(ft)
 	if len(calls) != 1 {
-		t.Fatalf("MateRevertActivity made %d calls, want 1 (callers own the preflight)", len(calls))
+		t.Fatalf("BackupRevertActivity made %d calls, want 1 (callers own the preflight)", len(calls))
 	}
 	post := calls[0]
 	wantArgv := []string{"curl", "-is", "-K", "-", "https://10.0.0.12:1943/SEMP"}
 	if len(post.argv) != len(wantArgv) {
-		t.Fatalf("MateRevertActivity argv = %v, want %v", post.argv, wantArgv)
+		t.Fatalf("BackupRevertActivity argv = %v, want %v", post.argv, wantArgv)
 	}
 	for i := range wantArgv {
 		if post.argv[i] != wantArgv[i] {
-			t.Fatalf("MateRevertActivity argv = %v, want %v", post.argv, wantArgv)
+			t.Fatalf("BackupRevertActivity argv = %v, want %v", post.argv, wantArgv)
 		}
 	}
 	if !strings.Contains(post.stdin, `user = "admin:adminpw"`) ||
 		!strings.Contains(post.stdin, `data = "<rpc><admin><redundancy><revert-activity/></redundancy></admin></rpc>"`) ||
 		!strings.Contains(post.stdin, "insecure") {
-		t.Errorf("MateRevertActivity stdin = %q, want the user, data and insecure config lines", post.stdin)
+		t.Errorf("BackupRevertActivity stdin = %q, want the user, data and insecure config lines", post.stdin)
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "tls.cas") {
-		t.Errorf("MateRevertActivity logs = %q, want a warning naming tls.cas", logs)
+		t.Errorf("BackupRevertActivity logs = %q, want a warning naming tls.cas", logs)
 	}
 	assertNoPasswordInArgv(t, ft, "adminpw")
 }
@@ -399,46 +399,46 @@ func assertNoPasswordInArgv(t *testing.T, ft *fakeTransport, pass string) {
 	}
 }
 
-// TestMateRevertActivityCredsAndBodyNeverInArgv is the S3 boundary check: the
+// TestBackupRevertActivityCredsAndBodyNeverInArgv is the S3 boundary check: the
 // admin credentials and the RPC body ride stdin only -- an argv token carrying
 // either would surface in process listings and the Echo runner records.
-func TestMateRevertActivityCredsAndBodyNeverInArgv(t *testing.T) {
+func TestBackupRevertActivityCredsAndBodyNeverInArgv(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte(sempOK), nil
 	}}
 	o, _ := newTestOps(t, localCfg("true"), ft)
-	if err := o.MateRevertActivity(context.Background()); err != nil {
-		t.Fatalf("MateRevertActivity error: %v", err)
+	if err := o.BackupRevertActivity(context.Background()); err != nil {
+		t.Fatalf("BackupRevertActivity error: %v", err)
 	}
 	assertNoPasswordInArgv(t, ft, "adminpw")
 }
 
-func TestMateRevertActivityNon2xx(t *testing.T) {
+func TestBackupRevertActivityNon2xx(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte("HTTP/1.1 500 Internal Server Error\r\n\r\n<rpc-reply><execute-result code=\"ok\"/></rpc-reply>"), nil
 	}}
 	o, _ := newTestOps(t, localCfg("true"), ft)
-	err := o.MateRevertActivity(context.Background())
+	err := o.BackupRevertActivity(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "500") {
-		t.Errorf("MateRevertActivity non-2xx err = %v, want the HTTP status (a non-2xx ok body must not pass)", err)
+		t.Errorf("BackupRevertActivity non-2xx err = %v, want the HTTP status (a non-2xx ok body must not pass)", err)
 	}
 }
 
-func TestMateRevertActivityRPCNotOK(t *testing.T) {
+func TestBackupRevertActivityRPCNotOK(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte("HTTP/1.1 200 OK\r\n\r\n<rpc-reply><execute-result code=\"fail\" reason=\"denied\"/></rpc-reply>"), nil
 	}}
 	o, _ := newTestOps(t, localCfg("true"), ft)
-	err := o.MateRevertActivity(context.Background())
+	err := o.BackupRevertActivity(context.Background())
 	if err == nil || !strings.Contains(err.Error(), `code="fail"`) {
-		t.Errorf("MateRevertActivity RPC-not-ok err = %v, want the mate's header-stripped reply", err)
+		t.Errorf("BackupRevertActivity RPC-not-ok err = %v, want the mate's header-stripped reply", err)
 	}
 	if err != nil && strings.Contains(err.Error(), "HTTP/1.1 200") {
-		t.Errorf("MateRevertActivity err = %v, want the headers stripped from the dumped reply", err)
+		t.Errorf("BackupRevertActivity err = %v, want the headers stripped from the dumped reply", err)
 	}
 }
 
-// TestMateRevertActivityBridgePlaintextOnly pins the last-resort branch: a
+// TestBackupRevertActivityBridgePlaintextOnly pins the last-resort branch: a
 // bridge mapping only 8080 (no TLS port mapped at all) keeps today's plain
 // http:// on the mapped host port, but now warns before the request that the
 // admin credentials are crossing the wire unencrypted.
@@ -447,7 +447,7 @@ func TestMateRevertActivityRPCNotOK(t *testing.T) {
 // mapping as the deciding factor, so this proves the fallback comes from 1943
 // being unmapped rather than from the certificate gate that
 // TestSempPortWithoutCertificateStaysPlaintext covers separately.
-func TestMateRevertActivityBridgePlaintextOnly(t *testing.T) {
+func TestBackupRevertActivityBridgePlaintextOnly(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte(sempOK), nil
 	}}
@@ -457,8 +457,8 @@ func TestMateRevertActivityBridgePlaintextOnly(t *testing.T) {
 	o.Cfg.Docker.Network = config.Network{Mode: "bridge", Ports: []string{"18080:8080"}}
 	var logs []string
 	o.Log = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
-	if err := o.MateRevertActivity(context.Background()); err != nil {
-		t.Fatalf("MateRevertActivity bridge error: %v", err)
+	if err := o.BackupRevertActivity(context.Background()); err != nil {
+		t.Fatalf("BackupRevertActivity bridge error: %v", err)
 	}
 	post := curlCalls(ft)[0]
 	if got := post.argv[len(post.argv)-1]; got != "http://10.0.0.12:18080/SEMP" {
@@ -474,12 +474,12 @@ func TestMateRevertActivityBridgePlaintextOnly(t *testing.T) {
 	assertNoPasswordInArgv(t, ft, "adminpw")
 }
 
-// TestMateRevertActivityBridgeTLSNoCA pins the "TLS mapped, no tls.cas"
+// TestBackupRevertActivityBridgeTLSNoCA pins the "TLS mapped, no tls.cas"
 // branch: a bridge mapping exposing 1943 is preferred over a plaintext 8080
 // mapping, but with no CAs configured curl's certificate verification is
 // disabled (a self-signed broker certificate is the normal case here) and a
 // warning names tls.cas as the way to turn verification on.
-func TestMateRevertActivityBridgeTLSNoCA(t *testing.T) {
+func TestBackupRevertActivityBridgeTLSNoCA(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte(sempOK), nil
 	}}
@@ -489,8 +489,8 @@ func TestMateRevertActivityBridgeTLSNoCA(t *testing.T) {
 	o.Cfg.Docker.Network = config.Network{Mode: "bridge", Ports: []string{"18080:8080", "18943:1943"}}
 	var logs []string
 	o.Log = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
-	if err := o.MateRevertActivity(context.Background()); err != nil {
-		t.Fatalf("MateRevertActivity bridge TLS error: %v", err)
+	if err := o.BackupRevertActivity(context.Background()); err != nil {
+		t.Fatalf("BackupRevertActivity bridge TLS error: %v", err)
 	}
 	post := curlCalls(ft)[0]
 	if got := post.argv[len(post.argv)-1]; got != "https://10.0.0.12:18943/SEMP" {
@@ -505,7 +505,7 @@ func TestMateRevertActivityBridgeTLSNoCA(t *testing.T) {
 	assertNoPasswordInArgv(t, ft, "adminpw")
 }
 
-// TestMateRevertActivityTLSIgnoresTLSCAs pins that tls.cas does NOT change this
+// TestBackupRevertActivityTLSIgnoresTLSCAs pins that tls.cas does NOT change this
 // leg, which is the opposite of what this test asserted before.
 //
 // It used to pin a "fully verified" branch that passed tls.cas[0] to curl's
@@ -519,7 +519,7 @@ func TestMateRevertActivityBridgeTLSNoCA(t *testing.T) {
 //
 // The warning is therefore required even with CAs configured: the channel is
 // encrypted, the mate's identity is not checked, and the operator should know.
-func TestMateRevertActivityTLSIgnoresTLSCAs(t *testing.T) {
+func TestBackupRevertActivityTLSIgnoresTLSCAs(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		return []byte(sempOK), nil
 	}}
@@ -530,8 +530,8 @@ func TestMateRevertActivityTLSIgnoresTLSCAs(t *testing.T) {
 	o.Cfg.TLS.CAs = []string{"/etc/solace/ca.pem"}
 	var logs []string
 	o.Log = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
-	if err := o.MateRevertActivity(context.Background()); err != nil {
-		t.Fatalf("MateRevertActivity bridge TLS error: %v", err)
+	if err := o.BackupRevertActivity(context.Background()); err != nil {
+		t.Fatalf("BackupRevertActivity bridge TLS error: %v", err)
 	}
 	post := curlCalls(ft)[0]
 	if got := post.argv[len(post.argv)-1]; got != "https://10.0.0.12:18943/SEMP" {

@@ -16,7 +16,7 @@ import (
 // in Go and applying it on stdin (`apply -f -`) is behavior-equivalent to the bash
 // `create secret --from-literal=...` form (012) but keeps every secret value off
 // the argv and out of an echoed command, which the bash form leaked (012:26,36,39,
-// 43). §3 hardening.
+// 43).
 type secretManifest struct {
 	name      string
 	namespace string
@@ -135,7 +135,7 @@ func AdditionalUsersSecret(cfg *config.Config) ([]byte, error) {
 // certificate, porting 012:39 / 051:32: tls.crt is the certificate followed by any
 // trusted CAs (the bash `--cert <(cat cert cas)`), tls.key is the private key. Both
 // files are read from disk here; the manifest is applied on stdin so the key never
-// reaches an argv or an echoed command (§3).
+// reaches an argv or an echoed command.
 func TLSSecret(cfg *config.Config) ([]byte, error) {
 	if cfg.TLS.Cert == "" || cfg.TLS.CertKey == "" {
 		return nil, fmt.Errorf("tls.cert and tls.certKey must both be set to build the TLS secret")
@@ -222,8 +222,8 @@ func DockerRegistrySecret(cfg *config.Config) ([]byte, error) {
 
 // operatorRegcredName is the fixed name of the operator's image-pull Secret. Named
 // rather than inlined because OperatorDelete has to remove it BY NAME: it is applied
-// separately from the bundle and used to be reaped along with the operator namespace,
-// which is no longer deleted. Fixed rather than derived the way the broker's own pull
+// separately from the bundle, and the operator namespace that would otherwise reap it is
+// deliberately never deleted. Fixed rather than derived the way the broker's own pull
 // secret is (config.Config.ImagePullSecretName) is the operator's own deliberate choice:
 // the operator install is one thing shared by every env file in the cluster, so there is
 // no per-file name to derive it from, and "regcred" stays the name whether or not this env

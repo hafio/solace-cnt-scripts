@@ -20,11 +20,10 @@ const previewValue = "(preview)"
 // seam where the bundle is actually read, and it lives here because this is the
 // package that already does host file I/O.
 //
-// preview substitutes a placeholder instead of reading, and it is not a
-// convenience. `compose()` runs on six docker verbs, so without it a dry-run of any
-// of them would fail before the certificate files exist -- losing exactly the
-// previewability that prepareSecrets goes out of its way to keep for the
-// pre-shared key. The placeholder keeps the ENTRY and blanks only the value:
+// preview substitutes a placeholder instead of reading, and it is not a convenience.
+// `compose()` runs on six docker verbs, so without it every argv test of any of them
+// would fail before the certificate files exist -- losing exactly the coverage
+// prepareSecrets goes out of its way to keep for the pre-shared key. The placeholder keeps the ENTRY and blanks only the value:
 // dropping the entry would break the deliberate "one child variable per secret"
 // invariant.
 //
