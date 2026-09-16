@@ -467,7 +467,9 @@ promises:
 | `linger` | `loginctl show-user <uid> --property=Linger` reports `yes` | **`broker deploy` enables it for you**; `validate` reports it |
 | `user systemd` | `systemctl --user` answers | `systemctl --user start podman.socket` |
 | `data dir` | `container.dataDir`'s nearest existing parent is writable | move `dataDir`, or pre-create and chown it |
-| `nofile` | the hard limit covers `container.ulimits.nofile` | [File descriptors on rootless podman](#file-descriptors-on-rootless-podman) |
+
+The container's rlimits are checked too, but not here: they bind every engine, so they have
+[a section of their own](#the-limits-the-container-actually-gets).
 
 **What decides whether a row is repaired: the privilege it needs, not how easy it is.** The
 tool already performs several unprivileged host changes during prep -- `mkdir -p`, `chown`,
@@ -482,7 +484,7 @@ which way round the privileges actually go:
 | `loginctl show-user ... --property=Linger` (what the check runs) | none; a D-Bus read of your own user |
 | `loginctl enable-linger`, no username (**what prep runs**) | none in the ordinary case: it targets the caller's own account, which polkit's `set-self-linger` grants to an active session |
 | `loginctl enable-linger <other-user>` | admin authentication -- and prep never issues this form, because it passes no username at all |
-| widening `/etc/subuid`, `/etc/security/limits.d` | root, so these are reported and refused |
+| widening `/etc/subuid`, or a `user@.service` drop-in | root, so these are reported and refused |
 
 polkit can still decline the self form -- a session that is not active under some SSH and cron
 setups, or a distribution that has tightened `org.freedesktop.login1.set-self-linger`. Prep
@@ -506,7 +508,8 @@ on without re-running anything. First, as yourself, see what you have:
 
 ```
 grep "^$(id -un):" /etc/subuid /etc/subgid
-ulimit -Hn
+cat /proc/sys/fs/nr_open
+systemctl show user@$(id -u).service -p LimitNOFILE -p LimitMEMLOCK -p LimitCORE
 ```
 
 Then the privileged steps, if those came up short:
@@ -517,9 +520,14 @@ Then the privileged steps, if those came up short:
 # block, so it does not overlap another account
 sudo usermod --add-subuids <start>-<end> --add-subgids <start>-<end> <user>
 
-# file-descriptor ceiling, in /etc/security/limits.d/99-solace.conf; needs a fresh login to take effect
-<user> hard nofile 1048576
-<user> soft nofile 2448
+# rlimit ceiling for every rootless container this user runs, in
+# /etc/systemd/system/user@.service.d/99-solace.conf. NOT /etc/security/limits.d: that is
+# pam_limits, for login sessions, and a quadlet container is a systemd service
+[Service]
+LimitNOFILE=2448:1048576
+LimitMEMLOCK=infinity
+LimitCORE=infinity
+# then `sudo systemctl daemon-reload`, and the user logs out of every session and back in
 
 # only if container.dataDir is somewhere this user cannot create
 sudo mkdir -p /opt/solace/data && sudo chown <user> /opt/solace/data
@@ -1389,29 +1397,64 @@ backup before the primary.
 
 ## Troubleshooting
 
-### File descriptors on rootless podman
+### The limits the container actually gets
 
-Both container artifacts ask the engine for `<docker|podman>.container.ulimits.nofile`
-(default `2448:1048576`). A **rootless** container cannot raise `nofile` above the hard limit
-of the user invoking podman -- the kernel refuses -- so `broker deploy` checks it on a
-podman env file and stops with the exact drop-in to add when it is too low:
+Both container artifacts ask the engine for a fixed `nofile` limit of `2448:1048576`, plus
+`memlock` and `core` unlimited and `2g` of `/dev/shm`. None of it is configurable -- it is
+what a Solace broker needs -- and `validate` and the first step of `broker deploy` check the
+host can grant it.
+
+`--ulimit` is only a REQUEST. What the engine may actually set depends on the privilege it
+holds:
+
+| Deployment | Engine | What caps it |
+| --- | --- | --- |
+| docker | `dockerd`, root, holds `CAP_SYS_RESOURCE` | `/proc/sys/fs/nr_open` |
+| rootful podman | `podman` under a system systemd unit, root | `/proc/sys/fs/nr_open` |
+| rootless podman | `podman` under `user@<uid>.service`, unprivileged | that unit's **hard** limits |
+
+So there are two host facts, and `/etc/security/limits.conf` is not one of them: it is read by
+`pam_limits`, for **login sessions**, and neither a quadlet container nor a docker container is
+one.
+
+**`fs.nr_open`, on every deployment.** No process is given a hard `nofile` above it. It
+defaults to `1048576`, exactly the ask, so a stock host passes. When it is short, prep raises
+it if it is running as root -- live, and persisted -- and otherwise hands over both commands:
 
 ```
-solace-util broker deploy -e env/prod.yaml
-...
-error: rootless podman: this user's hard nofile limit is 1024, but
-podman.container.ulimits.nofile needs 1048576 -- a rootless container cannot raise it
-above the user's own hard limit, so the broker would start under-provisioned.
-  Add this as root to /etc/security/limits.d/99-solace.conf, replacing <user> with the
-  account that runs the container, then log out and back in:
-    <user> hard nofile 1048576
-    <user> soft nofile 2448
+[FAIL] nr_open: 65536 (need 1048576)
+error: fs.nr_open is 65536, below the 1048576 the broker needs.
+  sudo sysctl -w fs.nr_open=1048576
+  echo 'fs.nr_open = 1048576' | sudo tee /etc/sysctl.d/99-solace.conf
 ```
 
-Prep reports and refuses rather than fixing it: raising a hard limit means editing host-wide
-security configuration as root, which is what a rootless deployment exists to avoid. Rootful
-podman and docker are unaffected -- their privileged engine raises the limit itself -- so the
-check runs only for `podman.rootless: true`.
+**`user@<uid>.service`, on rootless podman only.** Its hard limits are the ceiling, because an
+unprivileged engine cannot raise one. This is never repaired for you: the drop-in needs root,
+and a rootless deploy running as root is refused anyway.
+
+```
+[FAIL] user manager: LimitMEMLOCK is 8388608, needs infinity
+error: rootless podman cannot raise its own limits, and user@1000.service:
+LimitMEMLOCK is 8388608, needs infinity.
+  An administrator must create /etc/systemd/system/user@.service.d/99-solace.conf:
+    [Service]
+    LimitNOFILE=2448:1048576
+    LimitMEMLOCK=infinity
+    LimitCORE=infinity
+  then: sudo systemctl daemon-reload
+  then log out of every session on this host and back in.
+```
+
+A stock host ships `LimitMEMLOCK` at 8 MB, so that is the row a fresh rootless install
+usually fails. `LimitCORE` is already `infinity`.
+
+Two details worth knowing. The generated quadlet unit carries `LimitNOFILE=`, `LimitMEMLOCK=`
+and `LimitCORE=` in its `[Service]` section, which is what gives the `podman` process itself
+the limits it then asks for the container -- on a rootful system unit that is the whole story.
+And the soft limits are reported but never refused: any process raises its own soft limit up
+to its hard one without privilege, and the engine sets the container's from the artifact.
+
+`validate` reports all of this and changes nothing, whatever the euid.
 
 ### Podman secret flags
 

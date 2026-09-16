@@ -224,9 +224,15 @@ Load into the current shell:
 
   source <(solace-util auto-complete bash)
 
-Load for every session (needs the bash-completion package):
+Load for every session. With the bash-completion package installed, write it
+where that package looks:
 
   solace-util auto-complete bash > /etc/bash_completion.d/solace-util
+
+Without that package there is no such directory, so source it from ~/.bashrc
+instead -- this script needs nothing but bash itself:
+
+  echo 'source <(solace-util auto-complete bash)' >> ~/.bashrc
 
 ```
 solace-util auto-complete bash [flags]

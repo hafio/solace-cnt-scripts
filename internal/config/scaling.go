@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -17,7 +18,7 @@ import (
 // mem both still override it, because memory headroom depends on the message
 // mix in a way core count does not.
 type scalingTier struct {
-	cpu string // messagingNodeCpu (k8s), cpus:/--cpus (container); never settable
+	cpu string // messagingNodeCpu (k8s); the container cpuset's core count (cpuSetRange); never settable
 	mem string // Kubernetes quantity; containerMem rewrites it for the engines
 }
 
@@ -71,6 +72,26 @@ func containerMem(k8sMem string) string {
 	return k8sMem
 }
 
+// cpuSetRange turns a tier's core COUNT into the cpuset the engines take: the
+// 0-based range over that many cores ("2" -> "0-1", "12" -> "0-11"). It is
+// containerMem's counterpart for the other half of the footprint, and no more
+// general: it sees only the five fixed strings in scalingTiers.
+//
+// Anything that is not a positive integer yields "", which setDefault reads as no
+// default and both renderers then skip -- so a tier that ever spelled its cpu as
+// a millicore quantity could not produce an invalid cpuset. A count of 1 yields
+// "0", a single-cpu list both engines accept, rather than the legal but odd "0-0".
+func cpuSetRange(cores string) string {
+	n, err := strconv.Atoi(strings.TrimSpace(cores))
+	if err != nil || n < 1 {
+		return ""
+	}
+	if n == 1 {
+		return "0"
+	}
+	return "0-" + strconv.Itoa(n-1)
+}
+
 // applyScalingTierDefaults derives the tier-fixed CPU and the tier-defaulted
 // memory. ApplyDefaults calls it *after* the platform branches, which is the
 // whole point: maxConnections only reaches its final value in those branches
@@ -105,16 +126,24 @@ func (c *Config) applyScalingTierDefaults(p Platform) {
 	if !ok {
 		return
 	}
+	// Still assigned unconditionally, and now read by the Kubernetes CR alone: the
+	// container platforms cap cpu with a cpuset instead of a core count (below).
 	c.Scaling.CPU = t.cpu
 	if p == K8s {
 		setDefault(&c.K8s.MsgNode.Mem, t.mem)
 	}
 	if p.IsContainer() {
 		// Both blocks are filled whichever container platform is active, matching
-		// applyContainerDefaults' existing parity for name/shmSize/ulimits.
+		// applyContainerDefaults' existing parity for name/runUser/dataDir.
 		mem := containerMem(t.mem)
 		setDefault(&c.Docker.Container.Mem, mem)
 		setDefault(&c.Podman.Container.Mem, mem)
+		// The tier's cores as a cpuset, not as a count: --cpus= is a fractional
+		// quota and a broker sized by whole cores wants the cores. Same setDefault
+		// semantics as mem -- which cpus are free is the operator's knowledge.
+		set := cpuSetRange(t.cpu)
+		setDefault(&c.Docker.Container.CPUSet, set)
+		setDefault(&c.Podman.Container.CPUSet, set)
 	}
 }
 

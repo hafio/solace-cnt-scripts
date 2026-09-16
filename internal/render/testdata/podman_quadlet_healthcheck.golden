@@ -9,9 +9,9 @@ ContainerName=solace
 HostName=solace-primary
 User=1000001
 Group=0
-PodmanArgs=--cpus=2
+PodmanArgs=--cpuset-cpus=0-1
 Memory=6898m
-ShmSize=1g
+ShmSize=2g
 Ulimit=nofile=2448:1048576
 Ulimit=memlock=-1
 Ulimit=core=-1
@@ -52,6 +52,9 @@ Secret=solace-admin-password,type=mount,target=/mnt/secrets/username_admin_passw
 Secret=solace-redundancy-psk,type=mount,target=/mnt/secrets/redundancy_authentication_presharedkey_key
 
 [Service]
+LimitNOFILE=2448:1048576
+LimitMEMLOCK=infinity
+LimitCORE=infinity
 Restart=always
 
 [Install]

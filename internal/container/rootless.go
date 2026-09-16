@@ -37,7 +37,7 @@ const nearestWritableScript = `d="$0"; while [ ! -e "$d" ] && [ "$d" != "/" ]; d
 // first thing `broker deploy` does. Every row is READ-ONLY and every failure is a
 // refusal, never a fix: reading a prerequisite needs no privilege, but repairing
 // several of them means editing host-wide configuration as root, which is exactly
-// what a rootless deployment exists to avoid (the same argument checkNoFile and
+// what a rootless deployment exists to avoid (the same argument limits.go and
 // Preflight already make).
 //
 // It reports every row before returning, rather than stopping at the first, because
@@ -68,12 +68,13 @@ func (m *Manager) checkPodmanHost(ctx context.Context, fix bool) error {
 	}
 
 	// The euid invariant gates everything after it. A rootless block probed as root
-	// reads the WRONG user's linger, runtime directory and nofile limit, so every
-	// later row would be answering about an account the deploy will never use.
+	// reads the WRONG user's linger and runtime directory, so every later row would
+	// be answering about an account the deploy will never use (limits.go declines
+	// its own rows for the same reason).
 	if err := m.checkPodmanEUID(); err != nil {
 		r.Fail("euid: %v", err)
 		if m.Cfg.Podman.Rootless {
-			for _, row := range []string{"user session", "id mapping", "linger", "user systemd", "data dir", "nofile"} {
+			for _, row := range []string{"user session", "id mapping", "linger", "user systemd", "data dir"} {
 				r.Skip("%s: skipped (euid mismatch)", row)
 			}
 		}
@@ -81,8 +82,9 @@ func (m *Manager) checkPodmanHost(ctx context.Context, fix bool) error {
 	}
 	r.OK("euid: %d, matching podman.rootless=%t", euid, m.Cfg.Podman.Rootless)
 	if !m.Cfg.Podman.Rootless {
-		// Rootful podman's engine runs privileged: it owns the id mapping, raises
-		// nofile itself, and its units live under the system systemd instance.
+		// Rootful podman's engine runs privileged: it owns the id mapping and its
+		// units live under the system systemd instance. Its nofile ceiling is
+		// checked too, but one level up -- it binds every engine (limits.go).
 		return nil
 	}
 	return m.rootlessRows(ctx, euid, fix)
@@ -106,7 +108,7 @@ func (m *Manager) rootlessRows(ctx context.Context, euid int, fix bool) error {
 	}
 
 	// Independent of the bus: podman reads its own id mapping, and the data
-	// directory and nofile limit are plain filesystem and rlimit facts.
+	// directory is a plain filesystem fact.
 	if err := m.checkIDMapping(ctx, user); err != nil {
 		errs = append(errs, err)
 	}
@@ -122,9 +124,6 @@ func (m *Manager) rootlessRows(ctx context.Context, euid int, fix bool) error {
 		r.Skip("user systemd: skipped (no user session)")
 	}
 	if err := m.checkDataDir(ctx, user); err != nil {
-		errs = append(errs, err)
-	}
-	if err := m.checkNoFile(ctx); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)

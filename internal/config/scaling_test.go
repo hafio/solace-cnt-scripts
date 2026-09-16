@@ -133,9 +133,14 @@ func TestApplyScalingTierDefaultsMemOverride(t *testing.T) {
 	d := &Config{}
 	d.Scaling.MaxConnections = 100000
 	d.Docker.Container.Mem = "24g"
+	d.Docker.Container.CPUSet = "8-15"
 	d.ApplyDefaults(Docker)
 	if d.Docker.Container.Mem != "24g" {
 		t.Errorf("Docker.Container.Mem = %q, want the explicit 24g to survive", d.Docker.Container.Mem)
+	}
+	// Which cpus is the operator's too: the tier says how many, not which.
+	if d.Docker.Container.CPUSet != "8-15" {
+		t.Errorf("Docker.Container.CPUSet = %q, want the explicit 8-15 to survive", d.Docker.Container.CPUSet)
 	}
 	if d.Scaling.CPU != "8" {
 		t.Errorf("Scaling.CPU = %q, want 8", d.Scaling.CPU)
@@ -153,6 +158,11 @@ func TestApplyScalingTierDefaultsContainerBlocks(t *testing.T) {
 			t.Errorf("%s: container mem = docker %q / podman %q, want 12435m for both",
 				p, c.Docker.Container.Mem, c.Podman.Container.Mem)
 		}
+		if c.Docker.Container.CPUSet != "0-3" || c.Podman.Container.CPUSet != "0-3" {
+			t.Errorf("%s: container cpuset = docker %q / podman %q, want 0-3 for both",
+				p, c.Docker.Container.CPUSet, c.Podman.Container.CPUSet)
+		}
+		// Still derived, and now read by the Kubernetes CR alone.
 		if c.Scaling.CPU != "4" {
 			t.Errorf("%s: Scaling.CPU = %q, want 4", p, c.Scaling.CPU)
 		}
@@ -171,6 +181,15 @@ func TestApplyScalingTierDefaultsOffTier(t *testing.T) {
 	}
 	if err := c.Validate(K8s); err == nil || !strings.Contains(err.Error(), "scaling.maxConnections must be one of") {
 		t.Errorf("expected the tier error, got: %v", err)
+	}
+
+	// Same on a container platform: no cpuset rather than an invalid one.
+	d := &Config{}
+	d.Scaling.MaxConnections = 12345
+	d.ApplyDefaults(Docker)
+	if d.Docker.Container.Mem != "" || d.Docker.Container.CPUSet != "" {
+		t.Errorf("off-tier derived mem=%q cpuset=%q, want both empty",
+			d.Docker.Container.Mem, d.Docker.Container.CPUSet)
 	}
 }
 
@@ -296,6 +315,104 @@ func setContainerMem(c *Config, p Platform, mem string) {
 		return
 	}
 	c.Docker.Container.Mem = mem
+}
+
+func setContainerCPUSet(c *Config, p Platform, set string) {
+	if p == Podman {
+		c.Podman.Container.CPUSet = set
+		return
+	}
+	c.Docker.Container.CPUSet = set
+}
+
+// TestCPUSetRange pins the tier-count -> cpuset rewrite, including the fail-safe:
+// anything that is not a positive integer yields "", which setDefault reads as no
+// default at all rather than as an invalid cpuset the engine would reject.
+func TestCPUSetRange(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"2", "0-1"}, {"4", "0-3"}, {"8", "0-7"}, {"12", "0-11"},
+		{"1", "0"}, {" 4 ", "0-3"},
+		{"0", ""}, {"-1", ""}, {"", ""}, {"500m", ""}, {"two", ""},
+	} {
+		if got := cpuSetRange(tc.in); got != tc.want {
+			t.Errorf("cpuSetRange(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	// Every tier's own default must satisfy the validator an env file value faces,
+	// or the default itself would be refused. This is what catches a tier added to
+	// the table with a cpu this cannot turn into a cpuset.
+	for _, v := range []int{100, 1000, 10000, 100000, 200000} {
+		set := cpuSetRange(scalingTiers[v].cpu)
+		if !cpuSetRE.MatchString(set) {
+			t.Errorf("tier %d derives cpuset %q, which validateContainer would reject", v, set)
+		}
+	}
+}
+
+// TestApplyScalingTierDefaultsCPUSetPerTier drives the published table through the
+// real ApplyDefaults, on both container platforms, and checks it disturbs neither
+// Scaling.CPU (the Kubernetes CR still renders from it) nor the k8s memory default.
+func TestApplyScalingTierDefaultsCPUSetPerTier(t *testing.T) {
+	for _, tc := range []struct {
+		conns  int
+		cpu    string
+		cpuset string
+	}{
+		{100, "2", "0-1"}, {1000, "2", "0-1"}, {10000, "4", "0-3"},
+		{100000, "8", "0-7"}, {200000, "12", "0-11"},
+	} {
+		for _, p := range []Platform{Docker, Podman} {
+			c := &Config{}
+			c.Scaling.MaxConnections = tc.conns
+			c.ApplyDefaults(p)
+			if c.ContainerBlock(p).CPUSet != tc.cpuset {
+				t.Errorf("%s tier %d: cpuset = %q, want %q", p, tc.conns, c.ContainerBlock(p).CPUSet, tc.cpuset)
+			}
+			if c.Scaling.CPU != tc.cpu {
+				t.Errorf("%s tier %d: Scaling.CPU = %q, want %q", p, tc.conns, c.Scaling.CPU, tc.cpu)
+			}
+			if c.K8s.MsgNode.Mem != "" {
+				t.Errorf("%s tier %d: a container platform filled K8s.MsgNode.Mem = %q",
+					p, tc.conns, c.K8s.MsgNode.Mem)
+			}
+		}
+	}
+}
+
+func TestValidateContainerCPUSet(t *testing.T) {
+	for _, p := range []Platform{Docker, Podman} {
+		// The two likely mistakes: a core count, and a memlock-style -1.
+		for _, bad := range []string{"-1", "4 cores", "0-", ",0", "0,,1", "0 - 3", "0-3,", "all", "1.5", "0x1", "$(id -u)"} {
+			c := validContainerConfig(p, "true")
+			setContainerCPUSet(c, p, bad)
+			if err := c.Validate(p); err == nil {
+				t.Errorf("%s: container.cpuset %q was accepted", p, bad)
+			}
+		}
+		// A backwards range passes the charset and is refused on its own terms.
+		c := validContainerConfig(p, "true")
+		setContainerCPUSet(c, p, "3-0")
+		err := c.Validate(p)
+		if err == nil || !strings.Contains(err.Error(), "backwards") {
+			t.Errorf("%s: expected the backwards-range error, got: %v", p, err)
+		}
+
+		c = validContainerConfig(p, "true")
+		setContainerCPUSet(c, p, "4 cores")
+		if err := c.Validate(p); err == nil || !strings.Contains(err.Error(), ".container.cpuset") {
+			t.Fatalf("%s: expected a container.cpuset error naming the key, got: %v", p, err)
+		}
+
+		// "8-11" is four cores that are not the tier's first four, and that is legal:
+		// which cpus are free is a host fact the tier cannot know.
+		for _, good := range []string{"0", "0-1", "0-11", "0,2,4", "0-3,8", "8-11", "2-2", ""} {
+			c := validContainerConfig(p, "true")
+			setContainerCPUSet(c, p, good)
+			if err := c.Validate(p); err != nil {
+				t.Errorf("%s: container.cpuset %q was rejected: %v", p, good, err)
+			}
+		}
+	}
 }
 
 // --- Scaling.UnmarshalYAML: the dual-spelling allowlist ----------------------
@@ -484,5 +601,108 @@ func TestValidateMaxPoolRemovedThroughLoad(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "scaling.maxSpoolUsageMB") {
 		t.Errorf("removal error should name the replacement, got: %v", err)
+	}
+}
+
+// TestRetiredContainerLimitKeysFailLoud pins the retired-key rule for the four
+// container limits: the old key must still DECODE (that is what keeps the error
+// about the key rather than a bare unknown field) and must then fail Validate
+// naming the key and the value it is now fixed at.
+func TestRetiredContainerLimitKeysFailLoud(t *testing.T) {
+	cases := []struct {
+		name, doc string
+		p         Platform
+		want      string
+		fixed     string
+	}{
+		{"docker.shmSize", "docker:\n  container:\n    shmSize: 1g\n", Docker,
+			"docker.container.shmSize was removed", "2g"},
+		{"docker.nofile", "docker:\n  container:\n    ulimits:\n      nofile: \"1024:1024\"\n", Docker,
+			"docker.container.ulimits.nofile was removed", "2448:1048576"},
+		{"docker.memlock", "docker:\n  container:\n    ulimits:\n      memlock: \"-1\"\n", Docker,
+			"docker.container.ulimits.memlock was removed", "-1"},
+		{"docker.core", "docker:\n  container:\n    ulimits:\n      core: \"0\"\n", Docker,
+			"docker.container.ulimits.core was removed", "-1"},
+		{"podman.shmSize", "podman:\n  container:\n    shmSize: 1g\n", Podman,
+			"podman.container.shmSize was removed", "2g"},
+		{"podman.nofile", "podman:\n  container:\n    ulimits:\n      nofile: \"1024:1024\"\n", Podman,
+			"podman.container.ulimits.nofile was removed", "2448:1048576"},
+		{"podman.memlock", "podman:\n  container:\n    ulimits:\n      memlock: \"-1\"\n", Podman,
+			"podman.container.ulimits.memlock was removed", "-1"},
+		{"podman.core", "podman:\n  container:\n    ulimits:\n      core: \"0\"\n", Podman,
+			"podman.container.ulimits.core was removed", "-1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var c Config
+			if err := decodeStrict(tc.doc, &c); err != nil {
+				t.Fatalf("the removed key must still decode (that is the point): %v", err)
+			}
+			c.ApplyDefaults(tc.p)
+			err := c.Validate(tc.p)
+			if err == nil {
+				t.Fatal("the removed key must fail validation")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to contain %q", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.fixed) {
+				t.Errorf("error = %v, want it to name the fixed value %q", err, tc.fixed)
+			}
+			if !strings.Contains(err.Error(), "cpuset") {
+				t.Errorf("error = %v, want it to name the keys that still work", err)
+			}
+		})
+	}
+
+	// The sentinel must not fire on every config: an empty ulimits block sets
+	// nothing, and a valid fixture still has to pass. This is what would catch a
+	// resurrected setDefault in applyContainerBlockDefaults.
+	var empty Config
+	if err := decodeStrict("docker:\n  container:\n    ulimits: {}\n", &empty); err != nil {
+		t.Fatalf("an empty ulimits block must decode: %v", err)
+	}
+	for _, p := range []Platform{Docker, Podman} {
+		if err := validContainerConfig(p, "true").Validate(p); err != nil {
+			t.Errorf("%s: a valid config must not trip the removal error: %v", p, err)
+		}
+	}
+}
+
+// TestRetiredContainerKeysAreRefusedOnEveryPlatform pins the placement: the check
+// is platform-independent, like the renamed docker.runtime, so a shared env file
+// resolved to kubernetes still hears about a dead key in its docker block.
+func TestRetiredContainerKeysAreRefusedOnEveryPlatform(t *testing.T) {
+	var c Config
+	if err := decodeStrict("docker:\n  container:\n    shmSize: 1g\n", &c); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	c.ApplyDefaults(K8s)
+	if err := c.Validate(K8s); err == nil || !strings.Contains(err.Error(), "docker.container.shmSize was removed") {
+		t.Errorf("expected the removal error on kubernetes too, got: %v", err)
+	}
+}
+
+// TestRetiredContainerKeyFailsThroughLoad proves the sentinel survives the whole
+// pipeline -- strict decode, ApplyDefaults, home expansion, Validate -- and not
+// merely a hand-built Config. This is the test that fails if the retired defaults
+// are ever repointed at their constants instead of deleted.
+func TestRetiredContainerKeyFailsThroughLoad(t *testing.T) {
+	path := writeTempYAML(t, `
+image:
+  repo: solace/solace-pubsub-standard
+  tag: 10.10.1.35
+semp:
+  adminPass: s3cret
+redundancy:
+  enabled: "false"
+docker:
+  container:
+    dataDir: /opt/solace/data
+    shmSize: 1g
+`)
+	_, err := Load(path, Docker)
+	if err == nil || !strings.Contains(err.Error(), "docker.container.shmSize was removed") {
+		t.Errorf("Load should refuse the retired key by name, got: %v", err)
 	}
 }

@@ -94,6 +94,14 @@ solace-util auto-complete zsh > "${fpath[1]}/_solace-util"               # zsh
 solace-util auto-complete fish > ~/.config/fish/completions/solace-util.fish
 ```
 
+`/etc/bash_completion.d/` is read by the `bash-completion` package, not by bash itself. On
+a host without that package there is no directory to write to, so source the script from
+your `~/.bashrc` instead -- it needs nothing but bash:
+
+```
+echo 'source <(solace-util auto-complete bash)' >> ~/.bashrc
+```
+
 PowerShell has no such directory, so write the script once and dot-source it from your
 profile -- generating it once is what keeps shell start-up fast, since the alternative
 runs this binary on every new shell:
@@ -106,8 +114,7 @@ Add-Content $PROFILE '. $HOME\solace-util.ps1'
 If `$PROFILE` does not exist yet, `New-Item -ItemType File -Force $PROFILE` creates it.
 
 `solace-util auto-complete` on its own prints all of this, and each shell's own `--help`
-adds whatever that shell needs first (bash wants the `bash-completion` package; zsh wants
-`compinit` enabled).
+adds whatever that shell needs first (zsh wants `compinit` enabled; bash needs nothing).
 
 Beyond command and flag names it completes the values they take: the env files `-e`/`--env`
 would actually resolve, `primary`/`backup`/`monitor` for `--pod`, directories for

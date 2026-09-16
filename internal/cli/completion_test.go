@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -57,6 +58,153 @@ func TestCompletionScriptsGenerate(t *testing.T) {
 				t.Errorf("completion %s output missing %q", tc.shell, tc.marker)
 			}
 		})
+	}
+}
+
+// TestBashScriptDoesNotNeedBashCompletion: the emitted bash script completes on a host
+// with no bash-completion package. Cobra's script calls that package in two places and
+// neither survives its absence -- its own "minimal" fallback init is just
+// `_get_comp_words_by_ref`, and the directory directive `completeDirs` returns is
+// answered with `_filedir -d`. Unpatched, a TAB press there dies with a
+// command-not-found and offers nothing.
+//
+// The init assertion is positional on purpose: a later definition is what wins in bash,
+// so what has to hold is that the LAST `__solace-util_init_completion` in the file needs
+// nothing the package provides. Checking only that our text is present somewhere would
+// pass even if it were emitted first, where cobra's copy would override it instead.
+//
+// `_filedir` is checked differently because the name is not ours: it must be defined
+// behind a `declare -F` guard, so a host that HAS bash-completion keeps that package's
+// own version rather than being handed this cut-down one.
+func TestBashScriptDoesNotNeedBashCompletion(t *testing.T) {
+	const initFn = "__solace-util_init_completion()"
+	const owned = "_get_comp_words_by_ref"
+
+	out, err := runRoot(t, []string{"auto-complete", "bash"})
+	if err != nil {
+		t.Fatalf("completion bash: %v", err)
+	}
+	if n := strings.Count(out, initFn); n < 2 {
+		t.Fatalf("the bash script defines %s %d time(s): cobra's copy has to be FOLLOWED by "+
+			"ours, which is what overrides it", initFn, n)
+	}
+	if last := out[strings.LastIndex(out, initFn):]; strings.Contains(last, owned) {
+		t.Errorf("the definition of %s that wins still calls %s, which only the bash-completion "+
+			"package provides:\n%s", initFn, owned, last)
+	}
+	if !strings.Contains(out, "_filedir()") {
+		t.Error("the bash script calls _filedir for the directory directive but never defines " +
+			"it, so --base-dir and `broker copy into --dir` complete nothing without the " +
+			"bash-completion package")
+	}
+	if !strings.Contains(out, "declare -F _filedir") {
+		t.Error("_filedir is defined unguarded: the name belongs to bash-completion, and a host " +
+			"that has that package must keep its version rather than this cut-down one")
+	}
+
+	// Scoped to bash: the other three generators are cobra's, untouched.
+	for _, shell := range []string{"zsh", "fish", "powershell"} {
+		other, err := runRoot(t, []string{"auto-complete", shell})
+		if err != nil {
+			t.Fatalf("completion %s: %v", shell, err)
+		}
+		for _, marker := range []string{initFn, "_filedir()"} {
+			if strings.Contains(other, marker) {
+				t.Errorf("the %s script carries bash's %s fallback", shell, marker)
+			}
+		}
+	}
+}
+
+// TestBashInitFallbackRejoinsSplitWords: the replacement init function fills the four
+// variables cobra's script reads, and rejoins the words readline split apart.
+//
+// That rejoining is the whole reason cobra passes `-n =:`. COMP_WORDBREAKS contains both
+// characters, so `--platform=docker` reaches the completer as three words; a fallback
+// that left them split still completes `--platform docker` but offers nothing at all for
+// `--platform=d`, which is why asserting on the emitted text is not enough -- the text
+// says nothing about whether the shell agrees with it.
+//
+// It calls the function directly rather than pressing TAB, so the result does not depend
+// on whether the host has bash-completion (__start_solace-util would prefer the real
+// _init_completion) nor on a built binary named solace-util being on PATH for the
+// `${words[0]} __complete` round trip. Gated on bash being present rather than on GOOS:
+// where a Windows runner has Git Bash, this is worth running there too.
+func TestBashInitFallbackRejoinsSplitWords(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("no bash on PATH, so the generated script cannot be driven here: %v", err)
+	}
+	script, err := runRoot(t, []string{"auto-complete", "bash"})
+	if err != nil {
+		t.Fatalf("completion bash: %v", err)
+	}
+
+	// What bash hands a completion function for `solace-util broker deploy --platform=d`.
+	const drive = `
+COMP_WORDS=(solace-util broker deploy --platform = d)
+COMP_CWORD=5
+cur=; prev=; words=(); cword=
+__solace-util_init_completion -n =:
+printf '%s|%s|%s|%s' "${words[*]}" "$cword" "$cur" "$prev"
+`
+	out, err := exec.Command(bash, "--norc", "-c", script+drive).CombinedOutput()
+	if err != nil {
+		t.Fatalf("driving the generated script: %v\n%s", err, out)
+	}
+	const want = "solace-util broker deploy --platform=d|3|--platform=d|deploy"
+	if got := string(out); got != want {
+		t.Errorf("the init fallback did not rejoin the split words\ngot  %s\nwant %s", got, want)
+	}
+}
+
+// TestBashFiledirFallbackCompletesDirsOnly: the `_filedir` stand-in answers `-d` with
+// directories and nothing else. That is the whole of what `--base-dir` and `broker copy
+// into --dir` ask for, and offering the files beside them would be a worse answer than
+// the one a host WITH bash-completion gets.
+//
+// The fixture holds a directory whose name contains a space, which is what an unquoted
+// `$(compgen -d)` splits in half and the reason the fallback reads with readarray, and
+// two files, which are what the `-d` has to exclude.
+func TestBashFiledirFallbackCompletesDirsOnly(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("no bash on PATH, so the generated script cannot be driven here: %v", err)
+	}
+	script, err := runRoot(t, []string{"auto-complete", "bash"})
+	if err != nil {
+		t.Fatalf("completion bash: %v", err)
+	}
+
+	dir := t.TempDir()
+	for _, sub := range []string{"alpha", "gamma space"} {
+		if err := os.Mkdir(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"afile.txt", "bfile.yaml"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// compopt's output is dropped because it refuses outside a real completion, which
+	// this is not. What lands in COMPREPLY is the subject here.
+	const drive = `
+cur=""
+COMPREPLY=()
+_filedir -d 2>/dev/null
+printf '%s\n' "${COMPREPLY[@]}"
+`
+	cmd := exec.Command(bash, "--norc", "-c", script+drive)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("driving _filedir in the generated script: %v", err)
+	}
+	const want = "alpha\ngamma space\n"
+	if got := string(out); got != want {
+		t.Errorf("_filedir -d should offer the directories and only those\ngot  %q\nwant %q", got, want)
 	}
 }
 

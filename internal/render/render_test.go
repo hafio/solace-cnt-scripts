@@ -259,6 +259,26 @@ func TestGolden(t *testing.T) {
 			},
 		},
 		{
+			// The rootless framing of the same unit: no cpuset, and the run user and
+			// install target that follow from the same flag. The sample says
+			// rootless: false, so the flag is flipped and RunUser -- a setDefault
+			// field -- is cleared so the second pass derives the rootless one instead
+			// of leaving the rootful one in a rootless unit. WantedBy and
+			// SystemctlUser are assigned unconditionally and need no clearing;
+			// QuadletDir is left rootful deliberately, since it is where the file is
+			// WRITTEN rather than anything in it, and its rootless value is
+			// $XDG_CONFIG_HOME-derived.
+			name: "podman quadlet rootless",
+			file: "podman_quadlet_rootless.golden",
+			gen: func(t *testing.T) []byte {
+				c := load(t, config.Podman)
+				c.Podman.Rootless = true
+				c.Podman.Container.RunUser = ""
+				c.ApplyDefaults(config.Podman)
+				return Quadlet(c, c.ResolveNode(config.Primary))
+			},
+		},
+		{
 			name: "docker compose primary",
 			file: "docker_compose_primary.golden",
 			gen: func(t *testing.T) []byte {
@@ -777,21 +797,28 @@ func TestScalingTierReachesEveryArtifact(t *testing.T) {
 		t.Errorf("broker CR missing the 100000-tier memory:\n%s", cr)
 	}
 
+	// Both tier-derived container fields are cleared, for the same reason: they are
+	// setDefault fields, so the tier-1000 values load() produced would otherwise
+	// survive and the failure would read like a renderer bug.
 	d := load(t, config.Docker)
 	d.Scaling.MaxConnections = 100000
 	d.Docker.Container.Mem = ""
+	d.Docker.Container.CPUSet = ""
 	d.ApplyDefaults(config.Docker)
 	compose := string(Compose(d, d.ResolveNode(config.Primary)))
-	if !strings.Contains(compose, `    cpus: "8"`) || !strings.Contains(compose, "    mem_limit: 30925m") {
+	if !strings.Contains(compose, `    cpuset: "0-7"`) || !strings.Contains(compose, "    mem_limit: 30925m") {
 		t.Errorf("compose missing the 100000-tier limits:\n%s", compose)
 	}
 
+	// Rootful: a rootless unit carries no cpuset at all
+	// (TestRootlessQuadletOmitsTheCpusetOnly).
 	p := load(t, config.Podman)
 	p.Scaling.MaxConnections = 100000
 	p.Podman.Container.Mem = ""
+	p.Podman.Container.CPUSet = ""
 	p.ApplyDefaults(config.Podman)
 	unit := string(Quadlet(p, p.ResolveNode(config.Primary)))
-	if !strings.Contains(unit, "PodmanArgs=--cpus=8") || !strings.Contains(unit, "Memory=30925m") {
+	if !strings.Contains(unit, "PodmanArgs=--cpuset-cpus=0-7") || !strings.Contains(unit, "Memory=30925m") {
 		t.Errorf("quadlet missing the 100000-tier limits:\n%s", unit)
 	}
 }
@@ -889,43 +916,120 @@ func TestScalingReachesK8sAsSpecOnly(t *testing.T) {
 	}
 }
 
-// TestContainerMemOverrideReachesArtifact proves the asymmetry survives to the
-// artifact: memory is the operator's to override, CPU is not.
-func TestContainerMemOverrideReachesArtifact(t *testing.T) {
+// TestContainerOverridesReachArtifact proves both container overrides survive to
+// the artifact. The remaining asymmetry is on Kubernetes, where the CPU is a
+// tier-fixed count with no key under any spelling; here the tier decides how many
+// cores and the operator may say which.
+func TestContainerOverridesReachArtifact(t *testing.T) {
 	d := load(t, config.Docker)
 	d.Docker.Container.Mem = "24g"
+	d.Docker.Container.CPUSet = "2-5"
 	compose := string(Compose(d, d.ResolveNode(config.Primary)))
 	if !strings.Contains(compose, "    mem_limit: 24g") {
 		t.Errorf("compose did not carry the mem override:\n%s", compose)
 	}
-	if !strings.Contains(compose, `    cpus: "2"`) {
-		t.Errorf("compose CPU should stay the tier's, got:\n%s", compose)
+	if !strings.Contains(compose, `    cpuset: "2-5"`) {
+		t.Errorf("compose did not carry the cpuset override:\n%s", compose)
+	}
+}
+
+// TestComposeQuotesTheCpuset guards a rule no golden can: compose types cpuset as
+// a string and rejects a bare `cpuset: 0`. Every tier value is 0-N, which parses
+// as a string anyway, so only a single-cpu override reaches this.
+func TestComposeQuotesTheCpuset(t *testing.T) {
+	d := load(t, config.Docker)
+	d.Docker.Container.CPUSet = "0"
+	compose := string(Compose(d, d.ResolveNode(config.Primary)))
+	if !strings.Contains(compose, `    cpuset: "0"`) {
+		t.Errorf("a single-cpu cpuset must be quoted or compose rejects the file:\n%s", compose)
+	}
+}
+
+// TestRootlessQuadletOmitsTheCpusetOnly renders one fixture twice with only the
+// flag flipped, so the difference is attributable to podman.rootless and nothing
+// else. The cpuset is all rootless gives up: its cgroup controller is not
+// delegated to a user slice, while memory IS delegated and a ulimit is not a
+// cgroup control at all. The lines that STAY are asserted too -- they are the half
+// a golden break answered with -update would silently bless.
+func TestRootlessQuadletOmitsTheCpusetOnly(t *testing.T) {
+	rootful := load(t, config.Podman)
+	unit := string(Quadlet(rootful, rootful.ResolveNode(config.Primary)))
+	if !strings.Contains(unit, "PodmanArgs=--cpuset-cpus=0-1") {
+		t.Errorf("rootful podman must carry the cpuset:\n%s", unit)
+	}
+
+	rootless := load(t, config.Podman)
+	rootless.Podman.Rootless = true
+	rootless.Podman.Container.RunUser = ""
+	rootless.ApplyDefaults(config.Podman)
+	ru := string(Quadlet(rootless, rootless.ResolveNode(config.Primary)))
+	for _, unwanted := range []string{"PodmanArgs=", "cpuset"} {
+		if strings.Contains(ru, unwanted) {
+			t.Errorf("a rootless unit must not carry %q:\n%s", unwanted, ru)
+		}
+	}
+	for _, want := range []string{
+		"Memory=6898m", "ShmSize=2g",
+		"Ulimit=nofile=2448:1048576", "Ulimit=memlock=-1", "Ulimit=core=-1",
+		"LimitNOFILE=2448:1048576", "LimitMEMLOCK=infinity", "LimitCORE=infinity",
+	} {
+		if !strings.Contains(ru, want) {
+			t.Errorf("a rootless unit must still carry %q:\n%s", want, ru)
+		}
+	}
+}
+
+// TestQuadletAsksTheServiceAndTheContainerForTheSameLimits pins the two-layer
+// mechanism: Ulimit= is what podman asks for the container, Limit*= is what
+// systemd gives the podman process, and a rootless podman cannot exceed the
+// second. Two numbers that disagree would be a unit asking for what it cannot have.
+func TestQuadletAsksTheServiceAndTheContainerForTheSameLimits(t *testing.T) {
+	c := load(t, config.Podman)
+	unit := string(Quadlet(c, c.ResolveNode(config.Primary)))
+	for _, want := range []string{
+		"Ulimit=nofile=" + config.ContainerNoFile(),
+		"LimitNOFILE=" + config.ContainerNoFile(),
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("quadlet missing %q:\n%s", want, unit)
+		}
 	}
 }
 
 // TestUnresolvedTierOmitsLimits covers the renderers' fail-safe branch. A Config
 // built in code -- which is what the executors are handed, and what several
 // container tests construct -- carries maxConnections 0, which is no tier. The
-// artifacts must then omit the limits rather than emit an empty cpus:/--cpus=,
-// which the engines would reject outright.
+// TIER-DERIVED caps must then be omitted rather than emitted empty, which the
+// engines would reject. The hardcoded limits are not tier-derived and must still
+// be there, which is the other half of the claim.
 func TestUnresolvedTierOmitsLimits(t *testing.T) {
 	d := load(t, config.Docker)
-	d.Scaling.CPU = ""
 	d.Docker.Container.Mem = ""
+	d.Docker.Container.CPUSet = ""
 	compose := string(Compose(d, d.ResolveNode(config.Primary)))
-	for _, unwanted := range []string{"cpus:", "mem_limit:"} {
+	for _, unwanted := range []string{"cpuset:", "mem_limit:"} {
 		if strings.Contains(compose, unwanted) {
 			t.Errorf("compose emitted %q with no tier resolved:\n%s", unwanted, compose)
 		}
 	}
+	for _, want := range []string{"shm_size: 2g", "soft: 2448", "hard: 1048576", "memlock: -1", "core: -1"} {
+		if !strings.Contains(compose, want) {
+			t.Errorf("compose dropped the hardcoded %q with no tier resolved:\n%s", want, compose)
+		}
+	}
 
 	p := load(t, config.Podman)
-	p.Scaling.CPU = ""
 	p.Podman.Container.Mem = ""
+	p.Podman.Container.CPUSet = ""
 	unit := string(Quadlet(p, p.ResolveNode(config.Primary)))
 	for _, unwanted := range []string{"PodmanArgs=", "Memory="} {
 		if strings.Contains(unit, unwanted) {
 			t.Errorf("quadlet emitted %q with no tier resolved:\n%s", unwanted, unit)
+		}
+	}
+	for _, want := range []string{"ShmSize=2g", "Ulimit=nofile=2448:1048576", "LimitNOFILE=2448:1048576"} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("quadlet dropped the hardcoded %q with no tier resolved:\n%s", want, unit)
 		}
 	}
 

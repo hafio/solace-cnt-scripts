@@ -55,7 +55,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-80 test files, 1315 test functions. Three of those are not tests. Two are os/exec
+82 test files, 1370 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -68,24 +68,49 @@ launched from.
 | --- | --- | --- |
 | internal/k8s | 18 | 210 |
 | internal/broker | 22 | 429 |
-| internal/cli | 11 | 190 |
-| internal/config | 14 | 213 |
-| internal/container | 6 | 133 |
-| internal/convert | 1 | 37 |
-| internal/render | 2 | 33 |
+| internal/cli | 11 | 193 |
+| internal/config | 14 | 220 |
+| internal/container | 8 | 174 |
+| internal/convert | 1 | 38 |
+| internal/render | 2 | 36 |
 | internal/engine | 2 | 27 |
 | internal/output | 1 | 16 |
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **80** | **1315** |
+| **Total** | **82** | **1370** |
 
 
 ## Coverage
 
-Last recorded run, from `scripts/logs/cov.log` (2026-09-16), total **93.0%**. Re-run `cov`
+Last recorded run, from `scripts/logs/cov.log` (2026-09-17), total **92.6%**. Re-run `cov`
 after any change; these figures go stale the moment tests move, and the previous total is
 the floor the next run has to hold.
+
+**92.5% -> 92.6%, from the container resource change**, and the only per-package figure
+with a recorded predecessor is `internal/container`, 94.2% -> 94.6%: `splitLimit` and the
+old `checkNoFile` went, and `limits.go` arrived with a test per branch, including the two
+gate skips and both empty-answer cases. This run reads `internal/config` 96.5%,
+`internal/render` 97.7% and `internal/convert` 97.4%; treat those as the new floor rather
+than as deltas, since `scripts/logs/cov.log` is local-only and carried no prior run to
+compare them against. 82 files and 1370 functions, `internal/container` 7/165 -> 8/174,
+`internal/config` 214 -> 220, `internal/render` 33 -> 36, `internal/convert` 37 -> 38.
+
+**93.0% -> 92.5%, and the 0.5pp is the rootless-podman work landing after 93.0% was
+recorded, not a behaviour going untested.** That commit added the host-readiness block,
+the linger and id-mapping probes and the run-as-image-user switch, and the denominator
+moved with them: `internal/container` 95.5% -> 94.2%. The Summary table above was left on
+its pre-rootless figures by the same commit and is corrected here -- 81 files and 1350
+functions, `internal/container` 6/133 -> 7/165, `internal/config` 213 -> 214.
+
+The bash-completion fallback in this change is +3 statements in
+`internal/cli/completion.go` (94.6%, 3 uncovered). The `GenBashCompletionV2` error check
+and the `io.WriteString` after it are both covered by the four completion-script tests;
+the `return err` that check guards is the one new statement nothing reaches, because
+`completionShell` hands the generator `os.Stdout` and making that write fail needs a seam
+the command has no other reason to carry. `internal/cli` 82.63% -> 82.60% and the total
+92.49% -> 92.48% from that single statement -- the other two uncovered lines in the file
+(`base = "."` and the registration `panic`) predate it.
 
 **92.9% -> 93.0%, and the move is a consolidation in both directions.** The shrink pass
 deleted dead code and collapsed duplicated bodies onto one definition. That raises the
@@ -391,9 +416,10 @@ minimal `os.DirEntry` that lets it.
 
 ### scaling_test.go
 
-The scaling-tier table: `scaling.maxConnections` fixes the broker's CPU on every
-platform and defaults its memory, so these cover the table itself, the derivation,
-and the keys the change removed or added. Also `Scaling.UnmarshalYAML`'s
+The scaling-tier table: `scaling.maxConnections` fixes how many cores the broker gets
+on every platform and defaults its memory and, on the container platforms, its
+`cpuset`. These cover the table itself, the derivation, and the keys the change
+removed or added. Also `Scaling.UnmarshalYAML`'s
 dual-spelling allowlist -- the custom decoder every scaling setting goes through
 now that it is settable under either its friendly name or its destination broker
 setting.
@@ -405,9 +431,15 @@ setting.
 | `TestScalingTierListMatchesTable` | The error message's tier list cannot drift from the table -- every listed value is a key, the list is ascending, and its rendering is exact. The package avoids `sort`, so the order is a literal that needs pinning |
 | `TestContainerMem` | The one rewrite between the schema's two memory spellings: Kubernetes' `Mi`/`Gi` to the bare `m`/`g` docker and podman accept, leaving an already-container value untouched. Every tier's rewritten default is checked against the validator it would face from an env file, so a default cannot be one the loader rejects |
 | `TestApplyScalingTierDefaultsK8s` | A non-default tier derives its cores into `Scaling.CPU` and its memory into `kubernetes.msgNode.mem`, while `msgNode.cpu` stays empty so `validateK8s` can read any value there as user-set |
-| `TestApplyScalingTierDefaultsMemOverride` | The asymmetry the change rests on: an explicit memory survives defaulting on both k8s and container, while CPU is the tier's regardless |
-| `TestApplyScalingTierDefaultsContainerBlocks` | Both container blocks are filled whichever container platform is active, matching `applyContainerDefaults`' existing parity |
-| `TestApplyScalingTierDefaultsOffTier` | The fail-safe: an unresolvable tier derives nothing rather than inventing a footprint, and `Validate` is what the operator hears from |
+| `TestApplyScalingTierDefaultsMemOverride` | The asymmetry the change rests on: an explicit memory AND an explicit `cpuset` both survive defaulting on both k8s and container, while how many cores is the tier's regardless |
+| `TestApplyScalingTierDefaultsContainerBlocks` | Both container blocks are filled -- `mem` and `cpuset` alike -- whichever container platform is active, matching `applyContainerDefaults`' existing parity |
+| `TestApplyScalingTierDefaultsOffTier` | The fail-safe on both k8s and container: an unresolvable tier derives nothing rather than inventing a footprint (no `cpuset` rather than an invalid one), and `Validate` is what the operator hears from |
+| `TestCPUSetRange` | The tier-count to cpuset rewrite (`"2"` -> `"0-1"`, `"1"` -> `"0"`) and its fail-safe: anything not a positive integer yields `""`, which `setDefault` reads as no default rather than as an invalid cpuset. Every tier's own derived cpuset is checked against `cpuSetRE`, so a tier added with a cpu this cannot convert fails here |
+| `TestApplyScalingTierDefaultsCPUSetPerTier` | The published cpuset column, driven through the real `ApplyDefaults` on both container platforms, while `Scaling.CPU` keeps the tier's count (the CR still renders from it) and the k8s memory default stays untouched |
+| `TestValidateContainerCPUSet` | `container.cpuset` is a list or range of host cpu ids: a core count, a memlock-style `-1`, a shell substitution and every malformed separator are refused naming the key, a backwards range is refused on its own terms, and `8-11` is ACCEPTED at tier 1000 -- which cpus are free is a host fact the tier cannot know, so the count is deliberately not matched |
+| `TestRetiredContainerLimitKeysFailLoud` | The four removed container limit keys, per platform: each still DECODES (that is what keeps the error about the key rather than a bare unknown field) and then fails `Validate` naming the key, the value it is fixed at, and the two keys that still work. An empty `ulimits: {}` and a valid fixture do not trip it, which is what would catch a resurrected `setDefault` |
+| `TestRetiredContainerKeysAreRefusedOnEveryPlatform` | The placement: platform-independent, like the renamed `docker.runtime`, so a shared env file resolved to kubernetes still hears about a dead key in its docker block |
+| `TestRetiredContainerKeyFailsThroughLoad` | The decode-path sibling: the sentinel survives the whole pipeline -- strict decode, `ApplyDefaults`, home expansion, `Validate` -- rather than only a hand-built `Config`. This is the test that fails if the retired defaults are ever repointed at their constants instead of deleted |
 | `TestValidateScalingTierRejectsOffTier` | An off-tier value fails on all three platforms with a message listing the five tiers -- the check sits ahead of the platform switch because every platform now renders a CPU limit from it |
 | `TestValidateScalingTierAcceptsEveryTier` | Every tier validates cleanly on every platform, so the enum cannot be narrower than the table |
 | `TestValidateK8sMsgNodeCPURemoved` | `kubernetes.msgNode.cpu` still decodes but fails validation, so the operator gets a reason naming `scaling.maxConnections` and noting `mem` is unaffected, rather than a bare unknown-field error |
@@ -782,10 +814,22 @@ from parsing config or executing anything. (`TestCompletionNeverReadsTheEnvFile`
 `platform_test.go` pins that invariant directly, by completing against an env file
 that does not exist.)
 
+Three tests go the other way and inspect the emitted SCRIPT rather than the completer.
+`bashInitFallback` and `bashFiledirFallback` are appended after cobra's bash script
+because cobra calls the `bash-completion` package in two places that a host without
+that package cannot satisfy -- its own "minimal" fallback init, and the `_filedir -d`
+behind the directory directive. Two of the three drive real `bash` to prove the
+replacements agree with the shell; they are the only tests here that shell out, gated
+on `exec.LookPath("bash")` rather than on GOOS so a Windows runner carrying Git Bash
+still runs them.
+
 | Test | What it covers |
 | --- | --- |
 | `TestCompletionScriptsGenerate` | Each of bash/zsh/fish/powershell emits its own script, matched on the line that actually binds the completer to `solace-util`, so a script that generated but wired up nothing still fails |
 | `TestCompletionNoDescriptions` | `--no-descriptions` is honoured on every shell: the generated script requests `__completeNoDesc` instead of `__complete`, and does not without the flag |
+| `TestBashScriptDoesNotNeedBashCompletion` | The bash script completes on a host without the `bash-completion` package, which cobra's script needs in two places: its fallback init is only a call to `_get_comp_words_by_ref`, and the directory directive is answered with `_filedir -d`. Asserts the init positionally -- the LAST `__solace-util_init_completion` in the file is the one bash keeps, and that definition must need nothing from the package, so emitting our text first (where cobra's copy would override it) fails. `_filedir` is asserted to exist AND to sit behind a `declare -F` guard, since that name belongs to the package and a host that has it must keep its own. Also that the other three scripts are untouched |
+| `TestBashInitFallbackRejoinsSplitWords` | The replacement fills `cur`/`prev`/`words`/`cword` and rejoins what readline split on `=` and `:` -- the reason cobra passes `-n =:`, since `--platform=docker` reaches the completer as three words and leaving them split completes `--platform docker` while offering nothing for `--platform=d`. Drives real `bash`, because the emitted text says nothing about whether the shell agrees; calls the function directly, so the result turns on neither the host having `bash-completion` nor a built `solace-util` being on PATH for the `__complete` round trip |
+| `TestBashFiledirFallbackCompletesDirsOnly` | The `_filedir` stand-in answers `-d` with the directories and not the files beside them, which is all `--base-dir` and `broker copy into --dir` ask for. The fixture carries a directory whose name holds a space -- what an unquoted `$(compgen -d)` splits in half, and why the fallback reads with `readarray` -- and two files, which are what `-d` has to exclude. Drives real `bash` in a `t.TempDir()`, dropping `compopt`'s output since it refuses outside a live completion |
 | `TestCompletionNeedsAShell` | An unsupported shell, or none at all, fails loud with nothing on stdout -- the reason the parent carries a `RunE`, since cobra answers a non-runnable command by printing help to stdout and exiting 0, which would put help text into `solace-util completion tcsh > solace-util.ps1` and call it a success |
 | `TestCompletionHelpStillWorks` | `--help` short-circuits ahead of that `RunE`, so asking how to use the command is not itself an error |
 | `TestEnvFlagCompletesEnvFiles` | `-e` is completed from the two directories `config.ResolveEnvPath` searches, by bare name: base dir first, the shadowed `env/` copy of the same name offered once, and a non-YAML file not suggested |
@@ -906,7 +950,8 @@ mapping, and the YAML emitter. 37 tests.
 | `TestConvertAdminUserIsDroppedOnEveryPlatform` | The one admin field that is not portable: `SOLBK_ADM_USER` is emitted only for docker/podman, and on a k8s target is dropped with a warning naming why (`validateK8s` refuses any non-`admin` value), stays out of the generic unmapped list because it is still read, and leaves a document that validates -- no "will not load as-is". A source that already said `admin` warns about nothing |
 | `TestConvertAdminSecretAlias` | `SOLBK_ADM_SECRET` is an accepted alias of `SOLBK_USR_SECRET` for `kubernetes.adminSecret` (hand-maintained env files used it; the repo's bootstraps never defined it): the alias alone maps silently, an agreeing pair maps silently, and a disagreeing pair keeps the canonical `SOLBK_USR_SECRET` with a warning naming the choice |
 | `TestConvertK8sSecretNamesAreK8sOnly` | `IMAGEREPO_SECRET` and `SOLBK_SVR_SECRET` name Kubernetes Secret objects, so a container conversion drops each with a warning naming its `kubernetes.*` home (imagePullSecret / tlsServerSecret) -- never the generic unmapped list -- and neither key reaches the container YAML |
-| `TestConvertContainer` | A container env file maps the node table, container block, ulimits, network, and spool scaling |
+| `TestConvertContainer` | A container env file maps the node table, container block, network, and spool scaling, emits neither retired key, and takes the tier's `cpuset` |
+| `TestConvertRetiredContainerLimitsAreDropped` | `SOLBK_SHM_SIZE` and the three `SOLBK_ULIMIT_*` variables are READ so they count as mapped, then dropped with a warning naming the variable, the retired key and the value it is now fixed at -- rather than resurfacing in the generic unmapped list, which would say nothing about why |
 | `TestConvertPlatformDetection` | Podman markers, docker markers, and both-present all resolve to the expected section |
 | `TestConvertPodmanSection` | Podman rootless and quadlet dir land in the podman block, and no docker block is written |
 | `TestConvertExplicitPlatformWins` | `--platform` overrides detection and suppresses the detection warning |
@@ -1959,8 +2004,9 @@ AGE column is reproducible.
 
 The host-local Docker/Podman manager, its node-local transport, and the engine
 preflight that precedes every mutating operation, plus the engine `inspect` decode
-behind `broker status` and the server-certificate delivery each engine needs.
-133 tests across 6 files.
+behind `broker status` and the server-certificate delivery each engine needs, and the
+host rlimit ceilings every engine is bounded by.
+174 tests across 8 files.
 
 ### runtime_test.go
 
@@ -1995,14 +2041,7 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestManagerCheckDNSFailsLoudInHA` | An unresolvable redundancy host fails the check and is named |
 | `TestManagerCheckStandaloneDNSWarnsOnly` | Standalone tolerates an unresolved name |
 | `TestManagerPrepHostRootlessUsesUnshareChown` | Rootless podman chowns via `podman unshare`, once the whole host-readiness block ahead of it has passed (`healthyRootlessOut`, rootless_test.go) |
-| `TestPrepHostRootlessNoFileSufficient` | Rootless prep probes this user's hard `nofile` limit with `sh -c 'ulimit -Hn'` and reports the value when it covers `container.ulimits.nofile` |
-| `TestPrepHostRootlessNoFileTooLow` | The point of the check: a rootless container cannot raise `nofile` past the user's hard limit, so prep stops rather than deploying a broker that would run under-provisioned. The message carries both numbers and the exact `limits.d` drop-in, including the re-login that re-reads it |
-| `TestPrepHostRootlessNoFileUnlimited` | An unlimited hard limit satisfies any configured value |
-| `TestPrepHostRootlessNoFileUnreadable` | A limit that will not parse fails loud rather than being assumed adequate |
-| `TestPrepHostRootlessNoFileUnsetSkips` | With no configured `nofile` there is nothing to assert against, so the probe never runs -- the hand-built config the executors are handed |
-| `TestPrepHostRootfulSkipsNoFile` | Docker and rootful podman never probe: their privileged engine raises the limit itself, so the invoking user's hard limit does not bound the container |
-| `TestPrepHostRootlessDryRunSkipsTheReadinessBlock` | The nofile probe is one row of the podman host-readiness block now, and the block skips as a WHOLE under the Echo runner rather than row by row: nothing it asserts can be answered without a real host, so one honest skip beats seven echoed probes and seven skipped assertions. Prep still previews the work that follows the block |
-| `TestSplitLimit` | The `soft:hard` ulimit parser: a pair, a single value meaning both, surrounding whitespace, and the values that mean "nothing to assert" (`-1`, empty, non-numeric) |
+| `TestPrepHostRootlessDryRunSkipsTheReadinessBlock` | Two read-only blocks run before prep touches the host -- the podman readiness rows and the host limits -- and both skip as a WHOLE under the Echo runner rather than row by row: nothing they assert can be answered without a real host. Prep still previews the work that follows them |
 | `TestManagerDeployDockerComposeWritesFile` | Deploy writes the compose file and runs `compose up -d --force-recreate` |
 | `TestManagerDockerComposeCommandOverride` | A `docker.compose` override (the standalone `docker-compose` binary) is what every compose call goes through |
 | `TestManagerDockerCheckProbesCompose` | Docker `check` probes the compose command, so a missing plugin fails at check time rather than at deploy time |
@@ -2078,17 +2117,19 @@ The read-only engine probe, and the child-environment hygiene it shares with
 
 ### rootless_test.go
 
-Fixtures: `healthyRootlessOut(hardLimit)` answers every probe in the podman host-readiness
-block the way a correctly prepared host would, keyed by the SHAPE of each call rather than by
-index, so a row can be added or reordered without re-teaching it -- `manager_test.go`'s
-`rootlessNoFileMgr` shares it, since those tests are about the `nofile` limit and every other
-row has to pass for the failure they assert to be the one they mean. `fakeEnv(m, initial)`
+Fixtures: `healthyRootlessOut(nrOpen)` answers every probe in the podman host-readiness block
+AND the two host-limit probes the way a correctly prepared host would, keyed by the SHAPE of
+each call rather than by index, so a row can be added or reordered without re-teaching it --
+`limits_test.go`'s `limitsMgr` shares it, since those tests are about the host ceilings and
+every other row has to pass for the failure they assert to be the one they mean. Its
+`user@<uid>.service` branch is matched BEFORE the `systemctl show` one, because both are
+`systemctl show` and only the first asks the system manager about that unit's limits. `fakeEnv(m, initial)`
 replaces the `Getenv`/`Setenv` seams with a map, because `ensureUserSession` WRITES
 `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` and an `os.Setenv` would leak into every test
 after it; `newCapMgr` installs an inert pair for the same reason. `rootlessMgr()` is the
 healthy host each case then breaks in exactly one place, and `failOnCall` fails one captured
 `Output` call while leaving the rest healthy, which is what makes a row's failure attributable.
-`lingerOff(hardLimit)` is `healthyRootlessOut` with the one repairable row turned off, which is
+`lingerOff(nrOpen)` is `healthyRootlessOut` with the one repairable row turned off, which is
 what separates the read-only caller from the mutating one.
 
 `rootlessMgr` sets `Podman.SystemctlUser` and `Podman.WantedBy` by hand for the same reason
@@ -2099,11 +2140,11 @@ how the first version of `TestCheckPodmanHostHealthyReportsEveryRow` failed.
 
 | Test | What it covers |
 | --- | --- |
-| `TestCheckPodmanHostHealthyReportsEveryRow` | All seven rows report, and the exact argv of each probe (`loginctl show-user <uid> --property=Linger`, `systemctl --user show --property=Version`, the nearest-writable walk, `ulimit -Hn`) -- a renamed flag is caught here rather than on a host nobody can reproduce |
+| `TestCheckPodmanHostHealthyReportsEveryRow` | All six rows report, and the exact argv of each probe (`loginctl show-user <uid> --property=Linger`, `systemctl --user show --property=Version`, the nearest-writable walk) -- a renamed flag is caught here rather than on a host nobody can reproduce |
 | `TestCheckPodmanHostIsReadOnly` | `validate`'s own promise, asserted with linger OFF -- the one row the block CAN repair, so the read-only caller reporting it and leaving it alone is the whole test. Every call is `Output`, and none is `enable-linger`, `mkdir`, `chown` or `unshare` |
 | `TestCheckPodmanHostSkipsDockerAndPreview` | Docker probes nothing at all here, and the Echo runner reports `skipped (preview)` rather than asserting against answers it cannot get |
-| `TestCheckPodmanHostRootfulStopsAtEUID` | Rootful podman runs the euid row and nothing else: a privileged engine owns the id mapping, raises `nofile` itself, and installs units under the system systemd instance |
-| `TestCheckPodmanHostEUIDMismatchSkipsTheRest` | The reachability-first rule (k8s `verifyRows`' shape): probed as root, a rootless block would read the WRONG user's linger, runtime directory and limit, so those rows are honest skips and nothing is probed at all |
+| `TestCheckPodmanHostRootfulStopsAtEUID` | Rootful podman runs the euid row and nothing else: a privileged engine owns the id mapping and installs units under the system systemd instance. Its nofile ceiling is checked one level up, where it applies to every engine (`limits_test.go`) |
+| `TestCheckPodmanHostEUIDMismatchSkipsTheRest` | The reachability-first rule (k8s `verifyRows`' shape): probed as root, a rootless block would read the WRONG user's linger and runtime directory, so those rows are honest skips and nothing is probed at all |
 | `TestEnsureUserSessionDerivesBothWhenUnset` | The sudo/su/cron case: both variables derived from the euid, the runtime dir probed with `test -d` first, and the report saying `(derived)` |
 | `TestEnsureUserSessionNeverOverwritesInherited` | An operator who set one meant it -- neither value is touched, and the report says `(inherited)` |
 | `TestEnsureUserSessionDerivesEachHalfIndependently` | The middle ground where one survives and the other does not: the derived bus is built from the INHERITED runtime dir, and both origins are named |
@@ -2130,7 +2171,44 @@ how the first version of `TestCheckPodmanHostHealthyReportsEveryRow` failed.
 | `TestPrepHostRefusesBeforeTouchingTheHost` | The integration of the read-only property: an unready host stops prep with no `mkdir`, `chown` or `unshare` having run. The unready row is deliberately the DATA DIR rather than linger, since linger is the one thing prep repairs and using it would assert the opposite |
 | `TestPrepHostMkdirFailureExplainsRootless` | The guidance the legacy bash carried (`002-host-prep.sh`) and the Go port dropped -- unreachable in practice now, so this covers the race where ownership changes between the check and the create |
 | `TestPrepHostMkdirHintIsRootlessOnly` | Rootful podman and docker create the directory as root, so the rootless advice would be wrong there |
-| `TestCheckReportsDNSAndPodmanHostTogether` | The one-pass promise at the `Check` level: a DNS failure must not hide a host-readiness failure or the reverse, and both causes survive into the joined error |
+| `TestCheckReportsDNSAndPodmanHostTogether` | The one-pass promise at the `Check` level: DNS, the podman readiness rows and the host ceiling are all broken at once, and every cause survives into the joined error |
+
+### limits_test.go
+
+The host rlimit ceilings. `--ulimit` is only a REQUEST: the engine performs the
+`setrlimit`, so what it may ask for depends on the privilege it holds. Docker and
+rootful podman run a privileged engine bounded only by `fs.nr_open`; rootless podman
+runs under `user@<uid>.service` with no `CAP_SYS_RESOURCE` and is bounded by that
+unit's HARD limits. `/etc/security/limits.d` is not in either path -- it is read by
+`pam_limits`, for login sessions -- which is the bug this file's anti-assertions guard.
+
+Fixtures: `limitsMgr(t, p, rootless, nrOpen)` builds a Manager for platform `p` whose
+limit probes answer `nrOpen` and whose every other probe answers healthily, with the
+euid each platform's own invariant demands (rootful podman requires root, rootless
+refuses it). It redirects `Manager.SysctlDropIn` into a temp directory: the default is
+`/etc`, and a test that raised `nr_open` would otherwise write to the machine running
+it. `healthyNrOpen` and `healthyUserManagerProps` are the healthy answers the other
+files' fixtures share; the latter reports a LOW SOFT limit on purpose, because only
+hard limits can bind.
+
+| Test | What it covers |
+| --- | --- |
+| `TestPrepHostChecksNrOpenOnEveryTarget` | The behaviour change: the kernel ceiling binds whichever engine starts the container, so it is checked on docker, rootful podman and rootless podman alike rather than on rootless alone. A stock host passes, which is the outcome that matters -- `fs.nr_open` defaults to exactly the ask |
+| `TestPrepHostNrOpenTooLowRefusesAsNonRoot` | A non-root caller cannot `sysctl`, so the row hands over both commands -- the live one and the one that survives a reboot -- probes nothing further and writes nothing. It must NOT name `limits.conf` or `limits.d`: sending an operator to `pam_limits` would have them change something that cannot affect the container |
+| `TestPrepHostNrOpenRaisedAsRoot` | Raising `nr_open` is live immediately, unlike a `pam_limits` change, so prep applies it, writes the `sysctl.d` drop-in that persists it, says what it changed, and CONTINUES |
+| `TestPrepHostNrOpenRaiseFailureRefuses` | A failed repair falls back to the instructions rather than reporting a success the kernel did not grant, and carries the underlying cause |
+| `TestPrepHostNrOpenUnreadableSkips` | The false-refusal guard: Docker Desktop runs the engine in a VM, so `/proc` here belongs to a kernel no container will run under. There is nothing to assert, and refusing a healthy host over a missing file would be the defect |
+| `TestPrepHostNrOpenUnparseableFailsLoud` | A `/proc` that answers in a shape this cannot read is an anomaly, not a ceiling to be assumed adequate |
+| `TestPrepHostNrOpenEmptyAnswerSkips` | The other half of that rule: NO answer is not a garbled one. A probe that exits 0 and prints nothing has told us nothing, so it skips -- which is also what keeps every test in this package that is about something else from having to seed a limits answer |
+| `TestCheckLimitsRootlessEmptyUserManagerAnswerSkips` | The same rule for the `systemctl show` probe, with its boundary: an empty answer skips, while an answer carrying SOME properties but not the ones asked for still fails loud naming the missing one |
+| `TestValidateNeverWritesTheSysctlDropIn` | `validate` promises a run that disturbs nothing, so it reports the same shortfall and repairs none of it -- even as root |
+| `TestCheckLimitsRootlessRefusesAShortUserManager` | The rootless ceiling, and the refusal a default host actually gets: `LimitMEMLOCK` ships at 8 MB. The message names the unit, the short value, the `user@.service.d` drop-in, `[Service]`, `LimitMEMLOCK=infinity`, `daemon-reload` and the re-login -- and must NOT name `limits.conf`, which is the regression guard for the bug this replaced. Never repaired whatever `fix` says: the drop-in needs root, and a rootless deploy as root is already refused |
+| `TestCheckLimitsRootlessReportsTheSoftLimitWithoutGating` | Only a hard limit can bind: any process raises its own soft limit up to its hard one without privilege, and podman sets the container's from the artifact. So a low soft limit is reported and passes |
+| `TestCheckLimitsPrivilegedSkipsTheUserManager` | Docker and rootful podman run a privileged engine, so there is no user manager in the path to ask about |
+| `TestCheckLimitsSkipsWithoutPosixRlimits` | Windows has no POSIX rlimits, no shell to read them with, and an engine whose kernel is inside a VM -- one honest skip row, and nothing probed |
+| `TestCheckLimitsSkipsOnAnEUIDMismatch` | Probed as root, the rootless rows would answer about an account the deploy will never use, so both skip with the reason. `checkPodmanHost` is what FAILS on the mismatch; this block only declines to answer |
+| `TestParseLimit` | One limit value: a decimal, systemd's `infinity` and the shell's `unlimited` for an absent ceiling, and the two shapes that fail |
+| `TestLimitsCheckAssertsWhatTheArtifactAsks` | Why the thresholds are constants in `internal/config` rather than literals in the check: a check asserting something the artifact does not ask for would pass while the broker started under-provisioned. Both rendered artifacts are searched for the same numbers |
 
 ### transport_test.go
 
@@ -2254,7 +2332,7 @@ certificate's two delivery routes. 33 tests across 2 files.
 
 | Test | What it covers |
 | --- | --- |
-| `TestGolden` | Thirteen renderings from the sample env match their goldens: the k8s broker CR (the sample omits `kubernetes.ports`, `timezone` and both security blocks, so this covers the default ports and the omitted branches), the same CR with an explicit port list (a container port differing from the service port, and an explicit protocol), the same CR with timezone and both security blocks set, the podman quadlet, docker compose in HA and standalone (standalone drops the redundancy block and its PSK secret reference), container env pairs for HA (no `timezone`, so no TZ pair) and standalone (`timezone` set, so the TZ pair is present), the quadlet and compose forms of the opt-in health check, the CR with an explicit pullPolicy plus podAnnotations/podLabels, the CR with node and pod affinity alongside the legacy anti-affinity term, and the CR with loadBalancer annotations, node labels and tolerations (values carrying a colon and a URL, which survive only because both halves are quoted). The two secret-script goldens went with `render.SecretScript`: no container artifact carries a secret value any more |
+| `TestGolden` | Fourteen renderings from the sample env match their goldens: the k8s broker CR (the sample omits `kubernetes.ports`, `timezone` and both security blocks, so this covers the default ports and the omitted branches), the same CR with an explicit port list (a container port differing from the service port, and an explicit protocol), the same CR with timezone and both security blocks set, the podman quadlet rootful (carrying the tier's cpuset) and the same unit rootless (no cpuset, `User=1000`, `WantedBy=default.target`, everything else unchanged), docker compose in HA and standalone (standalone drops the redundancy block and its PSK secret reference), container env pairs for HA (no `timezone`, so no TZ pair) and standalone (`timezone` set, so the TZ pair is present), the quadlet and compose forms of the opt-in health check, the CR with an explicit pullPolicy plus podAnnotations/podLabels, the CR with node and pod affinity alongside the legacy anti-affinity term, and the CR with loadBalancer annotations, node labels and tolerations (values carrying a colon and a URL, which survive only because both halves are quoted). The two secret-script goldens went with `render.SecretScript`: no container artifact carries a secret value any more |
 | `TestArtifactsCarryNoSecrets` | The externalization guard: with distinctive values in `semp.adminPass`, `redundancy.psk` and an additional user's password, no deployment artifact on any platform (broker CR, quadlet, compose file) contains any of them -- each references the secret by name and `broker deploy` supplies the value |
 | `TestContainerSecretsRedundancy` | HA lists both secrets in a fixed order with the expected broker settings, `FilePathKey`/`MountPath` derive the file form both engines use (the mount is named after the setting, not the host-side secret), and standalone lists the admin password only (no mate link, so no PSK secret). An encrypted server-certificate key adds a third secret reaching the broker as `tls_servercertificate_passphrasefilepath`, and only when the passphrase is actually set |
 | `TestContainerSecretNamesAreHostScoped` | The de-confliction: the host-side name is `<container.name>-<suffix>` (the default name keeps the historical `solace-admin-password`), the in-container target and path never carry that prefix, and `EnvVar` maps `.`/`-` to `_` and prefixes a leading digit so the name stays exportable |
@@ -2267,8 +2345,11 @@ certificate's two delivery routes. 33 tests across 2 files.
 | `TestQuadletEscape` | systemd `Environment=` escaping of `%`, `"`, and `\` |
 | `TestScalingReachesContainersAsEnv` | Every scaling knob reaches docker and podman as a container environment variable, carrying the env file's values, including an explicit `0`, which is a real setting rather than an absent one. `max-dmr-links` -- the CR's hyphenated spelling -- must never appear there; the container gets `max_dmr_links` instead, since a systemd `Environment=` name cannot carry a hyphen |
 | `TestScalingReachesK8sAsSpecOnly` | The other half of the delivery split: on k8s the same settings are CR fields under `spec.systemScaling` and never pod environment variables. `max-dmr-links` is the one setting whose CR spelling differs from what reaches the container (`max_dmr_links`); the retired camelCase `maxSpoolUsage:` must no longer appear now that the CR uses the same `messagespool_maxspoolusage` name the containers always have |
-| `TestScalingTierReachesEveryArtifact` | One tier value decides the CPU cap in all three artifacts: the broker CR's `messagingNodeCpu`/`messagingNodeMemory`, compose's `cpus:`/`mem_limit:`, and the quadlet's `PodmanArgs=--cpus=`/`Memory=`. It uses 100000, which is no platform's default, so the value is proven read rather than hardcoded -- the goldens only ever show the default tier |
-| `TestContainerMemOverrideReachesArtifact` | The asymmetry survives to the artifact: an overridden `container.mem` reaches compose while the CPU stays the tier's |
+| `TestScalingTierReachesEveryArtifact` | One tier value decides the caps in all three artifacts: the broker CR's `messagingNodeCpu`/`messagingNodeMemory`, compose's `cpuset:`/`mem_limit:`, and the quadlet's `PodmanArgs=--cpuset-cpus=`/`Memory=`. It uses 100000, which is no platform's default, so the value is proven read rather than hardcoded -- the goldens only ever show the default tier. Both tier-derived container fields are cleared before the second `ApplyDefaults`, since `setDefault` would otherwise keep the tier-1000 values and the failure would read like a renderer bug. The podman half is rootful; a rootless unit carries no cpuset at all |
+| `TestContainerOverridesReachArtifact` | Both container overrides survive to the artifact: `container.mem` and `container.cpuset` each reach compose. The remaining asymmetry is on Kubernetes, where the CPU is a tier-fixed count with no key under any spelling |
+| `TestComposeQuotesTheCpuset` | A rule no golden can cover: compose types `cpuset` as a string and rejects a bare `cpuset: 0`, while every tier value (`0-N`) parses as a string anyway -- so only a single-cpu override reaches it |
+| `TestRootlessQuadletOmitsTheCpusetOnly` | One fixture rendered twice with only `podman.rootless` flipped, so the difference is attributable to the flag. The cpuset is all rootless gives up: its cgroup controller is not delegated to a user slice, while memory IS and a ulimit is not a cgroup control at all. The lines that STAY are asserted too -- they are the half a golden break answered with `-update` would silently bless |
+| `TestQuadletAsksTheServiceAndTheContainerForTheSameLimits` | The two-layer mechanism: `Ulimit=` is what podman asks for the container, `Limit*=` in `[Service]` is what systemd gives the podman process, and a rootless podman cannot exceed the second. Two numbers that disagreed would be a unit asking for what it cannot have |
 | `TestCustomVolumeMountRendersTheCRArray` | The translation at the boundary: the env file keys on this tool's lowercase role word, the CRD constrains `customVolumeMount[].name` to a capitalised enum, and the order is fixed rather than map order -- a Go map iterates randomly, and this renders into a CR that is diffed and re-applied, so an unstable order would look like a change on every deploy |
 | `TestNoCustomVolumeMountEmitsNothing` | The block is absent, not empty: an empty array is a different statement from an unset field, and the operator reads them differently |
 | `TestExtraEnvVarsSecretFollowsTheUsers` | The CR half of `semp.additionalUsers`. The field names a Secret, so emitting it with no users would point the operator at an object that does not exist and fail the pod on a mount the deployment never needed -- the same rule `preSharedAuthKeySecret` follows. Also pins that no password reaches the CR |
@@ -2278,7 +2359,7 @@ certificate's two delivery routes. 33 tests across 2 files.
 | `TestSecretsAndCertDoNotNest` | No secret's file can collide with the server certificate's mount, which is the hazard the old layout carried: the cert lived INSIDE the secrets directory, so a setting named `tls.crt` would have been the same path. They are separate trees now, and this asserts it rather than trusting it |
 | `TestComposeProjectIsDeclaredNotDerived` | With no top-level `name:`, compose takes the project name from the basename of the directory holding the file -- so it changes when the artifact is generated elsewhere or the directory is renamed, and the previous project's containers, network and volumes become orphans `down` no longer finds |
 | `TestComposeProjectFoldsToComposesGrammar` | Compose's project-name grammar is narrower than the container-name grammar config enforces: it lowercases and admits only `_` and `-`, while `My.Broker` is a container name both engines accept. Folding is the right trade -- refusing a perfectly good container name over a compose spelling rule would not be |
-| `TestUnresolvedTierOmitsLimits` | The renderers' fail-safe branch. A `Config` built in code -- what the executors are handed -- carries no tier, and all three artifacts must then omit the limits rather than emit an empty `cpus:`/`--cpus=`/`messagingNodeCpu:`, which the engines and the CRD would reject |
+| `TestUnresolvedTierOmitsLimits` | The renderers' fail-safe branch, in two halves. A `Config` built in code -- what the executors are handed -- carries no tier, so the TIER-DERIVED caps must be omitted rather than emitted empty, which the engines and the CRD would reject; and the HARDCODED limits (`shm_size`/`ShmSize=`, the nofile pair, the `[Service]` limits) are not tier-derived and must still be there |
 
 ### servercert_test.go
 

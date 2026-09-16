@@ -351,25 +351,21 @@ func assertContainerBlockDefaults(t *testing.T, b Container, wantRunUser string)
 	if b.RunUser != wantRunUser {
 		t.Errorf("RunUser = %q, want %q", b.RunUser, wantRunUser)
 	}
-	if b.ShmSize != "1g" {
-		t.Errorf("ShmSize = %q, want 1g", b.ShmSize)
-	}
 	// The container default tier is 1000 connections -> 6898Mi, rewritten into the
-	// b|k|m|g suffix docker and podman accept.
+	// b|k|m|g suffix docker and podman accept, and 2 cores -> cpuset 0-1.
 	if b.Mem != "6898m" {
 		t.Errorf("Mem = %q, want 6898m", b.Mem)
+	}
+	if b.CPUSet != "0-1" {
+		t.Errorf("CPUSet = %q, want 0-1 (tier 1000, 2 cores)", b.CPUSet)
 	}
 	if b.DataDir != "/opt/solace/data" {
 		t.Errorf("DataDir = %q, want /opt/solace/data", b.DataDir)
 	}
-	if b.Ulimits.NoFile != "2448:1048576" {
-		t.Errorf("Ulimits.NoFile = %q", b.Ulimits.NoFile)
-	}
-	if b.Ulimits.MemLock != "-1" {
-		t.Errorf("Ulimits.MemLock = %q", b.Ulimits.MemLock)
-	}
-	if b.Ulimits.Core != "-1" {
-		t.Errorf("Ulimits.Core = %q", b.Ulimits.Core)
+	// The retired keys must stay EMPTY: validateRetiredContainerKeys reads any value
+	// here as the operator's own, so a default would fail every container load.
+	if b.ShmSize != "" || b.Ulimits != (Ulimits{}) {
+		t.Errorf("retired keys were defaulted: shmSize=%q ulimits=%+v", b.ShmSize, b.Ulimits)
 	}
 	// The health check stays disabled by default, but its timings are filled so the
 	// block only needs `enabled` and `cmd` to be useful.

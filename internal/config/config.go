@@ -919,15 +919,32 @@ type Network struct {
 type Container struct {
 	Name    string `yaml:"name"`    // CONTAINER_NAME
 	RunUser string `yaml:"runUser"` // SOLBK_RUN_USER uid:gid
-	ShmSize string `yaml:"shmSize"` // SOLBK_SHM_SIZE
+
+	// ShmSize is retained only so an env file carrying the removed
+	// <docker|podman>.container.shmSize is refused by name rather than hitting a
+	// bare unknown-key error (validateRetiredContainerKeys). NEVER defaulted,
+	// which is what makes a non-empty value here the operator's own.
+	ShmSize string `yaml:"shmSize"`
+
+	// CPUSet pins the container to specific host cpus -- docker's `cpuset:`,
+	// podman's --cpuset-cpus. A cpu LIST or RANGE ("0-3", "0,2,4"), not a core
+	// count. Defaults to the tier's cores as 0-(cores-1) (cpuSetRange, scaling.go);
+	// an explicit value wins, because which cpus are free is a host fact the tier
+	// cannot know. Ignored under podman.rootless: the cpuset cgroup controller is
+	// not delegated to a user slice, so the unit omits it (render.Quadlet).
+	CPUSet string `yaml:"cpuset"`
+
 	// Mem is the container memory limit in docker's and podman's own b|k|m|g
 	// suffix, NOT the Mi/Gi Kubernetes quantity kubernetes.msgNode.mem takes -- the
 	// engines reject that spelling, so validateContainer catches it here rather
 	// than letting compose fail at deploy. Defaults to the scaling tier's memory
-	// (scaling.go). CPU has no counterpart: it is fixed by the tier, so there is
-	// nothing here to override.
-	Mem         string      `yaml:"mem"`
-	DataDir     string      `yaml:"dataDir"` // SOLBK_DATA_DIR (host bind mount)
+	// (scaling.go). CPUSet above is the cpu counterpart, defaulted from the same
+	// tier.
+	Mem     string `yaml:"mem"`
+	DataDir string `yaml:"dataDir"` // SOLBK_DATA_DIR (host bind mount)
+
+	// Ulimits is retained for the same reason ShmSize is: all three keys were
+	// removed and each is refused by name. NEVER defaulted.
 	Ulimits     Ulimits     `yaml:"ulimits"`
 	HealthCheck HealthCheck `yaml:"healthCheck"`
 }
@@ -964,11 +981,44 @@ const (
 	HealthCheckMinMinor = 26
 )
 
-// Ulimits are the container resource limits (soft:hard where applicable).
+// The container limits the broker needs. Fixed rather than configurable: there is
+// no value an env file could carry that would be right for one deployment and
+// wrong for another, so the renderers emit these and
+// validateRetiredContainerKeys refuses the keys they replaced.
+//
+// They live here rather than in internal/render because validate.go's refusals
+// have to name the value each retired key is now fixed at, and config must never
+// import render. internal/container reads the nofile pair too, to check it
+// against what this host will allow (limits.go).
+//
+// Two spellings of the same limit: the engines take -1 for unlimited, systemd
+// takes infinity, and a quadlet unit now carries both -- Ulimit= in [Container]
+// is what podman asks for the container, Limit*= in [Service] is what systemd
+// gives the podman process, and the second bounds the first when rootless.
+const (
+	ContainerShmSize      = "2g"
+	ContainerNoFileSoft   = 2448
+	ContainerNoFileHard   = 1048576
+	ContainerMemLock      = "-1"
+	ContainerCore         = "-1"
+	ContainerLimitMemLock = "infinity"
+	ContainerLimitCore    = "infinity"
+)
+
+// ContainerNoFile is the nofile pair in the engines' own soft:hard spelling,
+// which quadlet's Ulimit=nofile= and systemd's LimitNOFILE= both take as one token.
+func ContainerNoFile() string {
+	return fmt.Sprintf("%d:%d", ContainerNoFileSoft, ContainerNoFileHard)
+}
+
+// Ulimits is retained ONLY so the three removed
+// <docker|podman>.container.ulimits keys still decode and can be refused by name
+// (validateRetiredContainerKeys). The values are the constants above, and the
+// SOLBK_ULIMIT_* variables these fields used to name no longer map to anything.
 type Ulimits struct {
-	NoFile  string `yaml:"nofile"`  // SOLBK_ULIMIT_NOFILE
-	MemLock string `yaml:"memlock"` // SOLBK_ULIMIT_MEMLOCK
-	Core    string `yaml:"core"`    // SOLBK_ULIMIT_CORE
+	NoFile  string `yaml:"nofile"`
+	MemLock string `yaml:"memlock"`
+	Core    string `yaml:"core"`
 }
 
 // Redundancy is everything about the HA group: whether there is one, who is in it, and

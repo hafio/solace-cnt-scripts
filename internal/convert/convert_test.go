@@ -317,8 +317,28 @@ func TestConvertContainer(t *testing.T) {
 	if c.Docker.Container.DataDir != "/opt/solace/data" || c.Docker.Container.RunUser != "1000:1000" {
 		t.Errorf("docker.container = %+v", c.Docker.Container)
 	}
-	if c.Docker.Container.Ulimits.MemLock != "-1" || c.Docker.Container.Ulimits.NoFile != "2448:1048576" {
-		t.Errorf("ulimits = %+v", c.Docker.Container.Ulimits)
+	// The retired keys must not be EMITTED: a file carrying one no longer loads, so
+	// writing it would produce a conversion that fails on the tool's own output.
+	if c.Docker.Container.Ulimits != (config.Ulimits{}) || c.Docker.Container.ShmSize != "" {
+		t.Errorf("retired keys were emitted: ulimits=%+v shmSize=%q",
+			c.Docker.Container.Ulimits, c.Docker.Container.ShmSize)
+	}
+	if strings.Contains(string(res.YAML), "ulimits") || strings.Contains(string(res.YAML), "shmSize") {
+		t.Errorf("the YAML still names a retired key:\n%s", res.YAML)
+	}
+	// Nothing in the bootstraps named a cpuset, so the conversion emits none and the
+	// scaling tier supplies it at load. strictDecode stops before ApplyDefaults, so
+	// the default has to be asked for explicitly.
+	if c.Docker.Container.CPUSet != "" {
+		t.Errorf("convert should emit no cpuset, got %q", c.Docker.Container.CPUSet)
+	}
+	// A SEPARATE decode for the defaulted check: ApplyDefaults would also fill
+	// maxSpoolUsageMB with the container default of 100000, which is the value the
+	// spool assertion below is proving the conversion carried.
+	defaulted := strictDecode(t, res.YAML)
+	defaulted.ApplyDefaults(config.Docker)
+	if defaulted.Docker.Container.CPUSet != "0-1" {
+		t.Errorf("docker.container.cpuset = %q, want the tier default 0-1", defaulted.Docker.Container.CPUSet)
 	}
 	if c.Docker.Network.Mode != "host" {
 		t.Errorf("docker.network.mode = %q", c.Docker.Network.Mode)
@@ -333,6 +353,35 @@ func TestConvertContainer(t *testing.T) {
 	// An ambiguous container file says which section it picked.
 	if !hasWarning(res.Warnings, "assumed docker") {
 		t.Errorf("warnings = %v, want the assumed-docker note", res.Warnings)
+	}
+}
+
+// TestConvertRetiredContainerLimitsAreDropped pins that each retired variable is
+// READ (so it counts as mapped and gets a reason) rather than falling through to
+// the generic unmapped list, and that the warning names the fixed value.
+func TestConvertRetiredContainerLimitsAreDropped(t *testing.T) {
+	for _, p := range []config.Platform{config.Docker, config.Podman} {
+		res := convertOK(t, ctrEnv, p)
+		for _, tc := range []struct{ name, key, fixed string }{
+			{"SOLBK_SHM_SIZE", "container.shmSize", "2g"},
+			{"SOLBK_ULIMIT_NOFILE", "container.ulimits.nofile", "2448:1048576"},
+			{"SOLBK_ULIMIT_MEMLOCK", "container.ulimits.memlock", "-1"},
+			{"SOLBK_ULIMIT_CORE", "container.ulimits.core", "-1"},
+		} {
+			if !hasWarning(res.Warnings, tc.name+" is no longer supported") {
+				t.Errorf("%s: warnings = %v, want one naming %s", p, res.Warnings, tc.name)
+			}
+			if !hasWarning(res.Warnings, tc.key) {
+				t.Errorf("%s: the %s warning should name %s", p, tc.name, tc.key)
+			}
+			if !hasWarning(res.Warnings, tc.fixed) {
+				t.Errorf("%s: the %s warning should name the fixed value %s", p, tc.name, tc.fixed)
+			}
+		}
+		// Mapped, not unmapped: a reason beats a bare "dropped" list.
+		if hasWarning(res.Warnings, "no YAML equivalent") {
+			t.Errorf("%s: a retired limit resurfaced in the unmapped list: %v", p, res.Warnings)
+		}
 	}
 }
 

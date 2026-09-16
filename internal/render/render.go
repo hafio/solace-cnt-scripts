@@ -865,23 +865,33 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 	if gid != "" {
 		fmt.Fprintf(&b, "Group=%s\n", gid)
 	}
-	// Memory has a first-class quadlet key; CPU has none, so the tier's core cap
-	// rides PodmanArgs -- the documented escape hatch for a podman run flag
-	// quadlet does not map. ASSUMED, NOT VERIFIED: podman was not testable here,
-	// so confirm both against the target podman before relying on them; if
-	// Memory= predates that version, fold it into the same PodmanArgs line.
-	// Both are skipped when unset, which is what a Config built in code without
-	// ApplyDefaults carries -- an empty --cpus= would fail the unit at start.
-	if c.Scaling.CPU != "" {
-		fmt.Fprintf(&b, "PodmanArgs=--cpus=%s\n", c.Scaling.CPU)
+	// Memory has a first-class quadlet key; the cpuset has none, so it rides
+	// PodmanArgs -- the documented escape hatch for a podman run flag quadlet does
+	// not map, and the same mechanism the --cpus= line this replaces used.
+	//
+	// ASSUMED, NOT VERIFIED: podman is not installable where this is developed, so
+	// Memory='s presence in the target podman's quadlet and the --cpuset-cpus
+	// spelling come from the documentation. If Memory= predates that version, fold
+	// it into the PodmanArgs line as --memory=.
+	//
+	// Rootless omits the cpuset: the cpuset cgroup controller is not delegated to a
+	// user slice, so the unit would fail at start rather than cap anything. Memory
+	// and the ulimits are unaffected -- memory IS delegated, and a ulimit is an
+	// rlimit rather than a cgroup control.
+	//
+	// Both tier-derived lines are skipped when unset, which is what a Config built
+	// in code without ApplyDefaults carries -- an empty value would fail the unit.
+	if cb.CPUSet != "" && !c.Podman.Rootless {
+		fmt.Fprintf(&b, "PodmanArgs=--cpuset-cpus=%s\n", cb.CPUSet)
 	}
 	if cb.Mem != "" {
 		fmt.Fprintf(&b, "Memory=%s\n", cb.Mem)
 	}
-	fmt.Fprintf(&b, "ShmSize=%s\n", cb.ShmSize)
-	fmt.Fprintf(&b, "Ulimit=nofile=%s\n", cb.Ulimits.NoFile)
-	fmt.Fprintf(&b, "Ulimit=memlock=%s\n", cb.Ulimits.MemLock)
-	fmt.Fprintf(&b, "Ulimit=core=%s\n", cb.Ulimits.Core)
+	// Constants, so unconditional (config.ContainerShmSize and friends).
+	fmt.Fprintf(&b, "ShmSize=%s\n", config.ContainerShmSize)
+	fmt.Fprintf(&b, "Ulimit=nofile=%s\n", config.ContainerNoFile())
+	fmt.Fprintf(&b, "Ulimit=memlock=%s\n", config.ContainerMemLock)
+	fmt.Fprintf(&b, "Ulimit=core=%s\n", config.ContainerCore)
 	if hc := cb.HealthCheck; hc.Enabled {
 		// Quadlet takes a command line rather than an argv, so the probe is joined;
 		// a token containing a space is not representable here (documented in the
@@ -930,6 +940,15 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 	}
 	fmt.Fprint(&b, "\n")
 	fmt.Fprint(&b, "[Service]\n")
+	// The Ulimit= lines above are what podman asks for the CONTAINER; these are what
+	// systemd gives the PODMAN PROCESS, and they are the ceiling on the first: a
+	// rootless podman holds no CAP_SYS_RESOURCE, so it cannot raise a hard limit
+	// past its own. On a system unit these are bounded only by fs.nr_open; on a user
+	// unit they cannot exceed user@<uid>.service's hard limits, which
+	// container.checkLimits proves before deploying.
+	fmt.Fprintf(&b, "LimitNOFILE=%s\n", config.ContainerNoFile())
+	fmt.Fprintf(&b, "LimitMEMLOCK=%s\n", config.ContainerLimitMemLock)
+	fmt.Fprintf(&b, "LimitCORE=%s\n", config.ContainerLimitCore)
 	fmt.Fprint(&b, "Restart=always\n")
 	fmt.Fprint(&b, "\n")
 	fmt.Fprint(&b, "[Install]\n")
@@ -967,7 +986,6 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 	const p = config.Docker
 	cb := c.ContainerBlock(p)
 	net := c.NetworkBlock(p)
-	soft, hard := splitPair(cb.Ulimits.NoFile)
 
 	var b strings.Builder
 	// The project name is DECLARED, not left to be derived. With no `name:`, compose
@@ -998,24 +1016,33 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 	fmt.Fprintf(&b, "    hostname: %q\n", id.Hostname)
 	fmt.Fprintf(&b, "    user: %q\n", cb.RunUser)
 	fmt.Fprint(&b, "    restart: always\n")
-	// Service-level cpus:/mem_limit: rather than deploy.resources.limits, which
-	// the standalone v1 docker-compose binary -- the documented fallback behind
-	// docker.compose -- ignores without --compatibility, silently dropping the
-	// cap. These two are honoured by both v1 and the v2 plugin. Skipped when
-	// unset, which is what a Config built in code without ApplyDefaults carries.
-	if c.Scaling.CPU != "" {
-		fmt.Fprintf(&b, "    cpus: %q\n", c.Scaling.CPU)
+	// Service-level cpuset:/mem_limit: rather than deploy.resources.limits. For
+	// memory that is a choice: the standalone v1 docker-compose binary -- the
+	// documented fallback behind docker.compose -- ignores deploy.resources without
+	// --compatibility, silently dropping the cap, while mem_limit: is honoured by
+	// both. For the cpuset there is no choice: deploy.resources.limits has no
+	// cpuset field at all, so service level is the only place compose has.
+	//
+	// The cpuset is QUOTED because compose types the key as a string and rejects a
+	// bare `cpuset: 0`. A tier value (0-N) parses as a string anyway, so only an
+	// override reaches that -- which is why TestComposeQuotesTheCpuset exists and no
+	// golden covers it.
+	//
+	// There is no rootless branch here: docker has no rootless mode in this schema.
+	if cb.CPUSet != "" {
+		fmt.Fprintf(&b, "    cpuset: %q\n", cb.CPUSet)
 	}
 	if cb.Mem != "" {
 		fmt.Fprintf(&b, "    mem_limit: %s\n", cb.Mem)
 	}
-	fmt.Fprintf(&b, "    shm_size: %s\n", cb.ShmSize)
+	// Constants from here down (config.ContainerShmSize and friends).
+	fmt.Fprintf(&b, "    shm_size: %s\n", config.ContainerShmSize)
 	fmt.Fprint(&b, "    ulimits:\n")
 	fmt.Fprint(&b, "      nofile:\n")
-	fmt.Fprintf(&b, "        soft: %s\n", soft)
-	fmt.Fprintf(&b, "        hard: %s\n", hard)
-	fmt.Fprintf(&b, "      memlock: %s\n", cb.Ulimits.MemLock)
-	fmt.Fprintf(&b, "      core: %s\n", cb.Ulimits.Core)
+	fmt.Fprintf(&b, "        soft: %d\n", config.ContainerNoFileSoft)
+	fmt.Fprintf(&b, "        hard: %d\n", config.ContainerNoFileHard)
+	fmt.Fprintf(&b, "      memlock: %s\n", config.ContainerMemLock)
+	fmt.Fprintf(&b, "      core: %s\n", config.ContainerCore)
 	if hc := cb.HealthCheck; hc.Enabled {
 		fmt.Fprint(&b, "    healthcheck:\n")
 		fmt.Fprint(&b, "      test: [\"CMD\"")
@@ -1164,13 +1191,10 @@ func parseToleration(s string) (key, value, effect string, equal bool) {
 // splitUser splits "uid:gid" into its parts; a bare "uid" yields an empty gid.
 func splitUser(u string) (uid, gid string) { return cut(u, ":") }
 
-// splitPair splits "soft:hard"; a bare value yields it for both.
-func splitPair(v string) (a, b string) {
-	if i := strings.Index(v, ":"); i >= 0 {
-		return v[:i], v[i+1:]
-	}
-	return v, v
-}
+// splitPair is gone with the ulimits schema block. It split
+// <docker|podman>.container.ulimits.nofile's "soft:hard" into compose's two nested
+// keys; the pair is two int constants now (config.ContainerNoFileSoft/Hard) that
+// the compose renderer writes directly. splitUser above is unrelated and stays.
 
 // cut splits s on the first sep; if sep is absent, before=s and after="".
 func cut(s, sep string) (before, after string) {

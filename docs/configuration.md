@@ -213,8 +213,9 @@ Common optional knobs:
 | `kubernetes.securityContext` | -- | `runAsUser`/`fsGroup` for the pod. Omitted entirely when unset |
 | `kubernetes.containerSecurity` | -- | `runAsUser`/`runAsGroup`/`readOnlyRootFilesystem` for the broker container |
 | `scaling.*` | see [Scaling](#scaling) | Broker sizing, applied on every platform -- the CR's `spec.systemScaling` on Kubernetes, container environment variables on docker and podman |
-| `scaling.maxConnections` | `100` (Kubernetes) / `1000` (container) | The Solace scaling tier. Fixes the broker's CPU and defaults its memory on every platform -- see [Scaling tiers](#scaling-tiers) |
-| `<docker\|podman>.container.mem` | the tier's memory | Container memory limit, in docker's and podman's own `b\|k\|m\|g` suffix (not Kubernetes' `Mi`/`Gi`). There is no matching cpu key: CPU is fixed by the tier |
+| `scaling.maxConnections` | `100` (Kubernetes) / `1000` (container) | The Solace scaling tier. Fixes how many cores the broker gets and defaults its memory on every platform -- see [Scaling tiers](#scaling-tiers) |
+| `<docker\|podman>.container.mem` | the tier's memory | Container memory limit, in docker's and podman's own `b\|k\|m\|g` suffix (not Kubernetes' `Mi`/`Gi`) |
+| `<docker\|podman>.container.cpuset` | `0-(cores-1)` from the tier | WHICH host cpus the broker may use -- `cpuset:` in the compose file, `PodmanArgs=--cpuset-cpus=` in the quadlet unit. A list or range of cpu ids (`0-3`, `0,2,4`), not a core count: how many cores is the tier's. Ignored under `podman.rootless: true`, whose user slice has no cpuset controller |
 
 The `broker.*` keys sit at the top level rather than under `kubernetes.*` because every
 platform runs these same post-deployment steps identically. `cliScriptsDir`,
@@ -286,41 +287,50 @@ setting this tool does not map (`system_scaling_maxtransactedsessioncount`, say)
 load exactly as an unknown key does anywhere else in this schema. `cpu` and `messagingNodeCpu`
 are refused by name for a different reason: `scaling.cpu` is fixed by the `maxConnections`
 tier and derived, so there is no key for it under either spelling (see Scaling tiers, below).
+`<docker|podman>.container.cpuset` is not an exception to that: it says WHICH cpus, not how
+many, and it takes its own default from the same tier.
 
 Defaults are identical across platforms except `maxConnections` (100 on Kubernetes, 1000 on
 containers) and `maxSpoolUsageMB` (10000 on Kubernetes, 100000 on containers).
 
 ### Scaling tiers
 
-`scaling.maxConnections` is the Solace scaling tier, and it decides the broker's CPU on all
-three platforms. CPU is **not** configurable: sizing a broker by connection count and then
-sizing its CPU independently is how a 200k-connection broker ends up on two cores. Memory is
-the tier's default and stays yours to override; storage is untouched by the tier.
+`scaling.maxConnections` is the Solace scaling tier, and it decides how much CPU the broker
+gets on all three platforms. The **amount** is not configurable: sizing a broker by connection
+count and then sizing its CPU independently is how a 200k-connection broker ends up on two
+cores. The two platforms express it differently -- Kubernetes gets a CPU limit in the CR,
+docker and podman get a **cpuset**, the host cpus the container may run on -- and which cpus
+those are is yours to change. Memory is the tier's default and stays yours to override;
+storage is untouched by the tier.
 
-| `scaling.maxConnections` | CPU cores (fixed) | Memory default (Kubernetes / container) |
-| --- | --- | --- |
-| `100` (Kubernetes default) | 2 | `3410Mi` / `3410m` |
-| `1000` (container default) | 2 | `6898Mi` / `6898m` |
-| `10000` | 4 | `12435Mi` / `12435m` |
-| `100000` | 8 | `30925Mi` / `30925m` |
-| `200000` | 12 | `52581Mi` / `52581m` |
+| `scaling.maxConnections` | CPU cores (fixed) | Container `cpuset` default | Memory default (Kubernetes / container) |
+| --- | --- | --- | --- |
+| `100` (Kubernetes default) | 2 | `0-1` | `3410Mi` / `3410m` |
+| `1000` (container default) | 2 | `0-1` | `6898Mi` / `6898m` |
+| `10000` | 4 | `0-3` | `12435Mi` / `12435m` |
+| `100000` | 8 | `0-7` | `30925Mi` / `30925m` |
+| `200000` | 12 | `0-11` | `52581Mi` / `52581m` |
 
 The value must be **exactly** one of those five. A value between tiers is rejected rather
 than rounded, because Solace publishes no sizing for it. Override memory with
 `kubernetes.msgNode.mem` (a Kubernetes quantity, `Mi`/`Gi`) or `<docker|podman>.container.mem`
 (docker's and podman's own `b|k|m|g` suffix -- the engines reject `Mi`, so the two spellings
-are not interchangeable and the loader says so).
+are not interchangeable and the loader says so). Override which cpus with
+`<docker|podman>.container.cpuset`.
 
-Docker and podman carry the tier's CPU and memory caps in the generated compose file
-(`cpus:`, `mem_limit:`) and quadlet unit (`PodmanArgs=--cpus=`, `Memory=`), so an existing
-container deployment needs a full **redeploy** -- not just a restart -- to pick up a changed
-cap. In an HA group the monitor host gets the same caps as the messaging hosts; these are
-ceilings rather than reservations, so an oversized monitor limit costs nothing.
+Docker and podman carry the tier's caps in the generated compose file (`cpuset:`,
+`mem_limit:`) and quadlet unit (`PodmanArgs=--cpuset-cpus=`, `Memory=`), except that a
+**rootless** quadlet carries no cpuset: its user slice has no cpuset controller, so a unit
+naming one would fail to start. Either way an existing container deployment needs a full
+**redeploy** -- not just a restart -- to pick up a changed cap. In an HA group the monitor
+host gets the same caps as the messaging hosts; these are ceilings rather than reservations,
+so an oversized monitor limit costs nothing.
 
-A rootless podman host also has a file-descriptor ceiling the tier cannot raise on its own --
-see [File descriptors on rootless podman](operations.md#file-descriptors-on-rootless-podman).
-It has five other prerequisites besides, all checked and refused rather than fixed: see
-[Rootless podman prerequisites](operations.md#rootless-podman-prerequisites).
+The container `nofile`, `memlock`, `core` and shared-memory limits are **not** tunable: the
+broker needs one specific value for each, so this tool emits them and checks the host can
+grant them -- see [The limits the container actually gets](operations.md#the-limits-the-container-actually-gets).
+A rootless podman host has further prerequisites, all checked and refused rather than fixed:
+see [Rootless podman prerequisites](operations.md#rootless-podman-prerequisites).
 
 ## Secrets
 
@@ -587,8 +597,15 @@ onto `folder`. A certificate loaded from `dirs` is
 named `<last directory element>_<filename>`, which is what `files` exists to override when
 you want a name of your own or one file out of a directory of many.
 
-Two keys were **removed** rather than renamed, and each fails to load naming why: see
-[kubernetes.msgNode.cpu and scaling.maxPool](#migrating-from-the-bash-env-files-solace-util-convert).
+Some keys were **removed** rather than renamed. Each still decodes and then fails to load
+naming why, for the same reason the renames do:
+
+| Removed key | Why, and what to do instead |
+| --- | --- |
+| `kubernetes.msgNode.cpu` | Broker CPU is fixed by the scaling tier -- see [Scaling tiers](#scaling-tiers) |
+| `scaling.maxPool` | Named the same broker setting as `scaling.maxSpoolUsageMB`; use that |
+| `<docker\|podman>.container.shmSize` | `/dev/shm` is fixed at `2g`, which is what the broker needs |
+| `<docker\|podman>.container.ulimits` | `nofile`, `memlock` and `core` are fixed at `2448:1048576`, `-1` and `-1`. The host is checked against them -- see [The limits the container actually gets](operations.md#the-limits-the-container-actually-gets) |
 
 ## Migrating from the bash env files (`solace-util convert`)
 

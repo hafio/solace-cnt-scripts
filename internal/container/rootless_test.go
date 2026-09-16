@@ -17,22 +17,27 @@ import (
 // way a correctly prepared host would. It is keyed by the shape of each call
 // rather than by index, so a test can reorder or add rows without re-teaching it.
 //
-// It is shared with manager_test.go's rootlessNoFileMgr: those tests are about the
-// nofile limit, so every other row has to pass for the failure they assert to be
-// the one they mean.
-func healthyRootlessOut(hardLimit string) func(name string, args []string) []byte {
+// It is shared with limits_test.go's limitsMgr: those tests are about the host
+// ceilings, so every other row has to pass for the failure they assert to be the
+// one they mean. nrOpen is the fs.nr_open answer, and the user-manager row always
+// answers healthily -- shortLimitsOut is what breaks it.
+func healthyRootlessOut(nrOpen string) func(name string, args []string) []byte {
 	return func(name string, args []string) []byte {
 		switch {
 		case name == "id":
 			return []byte("solace\n")
 		case name == "loginctl":
 			return []byte("Linger=yes\n")
+		// Before the Version row: both are `systemctl show`, and only this one asks
+		// the SYSTEM manager about user@<uid>.service's limits (limits.go).
+		case name == "systemctl" && slices.Contains(args, "-p") && slices.Contains(args, "LimitNOFILE"):
+			return []byte(healthyUserManagerProps)
 		case name == "systemctl" && slices.Contains(args, "show"):
 			return []byte("Version=255\n")
 		case name == "sh" && slices.Contains(args, nearestWritableScript):
 			return []byte("/opt")
-		case name == "sh" && slices.Contains(args, "ulimit -Hn"):
-			return []byte(hardLimit)
+		case name == "sh" && slices.Contains(args, "cat "+nrOpenPath):
+			return []byte(nrOpen)
 		case slices.Contains(args, "--format") && strings.Contains(strings.Join(args, " "), "IDMappings"):
 			// 0:1 is this user mapped to container root; 1:65536 is the subuid
 			// range, which is what covers ctrCfg's runUser of 1000:0.
@@ -44,8 +49,8 @@ func healthyRootlessOut(hardLimit string) func(name string, args []string) []byt
 
 // lingerOff is healthyRootlessOut with the one row that can be REPAIRED turned off,
 // which is what separates the read-only caller from the mutating one.
-func lingerOff(hardLimit string) func(name string, args []string) []byte {
-	healthy := healthyRootlessOut(hardLimit)
+func lingerOff(nrOpen string) func(name string, args []string) []byte {
+	healthy := healthyRootlessOut(nrOpen)
 	return func(name string, args []string) []byte {
 		if name == "loginctl" {
 			return []byte("Linger=no\n")
@@ -80,10 +85,9 @@ func rootlessMgr() (*Manager, *capRunner, *bytes.Buffer) {
 	// exist to prove does not happen.
 	cfg.Podman.SystemctlUser = "--user"
 	cfg.Podman.WantedBy = "default.target"
-	setNoFile(cfg, config.Podman, "2448:1048576")
 	m, rr, buf := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 1000 }
-	rr.outFor = healthyRootlessOut("1048576\n")
+	rr.outFor = healthyRootlessOut(healthyNrOpen)
 	return m, rr, buf
 }
 
@@ -109,7 +113,7 @@ func TestCheckPodmanHostHealthyReportsEveryRow(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"euid: 1000", "user session:", "id mapping:", "linger: enabled",
-		"user systemd: answering", "data dir:", "hard nofile limit:",
+		"user systemd: answering", "data dir:",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report is missing %q:\n%s", want, out)
@@ -127,7 +131,6 @@ func TestCheckPodmanHostHealthyReportsEveryRow(t *testing.T) {
 		// restating it.
 		{"systemctl", withUser(m.Cfg, "show", "--property=Version")},
 		{"sh", []string{"-c", nearestWritableScript, "/opt/solace/data"}},
-		{"sh", []string{"-c", "ulimit -Hn"}},
 	} {
 		if !hasCall(rr, want.name, want.args) {
 			t.Errorf("missing probe %s %v:\n%+v", want.name, want.args, rr.calls)
@@ -144,7 +147,7 @@ func TestCheckPodmanHostHealthyReportsEveryRow(t *testing.T) {
 func TestCheckPodmanHostIsReadOnly(t *testing.T) {
 	m, rr, _ := rootlessMgr()
 	fakeEnv(m, nil)
-	rr.outFor = lingerOff("1048576\n")
+	rr.outFor = lingerOff(healthyNrOpen)
 	if err := m.checkPodmanHost(context.Background(), false); err == nil {
 		t.Fatal("linger off must be reported by the read-only caller")
 	}
@@ -183,9 +186,10 @@ func TestCheckPodmanHostSkipsDockerAndPreview(t *testing.T) {
 	}
 }
 
-// TestCheckPodmanHostRootfulStopsAtEUID: a privileged engine owns the id mapping,
-// raises nofile itself, and installs its units under the system systemd instance,
-// so none of the rootless rows apply.
+// TestCheckPodmanHostRootfulStopsAtEUID: a privileged engine owns the id mapping
+// and installs its units under the system systemd instance, so none of the
+// rootless rows apply. Its nofile ceiling is checked one level up, where it
+// applies to every engine (limits.go).
 func TestCheckPodmanHostRootfulStopsAtEUID(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.Rootless = false
@@ -203,9 +207,9 @@ func TestCheckPodmanHostRootfulStopsAtEUID(t *testing.T) {
 }
 
 // TestCheckPodmanHostEUIDMismatchSkipsTheRest is the reachability-first rule: a
-// rootless block probed as root would read the WRONG user's linger, runtime
-// directory and nofile limit, so those rows are honest skips rather than answers
-// about an account the deploy will never use.
+// rootless block probed as root would read the WRONG user's linger and runtime
+// directory, so those rows are honest skips rather than answers about an account
+// the deploy will never use.
 func TestCheckPodmanHostEUIDMismatchSkipsTheRest(t *testing.T) {
 	m, rr, buf := rootlessMgr()
 	m.Geteuid = func() int { return 0 } // rootless, but running as root
@@ -359,7 +363,7 @@ func TestCheckIDMappingRefusesAnUnmappedRunUser(t *testing.T) {
 		if slices.Contains(args, "--format") && strings.Contains(strings.Join(args, " "), "IDMappings") {
 			return []byte("0:1 1:10 ")
 		}
-		return healthyRootlessOut("1048576\n")(name, args)
+		return healthyRootlessOut(healthyNrOpen)(name, args)
 	}
 	err := m.checkPodmanHost(context.Background(), false)
 	if err == nil {
@@ -403,7 +407,7 @@ func TestCheckIDMappingRefusesWhenNothingIsAllocated(t *testing.T) {
 		if slices.Contains(args, "--format") && strings.Contains(strings.Join(args, " "), "IDMappings") {
 			return nil
 		}
-		return healthyRootlessOut("1048576\n")(name, args)
+		return healthyRootlessOut(healthyNrOpen)(name, args)
 	}
 	err := m.checkPodmanHost(context.Background(), false)
 	if err == nil {
@@ -432,7 +436,7 @@ func TestIDMappingCommandsNameTheAccountLiterally(t *testing.T) {
 		if slices.Contains(args, "--format") && strings.Contains(strings.Join(args, " "), "IDMappings") {
 			return []byte("0:1 1:10 ") // too small for the 1000:0 default
 		}
-		return healthyRootlessOut("1048576\n")(name, args)
+		return healthyRootlessOut(healthyNrOpen)(name, args)
 	}
 	err := m.checkPodmanHost(context.Background(), false)
 	if err == nil {
@@ -498,7 +502,7 @@ func TestSuggestSubIDRangeSaysWhenItIsGuessing(t *testing.T) {
 		if slices.Contains(args, "--format") && strings.Contains(strings.Join(args, " "), "IDMappings") {
 			return nil // no allocation at all
 		}
-		return healthyRootlessOut("1048576\n")(name, args)
+		return healthyRootlessOut(healthyNrOpen)(name, args)
 	}
 	failOnCall(rr, func(name string, args []string) bool {
 		return name == "sh" && slices.Contains(args, "cat /etc/subuid /etc/subgid 2>/dev/null")
@@ -526,7 +530,7 @@ func TestIDMappingErrProposesTheNextFreeBlock(t *testing.T) {
 		case slices.Contains(args, "--format") && strings.Contains(strings.Join(args, " "), "IDMappings"):
 			return nil
 		}
-		return healthyRootlessOut("1048576\n")(name, args)
+		return healthyRootlessOut(healthyNrOpen)(name, args)
 	}
 	err := m.checkPodmanHost(context.Background(), false)
 	if err == nil {
@@ -555,7 +559,7 @@ func TestHostUserNameFallsBackToTheUID(t *testing.T) {
 func TestCheckLingerRefusesWhenDisabled(t *testing.T) {
 	m, rr, buf := rootlessMgr()
 	fakeEnv(m, nil)
-	rr.outFor = lingerOff("1048576\n")
+	rr.outFor = lingerOff(healthyNrOpen)
 	err := m.checkPodmanHost(context.Background(), false)
 	if err == nil {
 		t.Fatal("linger off must refuse: systemd stops the broker at logout")
@@ -634,12 +638,17 @@ func TestCheckDataDirRefusesAnUnwritableParent(t *testing.T) {
 func TestCheckPodmanHostReportsEveryFailureInOnePass(t *testing.T) {
 	m, rr, _ := rootlessMgr()
 	fakeEnv(m, nil)
-	rr.outFor = lingerOff("1024\n") // linger off AND nofile far below the request
+	// Linger off AND an unwritable data dir: two rows this block still owns, since
+	// the host ceilings moved out of it (limits.go).
+	rr.outFor = lingerOff(healthyNrOpen)
+	failOnCall(rr, func(name string, args []string) bool {
+		return name == "sh" && slices.Contains(args, nearestWritableScript)
+	})
 	err := m.checkPodmanHost(context.Background(), false)
 	if err == nil {
 		t.Fatal("two broken rows must fail")
 	}
-	if !strings.Contains(err.Error(), "enable-linger") || !strings.Contains(err.Error(), "limits.d") {
+	if !strings.Contains(err.Error(), "enable-linger") || !strings.Contains(err.Error(), "dataDir") {
 		t.Errorf("both failures must survive into the joined error, got: %v", err)
 	}
 }
@@ -679,7 +688,7 @@ func TestPrepHostRefusesBeforeTouchingTheHost(t *testing.T) {
 func TestPrepHostEnablesLinger(t *testing.T) {
 	m, rr, buf := rootlessMgr()
 	fakeEnv(m, nil)
-	rr.outFor = lingerOff("1048576\n")
+	rr.outFor = lingerOff(healthyNrOpen)
 	if err := m.PrepHost(context.Background()); err != nil {
 		t.Fatalf("prep must enable linger rather than refusing: %v", err)
 	}
@@ -722,7 +731,7 @@ func TestPrepHostSkipsLingerWhenAlreadyEnabled(t *testing.T) {
 func TestPrepHostLingerEnableFailureIsActionable(t *testing.T) {
 	m, rr, buf := rootlessMgr()
 	fakeEnv(m, nil)
-	rr.outFor = lingerOff("1048576\n")
+	rr.outFor = lingerOff(healthyNrOpen)
 	rr.fail = func(name string, args []string) error {
 		if name == "loginctl" && slices.Contains(args, "enable-linger") {
 			return errors.New("Access denied")
@@ -764,7 +773,7 @@ func TestValidateReportsLingerAndPrepFixesIt(t *testing.T) {
 	} {
 		m, rr, _ := rootlessMgr()
 		fakeEnv(m, nil)
-		rr.outFor = lingerOff("1048576\n")
+		rr.outFor = lingerOff(healthyNrOpen)
 		err := m.checkPodmanHost(context.Background(), tc.fix)
 		if tc.wantOK && err != nil {
 			t.Errorf("%s: %v", tc.name, err)
@@ -837,15 +846,16 @@ func TestCheckReportsDNSAndPodmanHostTogether(t *testing.T) {
 	cfg.Podman.Rootless = true
 	cfg.Podman.SystemctlUser = "--user" // derived by ApplyDefaults, which ctrCfg skips
 	cfg.Podman.WantedBy = "default.target"
-	setNoFile(cfg, config.Podman, "2448:1048576")
 	m, rr, buf := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 1000 }
 	fakeEnv(m, nil)
 	m.Resolve = func(host string) bool { return host != "bkp-host" }
-	rr.outFor = lingerOff("1048576\n")
+	// Three blocks broken at once: DNS, the podman readiness rows, and the host
+	// ceiling. The one-pass promise now spans all three.
+	rr.outFor = lingerOff("65536\n")
 	err := m.Check(context.Background())
 	if err == nil {
-		t.Fatal("both halves are broken, so Check must fail")
+		t.Fatal("every half is broken, so Check must fail")
 	}
 	out := buf.String()
 	if !strings.Contains(out, "does NOT resolve: bkp-host") {
@@ -854,7 +864,12 @@ func TestCheckReportsDNSAndPodmanHostTogether(t *testing.T) {
 	if !strings.Contains(out, "linger: not enabled") {
 		t.Errorf("the podman host row must report in the same pass:\n%s", out)
 	}
-	if !strings.Contains(err.Error(), "do not resolve") || !strings.Contains(err.Error(), "enable-linger") {
-		t.Errorf("both causes must survive into the joined error, got: %v", err)
+	if !strings.Contains(out, "nr_open: 65536") {
+		t.Errorf("the host-ceiling row must report in the same pass:\n%s", out)
+	}
+	for _, want := range []string{"do not resolve", "enable-linger", "fs.nr_open"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the joined error should carry %q, got: %v", want, err)
+		}
 	}
 }

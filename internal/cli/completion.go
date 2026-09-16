@@ -53,10 +53,18 @@ func newCompletionCmd() *cobra.Command {
 		completionShell("bash",
 			"Load into the current shell:\n\n"+
 				"  source <(solace-util auto-complete bash)\n\n"+
-				"Load for every session (needs the bash-completion package):\n\n"+
-				"  solace-util auto-complete bash > /etc/bash_completion.d/solace-util",
+				"Load for every session. With the bash-completion package installed, write it\n"+
+				"where that package looks:\n\n"+
+				"  solace-util auto-complete bash > /etc/bash_completion.d/solace-util\n\n"+
+				"Without that package there is no such directory, so source it from ~/.bashrc\n"+
+				"instead -- this script needs nothing but bash itself:\n\n"+
+				"  echo 'source <(solace-util auto-complete bash)' >> ~/.bashrc",
 			func(root *cobra.Command, w io.Writer, desc bool) error {
-				return root.GenBashCompletionV2(w, desc)
+				if err := root.GenBashCompletionV2(w, desc); err != nil {
+					return err
+				}
+				_, err := io.WriteString(w, bashInitFallback+bashFiledirFallback)
+				return err
 			}),
 		completionShell("zsh",
 			"Load into the current shell:\n\n"+
@@ -116,6 +124,100 @@ func completionShell(shell, long string, gen func(root *cobra.Command, w io.Writ
 	c.Flags().BoolVar(&noDesc, "no-descriptions", false, "omit the descriptions shown beside each completion")
 	return c
 }
+
+// bashInitFallback is appended to cobra's bash script, and is the whole reason
+// `auto-complete bash` works on a host with no bash-completion package.
+//
+// cobra's script asks for that package's `_init_completion` and falls back to its own
+// `__solace-util_init_completion` when it is absent -- but that fallback is itself only a
+// call to `_get_comp_words_by_ref`, which the package also owns. So the branch written for
+// a host without the package is the one branch that cannot run there: every TAB press
+// fails with `_get_comp_words_by_ref: command not found` and completes nothing.
+//
+// Redefining the function AFTER cobra's copy is what overrides it -- a later definition
+// wins in bash, which is why this cannot be a prologue. It takes over one
+// `__solace-util_*` name and defines no `_init_completion` or `_get_comp_words_by_ref` of
+// its own, so a shell that HAS the package is unaffected in both directions: nothing
+// global is shadowed, and `__start_solace-util` still picks the real `_init_completion`,
+// which it tests for at completion time rather than when the script is sourced.
+//
+// The `-n <chars>` rejoining is why cobra passes `-n =:` at all. readline splits
+// COMP_WORDS on every character in COMP_WORDBREAKS, `=` and `:` among them, so
+// `--platform=docker` arrives as three words; leaving them split is what makes
+// `--platform=d` complete to nothing. cur/prev/words/cword are the locals
+// `__start_solace-util` declares, which is what lets a callee assign them.
+const bashInitFallback = `
+# The bash-completion package owns _get_comp_words_by_ref, which the fallback above
+# still calls, so this self-contained replacement takes over. With that package
+# installed, __start_solace-util prefers its _init_completion and never reaches here.
+__solace-util_init_completion()
+{
+    COMPREPLY=()
+    local _excl=""
+    while (($#)); do
+        case $1 in
+            -n) shift; _excl=${1-}; shift ;;
+            *)  shift ;;
+        esac
+    done
+
+    # Rejoin what readline split on the excluded characters, so ` + "`--flag=value`" + `
+    # and a value carrying a colon each arrive as the single word they were typed as.
+    words=(); cword=0
+    local _i _w _last
+    for ((_i = 0; _i < ${#COMP_WORDS[@]}; _i++)); do
+        _w=${COMP_WORDS[_i]}
+        if ((_i > 0)) && [[ -n $_excl ]] && [[ $_w == [$_excl] || ${COMP_WORDS[_i-1]} == *[$_excl] ]]; then
+            _last=$(( ${#words[@]} - 1 )); words[_last]+=$_w
+        else
+            words+=("$_w")
+        fi
+        ((_i == COMP_CWORD)) && cword=$(( ${#words[@]} - 1 ))
+    done
+
+    cur=${words[cword]}
+    if ((cword > 0)); then prev=${words[cword-1]}; else prev=""; fi
+}
+`
+
+// bashFiledirFallback is the second half of the same problem, and the one a reader is
+// most likely to miss: cobra's script answers ShellCompDirectiveFilterDirs by calling
+// `_filedir -d`, which the bash-completion package also owns. That is the directive
+// `completeDirs` returns, so without the package `--base-dir` and `broker copy into
+// --dir` print `_filedir: command not found` and offer nothing.
+//
+// Unlike the init function this name is not ours, so it is defined only when it is
+// missing: a host WITH bash-completion keeps that package's own `_filedir`, which
+// handles quoting, tilde expansion and `cur` shapes this does not. The guard is what
+// makes taking over a name outside our namespace safe -- the real one is never shadowed,
+// and on a host without the package there is nothing to shadow.
+//
+// Only the `-d` form matters here, because FilterDirs is the one file directive this CLI
+// emits; plain file completion never reaches `_filedir` at all, since cobra leaves
+// COMPREPLY empty and lets the `complete -o default` registration fall back to readline.
+// The other form is answered with files and directories rather than left to fail, since
+// that is what a caller asking to filter by extension would rather have.
+//
+// readarray -O appends without disturbing what the caller already collected, and keeps a
+// name containing a space or a newline in one piece where word splitting would not.
+const bashFiledirFallback = `
+# The bash-completion package also owns _filedir, which the directory directive above
+# calls. Define it only when absent: with the package installed its own version handles
+# quoting and tilde expansion that this does not, and must not be shadowed.
+if ! declare -F _filedir >/dev/null 2>&1; then
+    _filedir()
+    {
+        if [[ $(type -t compopt) == builtin ]]; then
+            compopt -o filenames
+        fi
+        if [[ ${1-} == -d ]]; then
+            readarray -t -O "${#COMPREPLY[@]}" COMPREPLY < <(compgen -d -- "${cur-}")
+        else
+            readarray -t -O "${#COMPREPLY[@]}" COMPREPLY < <(compgen -f -- "${cur-}")
+        fi
+    }
+fi
+`
 
 // completeEnvFiles offers the env files -e/--env can name. It mirrors
 // config.ResolveEnvPath: the base dir first, then <base-dir>/env, bare names only,

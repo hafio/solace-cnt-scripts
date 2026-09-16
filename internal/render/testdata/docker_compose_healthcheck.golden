@@ -6,9 +6,9 @@ services:
     hostname: "solace-primary"
     user: "1000001:0"
     restart: always
-    cpus: "2"
+    cpuset: "0-1"
     mem_limit: 6898m
-    shm_size: 1g
+    shm_size: 2g
     ulimits:
       nofile:
         soft: 2448

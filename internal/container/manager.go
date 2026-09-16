@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 
 	"solace/internal/broker"
@@ -74,6 +73,10 @@ type Manager struct {
 	// non-interactive run must do: re-deploying should never bounce a running
 	// broker unattended. The CLI wires it to the same prompt style as delete.
 	Confirm func(question string) bool
+	// SysctlDropIn is where a raised fs.nr_open is persisted (limits.go). A field
+	// rather than a constant so a test can point it at a temp directory instead of
+	// writing to /etc. NewManager sets the default.
+	SysctlDropIn string
 }
 
 // NewManager builds a container host Manager over the given runner, config and
@@ -95,6 +98,8 @@ func NewManager(r engine.EnvRunner, cfg *config.Config, p config.Platform, log f
 		Geteuid: os.Geteuid,
 		Getenv:  os.Getenv,
 		Setenv:  os.Setenv,
+
+		SysctlDropIn: defaultSysctlDropIn,
 	}
 }
 
@@ -222,7 +227,7 @@ func (m *Manager) Check(ctx context.Context) error {
 	}
 	// fix=false: `validate` promises a run that disturbs nothing, so the linger row
 	// reports rather than enabling (rootless.go).
-	return errors.Join(m.checkDNS(ctx), m.checkPodmanHost(ctx, false))
+	return errors.Join(m.checkLimits(ctx, false), m.checkDNS(ctx), m.checkPodmanHost(ctx, false))
 }
 
 // CheckEnv writes the effective container configuration, mirroring k8s.CheckEnv.
@@ -329,78 +334,14 @@ func (m *Manager) Reachable(ctx context.Context) error {
 	return nil
 }
 
-// checkNoFile is the rootless-only half of the nofile limit. Both artifacts ask
-// the engine for the configured limit (compose `ulimits.nofile`, quadlet
-// `Ulimit=nofile=`), but a ROOTLESS container cannot raise nofile above the hard
-// limit of the user invoking podman -- the kernel refuses, and the broker then
-// starts against a limit far below what it needs and fails obscurely later.
-// Rootful podman and docker are unaffected: their daemon/engine runs privileged
-// and can raise the limit itself, which is why this runs only in that branch.
+// checkNoFile has moved to limits.go, and it is no longer rootless-only: the ask
+// is a constant both artifacts carry (config.ContainerNoFile), so what has to be
+// checked is what the HOST will allow -- fs.nr_open on every platform, plus
+// user@<uid>.service's hard limits when rootless. /etc/security/limits.d is not
+// involved in either: it is read by pam_limits, for login sessions.
 //
-// It reports and refuses rather than fixing: raising a hard limit means editing
-// host-wide security configuration as root, which is precisely what a rootless
-// deployment exists to avoid. The message carries the exact drop-in to add.
-func (m *Manager) checkNoFile(ctx context.Context) error {
-	want := m.Cfg.ContainerBlock(m.P).Ulimits.NoFile
-	_, hardWant := splitLimit(want)
-	if hardWant == 0 {
-		return nil // unlimited or unparseable: nothing to assert against
-	}
-	// `ulimit` is a shell builtin, so it needs a shell; this is the user's own
-	// limit because prep runs as the user that will own the rootless container.
-	out, err := m.R.Output(ctx, "sh", "-c", "ulimit -Hn")
-	if m.isEcho() {
-		m.report().KVRow(reportKeyWidth, "nofile", "skipped (preview)")
-		return err
-	}
-	if err != nil {
-		return fmt.Errorf("cannot read this user's hard nofile limit (`sh -c 'ulimit -Hn'`): %w", err)
-	}
-	got := strings.TrimSpace(string(out))
-	if got == "unlimited" {
-		m.report().OK("hard nofile limit: unlimited (need %d)", hardWant)
-		return nil
-	}
-	hardGot, convErr := strconv.Atoi(got)
-	if convErr != nil {
-		return fmt.Errorf("cannot parse this user's hard nofile limit %q from `ulimit -Hn`: %w", got, convErr)
-	}
-	if hardGot >= hardWant {
-		m.report().OK("hard nofile limit: %d (need %d)", hardGot, hardWant)
-		return nil
-	}
-	// The account is named as a placeholder rather than resolved: prep may be
-	// running as root against a rootless deployment (the warning above), in which
-	// case this process's own user is the wrong one to write into the drop-in.
-	soft, _ := splitLimit(want)
-	return fmt.Errorf("rootless podman: this user's hard nofile limit is %d, but "+
-		"podman.container.ulimits.nofile needs %d -- a rootless container cannot raise it above the "+
-		"user's own hard limit, so the broker would start under-provisioned.\n"+
-		"  Add this as root to /etc/security/limits.d/99-solace.conf, replacing <user> with the account "+
-		"that runs the container, then log out and back in (a new login session is what re-reads it):\n"+
-		"    <user> hard nofile %d\n"+
-		"    <user> soft nofile %d",
-		hardGot, hardWant, hardWant, soft)
-}
-
-// splitLimit parses a `soft:hard` ulimit pair, or a single value meaning both.
-// A non-numeric half (including "-1", meaning unlimited) reports 0, which
-// checkNoFile reads as "nothing to assert".
-func splitLimit(v string) (soft, hard int) {
-	s, h := v, v
-	if i := strings.Index(v, ":"); i >= 0 {
-		s, h = v[:i], v[i+1:]
-	}
-	soft, _ = strconv.Atoi(strings.TrimSpace(s))
-	hard, _ = strconv.Atoi(strings.TrimSpace(h))
-	if soft < 0 {
-		soft = 0
-	}
-	if hard < 0 {
-		hard = 0
-	}
-	return soft, hard
-}
+// splitLimit went with it. It parsed the old ulimits.nofile key's "soft:hard";
+// the pair is two int constants now, so there is nothing left to split.
 
 // checkDNS resolves the broker hostname(s): in HA every node name must resolve
 // (fail loud on any miss, matching 002-host-prep.sh); standalone warns only on
@@ -453,16 +394,15 @@ func (m *Manager) PrepHost(ctx context.Context) error {
 	if err := m.Preflight(ctx); err != nil {
 		return err
 	}
-	// The whole podman host-readiness block, which subsumes the euid guard and the
-	// nofile probe this used to call separately (rootless.go). It runs BEFORE the
+	// The host ceilings and the podman host-readiness block, in one pass, BEFORE the
 	// first mkdir: a rootful mkdir/chown here would leave a data directory the later
-	// rootless deploy cannot use, and a host missing linger or a user bus would get
-	// a quadlet unit nothing can load. Every row is read-only, so a refusal still
-	// leaves "nothing happened" true.
-	// fix=true: prep may repair what it finds, which today is the linger row alone
-	// -- enabling it for the invoking user needs no privilege, so it belongs with
-	// the mkdir/chown/login below rather than in a refusal (rootless.go).
-	if err := m.checkPodmanHost(ctx, true); err != nil {
+	// rootless deploy cannot use, a host missing linger or a user bus would get a
+	// quadlet unit nothing can load, and a host below the nofile ceiling would get a
+	// container the kernel refuses. Joined so an operator short on two things learns
+	// both now.
+	// fix=true: prep may repair what it finds -- the linger row, and fs.nr_open when
+	// it is running as root. Both need no privilege it does not already hold.
+	if err := errors.Join(m.checkLimits(ctx, true), m.checkPodmanHost(ctx, true)); err != nil {
 		return err
 	}
 

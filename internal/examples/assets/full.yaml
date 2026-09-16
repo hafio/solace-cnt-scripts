@@ -101,22 +101,23 @@ tls:                                # uncomment cert+certKey together once you h
   #   - certs/ca.crt                # (`broker configure domain-certs`)
 
 # scaling: omit to take platform defaults. maxConnections is the Solace scaling tier and
-# FIXES the broker's CPU on every platform -- there is no cpu key in this schema. It must
-# be exactly one of the five values below; a value between tiers is rejected, not rounded.
-# Memory is the tier's default and stays overridable.
+# FIXES how many cores the broker gets on every platform -- there is no cpu COUNT key in
+# this schema. It must be exactly one of the five values below; a value between tiers is
+# rejected, not rounded. Memory is the tier's default and stays overridable, and on docker
+# and podman so is WHICH cores (<docker|podman>.container.cpuset).
 #
 # Every key below is ALSO settable under the broker setting name this tool emits for it
 # (e.g. `system_scaling_maxconnectioncount` for maxConnections) -- see docs/configuration.md
 # for the full pairing. Both spellings write the same value; setting a key under both at
 # once fails to load, naming both.
 #
-#   maxConnections | cpu (fixed) | memory default
-#   ---------------+-------------+----------------
-#   100            | 2           | 3410Mi  (Kubernetes default tier)
-#   1000           | 2           | 6898Mi  (container default tier)
-#   10000          | 4           | 12435Mi
-#   100000         | 8           | 30925Mi
-#   200000         | 12          | 52581Mi
+#   maxConnections | cores | cpuset | memory default
+#   ---------------+-------+--------+----------------
+#   100            | 2     | 0-1    | 3410Mi  (Kubernetes default tier)
+#   1000           | 2     | 0-1    | 6898Mi  (container default tier)
+#   10000          | 4     | 0-3    | 12435Mi
+#   100000         | 8     | 0-7    | 30925Mi
+#   200000         | 12    | 0-11   | 52581Mi
 #
 # scaling:
 #   maxConnections: 100             # Kubernetes default 100, container default 1000
@@ -360,14 +361,13 @@ docker:
   #   runUser: "1000001:0"          # uid:gid the container runs as; defaults to the
                                     # broker image's own user and group. "0:0" would be
                                     # host root here, since docker's engine is privileged
-  #   shmSize: 1g
   #   mem: 6898m                    # docker's b|k|m|g suffix, NOT the Mi/Gi
                                     # kubernetes.msgNode.mem takes. Defaults to the
-                                    # scaling tier's memory. No cpu key: fixed by tier
-  #   ulimits:
-  #     nofile: "2448:1048576"
-  #     memlock: "-1"
-  #     core: "-1"
+                                    # scaling tier's memory
+  #   cpuset: 0-1                   # WHICH host cpus the broker may use, in the
+                                    # engines' own syntax (0-3, or 0,2,4). Defaults to
+                                    # the tier's cores as 0-(cores-1). There is no cpu
+                                    # COUNT key: that is the tier's
   #   healthCheck:                  # opt-in; off leaves the artifact unchanged
   #     enabled: true               # polls the broker's readiness endpoint. REQUIRES
                                     # broker 10.26+ AND a version-numbered image.tag to
@@ -407,12 +407,10 @@ podman:
                                     # NO subgids: gid 0 maps to your own group. "0:0"
                                     # needs neither and maps container root to you, at
                                     # the cost of in-container isolation
-  #   shmSize: 1g
   #   mem: 6898m                    # same rules as docker.container.mem
-  #   ulimits:
-  #     nofile: "2448:1048576"
-  #     memlock: "-1"
-  #     core: "-1"
+  #   cpuset: 0-1                   # same rules as docker.container.cpuset, but
+                                    # IGNORED under rootless: true -- the cpuset cgroup
+                                    # controller is not delegated to a user slice
   #   healthCheck:                  # same shape as docker.container.healthCheck
   #     enabled: true               # built-in readiness probe; needs broker 10.26+
   # network:

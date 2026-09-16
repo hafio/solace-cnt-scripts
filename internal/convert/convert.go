@@ -34,6 +34,9 @@ var (
 	containerMarkers = []string{
 		"SOLBK_NODE_PRI_NAME", "SOLBK_NODE_BKP_NAME", "SOLBK_NODE_MON_NAME",
 		"SOLBK_DATA_DIR", "SOLBK_NETWORK_MODE", "SOLBK_SPOOL_MAXUSAGE",
+		// SOLBK_SHM_SIZE stays here although its key was removed: this list only
+		// detects the platform and never marks a variable mapped, and a file setting
+		// it is still unambiguously a container file.
 		"SOLBK_REDUNDANCY_PSK", "SOLBK_RUN_USER", "SOLBK_TZ", "SOLBK_SHM_SIZE",
 		"CONTAINER_NAME", "CONTAINER_RUNTIME",
 		"DOCKER_MODE", "DOCKER_COMPOSE_FILE", "PODMAN_ROOTLESS", "QUADLET_DIR",
@@ -488,14 +491,27 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 			d.block("container", func(d *doc) {
 				d.kv("name", v.s("CONTAINER_NAME"))
 				d.kv("runUser", v.s("SOLBK_RUN_USER"))
-				d.kv("shmSize", v.s("SOLBK_SHM_SIZE"))
 				d.kv("dataDir", v.s("SOLBK_DATA_DIR"))
-				d.block("ulimits", func(d *doc) {
-					d.kv("nofile", v.s("SOLBK_ULIMIT_NOFILE"))
-					d.kv("memlock", v.s("SOLBK_ULIMIT_MEMLOCK"))
-					d.kv("core", v.s("SOLBK_ULIMIT_CORE"))
-				})
+				// No cpuset: nothing in the bootstraps named one, so a converted file
+				// takes the scaling tier's default range.
 			})
+			// shmSize and the three ulimits became fixed constants, so there is no key
+			// left to carry a value into -- emitting one would produce a file that
+			// fails to load naming a key this tool had just written. Each variable is
+			// still READ so it counts as mapped rather than resurfacing in the generic
+			// unmapped list, the same shape as DOCKER_MODE above.
+			for _, r := range []struct{ name, key, fixed string }{
+				{"SOLBK_SHM_SIZE", "shmSize", config.ContainerShmSize},
+				{"SOLBK_ULIMIT_NOFILE", "ulimits.nofile", config.ContainerNoFile()},
+				{"SOLBK_ULIMIT_MEMLOCK", "ulimits.memlock", config.ContainerMemLock},
+				{"SOLBK_ULIMIT_CORE", "ulimits.core", config.ContainerCore},
+			} {
+				if got := v.s(r.name); got != "" {
+					warns = append(warns, fmt.Sprintf("%s is no longer supported: %s.container.%s was removed "+
+						"and is fixed at %s, so it was dropped (the source set %q)",
+						r.name, string(p), r.key, r.fixed, got))
+				}
+			}
 		})
 
 	}

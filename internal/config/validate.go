@@ -31,6 +31,13 @@ func (c *Config) Validate(p Platform) error {
 		return err
 	}
 
+	// Four more keys were REMOVED rather than renamed: their values are constants
+	// now. Checked on every platform, like the renames above, because a dead key is
+	// dead whichever section this run happens to read.
+	if err := c.validateRetiredContainerKeys(); err != nil {
+		return err
+	}
+
 	// After the rename check, deliberately: a file still carrying the retired
 	// broker.domainCerts.folder must hear that its key was renamed AND reshaped,
 	// not a complaint about the new block it has not written yet.
@@ -182,6 +189,56 @@ func (c *Config) validateRenamedKeys() error {
 	return nil
 }
 
+// validateRetiredContainerKeys refuses the four <docker|podman>.container keys
+// whose value stopped being a choice: the shared-memory size and the three
+// ulimits are fixed constants the renderers emit on every target.
+//
+// Refused rather than ignored, for the reason kubernetes.msgNode.cpu is: a stale
+// key is a decision the operator believes is in effect. Every field read here is
+// retained in config.go purely so it decodes, and none is written by
+// ApplyDefaults, which is what makes "non-empty" mean the operator set it.
+func (c *Config) validateRetiredContainerKeys() error {
+	for _, b := range []struct {
+		platform string
+		block    *Container
+	}{
+		{"docker", &c.Docker.Container},
+		{"podman", &c.Podman.Container},
+	} {
+		for _, f := range []struct{ key, value, fixed string }{
+			{"shmSize", b.block.ShmSize, ContainerShmSize},
+			{"ulimits.nofile", b.block.Ulimits.NoFile, ContainerNoFile()},
+			{"ulimits.memlock", b.block.Ulimits.MemLock, ContainerMemLock},
+			{"ulimits.core", b.block.Ulimits.Core, ContainerCore},
+		} {
+			if f.value == "" {
+				continue
+			}
+			return fmt.Errorf("%s.container.%s was removed (got: %q). It is fixed at %s on docker and "+
+				"podman alike -- drop the key. %s.container.mem and %s.container.cpuset still override "+
+				"the scaling tier", b.platform, f.key, f.value, f.fixed, b.platform, b.platform)
+		}
+	}
+	return nil
+}
+
+// invertedCPUSetRange finds the first backwards range in a cpuSetRE-shaped value.
+// Only reachable after the regex has matched, so every half parses.
+func invertedCPUSetRange(s string) (lo, hi int, inverted bool) {
+	for _, part := range strings.Split(s, ",") {
+		a, b, ok := strings.Cut(part, "-")
+		if !ok {
+			continue
+		}
+		l, _ := strconv.Atoi(a)
+		h, _ := strconv.Atoi(b)
+		if l > h {
+			return l, h, true
+		}
+	}
+	return 0, 0, false
+}
+
 // validateHostPaths runs CheckHostPath over every field whose value is a path on
 // the machine running this tool. The list is per platform because the fields are:
 // only a container platform has a compose file or a data dir, and only kubernetes
@@ -317,6 +374,16 @@ const maxContainerNameLen = 100
 // would reject -- both defaults ("1000001:0" and "1000:0") carry a colon, and the
 // bare-uid form an operator may write instead has to stay acceptable too.
 var runUserRE = regexp.MustCompile(`^[A-Za-z0-9._-]+(:[A-Za-z0-9._-]+)?$`)
+
+// cpuSetRE is the cpu LIST-or-RANGE grammar docker's `cpuset:` and podman's
+// --cpuset-cpus take: cpu numbers and hyphenated ranges, comma-separated
+// ("0-3", "0,2,4", "0-3,8").
+//
+// Its narrowness is also the escaping story: the value is interpolated into a
+// systemd unit assignment and a compose mapping value, and no legal cpuset needs
+// a quote, a space, a newline, a '%' or a '$'. Refusing everything outside
+// [0-9,-] here leaves both renderers nothing to escape.
+var cpuSetRE = regexp.MustCompile(`^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$`)
 
 // dnsLabelBodyRE is the Kubernetes DNS-1123 label charset and start/end rule
 // (RFC 1123): lowercase alphanumerics and '-', starting and ending with an
@@ -1353,6 +1420,18 @@ func (c *Config) validateContainer(p Platform) error {
 		// compose parse error at deploy time.
 		return fmt.Errorf("%s.container.mem %q is invalid: docker and podman take an integer followed by "+
 			"b, k, m or g (e.g. 6898m), not the Mi/Gi suffix kubernetes.msgNode.mem uses", platformKey(p), m)
+	}
+	if s := cb.CPUSet; s != "" {
+		// A core count ("4") and a memlock-style "-1" are the two likely mistakes,
+		// and both reach the engine as a bad flag otherwise.
+		if !cpuSetRE.MatchString(s) {
+			return fmt.Errorf("%s.container.cpuset %q is invalid: it is a list or range of host cpu ids "+
+				"(e.g. \"0-3\", \"0,2,4\"), not a core count. Leave it unset to take the scaling tier's cores",
+				platformKey(p), s)
+		}
+		if lo, hi, inverted := invertedCPUSetRange(s); inverted {
+			return fmt.Errorf("%s.container.cpuset %q runs backwards: write %d-%d", platformKey(p), s, hi, lo)
+		}
 	}
 	if err := c.validateAdditionalUsers(p); err != nil {
 		return err

@@ -318,13 +318,18 @@ func podmanRunUser(rootless bool) string {
 // applyContainerBlockDefaults fills the container runtime knobs. TZ is
 // deliberately absent: the timezone is optional on every platform, so an unset
 // value emits no TZ setting at all rather than silently pinning one.
+//
+// shmSize and the three ulimits are NOT here and must not be. They are retired
+// keys retained only so a file carrying one is refused by name, and that refusal
+// reads "non-empty" as "the operator set it" -- so defaulting either one here,
+// even to the constant the renderers emit, would fail every container load.
+//
+// cpuset is not here either, for the reason mem is not: its default is the
+// scaling tier's core count, settled only once maxConnections has been defaulted
+// (applyScalingTierDefaults, scaling.go).
 func applyContainerBlockDefaults(b *Container, defaultRunUser string) {
 	setDefault(&b.RunUser, defaultRunUser)
-	setDefault(&b.ShmSize, "1g")
 	setDefault(&b.DataDir, "/opt/solace/data")
-	setDefault(&b.Ulimits.NoFile, "2448:1048576")
-	setDefault(&b.Ulimits.MemLock, "-1")
-	setDefault(&b.Ulimits.Core, "-1")
 	// Health-check timings only reach an artifact when the block is enabled, so
 	// defaulting them unconditionally keeps a disabled block inert.
 	setDefault(&b.HealthCheck.Interval, "5s")

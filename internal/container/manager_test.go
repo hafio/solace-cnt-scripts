@@ -192,122 +192,12 @@ func TestManagerPrepHostRootlessUsesUnshareChown(t *testing.T) {
 	m.Geteuid = func() int { return 1000 } // rootless as non-root: euid guard passes
 	// PrepHost runs the whole podman host-readiness block first (rootless.go), so
 	// every one of its probes has to answer before the chown is ever reached.
-	rr.outFor = healthyRootlessOut("1048576\n")
+	rr.outFor = healthyRootlessOut(healthyNrOpen)
 	if err := m.PrepHost(context.Background()); err != nil {
 		t.Fatalf("PrepHost: %v", err)
 	}
 	if !hasCall(rr, "podman", []string{"unshare", "chown", "1000:0", "/opt/solace/data"}) {
 		t.Errorf("rootless PrepHost should chown via `podman unshare`:\n%+v", rr.calls)
-	}
-}
-
-// --- rootless nofile --------------------------------------------------------
-
-func setNoFile(cfg *config.Config, p config.Platform, v string) {
-	if p == config.Podman {
-		cfg.Podman.Container.Ulimits.NoFile = v
-		return
-	}
-	cfg.Docker.Container.Ulimits.NoFile = v
-}
-
-// rootlessNoFileMgr builds a rootless podman Manager whose `ulimit -Hn` probe
-// answers hardLimit and whose every OTHER rootless probe answers healthily, so
-// these tests fail on the nofile limit alone. A single canned stdout cannot do
-// that any more: PrepHost now runs the whole podman host-readiness block, whose
-// id-mapping, linger and systemd rows each read a differently-shaped answer
-// (healthyRootlessOut, rootless_test.go).
-func rootlessNoFileMgr(want, hardLimit string) (*Manager, *capRunner, *bytes.Buffer) {
-	cfg := ctrCfg(config.Podman, "false") // standalone -> the PSK step is skipped
-	cfg.Podman.Rootless = true
-	cfg.Podman.SystemctlUser = "--user" // derived by ApplyDefaults, which ctrCfg skips
-	cfg.Podman.WantedBy = "default.target"
-	setNoFile(cfg, config.Podman, want)
-	m, rr, buf := newCapMgr(cfg, config.Podman)
-	m.Geteuid = func() int { return 1000 } // rootless as non-root: euid guard passes
-	rr.out = []byte(hardLimit)
-	rr.outFor = healthyRootlessOut(hardLimit)
-	return m, rr, buf
-}
-
-func TestPrepHostRootlessNoFileSufficient(t *testing.T) {
-	m, rr, buf := rootlessNoFileMgr("2448:1048576", "1048576\n")
-	if err := m.PrepHost(context.Background()); err != nil {
-		t.Fatalf("PrepHost: %v", err)
-	}
-	if !hasCall(rr, "sh", []string{"-c", "ulimit -Hn"}) {
-		t.Errorf("rootless prep should probe this user's hard nofile limit:\n%+v", rr.calls)
-	}
-	if !strings.Contains(buf.String(), "hard nofile limit: 1048576") {
-		t.Errorf("prep should report the limit it found:\n%s", buf)
-	}
-}
-
-// TestPrepHostRootlessNoFileTooLow is the point of the check: a rootless
-// container cannot raise nofile past the user's hard limit, so prep stops before
-// deploying a broker that would silently run under-provisioned.
-func TestPrepHostRootlessNoFileTooLow(t *testing.T) {
-	m, _, _ := rootlessNoFileMgr("2448:1048576", "1024\n")
-	err := m.PrepHost(context.Background())
-	if err == nil {
-		t.Fatal("a hard limit below the configured one must fail prep")
-	}
-	// Both numbers and the exact remedy, so the message is actionable on its own.
-	for _, want := range []string{"1024", "1048576", "2448", "limits.d", "hard nofile", "soft nofile", "log out"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("nofile error should mention %q, got: %v", want, err)
-		}
-	}
-}
-
-func TestPrepHostRootlessNoFileUnlimited(t *testing.T) {
-	m, _, buf := rootlessNoFileMgr("2448:1048576", "unlimited\n")
-	if err := m.PrepHost(context.Background()); err != nil {
-		t.Fatalf("an unlimited hard limit satisfies any request: %v", err)
-	}
-	if !strings.Contains(buf.String(), "unlimited") {
-		t.Errorf("prep should report the unlimited case:\n%s", buf)
-	}
-}
-
-func TestPrepHostRootlessNoFileUnreadable(t *testing.T) {
-	m, _, _ := rootlessNoFileMgr("2448:1048576", "not-a-number\n")
-	if err := m.PrepHost(context.Background()); err == nil || !strings.Contains(err.Error(), "cannot parse") {
-		t.Errorf("an unreadable limit must fail loud rather than be assumed fine, got: %v", err)
-	}
-}
-
-// TestPrepHostRootlessNoFileUnsetSkips covers the hand-built config the executors
-// are handed: with no configured limit there is nothing to assert against, so the
-// probe never runs.
-func TestPrepHostRootlessNoFileUnsetSkips(t *testing.T) {
-	m, rr, _ := rootlessNoFileMgr("", "1024\n")
-	if err := m.PrepHost(context.Background()); err != nil {
-		t.Fatalf("PrepHost: %v", err)
-	}
-	if hasCall(rr, "sh", []string{"-c", "ulimit -Hn"}) {
-		t.Errorf("no configured nofile means no probe:\n%+v", rr.calls)
-	}
-}
-
-// TestPrepHostRootfulSkipsNoFile: a privileged engine raises the limit itself, so
-// the user's own hard limit does not bound the container.
-func TestPrepHostRootfulSkipsNoFile(t *testing.T) {
-	for _, p := range []config.Platform{config.Podman, config.Docker} {
-		cfg := ctrCfg(p, "false")
-		cfg.Podman.Rootless = false
-		setNoFile(cfg, p, "2448:1048576")
-		m, rr, _ := newCapMgr(cfg, p)
-		if p == config.Podman {
-			m.Geteuid = func() int { return 0 } // rootful podman requires root
-		}
-		rr.out = []byte("1024\n") // far below, and deliberately not consulted
-		if err := m.PrepHost(context.Background()); err != nil {
-			t.Fatalf("%s: PrepHost: %v", p, err)
-		}
-		if hasCall(rr, "sh", []string{"-c", "ulimit -Hn"}) {
-			t.Errorf("%s: only rootless podman is bounded by the user's limit:\n%+v", p, rr.calls)
-		}
 	}
 }
 
@@ -319,38 +209,20 @@ func TestPrepHostRootfulSkipsNoFile(t *testing.T) {
 func TestPrepHostRootlessDryRunSkipsTheReadinessBlock(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.Rootless = true
-	setNoFile(cfg, config.Podman, "2448:1048576")
 	m, buf := newEchoMgr(cfg, config.Podman)
 	if err := m.PrepHost(context.Background()); err != nil {
 		t.Fatalf("PrepHost: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "podman host") || !strings.Contains(out, "skipped (preview)") {
-		t.Errorf("dry-run should say the whole block was skipped:\n%s", out)
+	// Two blocks skip now, the readiness rows and the host limits (limits.go).
+	for _, want := range []string{"podman host", "limits", "skipped (preview)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry-run should say %q was skipped:\n%s", want, out)
+		}
 	}
 	// And prep still previews the work it would do after the block passes.
 	if !strings.Contains(out, "mkdir") {
 		t.Errorf("dry-run should still echo the prep commands:\n%s", out)
-	}
-}
-
-func TestSplitLimit(t *testing.T) {
-	for _, tc := range []struct {
-		in         string
-		soft, hard int
-	}{
-		{"2448:1048576", 2448, 1048576},
-		{"1024", 1024, 1024},
-		{"-1", 0, 0}, // unlimited: nothing to assert against
-		{"-1:-1", 0, 0},
-		{"", 0, 0},
-		{"bogus", 0, 0},
-		{" 2448 : 1048576 ", 2448, 1048576},
-	} {
-		soft, hard := splitLimit(tc.in)
-		if soft != tc.soft || hard != tc.hard {
-			t.Errorf("splitLimit(%q) = %d,%d want %d,%d", tc.in, soft, hard, tc.soft, tc.hard)
-		}
 	}
 }
 
