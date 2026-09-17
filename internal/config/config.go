@@ -938,6 +938,13 @@ type Container struct {
 	// container.checkLimits refuses a host where it is absent.
 	CPUSet string `yaml:"cpuset"`
 
+	// MonitorCPUSet is the same key for the HA monitor, whose footprint is
+	// MonitorCPUs/MonitorMem rather than the tier's. Only WHICH cpu is settable:
+	// the count is fixed at one, so validateContainer refuses a set naming more.
+	// Defaults to "0" (applyContainerBlockDefaults, load.go) rather than from the
+	// tier, since the monitor's size does not vary with it.
+	MonitorCPUSet string `yaml:"monitorCpuset"`
+
 	// Mem is the container memory limit in docker's and podman's own b|k|m|g
 	// suffix, NOT the Mi/Gi Kubernetes quantity kubernetes.msgNode.mem takes -- the
 	// engines reject that spelling, so validateContainer catches it here rather
@@ -1007,6 +1014,20 @@ const (
 	ContainerCore         = "-1"
 	ContainerLimitMemLock = "infinity"
 	ContainerLimitCore    = "infinity"
+
+	// The monitor node of an HA group arbitrates quorum: it carries no message
+	// spool and routes no traffic, so it is sized for that rather than for the
+	// tier the two messaging nodes take. The same argument kubernetes.storage's
+	// monNodeSize already makes for its PVC.
+	//
+	// These two numbers are the OPERATOR's, not a Solace-published figure: the
+	// scaling tiers are messaging-node sizing (scaling.go) and the CRD states a
+	// monitor minimum only for storage.
+	//
+	// Container platforms only. On Kubernetes the operator sizes the monitor pod
+	// and this tool sets nothing.
+	MonitorCPUs = 1
+	MonitorMem  = "2g"
 )
 
 // ContainerNoFile is the nofile pair in the engines' own soft:hard spelling,

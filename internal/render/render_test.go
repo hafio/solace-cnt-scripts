@@ -279,6 +279,17 @@ func TestGolden(t *testing.T) {
 			},
 		},
 		{
+			// The monitor's own footprint. No monitor-role container golden existed
+			// before this, so the whole artifact is pinned rather than only the two
+			// lines that differ.
+			name: "podman quadlet monitor",
+			file: "podman_quadlet_monitor.golden",
+			gen: func(t *testing.T) []byte {
+				c := load(t, config.Podman)
+				return Quadlet(c, c.ResolveNode(config.Monitor))
+			},
+		},
+		{
 			name: "docker compose primary",
 			file: "docker_compose_primary.golden",
 			gen: func(t *testing.T) []byte {
@@ -810,8 +821,8 @@ func TestScalingTierReachesEveryArtifact(t *testing.T) {
 		t.Errorf("compose missing the 100000-tier limits:\n%s", compose)
 	}
 
-	// Rootful: a rootless unit carries no cpuset at all
-	// (TestRootlessQuadletOmitsTheCpusetOnly).
+	// Rootful, but only incidentally: a rootless unit carries the same cpuset
+	// (TestRootlessQuadletCarriesTheSameCaps).
 	p := load(t, config.Podman)
 	p.Scaling.MaxConnections = 100000
 	p.Podman.Container.Mem = ""
@@ -976,6 +987,57 @@ func TestRootlessQuadletCarriesTheSameCaps(t *testing.T) {
 	// What the flag DOES still change.
 	if !strings.Contains(ru, "User=1000\n") || !strings.Contains(ru, "WantedBy=default.target") {
 		t.Errorf("rootless should change the run user and the install target:\n%s", ru)
+	}
+}
+
+// TestMonitorIsSizedForQuorumNotForTheTier: the monitor arbitrates quorum, carries
+// no spool and routes no traffic, so it takes a fixed one cpu and 2g instead of the
+// tier the two messaging nodes take. One fixture rendered at both roles, so the
+// difference is attributable to the role and nothing else -- and the lines that must
+// NOT differ are asserted too: shm and the ulimits are broker requirements, not
+// sizing.
+func TestMonitorIsSizedForQuorumNotForTheTier(t *testing.T) {
+	c := load(t, config.Podman)
+	unit := string(Quadlet(c, c.ResolveNode(config.Primary)))
+	mon := string(Quadlet(c, c.ResolveNode(config.Monitor)))
+
+	if !strings.Contains(unit, "PodmanArgs=--cpuset-cpus=0-1") || !strings.Contains(unit, "Memory=6898m") {
+		t.Errorf("a messaging node keeps the tier's caps:\n%s", unit)
+	}
+	if !strings.Contains(mon, "PodmanArgs=--cpuset-cpus=0") || !strings.Contains(mon, "Memory=2g") {
+		t.Errorf("the monitor should take one cpu and 2g:\n%s", mon)
+	}
+	// Not the tier's, which is the whole point.
+	if strings.Contains(mon, "cpuset-cpus=0-1") || strings.Contains(mon, "Memory=6898m") {
+		t.Errorf("the monitor must not carry the messaging tier's caps:\n%s", mon)
+	}
+	for _, same := range []string{
+		"ShmSize=2g", "Ulimit=nofile=2448:1048576", "Ulimit=memlock=-1", "Ulimit=core=-1",
+		"LimitNOFILE=2448:1048576", "LimitMEMLOCK=infinity", "LimitCORE=infinity",
+	} {
+		if !strings.Contains(mon, same) {
+			t.Errorf("the monitor keeps %q -- a broker requirement, not sizing:\n%s", same, mon)
+		}
+	}
+
+	// Same rule in the compose artifact.
+	d := load(t, config.Docker)
+	comp := string(Compose(d, d.ResolveNode(config.Monitor)))
+	if !strings.Contains(comp, `    cpuset: "0"`) || !strings.Contains(comp, "    mem_limit: 2g") {
+		t.Errorf("compose should size the monitor the same way:\n%s", comp)
+	}
+	if !strings.Contains(comp, "    shm_size: 2g") || !strings.Contains(comp, "        hard: 1048576") {
+		t.Errorf("compose monitor keeps the shared requirements:\n%s", comp)
+	}
+}
+
+// TestMonitorCPUSetOverrideReachesArtifact: which cpu is the operator's, the same
+// way container.cpuset is -- the count is what stays fixed.
+func TestMonitorCPUSetOverrideReachesArtifact(t *testing.T) {
+	c := load(t, config.Podman)
+	c.Podman.Container.MonitorCPUSet = "7"
+	if unit := string(Quadlet(c, c.ResolveNode(config.Monitor))); !strings.Contains(unit, "cpuset-cpus=7") {
+		t.Errorf("the monitor cpuset override did not reach the unit:\n%s", unit)
 	}
 }
 

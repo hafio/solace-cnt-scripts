@@ -363,6 +363,58 @@ func TestCPUSetRange(t *testing.T) {
 	}
 }
 
+func setMonitorCPUSet(c *Config, p Platform, set string) {
+	if p == Podman {
+		c.Podman.Container.MonitorCPUSet = set
+		return
+	}
+	c.Docker.Container.MonitorCPUSet = set
+}
+
+// TestValidateContainerMonitorCPUSet: the monitor takes exactly one cpu whatever
+// the tier, because it arbitrates quorum rather than carrying the load. Which cpu
+// is the operator's, the same split container.cpuset has.
+func TestValidateContainerMonitorCPUSet(t *testing.T) {
+	for _, p := range []Platform{Docker, Podman} {
+		for _, good := range []string{"0", "3", "11", "2-2", ""} {
+			c := validContainerConfig(p, "true")
+			setMonitorCPUSet(c, p, good)
+			if err := c.Validate(p); err != nil {
+				t.Errorf("%s: container.monitorCpuset %q was rejected: %v", p, good, err)
+			}
+		}
+		// More than one cpu is the mistake this catches: the tier's set belongs
+		// under container.cpuset, not here.
+		for _, many := range []string{"0-1", "0,2", "0-3"} {
+			c := validContainerConfig(p, "true")
+			setMonitorCPUSet(c, p, many)
+			err := c.Validate(p)
+			if err == nil {
+				t.Errorf("%s: container.monitorCpuset %q names more than one cpu and was accepted", p, many)
+				continue
+			}
+			if !strings.Contains(err.Error(), "monitorCpuset") || !strings.Contains(err.Error(), "exactly 1") {
+				t.Errorf("%s: the error should name the key and the one-cpu rule, got: %v", p, err)
+			}
+		}
+		for _, bad := range []string{"-1", "one", "0-", ",0", "$(id -u)"} {
+			c := validContainerConfig(p, "true")
+			setMonitorCPUSet(c, p, bad)
+			if err := c.Validate(p); err == nil {
+				t.Errorf("%s: container.monitorCpuset %q was accepted", p, bad)
+			}
+		}
+		// A backwards range passes the charset and is refused on its own terms,
+		// ahead of the count check -- which would also reject it, less clearly.
+		c := validContainerConfig(p, "true")
+		setMonitorCPUSet(c, p, "3-0")
+		err := c.Validate(p)
+		if err == nil || !strings.Contains(err.Error(), "backwards") {
+			t.Errorf("%s: expected the backwards-range error, got: %v", p, err)
+		}
+	}
+}
+
 // TestCPUSetCount is the arithmetic behind the size check: ranges are inclusive
 // and a comma-separated list sums.
 func TestCPUSetCount(t *testing.T) {

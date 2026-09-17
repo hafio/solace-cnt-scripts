@@ -359,6 +359,10 @@ func assertContainerBlockDefaults(t *testing.T, b Container, wantRunUser string)
 	if b.CPUSet != "0-1" {
 		t.Errorf("CPUSet = %q, want 0-1 (tier 1000, 2 cores)", b.CPUSet)
 	}
+	// The monitor's cpu does not move with the tier, so it defaults flat.
+	if b.MonitorCPUSet != "0" {
+		t.Errorf("MonitorCPUSet = %q, want 0", b.MonitorCPUSet)
+	}
 	if b.DataDir != "/opt/solace/data" {
 		t.Errorf("DataDir = %q, want /opt/solace/data", b.DataDir)
 	}

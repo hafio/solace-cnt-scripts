@@ -330,6 +330,9 @@ func podmanRunUser(rootless bool) string {
 func applyContainerBlockDefaults(b *Container, defaultRunUser string) {
 	setDefault(&b.RunUser, defaultRunUser)
 	setDefault(&b.DataDir, "/opt/solace/data")
+	// Not the tier path: the monitor's footprint is fixed (MonitorCPUs/MonitorMem),
+	// so only WHICH cpu it takes is defaulted, and it does not move with the tier.
+	setDefault(&b.MonitorCPUSet, "0")
 	// Health-check timings only reach an artifact when the block is enabled, so
 	// defaulting them unconditionally keeps a disabled block inert.
 	setDefault(&b.HealthCheck.Interval, "5s")

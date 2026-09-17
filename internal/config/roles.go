@@ -111,6 +111,12 @@ type NodeIdentity struct {
 	ActiveStandby string // primary | backup | "" (monitor / standalone)
 }
 
+// IsMonitor reports whether this identity is the HA group's monitor node. The
+// nodetype is a broker setting rather than an enum, so the literal lives here and
+// callers ask instead of spelling it again -- internal/render sizes the monitor
+// differently and must not drift from ResolveNode below.
+func (n NodeIdentity) IsMonitor() bool { return n.NodeType == "monitoring" }
+
 // FillStandaloneNodeName supplies the broker's routername from the host OS when a
 // STANDALONE env file left redundancy.primary.name empty, and reports whether it did.
 //

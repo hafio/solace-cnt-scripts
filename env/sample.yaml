@@ -364,10 +364,13 @@ docker:
   #   mem: 6898m                    # docker's b|k|m|g suffix, NOT the Mi/Gi
                                     # kubernetes.msgNode.mem takes. Defaults to the
                                     # scaling tier's memory
-  #   cpuset: 0-1                   # WHICH host cpus the broker may use, in the
-                                    # engines' own syntax (0-3, or 0,2,4). Defaults to
-                                    # the tier's cores as 0-(cores-1), and must name
+  #   cpuset: 0-1                   # WHICH host cpus the MESSAGING nodes may use, in
+                                    # the engines' own syntax (0-3, or 0,2,4). Defaults
+                                    # to the tier's cores as 0-(cores-1), and must name
                                     # exactly that many: the count is the tier's
+  #   monitorCpuset: 0              # WHICH cpu the HA monitor runs on, exactly one. It
+                                    # arbitrates quorum and carries no spool, so it gets
+                                    # a fixed 1 cpu and 2g whatever the tier
   #   healthCheck:                  # opt-in; off leaves the artifact unchanged
   #     enabled: true               # polls the broker's readiness endpoint. REQUIRES
                                     # broker 10.26+ AND a version-numbered image.tag to
@@ -412,6 +415,7 @@ podman:
                                     # rootless: true the user@<uid>.service drop-in
                                     # must delegate the cpuset controller; deploy
                                     # refuses a host where it is missing
+  #   monitorCpuset: 0              # same rules as docker.container.monitorCpuset
   #   healthCheck:                  # same shape as docker.container.healthCheck
   #     enabled: true               # built-in readiness probe; needs broker 10.26+
   # network:

@@ -883,11 +883,19 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 	//
 	// Both tier-derived lines are skipped when unset, which is what a Config built
 	// in code without ApplyDefaults carries -- an empty value would fail the unit.
-	if cb.CPUSet != "" {
-		fmt.Fprintf(&b, "PodmanArgs=--cpuset-cpus=%s\n", cb.CPUSet)
+	// The monitor node takes its own footprint rather than the tier's: it
+	// arbitrates quorum, carries no spool and routes no traffic (config.MonitorCPUs
+	// / MonitorMem). Only the two CAPS change -- shm and the ulimits below are
+	// broker requirements and host ceilings, identical on every role.
+	set, mem := cb.CPUSet, cb.Mem
+	if id.IsMonitor() {
+		set, mem = cb.MonitorCPUSet, config.MonitorMem
 	}
-	if cb.Mem != "" {
-		fmt.Fprintf(&b, "Memory=%s\n", cb.Mem)
+	if set != "" {
+		fmt.Fprintf(&b, "PodmanArgs=--cpuset-cpus=%s\n", set)
+	}
+	if mem != "" {
+		fmt.Fprintf(&b, "Memory=%s\n", mem)
 	}
 	// Constants, so unconditional (config.ContainerShmSize and friends).
 	fmt.Fprintf(&b, "ShmSize=%s\n", config.ContainerShmSize)
@@ -1031,11 +1039,19 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 	// golden covers it.
 	//
 	// There is no rootless branch here: docker has no rootless mode in this schema.
-	if cb.CPUSet != "" {
-		fmt.Fprintf(&b, "    cpuset: %q\n", cb.CPUSet)
+	// The monitor node takes its own footprint rather than the tier's: it
+	// arbitrates quorum, carries no spool and routes no traffic (config.MonitorCPUs
+	// / MonitorMem). Only the two CAPS change -- shm and the ulimits below are
+	// broker requirements and host ceilings, identical on every role.
+	set, mem := cb.CPUSet, cb.Mem
+	if id.IsMonitor() {
+		set, mem = cb.MonitorCPUSet, config.MonitorMem
 	}
-	if cb.Mem != "" {
-		fmt.Fprintf(&b, "    mem_limit: %s\n", cb.Mem)
+	if set != "" {
+		fmt.Fprintf(&b, "    cpuset: %q\n", set)
+	}
+	if mem != "" {
+		fmt.Fprintf(&b, "    mem_limit: %s\n", mem)
 	}
 	// Constants from here down (config.ContainerShmSize and friends).
 	fmt.Fprintf(&b, "    shm_size: %s\n", config.ContainerShmSize)

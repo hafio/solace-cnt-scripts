@@ -215,7 +215,8 @@ Common optional knobs:
 | `scaling.*` | see [Scaling](#scaling) | Broker sizing, applied on every platform -- the CR's `spec.systemScaling` on Kubernetes, container environment variables on docker and podman |
 | `scaling.maxConnections` | `100` (Kubernetes) / `1000` (container) | The Solace scaling tier. Fixes how many cores the broker gets and defaults its memory on every platform -- see [Scaling tiers](#scaling-tiers) |
 | `<docker\|podman>.container.mem` | the tier's memory | Container memory limit, in docker's and podman's own `b\|k\|m\|g` suffix (not Kubernetes' `Mi`/`Gi`) |
-| `<docker\|podman>.container.cpuset` | `0-(cores-1)` from the tier | WHICH host cpus the broker may use -- `cpuset:` in the compose file, `PodmanArgs=--cpuset-cpus=` in the quadlet unit. A list or range of cpu ids (`0-3`, `0,2,4`), not a core count: how many cores is the tier's. A list or range of cpu ids (`0-3`, `0,2,4`) naming EXACTLY as many cpus as the tier sizes the broker for; which ones is yours |
+| `<docker\|podman>.container.cpuset` | `0-(cores-1)` from the tier | WHICH host cpus the MESSAGING nodes may use -- `cpuset:` in the compose file, `PodmanArgs=--cpuset-cpus=` in the quadlet unit. A list or range of cpu ids (`0-3`, `0,2,4`) naming EXACTLY as many cpus as the tier sizes the broker for; which ones is yours |
+| `<docker\|podman>.container.monitorCpuset` | `0` | WHICH host cpu the HA monitor runs on. Exactly one id: the monitor gets a fixed 1 cpu and 2g whatever the tier, since it arbitrates quorum and carries no spool |
 
 The `broker.*` keys sit at the top level rather than under `kubernetes.*` because every
 platform runs these same post-deployment steps identically. `cliScriptsDir`,
@@ -323,9 +324,14 @@ Docker and podman carry the tier's caps in the generated compose file (`cpuset:`
 **rootless** quadlet, whose user slice gets the cpuset controller from the `Delegate=` line
 in the drop-in [its rlimits already need](operations.md#the-limits-the-container-actually-gets).
 Either way an existing container deployment needs a full
-**redeploy** -- not just a restart -- to pick up a changed cap. In an HA group the monitor
-host gets the same caps as the messaging hosts; these are ceilings rather than reservations,
-so an oversized monitor limit costs nothing.
+**redeploy** -- not just a restart -- to pick up a changed cap.
+
+**The monitor host is sized separately**, and not from the tier at all: it arbitrates
+quorum, carries no message spool and routes no traffic, so it gets a fixed **1 cpu and
+2g** on docker and podman however large the tier is. Only WHICH cpu is yours to set
+(`<docker|podman>.container.monitorCpuset`, default `0`); the count is fixed. Kubernetes
+is unaffected -- the operator sizes the monitor pod there, and this tool sets only its
+`monitorNodeStorageSize`.
 
 The container `nofile`, `memlock`, `core` and shared-memory limits are **not** tunable: the
 broker needs one specific value for each, so this tool emits them and checks the host can

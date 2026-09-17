@@ -1446,6 +1446,24 @@ func (c *Config) validateContainer(p Platform) error {
 			}
 		}
 	}
+	// The monitor's own cpu, checked the same way but against a fixed count: it
+	// arbitrates quorum rather than carrying the tier's load.
+	if s := cb.MonitorCPUSet; s != "" {
+		if !cpuSetRE.MatchString(s) {
+			return fmt.Errorf("%s.container.monitorCpuset %q is invalid: it is a host cpu id "+
+				"(e.g. \"0\", \"3\"). Leave it unset to take cpu 0", platformKey(p), s)
+		}
+		if lo, hi, inverted := invertedCPUSetRange(s); inverted {
+			return fmt.Errorf("%s.container.monitorCpuset %q runs backwards: write %d-%d",
+				platformKey(p), s, hi, lo)
+		}
+		if cpuSetCount(s) != MonitorCPUs {
+			return fmt.Errorf("%s.container.monitorCpuset %q names %d cpus: the monitor node gets "+
+				"exactly %d, since it arbitrates quorum and carries no spool. Name one cpu id, or set "+
+				"%s.container.cpuset for the messaging nodes", platformKey(p), s, cpuSetCount(s),
+				MonitorCPUs, platformKey(p))
+		}
+	}
 	if err := c.validateAdditionalUsers(p); err != nil {
 		return err
 	}
