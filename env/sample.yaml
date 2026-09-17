@@ -14,41 +14,6 @@
 # the default that applies when omitted. Decoding is strict: an unknown or misspelled
 # key is a hard error.
 
-# The HA group: whether there is one, who is in it, and the key its members
-# authenticate to each other with. Omitting `enabled` means false -- HA provisions three
-# brokers, so it is opted into rather than inherited.
-redundancy:
-  enabled: true
-  primary:
-    name: solace-primary            # the broker's routername. MANDATORY on containers in
-                                    # HA; in standalone it is optional and this host's own
-                                    # hostname is used when omitted
-    addr: 10.0.0.11                 # IP or resolvable name; mandatory on containers in HA.
-                                    # Also how a host identifies ITSELF when its hostname
-                                    # matches no name above -- the cloud case, where the
-                                    # instance is called something like ip-10-0-0-11
-  backup:
-    name: solace-backup             # mandatory on containers in HA
-    addr: 10.0.0.12                 # also reached from the primary at verify time by
-                                    # `broker perform assert-leader` and
-                                    # `broker perform redundancy-test`
-  monitor:
-    name: solace-monitor            # mandatory on containers in HA
-    addr: 10.0.0.13
-  psk: CHANGE-ME-run-openssl-rand-base64-32
-                                    # secret. YOU generate it -- nothing here does:
-                                    #   openssl rand -base64 32
-                                    #
-                                    # MANDATORY on docker/podman -- nothing distributes a
-                                    # key across three hosts, so each env file must carry
-                                    # the SAME value, and an empty one is refused at load.
-                                    # OPTIONAL on Kubernetes: left empty, the operator
-                                    # generates and distributes its own; set, it becomes
-                                    # the preshared_auth_key entry of
-                                    # kubernetes.adminSecret and the CR points at it.
-  # pskEnv: SOLACE_REDUNDANCY_PSK   # ...or name the variable holding it instead
-
-
 # timezone: Asia/Singapore          # omitted -> the broker keeps the image default
 
 image:
@@ -58,6 +23,35 @@ image:
   user: repo-user                   # registry login: Kubernetes builds the pull secret,
   pass: CHANGE-ME-registry          # docker/podman run `<runtime> login`. secret
   # passEnv: SOLACE_REGISTRY_PASS   # ...or name the variable holding it instead
+
+# scaling: omit to take platform defaults. maxConnections is the Solace scaling tier and
+# FIXES how many cores the broker gets on every platform -- there is no cpu COUNT key in
+# this schema. It must be exactly one of the five values below; a value between tiers is
+# rejected, not rounded. Memory is the tier's default and stays overridable, and on docker
+# and podman so is WHICH cores (<docker|podman>.container.cpuset).
+#
+# Every key below is ALSO settable under the broker setting name this tool emits for it
+# (e.g. `system_scaling_maxconnectioncount` for maxConnections) -- see docs/configuration.md
+# for the full pairing. Both spellings write the same value; setting a key under both at
+# once fails to load, naming both.
+#
+#   maxConnections | cores | cpuset | memory default
+#   ---------------+-------+--------+----------------
+#   100            | 2     | 0-1    | 3410Mi  (Kubernetes default tier)
+#   1000           | 2     | 0-1    | 6898Mi  (container default tier)
+#   10000          | 4     | 0-3    | 12435Mi
+#   100000         | 8     | 0-7    | 30925Mi
+#   200000         | 12    | 0-11   | 52581Mi
+#
+# scaling:
+#   maxConnections: 100             # Kubernetes default 100, container default 1000
+#   maxSpoolUsageMB: 10000          # Kubernetes default 10000, container default 100000
+#   maxQueueMessages: 100
+#   maxKafkaBridge: 0
+#   maxKafkaConnections: 0
+#   maxBridges: 25
+#   maxSubscriptions: 50000
+#   maxGuaranteedMsgMB: 10
 
 # semp: the broker's management (SEMP/CLI) credentials. There is no username key: the
 # built-in users are `admin` and `monitor` on every platform, which is the broker's own
@@ -100,34 +94,70 @@ tls:                                # uncomment cert+certKey together once you h
   # cas:                            # trusted domain CA files
   #   - certs/ca.crt                # (`broker configure domain-certs`)
 
-# scaling: omit to take platform defaults. maxConnections is the Solace scaling tier and
-# FIXES how many cores the broker gets on every platform -- there is no cpu COUNT key in
-# this schema. It must be exactly one of the five values below; a value between tiers is
-# rejected, not rounded. Memory is the tier's default and stays overridable, and on docker
-# and podman so is WHICH cores (<docker|podman>.container.cpuset).
-#
-# Every key below is ALSO settable under the broker setting name this tool emits for it
-# (e.g. `system_scaling_maxconnectioncount` for maxConnections) -- see docs/configuration.md
-# for the full pairing. Both spellings write the same value; setting a key under both at
-# once fails to load, naming both.
-#
-#   maxConnections | cores | cpuset | memory default
-#   ---------------+-------+--------+----------------
-#   100            | 2     | 0-1    | 3410Mi  (Kubernetes default tier)
-#   1000           | 2     | 0-1    | 6898Mi  (container default tier)
-#   10000          | 4     | 0-3    | 12435Mi
-#   100000         | 8     | 0-7    | 30925Mi
-#   200000         | 12    | 0-11   | 52581Mi
-#
-# scaling:
-#   maxConnections: 100             # Kubernetes default 100, container default 1000
-#   maxSpoolUsageMB: 10000          # Kubernetes default 10000, container default 100000
-#   maxQueueMessages: 100
-#   maxKafkaBridge: 0
-#   maxKafkaConnections: 0
-#   maxBridges: 25
-#   maxSubscriptions: 50000
-#   maxGuaranteedMsgMB: 10
+# The HA group: whether there is one, who is in it, and the key its members
+# authenticate to each other with. Omitting `enabled` means false -- HA provisions three
+# brokers, so it is opted into rather than inherited.
+redundancy:
+  enabled: true
+  primary:
+    name: solace-primary            # the broker's routername. MANDATORY on containers in
+                                    # HA; in standalone it is optional and this host's own
+                                    # hostname is used when omitted
+    addr: 10.0.0.11                 # IP or resolvable name; mandatory on containers in HA.
+                                    # Also how a host identifies ITSELF when its hostname
+                                    # matches no name above -- the cloud case, where the
+                                    # instance is called something like ip-10-0-0-11
+  backup:
+    name: solace-backup             # mandatory on containers in HA
+    addr: 10.0.0.12                 # also reached from the primary at verify time by
+                                    # `broker perform assert-leader` and
+                                    # `broker perform redundancy-test`
+  monitor:
+    name: solace-monitor            # mandatory on containers in HA
+    addr: 10.0.0.13
+  psk: CHANGE-ME-run-openssl-rand-base64-32
+                                    # secret. YOU generate it -- nothing here does:
+                                    #   openssl rand -base64 32
+                                    #
+                                    # MANDATORY on docker/podman -- nothing distributes a
+                                    # key across three hosts, so each env file must carry
+                                    # the SAME value, and an empty one is refused at load.
+                                    # OPTIONAL on Kubernetes: left empty, the operator
+                                    # generates and distributes its own; set, it becomes
+                                    # the preshared_auth_key entry of
+                                    # kubernetes.adminSecret and the CR points at it.
+  # pskEnv: SOLACE_REDUNDANCY_PSK   # ...or name the variable holding it instead
+
+# broker: platform-neutral post-deployment settings, applied over the broker CLI.
+# broker:
+#   cliScriptsDir: cli               # local folder holding .cli scripts
+#   hostDiagnosticDir: diag-configs  # local folder for gathered diagnostics
+#   productKeys: []                  # `broker configure product-keys`
+#   domainCerts:                     # HOST paths. A relative one resolves against THIS
+#                                    # FILE's directory; an absolute one is used as-is.
+#                                    # A leading ~ expands to the home directory of the
+#                                    # user RUNNING this tool, which makes such a path
+#                                    # non-portable between operators -- write it out in
+#                                    # full in any env file you share
+#     dirs:                          # every matching file DIRECTLY inside each entry is
+#                                    # loaded; subdirectories are NOT walked. A dir that
+#                                    # cannot be read fails the command before anything
+#                                    # is uploaded -- it is not skipped. Unset means no
+#                                    # directories, which is a no-op like an empty files:
+#       - /opt/solace/prod-cas       # plain path -> the default extensions cer, crt, pem
+#       - path: /opt/solace/partner-cas    # ...or a mapping, to name your own set
+#         fileExt: cer,crt,pem       # REPLACES the default for THIS dir only
+#     files: {}                      # CA-NAME: FULL host path. Use it for a certificate
+#                                    # whose derived name you do not want, or to load one
+#                                    # file out of a directory of many, e.g.
+#                                    # my-ca-name: /opt/solace/partner-cas/some-ca.pem
+#                                    # The CA name is the operand of `create domain-
+#                                    # certificate-authority` AND the filename inside the
+#                                    # broker, so it is letters, digits, underscore, dash
+#                                    # and period, 64 chars max. A name under dirs: is
+#                                    # derived as <last-dir-element>_<filename>; two
+#                                    # certificates resolving to one name is an error
+#                                    # naming both source paths
 
 # replication: a DR pair of SEPARATE brokers, per message-VPN -- each VPN active at one
 # site and standby at the other. Not redundancy: that is one HA group, this is two of
@@ -201,37 +231,6 @@ tls:                                # uncomment cert+certKey together once you h
 #                                   # DOWN by `configure data-replication`
 #     - { name: ORDERS,   activeAt: "v:tuas9csol1" }
 #     - { name: PAYMENTS, activeAt: "v:tuas8csol1" }
-
-# broker: platform-neutral post-deployment settings, applied over the broker CLI.
-# broker:
-#   cliScriptsDir: cli               # local folder holding .cli scripts
-#   hostDiagnosticDir: diag-configs  # local folder for gathered diagnostics
-#   productKeys: []                  # `broker configure product-keys`
-#   domainCerts:                     # HOST paths. A relative one resolves against THIS
-#                                    # FILE's directory; an absolute one is used as-is.
-#                                    # A leading ~ expands to the home directory of the
-#                                    # user RUNNING this tool, which makes such a path
-#                                    # non-portable between operators -- write it out in
-#                                    # full in any env file you share
-#     dirs:                          # every matching file DIRECTLY inside each entry is
-#                                    # loaded; subdirectories are NOT walked. A dir that
-#                                    # cannot be read fails the command before anything
-#                                    # is uploaded -- it is not skipped. Unset means no
-#                                    # directories, which is a no-op like an empty files:
-#       - /opt/solace/prod-cas       # plain path -> the default extensions cer, crt, pem
-#       - path: /opt/solace/partner-cas    # ...or a mapping, to name your own set
-#         fileExt: cer,crt,pem       # REPLACES the default for THIS dir only
-#     files: {}                      # CA-NAME: FULL host path. Use it for a certificate
-#                                    # whose derived name you do not want, or to load one
-#                                    # file out of a directory of many, e.g.
-#                                    # my-ca-name: /opt/solace/partner-cas/some-ca.pem
-#                                    # The CA name is the operand of `create domain-
-#                                    # certificate-authority` AND the filename inside the
-#                                    # broker, so it is letters, digits, underscore, dash
-#                                    # and period, 64 chars max. A name under dirs: is
-#                                    # derived as <last-dir-element>_<filename>; two
-#                                    # certificates resolving to one name is an error
-#                                    # naming both source paths
 
 # A real env file declares only the platform(s) it targets: the CLI detects the platform
 # from which of kubernetes:/docker:/podman: is present, so an unused section must be left

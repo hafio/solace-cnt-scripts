@@ -1,7 +1,7 @@
 # Graph Report - solace-cnt-scripts  (2026-09-17)
 
 ## Corpus Check
-- 189 files · ~567,672 words
+- 189 files · ~567,731 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 22 file(s) not represented in the graph (top: .golden 16, (none) 2, .cli 2)
 
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `0043bb51`
+- Built from commit: `2b2a9db7`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
