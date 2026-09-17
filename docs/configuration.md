@@ -74,7 +74,7 @@ Three fields deliberately do **not** follow the rule:
 
 | Field | Why |
 | --- | --- |
-| `<platform>.container.dataDir` | **Required absolute** instead. It is the host side of a bind mount *and* what `broker remove --delete-data` deletes recursively, so quietly changing which directory that points at is not a fix. The default `/opt/solace/data` already satisfies it |
+| `<platform>.container.dataDir` | **Required absolute** instead. It is the host side of a bind mount *and* what `broker remove --delete-data` empties (the directory itself stays), so quietly changing which directory that points at is not a fix. The default `/opt/solace/data` already satisfies it |
 | `podman.quadletDir` | Checked, never resolved. The unit must live where systemd scans, so resolving a relative value would invent a location systemd never reads. Both defaults are already absolute |
 | `podman.baseDir` | **Mandatory and required absolute.** It is a `Volume=` source too, and it receives a file containing a private key, so resolving a relative value would invent a location for that key which you never named |
 
@@ -215,7 +215,7 @@ Common optional knobs:
 | `scaling.*` | see [Scaling](#scaling) | Broker sizing, applied on every platform -- the CR's `spec.systemScaling` on Kubernetes, container environment variables on docker and podman |
 | `scaling.maxConnections` | `100` (Kubernetes) / `1000` (container) | The Solace scaling tier. Fixes how many cores the broker gets and defaults its memory on every platform -- see [Scaling tiers](#scaling-tiers) |
 | `<docker\|podman>.container.mem` | the tier's memory | Container memory limit, in docker's and podman's own `b\|k\|m\|g` suffix (not Kubernetes' `Mi`/`Gi`) |
-| `<docker\|podman>.container.cpuset` | `0-(cores-1)` from the tier | WHICH host cpus the broker may use -- `cpuset:` in the compose file, `PodmanArgs=--cpuset-cpus=` in the quadlet unit. A list or range of cpu ids (`0-3`, `0,2,4`), not a core count: how many cores is the tier's. Ignored under `podman.rootless: true`, whose user slice has no cpuset controller |
+| `<docker\|podman>.container.cpuset` | `0-(cores-1)` from the tier | WHICH host cpus the broker may use -- `cpuset:` in the compose file, `PodmanArgs=--cpuset-cpus=` in the quadlet unit. A list or range of cpu ids (`0-3`, `0,2,4`), not a core count: how many cores is the tier's. A list or range of cpu ids (`0-3`, `0,2,4`) naming EXACTLY as many cpus as the tier sizes the broker for; which ones is yours |
 
 The `broker.*` keys sit at the top level rather than under `kubernetes.*` because every
 platform runs these same post-deployment steps identically. `cliScriptsDir`,
@@ -319,9 +319,10 @@ are not interchangeable and the loader says so). Override which cpus with
 `<docker|podman>.container.cpuset`.
 
 Docker and podman carry the tier's caps in the generated compose file (`cpuset:`,
-`mem_limit:`) and quadlet unit (`PodmanArgs=--cpuset-cpus=`, `Memory=`), except that a
-**rootless** quadlet carries no cpuset: its user slice has no cpuset controller, so a unit
-naming one would fail to start. Either way an existing container deployment needs a full
+`mem_limit:`) and quadlet unit (`PodmanArgs=--cpuset-cpus=`, `Memory=`), including a
+**rootless** quadlet, whose user slice gets the cpuset controller from the `Delegate=` line
+in the drop-in [its rlimits already need](operations.md#the-limits-the-container-actually-gets).
+Either way an existing container deployment needs a full
 **redeploy** -- not just a restart -- to pick up a changed cap. In an HA group the monitor
 host gets the same caps as the messaging hosts; these are ceilings rather than reservations,
 so an oversized monitor limit costs nothing.

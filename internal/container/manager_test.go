@@ -93,6 +93,17 @@ func newCapMgr(cfg *config.Config, p config.Platform) (*Manager, *capRunner, *by
 	return m, rr, buf
 }
 
+// callIndex is hasCall's answer with the position, for the cases where the ORDER
+// of two calls is the property under test. -1 when the call is absent.
+func callIndex(rr *capRunner, name string, args []string) int {
+	for i, c := range rr.calls {
+		if c.name == name && eqArgs(c.args, args) {
+			return i
+		}
+	}
+	return -1
+}
+
 // hasCall reports whether rr captured a Run/RunInput call to name with exactly args.
 func hasCall(rr *capRunner, name string, args []string) bool {
 	for _, c := range rr.calls {
@@ -198,6 +209,95 @@ func TestManagerPrepHostRootlessUsesUnshareChown(t *testing.T) {
 	}
 	if !hasCall(rr, "podman", []string{"unshare", "chown", "1000:0", "/opt/solace/data"}) {
 		t.Errorf("rootless PrepHost should chown via `podman unshare`:\n%+v", rr.calls)
+	}
+	// Both in the namespace, chmod first: on a re-deploy the directory already
+	// belongs to a subuid, so a host-side chmod would be refused outright.
+	chmod, chown := callIndex(rr, "podman", []string{"unshare", "chmod", "775", "/opt/solace/data"}),
+		callIndex(rr, "podman", []string{"unshare", "chown", "1000:0", "/opt/solace/data"})
+	// A bare host-side chmod is the bug this replaced: on a re-deploy the directory
+	// already belongs to the subuid and the caller is refused outright.
+	if hasCall(rr, "chmod", []string{"775", "/opt/solace/data"}) {
+		t.Errorf("the data-dir chmod must run in the namespace, not on the host:\n%+v", rr.calls)
+	}
+	if chmod < 0 {
+		t.Errorf("rootless PrepHost should make the data dir group-writable:\n%+v", rr.calls)
+	} else if chmod > chown {
+		t.Errorf("chmod 775 must come before the chown, got chmod at %d and chown at %d:\n%+v",
+			chmod, chown, rr.calls)
+	}
+}
+
+// TestManagerPrepHostCreatesBaseDir: podman.baseDir is created up front rather
+// than by the first writeArtifact, and is deliberately NOT part of the 775/chown
+// pair -- it holds the server-certificate bundle, which contains the private key.
+func TestManagerPrepHostCreatesBaseDir(t *testing.T) {
+	cfg := ctrCfg(config.Podman, "false")
+	cfg.Podman.Rootless = true
+	m, rr, _ := newCapMgr(cfg, config.Podman)
+	m.Geteuid = func() int { return 1000 }
+	rr.outFor = healthyRootlessOut(healthyNrOpen)
+	if err := m.PrepHost(context.Background()); err != nil {
+		t.Fatalf("PrepHost: %v", err)
+	}
+	base := cfg.Podman.BaseDir
+	if !hasCall(rr, "mkdir", []string{"-p", base}) {
+		t.Errorf("prep should create podman.baseDir:\n%+v", rr.calls)
+	}
+	if !hasCall(rr, "chmod", []string{"700", base}) {
+		t.Errorf("baseDir must be 0700 explicitly -- mkdir -p leaves an existing mode alone:\n%+v", rr.calls)
+	}
+	if hasCall(rr, "chmod", []string{"775", base}) {
+		t.Errorf("baseDir must not be group-writable, it holds the private key:\n%+v", rr.calls)
+	}
+	if hasCall(rr, "podman", []string{"unshare", "chown", "1000:0", base}) {
+		t.Errorf("baseDir is read by the container through a bind mount, not owned by it:\n%+v", rr.calls)
+	}
+}
+
+// TestManagerPrepHostDirectoryErrors covers the three ways preparing the two
+// directories can fail. Each is its own return, and each names the directory and
+// what it was trying to do -- an engine's bare "permission denied" says neither.
+//
+// baseDir is a path of its own here rather than the default, so failing on it
+// cannot also match the dataDir underneath /opt/solace.
+func TestManagerPrepHostDirectoryErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name, on, want string
+	}{
+		{"baseDir mkdir", "/srv/solace-base", "create podman.baseDir"},
+		{"baseDir mode", "700", "restrict podman.baseDir"},
+		{"data dir mode", "775", "group-writable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := ctrCfg(config.Podman, "false")
+			cfg.Podman.Rootless = true
+			cfg.Podman.BaseDir = "/srv/solace-base"
+			m, rr, _ := newCapMgr(cfg, config.Podman)
+			m.Geteuid = func() int { return 1000 }
+			rr.outFor = healthyRootlessOut(healthyNrOpen)
+			rr.fail = failOn(tc.on)
+			err := m.PrepHost(context.Background())
+			if err == nil {
+				t.Fatalf("a failing %s must stop prep", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error should say what failed (%q), got: %v", tc.want, err)
+			}
+		})
+	}
+}
+
+// TestManagerPrepHostDockerHasNoBaseDir: baseDir is a podman key, so the docker
+// path must not invent one.
+func TestManagerPrepHostDockerHasNoBaseDir(t *testing.T) {
+	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
+	if err := m.PrepHost(context.Background()); err != nil {
+		t.Fatalf("PrepHost: %v", err)
+	}
+	for _, c := range rr.calls {
+		if c.name == "chmod" {
+			t.Errorf("docker prep has no directory to chmod: %s %v", c.name, c.args)
+		}
 	}
 }
 
@@ -995,8 +1095,14 @@ func TestManagerDeletePodmanPurgeRootless(t *testing.T) {
 	if err := m.Delete(context.Background(), true); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if !strings.Contains(buf.String(), "+ podman unshare rm -rf /opt/solace/data") {
-		t.Errorf("rootless purge should rm via `podman unshare`:\n%s", buf.String())
+	// The contents belong to a subuid, so clearing them needs the same namespace
+	// the chown used -- and the directory itself stays, keeping the ownership and
+	// mode prep established.
+	if !strings.Contains(buf.String(), "+ podman unshare find /opt/solace/data -mindepth 1 -delete") {
+		t.Errorf("rootless purge should clear through `podman unshare`:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "rm -rf /opt/solace/data") {
+		t.Errorf("purge must not remove the directory itself:\n%s", buf.String())
 	}
 }
 
@@ -1016,7 +1122,7 @@ func TestManagerDeleteDockerComposeDownWhenFileExists(t *testing.T) {
 	}
 }
 
-func TestManagerDeleteDockerPurgeRemovesDataDir(t *testing.T) {
+func TestManagerDeleteDockerPurgeClearsDataDir(t *testing.T) {
 	dir := t.TempDir()
 	cfg := ctrCfg(config.Docker, "false")
 	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
@@ -1030,8 +1136,16 @@ func TestManagerDeleteDockerPurgeRemovesDataDir(t *testing.T) {
 	if !hasCall(rr, "docker", []string{"compose", "-f", cfg.Docker.ComposeFile, "down"}) {
 		t.Errorf("Delete should compose down:\n%+v", rr.calls)
 	}
-	if !hasCall(rr, "rm", []string{"-rf", "/opt/solace/data"}) {
-		t.Errorf("purge should rm the data dir (rootful/docker):\n%+v", rr.calls)
+	// The CONTENTS go, the directory stays: removing it would throw away the
+	// ownership and mode prep established, which on a rootless host only
+	// `podman unshare` can put back.
+	if !hasCall(rr, "find", []string{"/opt/solace/data", "-mindepth", "1", "-delete"}) {
+		t.Errorf("purge should clear the data dir (rootful/docker):\n%+v", rr.calls)
+	}
+	for _, c := range rr.calls {
+		if c.name == "rm" {
+			t.Errorf("purge must not remove the directory itself: %s %v", c.name, c.args)
+		}
 	}
 }
 
@@ -1432,9 +1546,18 @@ func TestManagerPrepHostRootlessUnshareChownError(t *testing.T) {
 	cfg.Podman.Rootless = true
 	m, rr, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 1000 } // avoid the rootless-as-root WARN noise
-	rr.fail = failOn("unshare")
-	if err := m.PrepHost(context.Background()); err == nil {
+	// The whole readiness block has to PASS for the chown to be reached at all --
+	// without this the id-mapping row refuses first and the test proves nothing.
+	rr.outFor = healthyRootlessOut(healthyNrOpen)
+	// "chown", not "unshare": the data-dir row's own read-only probe is an unshare
+	// call too, so failing every unshare would refuse at the CHECK instead.
+	rr.fail = failOn("chown")
+	err := m.PrepHost(context.Background())
+	if err == nil {
 		t.Fatal("rootless PrepHost should propagate an unshare chown failure")
+	}
+	if !strings.Contains(err.Error(), "chown data dir") {
+		t.Errorf("the failure must be the chown, not an earlier row: %v", err)
 	}
 }
 
@@ -1830,7 +1953,7 @@ func TestManagerDeletePurgeError(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, rr, _ := newCapMgr(cfg, config.Docker)
-	rr.fail = failOn("-rf") // targets only the purge `rm -rf`, not compose down
+	rr.fail = failOn("-mindepth") // targets only the purge find, not compose down
 	if err := m.Delete(context.Background(), true); err == nil {
 		t.Fatal("Delete --purge should propagate a data-dir rm failure")
 	}

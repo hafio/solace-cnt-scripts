@@ -154,7 +154,7 @@ func (m *Manager) ensureUserSession(ctx context.Context) error {
 		return m.sessionErr
 	}
 	m.sessionOnce = true
-	if m.P != config.Podman || !m.Cfg.Podman.Rootless || m.isEcho() {
+	if !m.rootlessPodman() || m.isEcho() {
 		return nil
 	}
 	euid := m.Geteuid()
@@ -482,6 +482,14 @@ func (m *Manager) checkDataDir(ctx context.Context, user string) error {
 		r.OK("data dir: %s is creatable (%s is writable)", dir, existing)
 		return nil
 	}
+	// A directory prep has already handed to the container fails the test above by
+	// design: `podman unshare chown` moved it to a subuid this user cannot become.
+	// Asking again INSIDE the namespace is the question that actually matters, and
+	// it is what stops a correctly prepared host being flagged on every later run.
+	if m.namespaceWritable(ctx, dir) {
+		r.OK("data dir: %s is already owned by the container (writable in the user namespace)", dir)
+		return nil
+	}
 	r.Fail("data dir: %s is not creatable (%s is not writable by this user)", dir, existing)
 	// The chown handed over here is to THIS user, not to container.runUser: prep's
 	// own `podman unshare chown` sets the in-namespace ownership afterwards, and a
@@ -494,6 +502,17 @@ func (m *Manager) checkDataDir(ctx context.Context, user string) error {
 		dir, existing, m.P, dir, user, dir)
 }
 
+// namespaceWritable reports whether dir is writable from inside rootless podman's
+// user namespace -- that is, whether the container will be able to write there.
+// Read-only, so `validate` may call it, and false for anything but rootless podman,
+// where there is no namespace and the host-side answer was already the right one.
+func (m *Manager) namespaceWritable(ctx context.Context, dir string) bool {
+	if !m.rootlessPodman() {
+		return false
+	}
+	return m.run(ctx, "unshare", "sh", "-c", `test -w "$0"`, dir) == nil
+}
+
 // dataDirHint is what a failed mkdir/chown adds to the engine's own message. The
 // checkDataDir row above should make it unreachable in practice -- it is here for
 // the race where the directory's ownership changes between the check and the
@@ -504,7 +523,7 @@ func (m *Manager) checkDataDir(ctx context.Context, user string) error {
 // dropped: dataDir defaults under /opt, which no unprivileged user can write to,
 // and that default does not change for podman.rootless.
 func (m *Manager) dataDirHint(dir string) string {
-	if m.P != config.Podman || !m.Cfg.Podman.Rootless {
+	if !m.rootlessPodman() {
 		return ""
 	}
 	return fmt.Sprintf("\n  Set podman.container.dataDir to a directory you own (~/solace/data, say), "+

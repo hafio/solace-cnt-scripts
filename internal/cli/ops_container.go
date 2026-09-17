@@ -371,7 +371,8 @@ func opCtrGenArtifact(a *App) error {
 // for -- the data directory.
 //
 // There is no namespace analog here. The host's data directory is the layer that survives,
-// so it is what --delete-data governs; removing the certificate bundle is NOT optional and
+// so it is what --delete-data governs -- its CONTENTS, not the directory, which keeps the
+// ownership prep gave it; removing the certificate bundle is NOT optional and
 // a failure there is fatal, because leaving a private key on the host is the worst outcome
 // available.
 func opCtrRemoveBroker(a *App) error {

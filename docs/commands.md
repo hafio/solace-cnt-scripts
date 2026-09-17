@@ -885,7 +885,7 @@ Also available as: rm
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--delete-data` | `false` | delete the broker's persistent data too (Kubernetes PVCs / the container data directory). Without it the data is kept |
+| `--delete-data` | `false` | delete the broker's persistent data too (Kubernetes PVCs, or the contents of the container data directory). Without it the data is kept |
 | `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask. It does not RAISE a question -- without --delete-data, persistent data is still kept |
 
 

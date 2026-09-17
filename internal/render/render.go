@@ -874,14 +874,16 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 	// spelling come from the documentation. If Memory= predates that version, fold
 	// it into the PodmanArgs line as --memory=.
 	//
-	// Rootless omits the cpuset: the cpuset cgroup controller is not delegated to a
-	// user slice, so the unit would fail at start rather than cap anything. Memory
-	// and the ulimits are unaffected -- memory IS delegated, and a ulimit is an
-	// rlimit rather than a cgroup control.
+	// Rootless carries the cpuset too. The cpuset controller is not delegated to a
+	// user slice by default -- which is why the unit omitted it before -- but the
+	// user@<uid>.service drop-in this tool requires for the rlimits now sets
+	// Delegate=cpu cpuset io memory pids, and container.checkLimits refuses a host
+	// where those controllers are absent. So by the time a rootless unit is written
+	// the controller is there.
 	//
 	// Both tier-derived lines are skipped when unset, which is what a Config built
 	// in code without ApplyDefaults carries -- an empty value would fail the unit.
-	if cb.CPUSet != "" && !c.Podman.Rootless {
+	if cb.CPUSet != "" {
 		fmt.Fprintf(&b, "PodmanArgs=--cpuset-cpus=%s\n", cb.CPUSet)
 	}
 	if cb.Mem != "" {

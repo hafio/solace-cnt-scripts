@@ -23,8 +23,10 @@ import (
 // values can bind, and this fixture is what keeps that true in the tests.
 const (
 	healthyNrOpen           = "1048576\n"
+	healthySessionNoFile    = "1048576\n"
 	healthyUserManagerProps = "LimitNOFILE=1048576\nLimitNOFILESoft=1024\n" +
-		"LimitMEMLOCK=infinity\nLimitCORE=infinity\n"
+		"LimitMEMLOCK=infinity\nLimitCORE=infinity\n" +
+		"DelegateControllers=cpu cpuset io memory pids\n"
 )
 
 // limitsMgr builds a Manager for platform p whose limit probes answer nrOpen and
@@ -100,7 +102,7 @@ func TestPrepHostNrOpenTooLowRefusesAsNonRoot(t *testing.T) {
 	if err == nil {
 		t.Fatal("a kernel ceiling below the ask must fail prep")
 	}
-	for _, want := range []string{"65536", "1048576", "sysctl -w fs.nr_open", m.SysctlDropIn} {
+	for _, want := range []string{"65536", "1048576", "Run: sudo sysctl -w fs.nr_open", m.SysctlDropIn} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal should name %q, got: %v", want, err)
 		}
@@ -158,6 +160,39 @@ func TestPrepHostNrOpenRaiseFailureRefuses(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal should carry %q, got: %v", want, err)
 		}
+	}
+}
+
+// TestPrepHostNrOpenDropInWriteFailureRefuses: the sysctl took effect but the
+// change would not survive a reboot, which is not a success to report. The
+// drop-in path is pointed inside a regular FILE, so MkdirAll fails the way an
+// unwritable /etc would.
+func TestPrepHostNrOpenDropInWriteFailureRefuses(t *testing.T) {
+	m, _, _ := limitsMgr(t, config.Podman, false, "65536\n") // rootful podman -> euid 0
+	blocker := filepath.Join(filepath.Dir(m.SysctlDropIn), "not-a-dir")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.SysctlDropIn = filepath.Join(blocker, "99-solace.conf")
+	err := m.PrepHost(context.Background())
+	if err == nil {
+		t.Fatal("a drop-in that cannot be written must not report success")
+	}
+	if !strings.Contains(err.Error(), "sysctl -w fs.nr_open") {
+		t.Errorf("the refusal should still hand over the remedy, got: %v", err)
+	}
+}
+
+// TestCheckLimitsRootlessUserManagerUnreadableFailsLoud: a systemctl that cannot
+// be reached at all is an anomaly, unlike one that answers with nothing.
+func TestCheckLimitsRootlessUserManagerUnreadableFailsLoud(t *testing.T) {
+	m, rr, _ := limitsMgr(t, config.Podman, true, healthyNrOpen)
+	failOnCall(rr, func(name string, args []string) bool {
+		return name == "systemctl" && slices.Contains(args, "LimitMEMLOCK")
+	})
+	err := m.checkLimits(context.Background(), false)
+	if err == nil || !strings.Contains(err.Error(), "cannot read user@1000.service limits") {
+		t.Errorf("an unreachable user manager must fail loud naming the unit, got: %v", err)
 	}
 }
 
@@ -262,7 +297,8 @@ func TestCheckLimitsRootlessRefusesAShortUserManager(t *testing.T) {
 	rr.outFor = func(name string, args []string) []byte {
 		if name == "systemctl" && slices.Contains(args, "LimitMEMLOCK") {
 			return []byte("LimitNOFILE=1048576\nLimitNOFILESoft=1024\n" +
-				"LimitMEMLOCK=8388608\nLimitCORE=infinity\n")
+				"LimitMEMLOCK=8388608\nLimitCORE=infinity\n" +
+				"DelegateControllers=cpu cpuset io memory pids\n")
 		}
 		return healthy(name, args)
 	}
@@ -270,18 +306,19 @@ func TestCheckLimitsRootlessRefusesAShortUserManager(t *testing.T) {
 	if err == nil {
 		t.Fatal("a user manager that cannot grant the limit must fail")
 	}
+	// BOTH drop-ins: the unit bounds the container, and pam_limits bounds what the
+	// operator runs against it from a login shell. Naming only the first is how an
+	// operator ends up discovering the second the hard way.
 	for _, want := range []string{
-		"LimitMEMLOCK", "8388608", userUnitDropIn, "[Service]",
-		"LimitMEMLOCK=infinity", "systemctl daemon-reload", "log out",
+		"LimitMEMLOCK", "8388608", "[Service]",
+		"LimitMEMLOCK=infinity", pamLimitsDropIn,
+		"/etc/systemd/system/user@1000.service.d/99-solace.conf",
+		"solace hard memlock unlimited", "solace hard nofile 1048576",
+		"systemctl daemon-reload", "loginctl terminate-user 1000",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal should name %q, got: %v", want, err)
 		}
-	}
-	// The regression guard for the bug this replaced: pam_limits is not involved,
-	// and an operator sent to limits.conf would change nothing and blame the tool.
-	if strings.Contains(err.Error(), "limits.conf") || strings.Contains(err.Error(), "limits.d") {
-		t.Errorf("the refusal must not point at pam_limits: %v", err)
 	}
 	if !strings.Contains(buf.String(), "user manager:") {
 		t.Errorf("the row must report:\n%s", buf)
@@ -290,6 +327,55 @@ func TestCheckLimitsRootlessRefusesAShortUserManager(t *testing.T) {
 	// deploy running as root is already refused.
 	if hasCall(rr, "systemctl", []string{"daemon-reload"}) {
 		t.Errorf("this row must only ever hand over instructions:\n%+v", rr.calls)
+	}
+}
+
+// TestCheckLimitsRootlessRefusesUndelegatedControllers: the rootless quadlet now
+// carries a cpuset, and the cpuset controller is not delegated to a user slice by
+// default -- so an undelegated host would fail the container at start. It is the
+// same row and the same drop-in as the rlimits, because it is the same file.
+func TestCheckLimitsRootlessRefusesUndelegatedControllers(t *testing.T) {
+	m, rr, buf := limitsMgr(t, config.Podman, true, healthyNrOpen)
+	healthy := rr.outFor
+	rr.outFor = func(name string, args []string) []byte {
+		if name == "systemctl" && slices.Contains(args, "LimitMEMLOCK") {
+			return []byte("LimitNOFILE=1048576\nLimitNOFILESoft=1024\n" +
+				"LimitMEMLOCK=infinity\nLimitCORE=infinity\n" +
+				"DelegateControllers=memory pids\n")
+		}
+		return healthy(name, args)
+	}
+	err := m.checkLimits(context.Background(), false)
+	if err == nil {
+		t.Fatal("a slice without the cpuset controller must refuse")
+	}
+	for _, want := range []string{"DelegateControllers is missing", "cpu", "cpuset", "io",
+		"Delegate=cpu cpuset io memory pids"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal should name %q, got: %v", want, err)
+		}
+	}
+	if !strings.Contains(buf.String(), "DelegateControllers is missing") {
+		t.Errorf("the row must report it:\n%s", buf)
+	}
+}
+
+// TestMissingControllers is the set arithmetic on its own: an empty value means
+// nothing is delegated, and order does not matter.
+func TestMissingControllers(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want int
+	}{
+		{"cpu cpuset io memory pids", 0},
+		{"pids memory io cpuset cpu", 0},
+		{"cpu cpuset io memory pids extra", 0},
+		{"memory pids", 3},
+		{"", 5},
+	} {
+		if got := len(missingControllers(tc.in)); got != tc.want {
+			t.Errorf("missingControllers(%q) = %d missing, want %d", tc.in, got, tc.want)
+		}
 	}
 }
 
@@ -322,6 +408,165 @@ func TestCheckLimitsPrivilegedSkipsTheUserManager(t *testing.T) {
 				if c.name == "systemctl" && slices.Contains(c.args, "LimitMEMLOCK") {
 					t.Errorf("a privileged engine has no user manager to ask about:\n%+v", rr.calls)
 				}
+			}
+		})
+	}
+}
+
+// TestCheckLimitsRootlessSessionNoFile is the third rootless ceiling, and the one
+// that bounds the OPERATOR rather than the container: `podman exec` and the admin
+// commands inherit this session's rlimits, which pam_limits sets. A stock host is
+// at 524288, so this is the row a fresh install actually fails.
+func TestCheckLimitsRootlessSessionNoFile(t *testing.T) {
+	m, rr, buf := limitsMgr(t, config.Podman, true, healthyNrOpen)
+	healthy := rr.outFor
+	rr.outFor = func(name string, args []string) []byte {
+		if name == "sh" && slices.Contains(args, "ulimit -Hn") {
+			return []byte("524288\n")
+		}
+		return healthy(name, args)
+	}
+	err := m.checkLimits(context.Background(), true)
+	if err == nil {
+		t.Fatal("a session limit below the ask must refuse")
+	}
+	for _, want := range []string{
+		"524288", "1048576", pamLimitsDropIn,
+		"solace hard nofile 1048576", "solace soft nofile 2448",
+		"loginctl terminate-user 1000",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal should name %q, got: %v", want, err)
+		}
+	}
+	if !strings.Contains(buf.String(), "session nofile: 524288") {
+		t.Errorf("the row must report what it found:\n%s", buf)
+	}
+	// Never repaired: the drop-in needs root, and a rootless deploy as root is
+	// already refused, so nothing may touch that path.
+	for _, c := range rr.calls {
+		if slices.Contains(c.args, pamLimitsDropIn) {
+			t.Errorf("this row only ever hands over instructions: %s %v", c.name, c.args)
+		}
+	}
+}
+
+// TestCheckLimitsRootlessUnparseableLimitFailsLoud: a property that IS reported
+// but in a shape this cannot read is an anomaly, not a limit to assume adequate.
+func TestCheckLimitsRootlessUnparseableLimitFailsLoud(t *testing.T) {
+	m, rr, _ := limitsMgr(t, config.Podman, true, healthyNrOpen)
+	healthy := rr.outFor
+	rr.outFor = func(name string, args []string) []byte {
+		if name == "systemctl" && slices.Contains(args, "LimitMEMLOCK") {
+			return []byte("LimitNOFILE=bogus\nLimitNOFILESoft=1024\n" +
+				"LimitMEMLOCK=infinity\nLimitCORE=infinity\n" +
+				"DelegateControllers=cpu cpuset io memory pids\n")
+		}
+		return healthy(name, args)
+	}
+	err := m.checkLimits(context.Background(), false)
+	if err == nil || !strings.Contains(err.Error(), `cannot parse the limit "bogus"`) {
+		t.Errorf("a garbled property must fail loud naming the value, got: %v", err)
+	}
+}
+
+// TestCheckLimitsSessionNoFileUnreadable covers the session row's two non-answers,
+// which split the same way every other probe does: nothing at all is a skip, a
+// value that will not parse is a refusal.
+func TestCheckLimitsSessionNoFileUnreadable(t *testing.T) {
+	for _, tc := range []struct {
+		name, answer string
+		wantErr      string
+	}{
+		{"empty", "", ""},
+		{"garbled", "not-a-number\n", "cannot parse the limit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rr, buf := limitsMgr(t, config.Podman, true, healthyNrOpen)
+			healthy := rr.outFor
+			rr.outFor = func(name string, args []string) []byte {
+				if name == "sh" && slices.Contains(args, "ulimit -Hn") {
+					return []byte(tc.answer)
+				}
+				return healthy(name, args)
+			}
+			err := m.checkLimits(context.Background(), false)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("an empty answer must skip, not refuse: %v", err)
+				}
+				if !strings.Contains(buf.String(), "session nofile: skipped") {
+					t.Errorf("the skip must be said out loud:\n%s", buf)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("a garbled answer must fail loud, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestCheckLimitsSaysRestartTheSessionOnce: a stock rootless host fails BOTH
+// drop-in rows, and one session restart picks up whichever were written -- so the
+// instruction belongs at the end of the pass, not on each row that needs it.
+func TestCheckLimitsSaysRestartTheSessionOnce(t *testing.T) {
+	m, rr, _ := limitsMgr(t, config.Podman, true, healthyNrOpen)
+	healthy := rr.outFor
+	rr.outFor = func(name string, args []string) []byte {
+		if name == "systemctl" && slices.Contains(args, "LimitMEMLOCK") {
+			return []byte("LimitNOFILE=1048576\nLimitNOFILESoft=1024\n" +
+				"LimitMEMLOCK=8388608\nLimitCORE=infinity\n" +
+				"DelegateControllers=cpu cpuset io memory pids\n")
+		}
+		if name == "sh" && slices.Contains(args, "ulimit -Hn") {
+			return []byte("524288\n")
+		}
+		return healthy(name, args)
+	}
+	err := m.checkLimits(context.Background(), true)
+	if err == nil {
+		t.Fatal("both drop-in rows are short, so this must refuse")
+	}
+	// Both causes survive the join, and the restart is stated exactly once.
+	for _, want := range []string{"LimitMEMLOCK is 8388608", "session nofile is 524288"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the joined error should carry %q, got: %v", want, err)
+		}
+	}
+	if n := strings.Count(err.Error(), "loginctl terminate-user"); n != 1 {
+		t.Errorf("the session restart must be said once, not %d times:\n%v", n, err)
+	}
+}
+
+// TestCheckLimitsNrOpenAloneNeedsNoRestart: sysctl is live immediately, so the
+// nr_open row must not drag the session-restart line in behind it.
+func TestCheckLimitsNrOpenAloneNeedsNoRestart(t *testing.T) {
+	m, _, _ := limitsMgr(t, config.Docker, false, "65536\n")
+	err := m.checkLimits(context.Background(), false)
+	if err == nil {
+		t.Fatal("a short nr_open must refuse")
+	}
+	if strings.Contains(err.Error(), "terminate-user") {
+		t.Errorf("raising fs.nr_open needs no session restart: %v", err)
+	}
+}
+
+// TestCheckLimitsSessionNoFileIsRootlessOnly: docker and rootful podman start the
+// container from a privileged daemon, so the shell that issued the command bounds
+// nothing it does and the probe must not run.
+func TestCheckLimitsSessionNoFileIsRootlessOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		p    config.Platform
+	}{{"docker", config.Docker}, {"rootful podman", config.Podman}} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rr, _ := limitsMgr(t, tc.p, false, healthyNrOpen)
+			if err := m.checkLimits(context.Background(), false); err != nil {
+				t.Fatalf("checkLimits: %v", err)
+			}
+			if hasCall(rr, "sh", []string{"-c", "ulimit -Hn"}) {
+				t.Errorf("a privileged daemon is not bounded by this shell:\n%+v", rr.calls)
 			}
 		})
 	}

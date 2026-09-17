@@ -466,15 +466,15 @@ promises:
 | `id mapping` | this user has a subuid/subgid allocation **and** it reaches `container.runUser` | an administrator allocates or widens it (below), then you run `podman system migrate` |
 | `linger` | `loginctl show-user <uid> --property=Linger` reports `yes` | **`broker deploy` enables it for you**; `validate` reports it |
 | `user systemd` | `systemctl --user` answers | `systemctl --user start podman.socket` |
-| `data dir` | `container.dataDir`'s nearest existing parent is writable | move `dataDir`, or pre-create and chown it |
+| `data dir` | `container.dataDir`'s nearest existing parent is writable, or the directory is already writable inside the user namespace | move `dataDir`, or pre-create and chown it |
 
 The container's rlimits are checked too, but not here: they bind every engine, so they have
 [a section of their own](#the-limits-the-container-actually-gets).
 
 **What decides whether a row is repaired: the privilege it needs, not how easy it is.** The
-tool already performs several unprivileged host changes during prep -- `mkdir -p`, `chown`,
-`podman unshare chown`, `podman login` -- and enabling linger for the invoking user is in
-exactly that class. The rows it will not touch are the ones that would need root, because a
+tool already performs several unprivileged host changes during prep -- `mkdir -p`, `chmod`,
+`chown`, `podman unshare chown`, `podman login` -- and enabling linger for the invoking user
+is in exactly that class. The rows it will not touch are the ones that would need root, because a
 tool that escalated on your behalf would defeat the point of running rootless at all. Note
 which way round the privileges actually go:
 
@@ -490,6 +490,20 @@ polkit can still decline the self form -- a session that is not active under som
 setups, or a distribution that has tightened `org.freedesktop.login1.set-self-linger`. Prep
 says so when that happens, and names the administrator's `loginctl enable-linger <user>` as
 the way round it.
+
+**What prep does to the two directories.** `container.dataDir` is created, made `775`, and
+then handed to the container with `podman unshare chown`. Both the chmod and the chown run
+**inside the namespace**: on a re-deploy the directory already belongs to that subuid, so a
+host-side `chmod` is refused outright, while inside the namespace you are root either way.
+The mode matters because after the chown the directory belongs to a subuid nobody can
+become, and since container gid 0 maps to your own group, the group bit is the only thing
+that keeps it writable from outside the container. That is also why the `data dir` row asks a second
+question -- a directory prep has already handed over fails a plain `test -w` by design, so
+the row re-asks inside the namespace and accepts a host that is simply ready.
+
+`podman.baseDir` is created too, but it is not part of that pair: it holds the
+server-certificate bundle with its private key, so it stays `0700` and owned by you, and the
+container reads the bundle through a bind mount rather than owning it.
 
 **Where subuid ranges come from.** Usually nowhere you have to think about: `useradd`
 allocates one at account-creation time from `/etc/login.defs` (`SUB_UID_MIN` 100000,
@@ -521,13 +535,23 @@ Then the privileged steps, if those came up short:
 sudo usermod --add-subuids <start>-<end> --add-subgids <start>-<end> <user>
 
 # rlimit ceiling for every rootless container this user runs, in
-# /etc/systemd/system/user@.service.d/99-solace.conf. NOT /etc/security/limits.d: that is
-# pam_limits, for login sessions, and a quadlet container is a systemd service
+# /etc/systemd/system/user@<uid>.service.d/99-solace.conf -- this is what bounds the
+# container. Scoped to the uid: user@.service.d would raise it for EVERY user on the host
 [Service]
+Delegate=cpu cpuset io memory pids
 LimitNOFILE=2448:1048576
 LimitMEMLOCK=infinity
 LimitCORE=infinity
-# then `sudo systemctl daemon-reload`, and the user logs out of every session and back in
+# then `sudo systemctl daemon-reload`, and the user's manager is restarted -- log out of
+# every session on this host and back in, or `sudo loginctl terminate-user <user>`
+
+# and /etc/security/limits.d/99-solace.conf, which bounds what you run against the
+# container from a login shell -- podman exec, an interactive podman run, the admin
+# commands. Needs a fresh login to take effect
+<user> hard nofile 1048576
+<user> soft nofile 2448
+<user> hard memlock unlimited
+<user> soft memlock unlimited
 
 # only if container.dataDir is somewhere this user cannot create
 sudo mkdir -p /opt/solace/data && sudo chown <user> /opt/solace/data
@@ -786,11 +810,17 @@ The last row is the one worth reading twice. A scripted removal cannot lose data
 omission, and it cannot lose it by *asking* either: without a terminal to answer the
 question, the layer survives and the run says so rather than proceeding in silence.
 
-On docker and podman the directory `--delete-data` deletes recursively is exactly
+On docker and podman the directory `--delete-data` empties is exactly
 `<platform>.container.dataDir`, which is why that key is **required to be an absolute path**
 and is the one host path not resolved against the env file's directory: what a recursive
 delete points at should never move because of where the command was run from
 ([configuration.md](configuration.md#relative-paths-resolve-against-the-env-file-not-the-current-directory)).
+
+The directory itself **stays**; only its contents go. Prep gave it an ownership and a mode
+the next deploy depends on -- on a rootless host a subuid mapping only `podman unshare` can
+restore -- and it may sit under a parent this user cannot write to, so re-creating it is not
+always possible. What the flag promises is that the broker's data is gone, not the mount
+point.
 
 Two more properties hold on every path:
 
@@ -838,7 +868,7 @@ another team put there, and this tool may not have created it in the first place
 **Docker and Podman have their own teardown wrinkles**, on top of the `--delete-data` layer.
 The sequence is: stop the container, remove it, remove the compose file or quadlet unit,
 remove the engine secrets and the server-certificate bundle, then ask about the data
-directory.
+directory -- whose CONTENTS are what `--delete-data` removes; the directory stays.
 
 - Podman's secret store is a real, separate persistence layer -- `broker remove` removes
   every secret `broker deploy` loaded into it as part of removing the container. A secret
@@ -1413,9 +1443,20 @@ holds:
 | rootful podman | `podman` under a system systemd unit, root | `/proc/sys/fs/nr_open` |
 | rootless podman | `podman` under `user@<uid>.service`, unprivileged | that unit's **hard** limits |
 
-So there are two host facts, and `/etc/security/limits.conf` is not one of them: it is read by
-`pam_limits`, for **login sessions**, and neither a quadlet container nor a docker container is
-one.
+So `validate` and `broker deploy` read **`fs.nr_open` everywhere**, and on rootless podman
+two more: `user@<uid>.service`'s hard limits, and this login session's own `ulimit -Hn`.
+The unit drop-in is written under `user@<uid>.service.d`, not the `user@.service.d`
+template, so it raises the limits of the broker's account and no one else's. It also
+carries `Delegate=cpu cpuset io memory pids`, and the same row checks those controllers
+reached the slice -- without `cpuset` a rootless quadlet's `--cpuset-cpus` fails the
+container at start, which is why the rootless unit can carry a cpuset at all.
+
+The last of those is not about the container. `/etc/security/limits.d` is read by
+`pam_limits`, for **login sessions**, and neither a quadlet container nor a docker container
+is one -- but it bounds everything you run *against* the container from your own shell,
+`podman exec`, an interactive `podman run`, the admin commands. A host with the unit drop-in
+and no `limits.d` entry runs a correctly provisioned broker you cannot administer properly,
+which is why it is a row of its own rather than a footnote. Both files, on a rootless host.
 
 **`fs.nr_open`, on every deployment.** No process is given a hard `nofile` above it. It
 defaults to `1048576`, exactly the ask, so a stock host passes. When it is short, prep raises
@@ -1423,9 +1464,9 @@ it if it is running as root -- live, and persisted -- and otherwise hands over b
 
 ```
 [FAIL] nr_open: 65536 (need 1048576)
-error: fs.nr_open is 65536, below the 1048576 the broker needs.
-  sudo sysctl -w fs.nr_open=1048576
-  echo 'fs.nr_open = 1048576' | sudo tee /etc/sysctl.d/99-solace.conf
+error: fs.nr_open is 65536, needs 1048576.
+  Run: sudo sysctl -w fs.nr_open=1048576
+  Run: echo 'fs.nr_open = 1048576' | sudo tee /etc/sysctl.d/99-solace.conf
 ```
 
 **`user@<uid>.service`, on rootless podman only.** Its hard limits are the ceiling, because an
@@ -1434,25 +1475,52 @@ and a rootless deploy running as root is refused anyway.
 
 ```
 [FAIL] user manager: LimitMEMLOCK is 8388608, needs infinity
-error: rootless podman cannot raise its own limits, and user@1000.service:
-LimitMEMLOCK is 8388608, needs infinity.
-  An administrator must create /etc/systemd/system/user@.service.d/99-solace.conf:
+error: user@1000.service: LimitMEMLOCK is 8388608, needs infinity.
+  Create /etc/systemd/system/user@1000.service.d/99-solace.conf as root:
     [Service]
+    Delegate=cpu cpuset io memory pids
     LimitNOFILE=2448:1048576
     LimitMEMLOCK=infinity
     LimitCORE=infinity
-  then: sudo systemctl daemon-reload
-  then log out of every session on this host and back in.
+  Create /etc/security/limits.d/99-solace.conf as root:
+    solace hard nofile 1048576
+    solace soft nofile 2448
+    solace hard memlock unlimited
+    solace soft memlock unlimited
+  Run: sudo systemctl daemon-reload
+  Then run: sudo loginctl terminate-user 1000
 ```
 
 A stock host ships `LimitMEMLOCK` at 8 MB, so that is the row a fresh rootless install
 usually fails. `LimitCORE` is already `infinity`.
 
-Two details worth knowing. The generated quadlet unit carries `LimitNOFILE=`, `LimitMEMLOCK=`
-and `LimitCORE=` in its `[Service]` section, which is what gives the `podman` process itself
-the limits it then asks for the container -- on a rootful system unit that is the whole story.
-And the soft limits are reported but never refused: any process raises its own soft limit up
-to its hard one without privilege, and the engine sets the container's from the artifact.
+**This login session, on rootless podman only.** A stock host gives you a hard `nofile` of
+524288, below what the broker asks for, so this row usually fails on a fresh install too:
+
+```
+[FAIL] session nofile: 524288 (need 1048576)
+error: session nofile is 524288, needs 1048576.
+  Create /etc/security/limits.d/99-solace.conf as root:
+    solace hard nofile 1048576
+    solace soft nofile 2448
+  Then run: sudo loginctl terminate-user 1000
+```
+
+Docker and rootful podman skip it: their container comes from a privileged daemon, so the
+shell that issued the command bounds nothing it does.
+
+A stock rootless host fails both drop-in rows at once, and one session restart picks up
+whichever were written -- so `loginctl terminate-user` is stated once, at the end of the
+pass, however many rows asked for a file. Raising `fs.nr_open` does not need it: `sysctl` is
+live immediately.
+
+Three details worth knowing. The generated quadlet unit carries `LimitNOFILE=`,
+`LimitMEMLOCK=` and `LimitCORE=` in its `[Service]` section, which is what gives the `podman`
+process itself the limits it then asks for the container -- on a rootful system unit that is
+the whole story. The soft limits are reported but never refused: any process raises its own
+soft limit up to its hard one without privilege, and the engine sets the container's from the
+artifact. And the two drop-ins are not alternatives -- the unit one is the container's
+ceiling, the `limits.d` one is your shell's, and a rootless host wants both.
 
 `validate` reports all of this and changes nothing, whatever the euid.
 

@@ -355,7 +355,8 @@ docker:
                                     # secret is written beside it
   container:
     dataDir: /opt/solace/data       # mandatory, must be ABSOLUTE. Also what
-                                    # `broker remove --delete-data` deletes recursively
+                                    # `broker remove --delete-data` empties (the directory
+                                    # itself stays)
   #   name: solace                  # container name; also prefixes this host's secret
                                     # names, so two brokers on one host cannot clash
   #   runUser: "1000001:0"          # uid:gid the container runs as; defaults to the
@@ -366,8 +367,8 @@ docker:
                                     # scaling tier's memory
   #   cpuset: 0-1                   # WHICH host cpus the broker may use, in the
                                     # engines' own syntax (0-3, or 0,2,4). Defaults to
-                                    # the tier's cores as 0-(cores-1). There is no cpu
-                                    # COUNT key: that is the tier's
+                                    # the tier's cores as 0-(cores-1), and must name
+                                    # exactly that many: the count is the tier's
   #   healthCheck:                  # opt-in; off leaves the artifact unchanged
   #     enabled: true               # polls the broker's readiness endpoint. REQUIRES
                                     # broker 10.26+ AND a version-numbered image.tag to
@@ -408,9 +409,10 @@ podman:
                                     # needs neither and maps container root to you, at
                                     # the cost of in-container isolation
   #   mem: 6898m                    # same rules as docker.container.mem
-  #   cpuset: 0-1                   # same rules as docker.container.cpuset, but
-                                    # IGNORED under rootless: true -- the cpuset cgroup
-                                    # controller is not delegated to a user slice
+  #   cpuset: 0-1                   # same rules as docker.container.cpuset. Under
+                                    # rootless: true the user@<uid>.service drop-in
+                                    # must delegate the cpuset controller; deploy
+                                    # refuses a host where it is missing
   #   healthCheck:                  # same shape as docker.container.healthCheck
   #     enabled: true               # built-in readiness probe; needs broker 10.26+
   # network:

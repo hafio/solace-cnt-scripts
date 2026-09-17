@@ -55,7 +55,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-82 test files, 1370 test functions. Three of those are not tests. Two are os/exec
+82 test files, 1386 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -69,8 +69,8 @@ launched from.
 | internal/k8s | 18 | 210 |
 | internal/broker | 22 | 429 |
 | internal/cli | 11 | 193 |
-| internal/config | 14 | 220 |
-| internal/container | 8 | 174 |
+| internal/config | 14 | 221 |
+| internal/container | 8 | 189 |
 | internal/convert | 1 | 38 |
 | internal/render | 2 | 36 |
 | internal/engine | 2 | 27 |
@@ -78,14 +78,28 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **82** | **1370** |
+| **Total** | **82** | **1386** |
 
 
 ## Coverage
 
-Last recorded run, from `scripts/logs/cov.log` (2026-09-17), total **92.6%**. Re-run `cov`
+Last recorded run, from `scripts/logs/cov.log` (2026-09-17), total **92.7%**. Re-run `cov`
 after any change; these figures go stale the moment tests move, and the previous total is
 the floor the next run has to hold.
+
+**92.7% held, and `internal/container` 95.0% -> 95.2%, from the delegation and
+cpuset work.** The new branches -- the `DelegateControllers` check, an unparseable
+`systemctl` property, and the session row's empty and garbled answers -- are each
+covered rather than declared. The intermediate run that landed at 94.6% was those
+same branches before their tests existed, not a behaviour going untested.
+
+**92.6% -> 92.7%, from the podman directory change**, and `internal/container`
+94.6% -> 95.0%. Three of those statements are new -- the baseDir `mkdir`/`chmod`
+returns and the data dir's `chmod 775` -- and one is not: fixing
+`TestManagerPrepHostRootlessUnshareChownError` to install the healthy readiness
+fixture means the `unshare chown` error branch is reached for the first time.
+Without it the id-mapping row refused first, so that test had never exercised the
+path it is named for.
 
 **92.5% -> 92.6%, from the container resource change**, and the only per-package figure
 with a recorded predecessor is `internal/container`, 94.2% -> 94.6%: `splitLimit` and the
@@ -436,7 +450,8 @@ setting.
 | `TestApplyScalingTierDefaultsOffTier` | The fail-safe on both k8s and container: an unresolvable tier derives nothing rather than inventing a footprint (no `cpuset` rather than an invalid one), and `Validate` is what the operator hears from |
 | `TestCPUSetRange` | The tier-count to cpuset rewrite (`"2"` -> `"0-1"`, `"1"` -> `"0"`) and its fail-safe: anything not a positive integer yields `""`, which `setDefault` reads as no default rather than as an invalid cpuset. Every tier's own derived cpuset is checked against `cpuSetRE`, so a tier added with a cpu this cannot convert fails here |
 | `TestApplyScalingTierDefaultsCPUSetPerTier` | The published cpuset column, driven through the real `ApplyDefaults` on both container platforms, while `Scaling.CPU` keeps the tier's count (the CR still renders from it) and the k8s memory default stays untouched |
-| `TestValidateContainerCPUSet` | `container.cpuset` is a list or range of host cpu ids: a core count, a memlock-style `-1`, a shell substitution and every malformed separator are refused naming the key, a backwards range is refused on its own terms, and `8-11` is ACCEPTED at tier 1000 -- which cpus are free is a host fact the tier cannot know, so the count is deliberately not matched |
+| `TestValidateContainerCPUSet` | `container.cpuset` is a list or range of host cpu ids: a core count, a memlock-style `-1`, a shell substitution and every malformed separator are refused naming the key, a backwards range is refused on its own terms, and the SIZE must match the tier: at the 2-core default `0-1`, `2-3` and `0,2` pass while `0`, `0-3` and `0,2,4` are refused naming the tier's core count. Which cpus is the operator's -- a host fact the tier cannot know -- how many is not |
+| `TestCPUSetCount` | The arithmetic behind that size check: inclusive ranges, comma-separated sums, and every tier's own derived cpuset counting to its own core number |
 | `TestRetiredContainerLimitKeysFailLoud` | The four removed container limit keys, per platform: each still DECODES (that is what keeps the error about the key rather than a bare unknown field) and then fails `Validate` naming the key, the value it is fixed at, and the two keys that still work. An empty `ulimits: {}` and a valid fixture do not trip it, which is what would catch a resurrected `setDefault` |
 | `TestRetiredContainerKeysAreRefusedOnEveryPlatform` | The placement: platform-independent, like the renamed `docker.runtime`, so a shared env file resolved to kubernetes still hears about a dead key in its docker block |
 | `TestRetiredContainerKeyFailsThroughLoad` | The decode-path sibling: the sentinel survives the whole pipeline -- strict decode, `ApplyDefaults`, home expansion, `Validate` -- rather than only a hand-built `Config`. This is the test that fails if the retired defaults are ever repointed at their constants instead of deleted |
@@ -483,7 +498,7 @@ and the keys deliberately exempt from it.
 | `TestRebaseIsANoOpWithoutABaseDir` | The property `internal/convert` and every hand-built `Config` depend on -- `ApplyDefaults` and `Validate` are called directly, with no path to derive a base from, and those paths behave exactly as before |
 | `TestQuadletDirAndDataDirAreNotRebased` | The two deliberate exclusions, each for its own reason: the unit must live where systemd scans, and the data dir is what a recursive delete points at |
 | `TestPodmanBaseDirIsRequiredAndAbsolute` | Both halves of the one mandatory path key. Mandatory rather than defaulted because it receives the server-certificate bundle, which contains a PRIVATE KEY; required absolute rather than rebased because it is a quadlet `Volume=` source, and podman reads a relative source as a NAMED VOLUME -- mounting an empty volume over the certificate with no error at all |
-| `TestDataDirMustBeAbsolute` | The one host path REQUIRED absolute rather than resolved, with a message explaining both halves of why: it is a bind-mount source (podman reads a bare one as a named volume) and it is what `broker remove --delete-data` deletes recursively |
+| `TestDataDirMustBeAbsolute` | The one host path REQUIRED absolute rather than resolved, with a message explaining both halves of why: it is a bind-mount source (podman reads a bare one as a named volume) and it is what `broker remove --delete-data` empties |
 | `TestContainerHostDirsExpandATilde` | Replaces `TestContainerHostPathsRefuseATilde`, which pinned an exclusion that is gone. `podman.quadletDir`, `podman.baseDir` and `<platform>.container.dataDir` were the three keys `expandHomePaths` skipped, on the argument that they name the CONTAINER's host while `os.UserHomeDir` answers for this tool's -- and the code says otherwise: this process writes the quadlet unit and the certificate bundle itself (`os.WriteFile`/`os.Remove`) and creates, chowns and `rm -rf`s the data dir through local subprocesses, and the rootless `quadletDir` default is already built from `os.UserHomeDir`. So each of the four container dir keys expands like every other path key, and `checkContainerHostPath` went with the exception it existed for. Two things per field, and the second is what forced `Load`'s ordering change: the value expands, and the EXPANDED value then satisfies `Validate`'s own absoluteness requirement -- `dataDir: ~/solace/data` is not absolute by `IsAbsHostPath`, so a `Validate` that ran first refused it before anything could expand it. The fail-closed half is pinned too, and now comes from `CheckHostPath` ITSELF: one rule, one gate |
 | `TestDomainCertsDirsAreNotDefaulted` | Replaces `TestDomainCertsFolderIsDefaulted`: the retired `folder` key defaulted to `certs`, but its replacement, `dirs`, deliberately does NOT -- an unconfigured file must stay the documented no-op, and defaulting a dir that does not exist would turn that no-op into a hard failure under rule F (an unreadable configured dir is an error) |
 | `TestRenamedBrokerKeysFailLoud` | The three retained-legacy-field migrations for `broker.cliScriptsFolder`/`diagDir`/`domainCerts.folder`: the old key decodes, is never defaulted, and `Validate`'s error names the replacement |
@@ -2006,7 +2021,7 @@ The host-local Docker/Podman manager, its node-local transport, and the engine
 preflight that precedes every mutating operation, plus the engine `inspect` decode
 behind `broker status` and the server-certificate delivery each engine needs, and the
 host rlimit ceilings every engine is bounded by.
-174 tests across 8 files.
+189 tests across 8 files.
 
 ### runtime_test.go
 
@@ -2040,7 +2055,10 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestManagerCheckDryRun` | Preflight report for docker/podman x HA/standalone: title, mode line, runtime version probe, dry-run skip note |
 | `TestManagerCheckDNSFailsLoudInHA` | An unresolvable redundancy host fails the check and is named |
 | `TestManagerCheckStandaloneDNSWarnsOnly` | Standalone tolerates an unresolved name |
-| `TestManagerPrepHostRootlessUsesUnshareChown` | Rootless podman chowns via `podman unshare`, once the whole host-readiness block ahead of it has passed (`healthyRootlessOut`, rootless_test.go) |
+| `TestManagerPrepHostRootlessUsesUnshareChown` | Rootless podman chowns via `podman unshare`, once the whole host-readiness block ahead of it has passed (`healthyRootlessOut`, rootless_test.go), and the `chmod 775` runs in the SAME namespace and lands before that chown -- asserted by call position, plus an anti-assertion that no bare host-side chmod is issued, which on a re-deploy would be refused because the directory already belongs to the subuid |
+| `TestManagerPrepHostCreatesBaseDir` | `podman.baseDir` is created up front rather than by the first `writeArtifact`, at `0700` set explicitly (`mkdir -p` leaves an existing mode alone), and is deliberately NOT given the `775` or the namespace chown: it holds the server-certificate bundle's private key, which the container reads through a bind mount rather than owning |
+| `TestManagerPrepHostDirectoryErrors` | The three ways preparing the two directories can fail -- the baseDir `mkdir`, its `chmod 700`, and the data dir's `chmod 775` -- each stopping prep with a message naming the directory and the operation, which an engine's bare "permission denied" does not. baseDir is given a path of its own so failing on it cannot also match the dataDir under `/opt/solace` |
+| `TestManagerPrepHostDockerHasNoBaseDir` | `baseDir` is a podman key, so the docker path invents no directory and issues no `chmod` at all |
 | `TestPrepHostRootlessDryRunSkipsTheReadinessBlock` | Two read-only blocks run before prep touches the host -- the podman readiness rows and the host limits -- and both skip as a WHOLE under the Echo runner rather than row by row: nothing they assert can be answered without a real host. Prep still previews the work that follows them |
 | `TestManagerDeployDockerComposeWritesFile` | Deploy writes the compose file and runs `compose up -d --force-recreate` |
 | `TestManagerDockerComposeCommandOverride` | A `docker.compose` override (the standalone `docker-compose` binary) is what every compose call goes through |
@@ -2065,9 +2083,9 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestManagerDeletePodmanStopFailsServiceInactiveProceeds` | The same failed stop, but `serviceState` confirms the unit is already `inactive` -- the benign "already stopped" case still proceeds exactly as before |
 | `TestManagerDeletePodmanStopFailsStateUnknownBlocksRemoval` | The case the guard exists for: the stop failed AND `systemctl is-active` answered nothing, which is what an unreachable rootless systemd user session looks like while `podman info` still succeeds on the engine socket. `is-active` exits non-zero for every state but `active`, so the exit code cannot tell "stopped" from "could not ask" -- only the state text can, and no text means refuse. Pins that silence is never read as "already stopped" |
 | `TestManagerDeletePodmanRemovesSecrets` | Delete removes every secret `createPodmanSecrets` loaded into podman's own store (the same `render.ContainerSecrets` list), so they no longer outlive a `broker remove --delete-data`; a failing removal warns rather than failing a teardown that otherwise succeeded |
-| `TestManagerDeletePodmanPurgeRootless` | Rootless purge removes the data dir via `podman unshare` |
+| `TestManagerDeletePodmanPurgeRootless` | Rootless purge EMPTIES the data dir through `podman unshare find -mindepth 1 -delete` -- the contents belong to a subuid, so clearing them needs the namespace the chown used -- and asserts no `rm -rf` of the directory itself |
 | `TestManagerDeleteDockerComposeDownWhenFileExists` | With a compose file present, delete runs `compose down` |
-| `TestManagerDeleteDockerPurgeRemovesDataDir` | Delete runs `compose down` and, with purge, removes the data dir |
+| `TestManagerDeleteDockerPurgeClearsDataDir` | Delete runs `compose down` and, with purge, EMPTIES the data dir with `find -mindepth 1 -delete` -- asserting both that the contents go and that no `rm` removes the directory, which would throw away the ownership and mode prep established |
 | `TestManagerDeleteDockerComposeNoFileFallsBackToStopRm` | A missing compose file falls back to stop+rm |
 | `TestManagerStopAndRemoveContainerAbsentNoOp` | `docker rm` on a name never deployed exits non-zero, which used to turn "reset after a failed deploy" into an error; `containerExists` (matched against a `ps --all` listing, not the unanchored `--filter name=` regex) makes the no-compose-file fallback no-op like every other removal path in the tool |
 | `TestManagerStopAndRemoveStopFailsContainerRunningBlocks` | The docker half of the same stop-failure check as podman's: `docker info`/Preflight proves the engine is reachable, not that the container stopped, so a failed stop with the container still running blocks `rm` instead of falling through to it |
@@ -2105,7 +2123,7 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestManagerDeletePodmanRemoveUnitError` | An unremovable unit path fails delete |
 | `TestManagerDeleteDockerComposeDownError` | A `compose down` failure propagates |
 | `TestManagerDeleteDockerStopTolerated` | The tolerate branch B2 kept: a failed stop that the engine then CONFIRMS is not running still warns and goes on to `rm`. Uses `capRunner.outFor` so the two probes answer differently -- `ps --all` lists the container (so stop is attempted at all), `ps --filter status=running` does not (so it is confirmed down). Confirmation is what earns the tolerance; silence does not |
-| `TestManagerDeletePurgeError` | A failing data-dir removal under `--purge` propagates |
+| `TestManagerDeletePurgeError` | A failing data-dir clear under `--purge` propagates; the injection targets the purge `find` alone, not `compose down` |
 | `TestManagerStatusDockerNoComposeFile` | With no compose file on disk, status lists the container and never calls compose |
 | `TestManagerStatusPodmanUnitInactiveTolerated` | An inactive unit warns but status still lists the container |
 | `TestManagerStatusDockerRunsNoComposePs` | Status runs no compose at all, even WITH a compose file on disk. It replaced the tolerated-failure test: compose listed the same single container, and its PORTS column -- every published port with both host bindings -- was the widest thing in the report with no way to narrow it, since compose's `--format` takes only `table` or `json` |
@@ -2166,9 +2184,11 @@ how the first version of `TestCheckPodmanHostHealthyReportsEveryRow` failed.
 | `TestValidateReportsLingerAndPrepFixesIt` | The two callers reading the SAME block differently: one definition of a ready host, two dispositions. `fix=false` reports and issues nothing; `fix=true` repairs and passes |
 | `TestCheckLingerRefusesWhenLoginctlCannotRun` | Quadlet is a systemd generator, so a host whose logind does not answer cannot run this deployment however the other rows read -- a failure, not a skip, and reached only once the session row has passed so it can no longer fail merely for a missing bus address |
 | `TestCheckUserSystemdRefusesWhenTheBusIsDead` | The promise deploy's own `daemon-reload` cannot keep, because the unit is on disk by then: the bus is proven before anything is written, and the error names `podman.socket`, `enable-linger` and that sudo is the wrong answer |
-| `TestCheckDataDirRefusesAnUnwritableParent` | The ordinary first run as a non-root user, since `dataDir` defaults under `/opt`, which no unprivileged user can write to, and that default does not change for rootless. The row names the EXISTING directory at fault rather than only the configured one, and the handed-over `chown` targets THIS user rather than `runUser` -- prep's own `podman unshare chown` sets the in-namespace ownership afterwards |
+| `TestCheckDataDirRefusesAnUnwritableParent` | The ordinary first run as a non-root user, since `dataDir` defaults under `/opt`, which no unprivileged user can write to, and that default does not change for rootless. The row names the EXISTING directory at fault rather than only the configured one, and the handed-over `chown` targets THIS user rather than `runUser` -- prep's own `podman unshare chown` sets the in-namespace ownership afterwards. Both questions have to answer no: the fixture fails the host-side walk AND the namespace probe |
+| `TestCheckDataDirAcceptsAnAlreadyChownedDir` | The case a prepared host hits on every run after the first: `podman unshare chown` moved the directory to a subuid this user cannot become, so the host-side test fails by design. The row re-asks inside the namespace and passes, which is what stops a ready host being refused for being ready |
+| `TestNamespaceWritableIsRootlessPodmanOnly` | Docker and rootful podman have no user namespace, so there is no second question: the helper answers false and probes nothing |
 | `TestCheckPodmanHostReportsEveryFailureInOnePass` | What `validate`'s own help promises, and why the errors are joined rather than returned at the first: two broken rows both survive into the error |
-| `TestPrepHostRefusesBeforeTouchingTheHost` | The integration of the read-only property: an unready host stops prep with no `mkdir`, `chown` or `unshare` having run. The unready row is deliberately the DATA DIR rather than linger, since linger is the one thing prep repairs and using it would assert the opposite |
+| `TestPrepHostRefusesBeforeTouchingTheHost` | The integration of the read-only property: an unready host stops prep with no `mkdir`, `chmod`, `chown` or `unshare` having run. The data-dir row's own `podman unshare sh -c 'test -w ...'` probe is excluded by name, since it reads rather than changes. The unready row is deliberately the DATA DIR rather than linger, since linger is the one thing prep repairs and using it would assert the opposite |
 | `TestPrepHostMkdirFailureExplainsRootless` | The guidance the legacy bash carried (`002-host-prep.sh`) and the Go port dropped -- unreachable in practice now, so this covers the race where ownership changes between the check and the create |
 | `TestPrepHostMkdirHintIsRootlessOnly` | Rootful podman and docker create the directory as root, so the rootless advice would be wrong there |
 | `TestCheckReportsDNSAndPodmanHostTogether` | The one-pass promise at the `Check` level: DNS, the podman readiness rows and the host ceiling are all broken at once, and every cause survives into the joined error |
@@ -2179,8 +2199,10 @@ The host rlimit ceilings. `--ulimit` is only a REQUEST: the engine performs the
 `setrlimit`, so what it may ask for depends on the privilege it holds. Docker and
 rootful podman run a privileged engine bounded only by `fs.nr_open`; rootless podman
 runs under `user@<uid>.service` with no `CAP_SYS_RESOURCE` and is bounded by that
-unit's HARD limits. `/etc/security/limits.d` is not in either path -- it is read by
-`pam_limits`, for login sessions -- which is the bug this file's anti-assertions guard.
+unit's HARD limits, and by this login session's own `ulimit -Hn` for anything the operator
+runs against the container. `/etc/security/limits.d` bounds that last one only -- it is read
+by `pam_limits`, for login sessions, not for a systemd service -- so the rows that refuse
+over it and the rows that do not are deliberately different.
 
 Fixtures: `limitsMgr(t, p, rootless, nrOpen)` builds a Manager for platform `p` whose
 limit probes answer `nrOpen` and whose every other probe answers healthily, with the
@@ -2197,12 +2219,22 @@ hard limits can bind.
 | `TestPrepHostNrOpenTooLowRefusesAsNonRoot` | A non-root caller cannot `sysctl`, so the row hands over both commands -- the live one and the one that survives a reboot -- probes nothing further and writes nothing. It must NOT name `limits.conf` or `limits.d`: sending an operator to `pam_limits` would have them change something that cannot affect the container |
 | `TestPrepHostNrOpenRaisedAsRoot` | Raising `nr_open` is live immediately, unlike a `pam_limits` change, so prep applies it, writes the `sysctl.d` drop-in that persists it, says what it changed, and CONTINUES |
 | `TestPrepHostNrOpenRaiseFailureRefuses` | A failed repair falls back to the instructions rather than reporting a success the kernel did not grant, and carries the underlying cause |
+| `TestPrepHostNrOpenDropInWriteFailureRefuses` | The `sysctl -w` took effect but the drop-in that makes it survive a reboot could not be written, which is not a success to report. The path is pointed inside a regular file so `MkdirAll` fails the way an unwritable `/etc` would, and the refusal still hands over the remedy |
+| `TestCheckLimitsRootlessUserManagerUnreadableFailsLoud` | A `systemctl` that cannot be reached at all is an anomaly and fails loud naming the unit -- the boundary against the empty-answer case above, which skips |
 | `TestPrepHostNrOpenUnreadableSkips` | The false-refusal guard: Docker Desktop runs the engine in a VM, so `/proc` here belongs to a kernel no container will run under. There is nothing to assert, and refusing a healthy host over a missing file would be the defect |
 | `TestPrepHostNrOpenUnparseableFailsLoud` | A `/proc` that answers in a shape this cannot read is an anomaly, not a ceiling to be assumed adequate |
 | `TestPrepHostNrOpenEmptyAnswerSkips` | The other half of that rule: NO answer is not a garbled one. A probe that exits 0 and prints nothing has told us nothing, so it skips -- which is also what keeps every test in this package that is about something else from having to seed a limits answer |
 | `TestCheckLimitsRootlessEmptyUserManagerAnswerSkips` | The same rule for the `systemctl show` probe, with its boundary: an empty answer skips, while an answer carrying SOME properties but not the ones asked for still fails loud naming the missing one |
 | `TestValidateNeverWritesTheSysctlDropIn` | `validate` promises a run that disturbs nothing, so it reports the same shortfall and repairs none of it -- even as root |
-| `TestCheckLimitsRootlessRefusesAShortUserManager` | The rootless ceiling, and the refusal a default host actually gets: `LimitMEMLOCK` ships at 8 MB. The message names the unit, the short value, the `user@.service.d` drop-in, `[Service]`, `LimitMEMLOCK=infinity`, `daemon-reload` and the re-login -- and must NOT name `limits.conf`, which is the regression guard for the bug this replaced. Never repaired whatever `fix` says: the drop-in needs root, and a rootless deploy as root is already refused |
+| `TestCheckLimitsRootlessRefusesAShortUserManager` | The rootless ceiling, and the refusal a default host actually gets: `LimitMEMLOCK` ships at 8 MB. The message names the unit, the short value, BOTH drop-ins -- the `user@<uid>.service.d` one that bounds the container, scoped to the uid rather than the template unit, and the `limits.d` one that bounds what the operator runs against it from a login shell -- plus `daemon-reload` and `loginctl terminate-user`, with the account resolved by name rather than left as a placeholder so the drop-in forwards as-is. Naming only the first drop-in is how an operator ends up finding the second the hard way. Never repaired whatever `fix` says: the drop-in needs root, and a rootless deploy as root is already refused |
+| `TestCheckLimitsRootlessSessionNoFile` | The third rootless ceiling, and the one that bounds the OPERATOR rather than the container: `podman exec` and the admin commands inherit this session's rlimits, which `pam_limits` sets. A stock host is at 524288, so this is a row a fresh install actually fails. The refusal names the `limits.d` drop-in, both lines with the account resolved, and `loginctl terminate-user`; nothing may touch that path -- the drop-in needs root, which a rootless deploy never has |
+| `TestCheckLimitsSaysRestartTheSessionOnce` | A stock rootless host fails BOTH drop-in rows, and one session restart picks up whichever were written -- so `loginctl terminate-user` is counted, and must appear exactly once however many rows asked for a file. Both causes still survive the join |
+| `TestCheckLimitsNrOpenAloneNeedsNoRestart` | `sysctl` is live immediately, so the `nr_open` row must not drag the session-restart line in behind it |
+| `TestCheckLimitsSessionNoFileIsRootlessOnly` | Docker and rootful podman start the container from a privileged daemon, so the shell that issued the command bounds nothing it does and the `ulimit -Hn` probe must not run |
+| `TestCheckLimitsRootlessRefusesUndelegatedControllers` | The rootless quadlet carries a cpuset now, and the cpuset controller is not delegated to a user slice by default, so an undelegated host would fail the container at start. Same row and same drop-in as the rlimits, because it is the same file |
+| `TestCheckLimitsRootlessUnparseableLimitFailsLoud` | A `systemctl` property that IS reported but in a shape this cannot read is an anomaly, not a limit to assume adequate -- distinct from the property being absent, which names the property, and from the whole answer being empty, which skips |
+| `TestCheckLimitsSessionNoFileUnreadable` | The session row's two non-answers, splitting the way every other probe does: nothing at all is a skip, a value that will not parse is a refusal |
+| `TestMissingControllers` | The set arithmetic alone: order does not matter, extras are fine, and an empty value means nothing is delegated |
 | `TestCheckLimitsRootlessReportsTheSoftLimitWithoutGating` | Only a hard limit can bind: any process raises its own soft limit up to its hard one without privilege, and podman sets the container's from the artifact. So a low soft limit is reported and passes |
 | `TestCheckLimitsPrivilegedSkipsTheUserManager` | Docker and rootful podman run a privileged engine, so there is no user manager in the path to ask about |
 | `TestCheckLimitsSkipsWithoutPosixRlimits` | Windows has no POSIX rlimits, no shell to read them with, and an engine whose kernel is inside a VM -- one honest skip row, and nothing probed |
@@ -2348,7 +2380,7 @@ certificate's two delivery routes. 33 tests across 2 files.
 | `TestScalingTierReachesEveryArtifact` | One tier value decides the caps in all three artifacts: the broker CR's `messagingNodeCpu`/`messagingNodeMemory`, compose's `cpuset:`/`mem_limit:`, and the quadlet's `PodmanArgs=--cpuset-cpus=`/`Memory=`. It uses 100000, which is no platform's default, so the value is proven read rather than hardcoded -- the goldens only ever show the default tier. Both tier-derived container fields are cleared before the second `ApplyDefaults`, since `setDefault` would otherwise keep the tier-1000 values and the failure would read like a renderer bug. The podman half is rootful; a rootless unit carries no cpuset at all |
 | `TestContainerOverridesReachArtifact` | Both container overrides survive to the artifact: `container.mem` and `container.cpuset` each reach compose. The remaining asymmetry is on Kubernetes, where the CPU is a tier-fixed count with no key under any spelling |
 | `TestComposeQuotesTheCpuset` | A rule no golden can cover: compose types `cpuset` as a string and rejects a bare `cpuset: 0`, while every tier value (`0-N`) parses as a string anyway -- so only a single-cpu override reaches it |
-| `TestRootlessQuadletOmitsTheCpusetOnly` | One fixture rendered twice with only `podman.rootless` flipped, so the difference is attributable to the flag. The cpuset is all rootless gives up: its cgroup controller is not delegated to a user slice, while memory IS and a ulimit is not a cgroup control at all. The lines that STAY are asserted too -- they are the half a golden break answered with `-update` would silently bless |
+| `TestRootlessQuadletCarriesTheSameCaps` | One fixture rendered twice with only `podman.rootless` flipped. Rootless used to omit the cpuset, since its controller is not delegated to a user slice by default -- but the `user@<uid>.service.d` drop-in this tool requires for the rlimits now sets `Delegate=cpu cpuset io memory pids`, and `checkLimits` refuses a host without it, so both units carry the same caps. Only the run user and the install target differ |
 | `TestQuadletAsksTheServiceAndTheContainerForTheSameLimits` | The two-layer mechanism: `Ulimit=` is what podman asks for the container, `Limit*=` in `[Service]` is what systemd gives the podman process, and a rootless podman cannot exceed the second. Two numbers that disagreed would be a unit asking for what it cannot have |
 | `TestCustomVolumeMountRendersTheCRArray` | The translation at the boundary: the env file keys on this tool's lowercase role word, the CRD constrains `customVolumeMount[].name` to a capitalised enum, and the order is fixed rather than map order -- a Go map iterates randomly, and this renders into a CR that is diffed and re-applied, so an unstable order would look like a change on every deploy |
 | `TestNoCustomVolumeMountEmitsNothing` | The block is absent, not empty: an empty array is a different statement from an unset field, and the operator reads them differently |

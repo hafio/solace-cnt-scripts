@@ -9,6 +9,7 @@ ContainerName=solace
 HostName=solace-primary
 User=1000
 Group=0
+PodmanArgs=--cpuset-cpus=0-1
 Memory=6898m
 ShmSize=2g
 Ulimit=nofile=2448:1048576

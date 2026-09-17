@@ -38,6 +38,8 @@ func healthyRootlessOut(nrOpen string) func(name string, args []string) []byte {
 			return []byte("/opt")
 		case name == "sh" && slices.Contains(args, "cat "+nrOpenPath):
 			return []byte(nrOpen)
+		case name == "sh" && slices.Contains(args, "ulimit -Hn"):
+			return []byte(healthySessionNoFile)
 		case slices.Contains(args, "--format") && strings.Contains(strings.Join(args, " "), "IDMappings"):
 			// 0:1 is this user mapped to container root; 1:65536 is the subuid
 			// range, which is what covers ctrCfg's runUser of 1000:0.
@@ -618,6 +620,10 @@ func TestCheckDataDirRefusesAnUnwritableParent(t *testing.T) {
 	failOnCall(rr, func(name string, args []string) bool {
 		return name == "sh" && slices.Contains(args, nearestWritableScript)
 	})
+	// The row asks a second question when the first fails -- whether the directory
+	// is writable INSIDE the namespace -- so an unwritable host has to answer no to
+	// both.
+	rr.fail = failOn("unshare")
 	err := m.checkPodmanHost(context.Background(), false)
 	if err == nil {
 		t.Fatal("an unwritable data dir parent must refuse before mkdir runs")
@@ -633,6 +639,51 @@ func TestCheckDataDirRefusesAnUnwritableParent(t *testing.T) {
 	}
 }
 
+// TestCheckDataDirAcceptsAnAlreadyChownedDir is the other side of that row, and
+// the case a correctly prepared host hits on EVERY run after the first: prep's
+// `podman unshare chown` moved the directory to a subuid this user cannot become,
+// so the host-side test fails by design. Asking inside the namespace is the
+// question that matters, and answering it is what stops a ready host being
+// refused for being ready.
+func TestCheckDataDirAcceptsAnAlreadyChownedDir(t *testing.T) {
+	m, rr, buf := rootlessMgr()
+	fakeEnv(m, nil)
+	failOnCall(rr, func(name string, args []string) bool {
+		return name == "sh" && slices.Contains(args, nearestWritableScript)
+	})
+	// rr.fail stays nil, so the namespace probe succeeds: the container can write.
+	if err := m.checkPodmanHost(context.Background(), false); err != nil {
+		t.Fatalf("a directory already handed to the container must pass: %v", err)
+	}
+	if !hasCall(rr, "podman", []string{"unshare", "sh", "-c", `test -w "$0"`, "/opt/solace/data"}) {
+		t.Errorf("the row should ask inside the namespace:\n%+v", rr.calls)
+	}
+	if !strings.Contains(buf.String(), "already owned by the container") {
+		t.Errorf("the row must say why it passed:\n%s", buf)
+	}
+}
+
+// TestNamespaceWritableIsRootlessPodmanOnly: docker and rootful podman have no user
+// namespace, so the host-side answer was already the right one and there is no
+// second question to ask.
+func TestNamespaceWritableIsRootlessPodmanOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		p    config.Platform
+	}{{"docker", config.Docker}, {"rootful podman", config.Podman}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := ctrCfg(tc.p, "false")
+			m, rr, _ := newCapMgr(cfg, tc.p)
+			if m.namespaceWritable(context.Background(), "/opt/solace/data") {
+				t.Error("there is no namespace to be writable in")
+			}
+			if len(rr.calls) != 0 {
+				t.Errorf("and nothing may be probed:\n%+v", rr.calls)
+			}
+		})
+	}
+}
+
 // TestCheckPodmanHostReportsEveryFailureInOnePass is what `validate`'s own help
 // promises, and the reason the errors are joined rather than returned at the first.
 func TestCheckPodmanHostReportsEveryFailureInOnePass(t *testing.T) {
@@ -644,6 +695,10 @@ func TestCheckPodmanHostReportsEveryFailureInOnePass(t *testing.T) {
 	failOnCall(rr, func(name string, args []string) bool {
 		return name == "sh" && slices.Contains(args, nearestWritableScript)
 	})
+	// The row asks a second question when the first fails -- whether the directory
+	// is writable INSIDE the namespace -- so an unwritable host has to answer no to
+	// both.
+	rr.fail = failOn("unshare")
 	err := m.checkPodmanHost(context.Background(), false)
 	if err == nil {
 		t.Fatal("two broken rows must fail")
@@ -666,11 +721,21 @@ func TestPrepHostRefusesBeforeTouchingTheHost(t *testing.T) {
 	failOnCall(rr, func(name string, args []string) bool {
 		return name == "sh" && slices.Contains(args, nearestWritableScript)
 	})
+	// The row asks a second question when the first fails -- whether the directory
+	// is writable INSIDE the namespace -- so an unwritable host has to answer no to
+	// both.
+	rr.fail = failOn("unshare")
 	if err := m.PrepHost(context.Background()); err == nil {
 		t.Fatal("PrepHost must refuse when the host is not ready")
 	}
 	for _, c := range rr.calls {
-		if c.name == "mkdir" || c.name == "chown" || slices.Contains(c.args, "unshare") {
+		// `podman unshare sh -c 'test -w ...'` is the data-dir row's own read-only
+		// probe, so it is expected here; what must not have run is anything that
+		// CHANGES the host.
+		if slices.Contains(c.args, "test -w \"$0\"") {
+			continue
+		}
+		if c.name == "mkdir" || c.name == "chown" || c.name == "chmod" || slices.Contains(c.args, "unshare") {
 			t.Errorf("nothing may be created once prep has refused: %s %v", c.name, c.args)
 		}
 	}

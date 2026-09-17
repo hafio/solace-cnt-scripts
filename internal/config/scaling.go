@@ -92,6 +92,24 @@ func cpuSetRange(cores string) string {
 	return "0-" + strconv.Itoa(n-1)
 }
 
+// cpuSetCount is how many cpus a cpuSetRE-shaped value names: "0-3" is four,
+// "0,2,4" is three, "0-3,8" is five. Only reachable after the regex has matched,
+// so every half parses and no range runs backwards.
+func cpuSetCount(s string) int {
+	n := 0
+	for _, part := range strings.Split(s, ",") {
+		lo, hi, ok := strings.Cut(part, "-")
+		if !ok {
+			n++
+			continue
+		}
+		l, _ := strconv.Atoi(lo)
+		h, _ := strconv.Atoi(hi)
+		n += h - l + 1
+	}
+	return n
+}
+
 // applyScalingTierDefaults derives the tier-fixed CPU and the tier-defaulted
 // memory. ApplyDefaults calls it *after* the platform branches, which is the
 // whole point: maxConnections only reaches its final value in those branches

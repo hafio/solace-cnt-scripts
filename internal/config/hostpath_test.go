@@ -485,7 +485,7 @@ func TestPodmanBaseDirIsRequiredAndAbsolute(t *testing.T) {
 // TestDataDirMustBeAbsolute pins the one host path that is REQUIRED absolute rather
 // than resolved, and the message has to explain both halves of why: it is a bind
 // mount source (podman reads a bare one as a named volume) and it is what
-// `remove broker --delete-data` deletes recursively.
+// `remove broker --delete-data` empties.
 func TestDataDirMustBeAbsolute(t *testing.T) {
 	for _, p := range []Platform{Docker, Podman} {
 		// The default is absolute, so an untouched fixture must pass.

@@ -226,6 +226,12 @@ func TestValidateScalingTierAcceptsEveryTier(t *testing.T) {
 		for _, p := range []Platform{Docker, Podman} {
 			cc := validContainerConfig(p, "true")
 			cc.Scaling.MaxConnections = v
+			// Both tier-derived container fields are setDefault fields, so the
+			// fixture's tier-1000 values would survive and the cpuset would then be
+			// the wrong SIZE for the new tier -- which validateContainer refuses, by
+			// design. A real load never hits this: ApplyDefaults runs once, on a
+			// config where both are still empty.
+			clearTierDerived(cc)
 			cc.ApplyDefaults(p)
 			if err := cc.Validate(p); err != nil {
 				t.Errorf("%s tier %d rejected: %v", p, v, err)
@@ -317,6 +323,14 @@ func setContainerMem(c *Config, p Platform, mem string) {
 	c.Docker.Container.Mem = mem
 }
 
+// clearTierDerived empties the two container fields the tier defaults, so a test
+// that changes maxConnections after ApplyDefaults can re-derive them rather than
+// keeping the previous tier's.
+func clearTierDerived(c *Config) {
+	c.Docker.Container.Mem, c.Docker.Container.CPUSet = "", ""
+	c.Podman.Container.Mem, c.Podman.Container.CPUSet = "", ""
+}
+
 func setContainerCPUSet(c *Config, p Platform, set string) {
 	if p == Podman {
 		c.Podman.Container.CPUSet = set
@@ -345,6 +359,30 @@ func TestCPUSetRange(t *testing.T) {
 		set := cpuSetRange(scalingTiers[v].cpu)
 		if !cpuSetRE.MatchString(set) {
 			t.Errorf("tier %d derives cpuset %q, which validateContainer would reject", v, set)
+		}
+	}
+}
+
+// TestCPUSetCount is the arithmetic behind the size check: ranges are inclusive
+// and a comma-separated list sums.
+func TestCPUSetCount(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want int
+	}{
+		{"0", 1}, {"0-1", 2}, {"0-11", 12}, {"2-2", 1},
+		{"0,2,4", 3}, {"0-3,8", 5}, {"0-1,4-5", 4},
+	} {
+		if got := cpuSetCount(tc.in); got != tc.want {
+			t.Errorf("cpuSetCount(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+	// Every tier's own default must satisfy the size check it would face.
+	for _, v := range []int{100, 1000, 10000, 100000, 200000} {
+		cpu := scalingTiers[v].cpu
+		n, _ := strconv.Atoi(cpu)
+		if got := cpuSetCount(cpuSetRange(cpu)); got != n {
+			t.Errorf("tier %d derives a cpuset of %d cpus, want %s", v, got, cpu)
 		}
 	}
 }
@@ -403,13 +441,32 @@ func TestValidateContainerCPUSet(t *testing.T) {
 			t.Fatalf("%s: expected a container.cpuset error naming the key, got: %v", p, err)
 		}
 
-		// "8-11" is four cores that are not the tier's first four, and that is legal:
-		// which cpus are free is a host fact the tier cannot know.
-		for _, good := range []string{"0", "0-1", "0-11", "0,2,4", "0-3,8", "8-11", "2-2", ""} {
+		// The fixture is the container default tier, 1000 connections -> 2 cores, so
+		// every accepted value names exactly two cpus. WHICH two is the operator's --
+		// that is a host fact the tier cannot know -- but how many is not.
+		for _, good := range []string{"0-1", "2-3", "8-9", "0,2", "3,7", ""} {
 			c := validContainerConfig(p, "true")
 			setContainerCPUSet(c, p, good)
 			if err := c.Validate(p); err != nil {
 				t.Errorf("%s: container.cpuset %q was rejected: %v", p, good, err)
+			}
+		}
+		// A set of the wrong SIZE silently resizes the broker, which is the one
+		// mistake the tier exists to prevent.
+		for _, wrong := range []struct {
+			set  string
+			cpus int
+		}{{"0", 1}, {"0-3", 4}, {"0-11", 12}, {"0,2,4", 3}} {
+			c := validContainerConfig(p, "true")
+			setContainerCPUSet(c, p, wrong.set)
+			err := c.Validate(p)
+			if err == nil {
+				t.Errorf("%s: container.cpuset %q names %d cpus at a 2-core tier and was accepted",
+					p, wrong.set, wrong.cpus)
+				continue
+			}
+			if !strings.Contains(err.Error(), "sizes this broker for 2") {
+				t.Errorf("%s: the error should name the tier's core count, got: %v", p, err)
 			}
 		}
 	}

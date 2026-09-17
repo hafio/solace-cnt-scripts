@@ -945,37 +945,37 @@ func TestComposeQuotesTheCpuset(t *testing.T) {
 	}
 }
 
-// TestRootlessQuadletOmitsTheCpusetOnly renders one fixture twice with only the
-// flag flipped, so the difference is attributable to podman.rootless and nothing
-// else. The cpuset is all rootless gives up: its cgroup controller is not
-// delegated to a user slice, while memory IS delegated and a ulimit is not a
-// cgroup control at all. The lines that STAY are asserted too -- they are the half
-// a golden break answered with -update would silently bless.
-func TestRootlessQuadletOmitsTheCpusetOnly(t *testing.T) {
+// TestRootlessQuadletCarriesTheSameCaps renders one fixture twice with only the
+// flag flipped. Rootless used to omit the cpuset, because the cpuset controller is
+// not delegated to a user slice by default -- but the user@<uid>.service drop-in
+// this tool requires for the rlimits now sets Delegate=cpu cpuset io memory pids,
+// and container.checkLimits refuses a host without it. So the two units carry the
+// same caps and differ only in the run user and the install target.
+func TestRootlessQuadletCarriesTheSameCaps(t *testing.T) {
 	rootful := load(t, config.Podman)
 	unit := string(Quadlet(rootful, rootful.ResolveNode(config.Primary)))
-	if !strings.Contains(unit, "PodmanArgs=--cpuset-cpus=0-1") {
-		t.Errorf("rootful podman must carry the cpuset:\n%s", unit)
-	}
 
 	rootless := load(t, config.Podman)
 	rootless.Podman.Rootless = true
 	rootless.Podman.Container.RunUser = ""
 	rootless.ApplyDefaults(config.Podman)
 	ru := string(Quadlet(rootless, rootless.ResolveNode(config.Primary)))
-	for _, unwanted := range []string{"PodmanArgs=", "cpuset"} {
-		if strings.Contains(ru, unwanted) {
-			t.Errorf("a rootless unit must not carry %q:\n%s", unwanted, ru)
-		}
-	}
+
 	for _, want := range []string{
-		"Memory=6898m", "ShmSize=2g",
+		"PodmanArgs=--cpuset-cpus=0-1", "Memory=6898m", "ShmSize=2g",
 		"Ulimit=nofile=2448:1048576", "Ulimit=memlock=-1", "Ulimit=core=-1",
 		"LimitNOFILE=2448:1048576", "LimitMEMLOCK=infinity", "LimitCORE=infinity",
 	} {
-		if !strings.Contains(ru, want) {
-			t.Errorf("a rootless unit must still carry %q:\n%s", want, ru)
+		if !strings.Contains(unit, want) {
+			t.Errorf("rootful unit missing %q:\n%s", want, unit)
 		}
+		if !strings.Contains(ru, want) {
+			t.Errorf("rootless unit missing %q -- the delegation drop-in is what makes it safe:\n%s", want, ru)
+		}
+	}
+	// What the flag DOES still change.
+	if !strings.Contains(ru, "User=1000\n") || !strings.Contains(ru, "WantedBy=default.target") {
+		t.Errorf("rootless should change the run user and the install target:\n%s", ru)
 	}
 }
 

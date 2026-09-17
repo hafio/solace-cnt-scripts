@@ -283,9 +283,9 @@ var (
 	layerData = layer{
 		flag: "delete-data",
 		what: "persistent data",
-		why:  "Kubernetes PVCs / the container data directory -- the broker's messages and configuration",
-		usage: "delete the broker's persistent data too (Kubernetes PVCs / the container data " +
-			"directory). Without it the data is kept",
+		why:  "Kubernetes PVCs / the container data directory's contents -- the broker's messages and configuration",
+		usage: "delete the broker's persistent data too (Kubernetes PVCs, or the contents of the " +
+			"container data directory). Without it the data is kept",
 	}
 	layerCRD = layer{
 		flag: "delete-crd",

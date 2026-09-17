@@ -411,7 +411,23 @@ func (m *Manager) PrepHost(ctx context.Context) error {
 	if err := m.R.Run(ctx, "mkdir", "-p", cb.DataDir); err != nil {
 		return fmt.Errorf("create data dir %q: %w%s", cb.DataDir, err, m.dataDirHint(cb.DataDir))
 	}
-	if m.P == config.Podman && m.Cfg.Podman.Rootless {
+	if err := m.prepBaseDir(ctx); err != nil {
+		return err
+	}
+	if m.rootlessPodman() {
+		// 775 so the directory stays writable from outside the container once the
+		// chown below moves it to a subuid nobody can become: container gid 0 maps
+		// to this user's own group, so the group bit is what prep and the data-dir
+		// row rely on afterwards (checkDataDir, rootless.go).
+		//
+		// IN THE NAMESPACE, like the chown. On a re-deploy the directory is already
+		// owned by that subuid, so a host-side chmod is refused outright -- and
+		// inside the namespace this user is root either way, which covers the fresh
+		// directory and the already-prepared one with one call.
+		if err := m.run(ctx, "unshare", "chmod", "775", cb.DataDir); err != nil {
+			return fmt.Errorf("make data dir %q group-writable (rootless): %w%s",
+				cb.DataDir, err, m.dataDirHint(cb.DataDir))
+		}
 		// Rootless podman: the container's uid:gid maps through subuid/subgid, so
 		// enter the user namespace to apply the ownership the container will see.
 		if err := m.run(ctx, "unshare", "chown", cb.RunUser, cb.DataDir); err != nil {
@@ -425,6 +441,29 @@ func (m *Manager) PrepHost(ctx context.Context) error {
 		return err
 	}
 	return m.registryLogin(ctx)
+}
+
+// prepBaseDir creates podman.baseDir up front rather than leaving it to the first
+// writeArtifact. It is podman-only, and it is NOT chowned into the user namespace
+// or made group-writable: it holds the server-certificate bundle, which contains
+// the PRIVATE KEY, and the container reads that through a bind mount rather than
+// owning it. 0700 is set explicitly because MkdirAll only applies a mode to a
+// directory it CREATES, so a pre-existing 0755 would otherwise survive.
+func (m *Manager) prepBaseDir(ctx context.Context) error {
+	if m.P != config.Podman {
+		return nil
+	}
+	dir := m.Cfg.Podman.BaseDir
+	if dir == "" {
+		return nil
+	}
+	if err := m.R.Run(ctx, "mkdir", "-p", dir); err != nil {
+		return fmt.Errorf("create podman.baseDir %q: %w", dir, err)
+	}
+	if err := m.R.Run(ctx, "chmod", "700", dir); err != nil {
+		return fmt.Errorf("restrict podman.baseDir %q to 0700 (it holds the server private key): %w", dir, err)
+	}
+	return nil
 }
 
 // registryLogin authenticates this host to the image registry when credentials are
@@ -905,10 +944,12 @@ func (m *Manager) Delete(ctx context.Context, purge bool) error {
 		if err := m.purgeData(ctx); err != nil {
 			return err
 		}
-		m.progress().OK("data directory %s deleted.", m.Cfg.ContainerBlock(m.P).DataDir)
+		m.progress().OK("data directory %s emptied; the directory itself is kept.",
+			m.Cfg.ContainerBlock(m.P).DataDir)
 		return nil
 	}
-	m.progress().Info("data directory %s kept (pass --delete-data to remove it).", m.Cfg.ContainerBlock(m.P).DataDir)
+	m.progress().Info("data directory %s and its contents kept (pass --delete-data to empty it).",
+		m.Cfg.ContainerBlock(m.P).DataDir)
 	return nil
 }
 
@@ -1041,13 +1082,24 @@ func (m *Manager) containerExists(ctx context.Context) bool {
 	return found
 }
 
+// purgeData empties container.dataDir and LEAVES THE DIRECTORY. Removing it would
+// throw away the ownership and mode prep established -- on a rootless host that is
+// a subuid mapping only `podman unshare` can restore -- so the next deploy would
+// have to re-create it, and could not where the parent is not writable by this
+// user. What --delete-data promises is that the broker's data is gone, not that
+// the mount point is.
+//
+// find rather than a shell glob: `rm -rf dir/*` misses dotfiles, and the
+// alternatives that do not need two more patterns need a shell. -delete implies
+// -depth, so a non-empty subdirectory goes with its contents.
 func (m *Manager) purgeData(ctx context.Context) error {
 	dir := m.Cfg.ContainerBlock(m.P).DataDir
-	m.logf("removing data directory %s", dir)
-	if m.P == config.Podman && m.Cfg.Podman.Rootless {
-		return m.run(ctx, "unshare", "rm", "-rf", dir)
+	m.logf("clearing data directory %s", dir)
+	args := []string{dir, "-mindepth", "1", "-delete"}
+	if m.rootlessPodman() {
+		return m.run(ctx, append([]string{"unshare", "find"}, args...)...)
 	}
-	return m.R.Run(ctx, "rm", "-rf", dir)
+	return m.R.Run(ctx, "find", args...)
 }
 
 // --- Lifecycle: Start / Stop / Restart ---------------------------------------

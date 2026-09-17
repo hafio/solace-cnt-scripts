@@ -1362,8 +1362,8 @@ func (c *Config) validateContainer(p Platform) error {
 
 	if dir := c.ContainerBlock(p).DataDir; !IsAbsHostPath(dir) {
 		return fmt.Errorf("%s %q must be an absolute path: it is the host side of a bind mount, and it is what "+
-			"`remove broker --delete-data` deletes recursively -- a relative value would be read by podman as a "+
-			"named volume and would leave a recursive delete pointing at whatever directory the command was run "+
+			"`remove broker --delete-data` empties -- a relative value would be read by podman as a named "+
+			"volume and would leave a recursive delete pointing at whatever directory the command was run "+
 			"from (e.g. /opt/solace/data)", dataKey, dir)
 	}
 
@@ -1431,6 +1431,19 @@ func (c *Config) validateContainer(p Platform) error {
 		}
 		if lo, hi, inverted := invertedCPUSetRange(s); inverted {
 			return fmt.Errorf("%s.container.cpuset %q runs backwards: write %d-%d", platformKey(p), s, hi, lo)
+		}
+		// The tier decides HOW MANY cpus the broker gets; this key decides which.
+		// A set of the wrong size silently resizes the broker, which is the one
+		// mistake the tier exists to prevent -- and it is invisible afterwards,
+		// since nothing downstream compares the two.
+		if want := c.Scaling.CPU; want != "" {
+			n, err := strconv.Atoi(want)
+			if err == nil && cpuSetCount(s) != n {
+				return fmt.Errorf("%s.container.cpuset %q names %d cpus, but scaling.maxConnections %d "+
+					"sizes this broker for %d: list exactly %d cpu ids (which ones is yours to choose, "+
+					"e.g. %s)", platformKey(p), s, cpuSetCount(s), c.Scaling.MaxConnections, n, n,
+					cpuSetRange(want))
+			}
 		}
 	}
 	if err := c.validateAdditionalUsers(p); err != nil {

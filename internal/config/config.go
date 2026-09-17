@@ -930,8 +930,12 @@ type Container struct {
 	// podman's --cpuset-cpus. A cpu LIST or RANGE ("0-3", "0,2,4"), not a core
 	// count. Defaults to the tier's cores as 0-(cores-1) (cpuSetRange, scaling.go);
 	// an explicit value wins, because which cpus are free is a host fact the tier
-	// cannot know. Ignored under podman.rootless: the cpuset cgroup controller is
-	// not delegated to a user slice, so the unit omits it (render.Quadlet).
+	// cannot know. HOW MANY is the tier's, so validateContainer refuses a set of
+	// the wrong size -- that would silently resize the broker.
+	//
+	// Rootless podman carries it too: the user@<uid>.service drop-in its rlimits
+	// already need also delegates the cpuset controller, and
+	// container.checkLimits refuses a host where it is absent.
 	CPUSet string `yaml:"cpuset"`
 
 	// Mem is the container memory limit in docker's and podman's own b|k|m|g
