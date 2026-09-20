@@ -67,17 +67,13 @@ func (m *Manager) checkPodmanHost(ctx context.Context, fix bool) error {
 		return nil
 	}
 
-	// The euid invariant gates everything after it. A rootless block probed as root
-	// reads the WRONG user's linger and runtime directory, so every later row would
-	// be answering about an account the deploy will never use (limits.go declines
-	// its own rows for the same reason).
+	// The euid invariant gates everything after it: a rootless block probed as root
+	// reads the WRONG user's linger and runtime directory. cli.prepare refuses a
+	// mismatch before this block can run, so reaching it means a Manager built
+	// outside the CLI -- it fails and probes nothing rather than answering about an
+	// account the deploy will never use.
 	if err := m.checkPodmanEUID(); err != nil {
 		r.Fail("euid: %v", err)
-		if m.Cfg.Podman.Rootless {
-			for _, row := range []string{"user session", "id mapping", "linger", "user systemd", "data dir"} {
-				r.Skip("%s: skipped (euid mismatch)", row)
-			}
-		}
 		return err
 	}
 	r.OK("euid: %d, matching podman.rootless=%t", euid, m.Cfg.Podman.Rootless)

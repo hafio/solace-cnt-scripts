@@ -94,20 +94,12 @@ func (m *Manager) checkLimits(ctx context.Context, fix bool) error {
 		r.KVRow(reportKeyWidth, "limits", "skipped (no POSIX rlimits here)")
 		return nil
 	}
-	// The euid invariant checkPodmanHost states: probed as the wrong account the
-	// user-manager row answers about a user the deploy will never use. Re-derived
-	// rather than remembered -- checkPodmanEUID reads only the config and the euid.
-	// checkPodmanHost is what FAILS on the mismatch; this row only stays quiet.
-	if m.P == config.Podman && m.checkPodmanEUID() != nil {
-		r.Skip("nr_open: skipped (euid mismatch)")
-		r.Skip("user manager: skipped (euid mismatch)")
-		return nil
-	}
 	// Resolved once, and only where a row can actually print it: both rootless
 	// remedies name the account literally so the drop-in can be forwarded to an
-	// administrator as-is. Safe to resolve here rather than leave a placeholder,
-	// because the euid guard above has already established that this process is
-	// the rootless user rather than root standing in for them.
+	// administrator as-is. Safe to resolve rather than leave a placeholder, because
+	// the CLI guard (container.GuardPodmanEUID, run by cli.prepare) has already
+	// established that this process is the rootless user rather than root standing
+	// in for them.
 	user := ""
 	if m.rootlessPodman() {
 		user = m.hostUserName(ctx, m.Geteuid())

@@ -208,11 +208,15 @@ func TestCheckPodmanHostRootfulStopsAtEUID(t *testing.T) {
 	}
 }
 
-// TestCheckPodmanHostEUIDMismatchSkipsTheRest is the reachability-first rule: a
+// TestCheckPodmanHostEUIDMismatchProbesNothing is the reachability-first rule: a
 // rootless block probed as root would read the WRONG user's linger and runtime
-// directory, so those rows are honest skips rather than answers about an account
-// the deploy will never use.
-func TestCheckPodmanHostEUIDMismatchSkipsTheRest(t *testing.T) {
+// directory, so it fails and asks nothing.
+//
+// There are no longer any `skipped (euid mismatch)` rows to print: cli.prepare
+// refuses a mismatch before this block can run, so reaching it at all means a
+// Manager built outside the CLI, and a report enumerating rows nobody will see
+// would be describing a path the operator cannot take.
+func TestCheckPodmanHostEUIDMismatchProbesNothing(t *testing.T) {
 	m, rr, buf := rootlessMgr()
 	m.Geteuid = func() int { return 0 } // rootless, but running as root
 	err := m.checkPodmanHost(context.Background(), false)
@@ -220,8 +224,11 @@ func TestCheckPodmanHostEUIDMismatchSkipsTheRest(t *testing.T) {
 		t.Fatal("rootless podman running as root must fail")
 	}
 	out := buf.String()
-	if !strings.Contains(out, "euid:") || !strings.Contains(out, "skipped (euid mismatch)") {
-		t.Errorf("the later rows must be skipped, not answered:\n%s", out)
+	if !strings.Contains(out, "euid:") {
+		t.Errorf("the euid row must report what it found:\n%s", out)
+	}
+	if strings.Contains(out, "skipped (euid mismatch)") {
+		t.Errorf("the skip rows went with the CLI guard:\n%s", out)
 	}
 	if len(rr.calls) != 0 {
 		t.Errorf("nothing may be probed once the euid is wrong:\n%+v", rr.calls)

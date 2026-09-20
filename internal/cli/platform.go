@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"solace/internal/config"
+	"solace/internal/container"
 )
 
 // platformAnnotation lists the platforms a command (or, as a flag annotation, a
@@ -182,7 +183,23 @@ func prepare(app *App, cmd *cobra.Command) error {
 	if err := checkFlagPlatforms(cmd, p); err != nil {
 		return err
 	}
-	return asUsage(app.load(cmd))
+	if err := app.load(cmd); err != nil {
+		return asUsage(err)
+	}
+	// Last, because it needs the config and the runner load built. The DECLARED
+	// podman.rootless is checked against the account running this command before
+	// ANY podman command -- version, info, exec, cp -- so a mismatch never probes,
+	// deploys into or reads the wrong account's engine. Every executing container
+	// command passes through here, including the fifteen that reach the broker over
+	// `podman exec` and never build a container.Manager at all.
+	//
+	// Render-only commands are exempt through the same annotation that exempts them
+	// from --allow-command: `broker generate` touches no host, and a file has to
+	// render the same artifact from any account and any OS.
+	if !app.willExecute(cmd) {
+		return nil
+	}
+	return asUsage(container.GuardPodmanEUID(app.Cfg, app.Platform, app.Runner, app.geteuid()))
 }
 
 // resolvePlatform settles which platform this invocation drives. --platform wins

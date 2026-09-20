@@ -1473,25 +1473,14 @@ func (m *Manager) systemctlArgs(args []string) []string {
 	return args
 }
 
-// checkPodmanEUID enforces the rootless/rootful invariant before a real deploy:
-// rootless must not run as root and rootful must. It is skipped under the Echo runner
-// and on platforms without a meaningful euid (Windows returns -1), so the deploy
-// stays previewable everywhere.
+// checkPodmanEUID is the executor-side call of the one guard definition
+// (GuardPodmanEUID, euid.go). cli.prepare has already refused a mismatch before
+// any command ran, so in production this never fires -- it is kept at the two
+// sites where a wrong-account run does LASTING damage, Deploy's writes into the
+// secret store and PrepHost's mkdir/chown, because an executor must not assume
+// its caller checked. That is the same stance runtime() takes on CheckCommand.
 func (m *Manager) checkPodmanEUID() error {
-	if m.isEcho() {
-		return nil
-	}
-	euid := m.Geteuid()
-	if euid < 0 {
-		return nil
-	}
-	if m.Cfg.Podman.Rootless && euid == 0 {
-		return fmt.Errorf("podman.rootless=true but running as root; run as the target rootless user (no sudo)")
-	}
-	if !m.Cfg.Podman.Rootless && euid != 0 {
-		return fmt.Errorf("rootful podman requires root; re-run with sudo or set podman.rootless=true")
-	}
-	return nil
+	return GuardPodmanEUID(m.Cfg, m.P, m.R, m.Geteuid())
 }
 
 // composeFile is the docker compose path, defaulting an empty config value to

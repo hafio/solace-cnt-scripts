@@ -590,25 +590,6 @@ func TestCheckLimitsSkipsWithoutPosixRlimits(t *testing.T) {
 	}
 }
 
-// TestCheckLimitsSkipsOnAnEUIDMismatch: probed as root, the rootless rows would
-// answer about an account the deploy will never use. checkPodmanHost is what fails
-// on the mismatch; this block only declines to answer.
-func TestCheckLimitsSkipsOnAnEUIDMismatch(t *testing.T) {
-	m, rr, buf := limitsMgr(t, config.Podman, true, healthyNrOpen)
-	m.Geteuid = func() int { return 0 } // rootless, but running as root
-	if err := m.checkLimits(context.Background(), true); err != nil {
-		t.Fatalf("this block reports the skip and leaves the failing to the euid row: %v", err)
-	}
-	out := buf.String()
-	if !strings.Contains(out, "nr_open: skipped (euid mismatch)") ||
-		!strings.Contains(out, "user manager: skipped (euid mismatch)") {
-		t.Errorf("both rows must skip with the reason:\n%s", out)
-	}
-	if len(rr.calls) != 0 {
-		t.Errorf("nothing may be probed:\n%+v", rr.calls)
-	}
-}
-
 // --- parsing and the shared definition ---------------------------------------
 
 func TestParseLimit(t *testing.T) {

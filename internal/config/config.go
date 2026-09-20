@@ -880,9 +880,17 @@ type DockerConfig struct {
 
 // PodmanConfig holds podman-only deployment options plus the shared container block.
 type PodmanConfig struct {
-	Command    Command `yaml:"command"`    // CONTAINER_RUNTIME override (default: podman)
-	Rootless   bool    `yaml:"rootless"`   // PODMAN_ROOTLESS
-	QuadletDir string  `yaml:"quadletDir"` // QUADLET_DIR override
+	Command Command `yaml:"command"` // CONTAINER_RUNTIME override (default: podman)
+
+	// Rootless is DECLARED, never detected from the invoking euid. It decides where
+	// the unit is installed, which systemd instance loads it, which uid:gid the
+	// container runs as and where the private key lands -- so one env file must
+	// render one artifact from any account and any OS, which is what `generate`
+	// promises. The euid is then checked AGAINST it before any podman command runs
+	// (container.GuardPodmanEUID, called by cli.prepare), rather than being allowed
+	// to pick the other mode silently: `sudo` is a refusal, not a second deployment.
+	Rootless   bool   `yaml:"rootless"`   // PODMAN_ROOTLESS
+	QuadletDir string `yaml:"quadletDir"` // QUADLET_DIR override
 	// BaseDir is the host directory for files THIS TOOL writes for podman, as
 	// opposed to Config.BaseDir(), which is the directory the env FILE was loaded
 	// from -- two different bases, so the doc comment says which.

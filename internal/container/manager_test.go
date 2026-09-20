@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -925,14 +926,6 @@ func TestManagerDeployPodmanDryRunSkipsWrite(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("dry-run Deploy should echo %q:\n%s", want, out)
 		}
-	}
-}
-
-func TestManagerPodmanEUIDGuardSkippedOnDryRun(t *testing.T) {
-	m, _ := newEchoMgr(ctrCfg(config.Podman, "false"), config.Podman)
-	m.Cfg.Podman.Rootless = false // rootful would require root if the guard ran
-	if err := m.checkPodmanEUID(); err != nil {
-		t.Errorf("euid guard must be skipped under the Echo runner, got %v", err)
 	}
 }
 
@@ -2039,30 +2032,65 @@ func TestStatusListingCarriesNoPortsColumn(t *testing.T) {
 
 // --- euid guard (via the Geteuid seam) --------------------------------------
 
-func TestManagerCheckPodmanEUID(t *testing.T) {
+// TestGuardPodmanEUID is the ONE definition of the rootless/rootful invariant, the
+// same function cli.prepare runs before any podman command and Deploy/PrepHost run
+// again at the two sites where a wrong-account run does lasting damage. The three
+// passes are as load-bearing as the two failures: docker has no rootless mode in
+// this schema, a preview reaches no host, and a platform with no POSIX euid still
+// has to render.
+func TestGuardPodmanEUID(t *testing.T) {
 	cases := []struct {
 		name     string
+		platform config.Platform
+		echo     bool
 		rootless bool
 		euid     int
 		wantErr  bool
 	}{
-		{"rootless as root fails", true, 0, true},
-		{"rootful as non-root fails", false, 1000, true},
-		{"rootless as non-root passes", true, 1000, false},
-		{"rootful as root passes", false, 0, false},
-		{"non-posix euid skips guard", false, -1, false},
+		{"rootless as root fails", config.Podman, false, true, 0, true},
+		{"rootful as non-root fails", config.Podman, false, false, 1000, true},
+		{"rootless as non-root passes", config.Podman, false, true, 1000, false},
+		{"rootful as root passes", config.Podman, false, false, 0, false},
+		{"non-posix euid skips guard", config.Podman, false, false, -1, false},
+		{"docker is never guarded", config.Docker, false, true, 0, false},
+		{"docker as non-root too", config.Docker, false, false, 1000, false},
+		{"echo runner reaches no host", config.Podman, true, false, 1000, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := ctrCfg(config.Podman, "false")
+			cfg := ctrCfg(tc.platform, "false")
 			cfg.Podman.Rootless = tc.rootless
-			m, _, _ := newCapMgr(cfg, config.Podman)
-			m.Geteuid = func() int { return tc.euid }
-			err := m.checkPodmanEUID()
+			var r engine.Runner = &capRunner{}
+			if tc.echo {
+				r = engine.Echo{W: io.Discard}
+			}
+			err := GuardPodmanEUID(cfg, tc.platform, r, tc.euid)
 			if tc.wantErr != (err != nil) {
-				t.Errorf("checkPodmanEUID rootless=%t euid=%d: err=%v, wantErr=%t", tc.rootless, tc.euid, err, tc.wantErr)
+				t.Errorf("GuardPodmanEUID %s rootless=%t euid=%d: err=%v, wantErr=%t",
+					tc.platform, tc.rootless, tc.euid, err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestGuardPodmanEUIDMessagesNameTheKeyAndTheFix: both refusals are read by an
+// operator who has to decide between re-running differently and editing the file,
+// so each names the key, the account it found, and both ways out.
+func TestGuardPodmanEUIDMessagesNameTheKeyAndTheFix(t *testing.T) {
+	cfg := ctrCfg(config.Podman, "false")
+	cfg.Podman.Rootless = true
+	err := GuardPodmanEUID(cfg, config.Podman, &capRunner{}, 0)
+	for _, want := range []string{"podman.rootless=true", "running as root", "without sudo", "podman.rootless=false"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("the rootless-as-root refusal should name %q, got: %v", want, err)
+		}
+	}
+	cfg.Podman.Rootless = false
+	err = GuardPodmanEUID(cfg, config.Podman, &capRunner{}, 1000)
+	for _, want := range []string{"podman.rootless=false", "requires root", "euid 1000", "sudo", "podman.rootless=true"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("the rootful-as-non-root refusal should name %q, got: %v", want, err)
+		}
 	}
 }
 

@@ -55,7 +55,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-82 test files, 1389 test functions. Three of those are not tests. Two are os/exec
+83 test files, 1391 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -68,9 +68,9 @@ launched from.
 | --- | --- | --- |
 | internal/k8s | 18 | 210 |
 | internal/broker | 22 | 429 |
-| internal/cli | 11 | 193 |
+| internal/cli | 12 | 196 |
 | internal/config | 14 | 222 |
-| internal/container | 8 | 189 |
+| internal/container | 8 | 188 |
 | internal/convert | 1 | 38 |
 | internal/render | 2 | 38 |
 | internal/engine | 2 | 27 |
@@ -78,7 +78,7 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **82** | **1389** |
+| **Total** | **83** | **1391** |
 
 
 ## Coverage
@@ -86,6 +86,12 @@ launched from.
 Last recorded run, from `scripts/logs/cov.log` (2026-09-17), total **92.7%**. Re-run `cov`
 after any change; these figures go stale the moment tests move, and the previous total is
 the floor the next run has to hold.
+
+**92.7% held, and `internal/cli` 82.6% -> 82.7%, from moving the podman euid guard to
+`cli.prepare`.** `internal/container` held at 95.2% despite losing two branches
+(`checkPodmanHost`'s five skip rows and `checkLimits`' mismatch predicate) and their
+two tests: `TestGuardPodmanEUID`'s new docker, Echo and non-POSIX rows reach the same
+statements through the one definition that two copies used to.
 
 **92.7% held, and `internal/container` 95.0% -> 95.2%, from the delegation and
 cpuset work.** The new branches -- the `DelegateControllers` check, an unparseable
@@ -617,7 +623,7 @@ without a live broker;
 fixtures stand in for a captured `show current-config` transcript; and
 `exportconfigReadCounter` wraps `App.PromptIn` to prove a confirmation prompt was never
 actually read, not merely that the command did not block.
-190 tests across 11 files.
+196 tests across 12 files.
 
 Because the platform is a flag rather than the first word of a command, the
 invocations here name it explicitly (`--platform docker`) rather than relying on
@@ -927,6 +933,27 @@ the command did not block.
 | `TestReportReplicationConfigMateSkippedSaysNothingWasWritten` | The report never claims the mate was applied when phase 1 was skipped -- `res.Mate` is what WOULD have been sent, not what was, and printing it unconditionally would misdescribe a run that wrote nothing and stopped no VPN |
 | `TestReportReplicationConfigMateAppliedNamesWhatPhase1Stopped` | When phase 1 DID run, the report names every VPN it stopped -- the half of the blast radius `res.Enabled` cannot show, since phase 1's shutdown covers unlisted VPNs too |
 | `TestResolveSitesRefusesAFileWithNoReplication` | The refusal lands before the broker is asked anything -- with no `replication:` section, a router name matched against an empty list is a round trip whose answer cannot matter |
+
+### euid_test.go
+
+The one place the DECLARED `podman.rootless` is checked against the account running the
+command (`container.GuardPodmanEUID`, called by `cli.prepare`). It lives at the CLI boundary
+rather than in the Manager because fifteen container commands -- every `broker configure *`
+and `broker perform *` -- reach the broker over `podman exec` and never build a Manager at
+all, and because `Reachable`'s `podman version` and `Preflight`'s `podman info` would
+otherwise already have run as the wrong account.
+
+Every case drives a NON-Echo `opRunner`, since the property under test is that the runner is
+never reached; an Echo runner would pass the guard for its own reason and prove nothing. That
+is also why `App.Geteuid` exists -- without it these would pass or fail on whichever account
+runs `go test`. `writeRootlessPodmanEnv` is the podman-only `rootless: true` fixture the
+guard has something to disagree with.
+
+| Test | What it covers |
+| --- | --- |
+| `TestPodmanEUIDGuardRefusesBeforeAnyCommand` | Six invocations across both paths -- `broker remove --delete-data`, `status` and `validate` (Manager) and `configure product-keys` and `perform semp-login-check` (transport, no Manager) -- each refused with the phrase that names the mismatch, at exit 2, with ZERO runner calls and empty stdout. `remove --delete-data` is the case that motivated the change: under `sudo` against a rootless deployment it used to stop nothing, remove nothing, then clear the data directory as root |
+| `TestPodmanEUIDGuardSkips` | The three passes, each asserting the runner was REACHED rather than a clean exit (these commands go on to fail for their own reasons against a runner that answers nothing): the Echo preview still echoes `+ podman ps`, a non-POSIX euid has nothing to compare, and docker has no rootless mode in this schema |
+| `TestGenerateIgnoresTheEUID` | The exemption, and the reason the guard sits in `prepare` rather than in `ctrManager`/`ctrOps`: a constructor-level guard would have caught the `Ops` that `detectContainerRole` builds for role detection -- which issues no podman command -- and broken `generate`. A rootless file renders under root and a rootful one renders as a user, both with zero runner calls |
 
 ### exit_test.go
 
@@ -2022,7 +2049,7 @@ The host-local Docker/Podman manager, its node-local transport, and the engine
 preflight that precedes every mutating operation, plus the engine `inspect` decode
 behind `broker status` and the server-certificate delivery each engine needs, and the
 host rlimit ceilings every engine is bounded by.
-189 tests across 8 files.
+188 tests across 8 files.
 
 ### runtime_test.go
 
@@ -2078,7 +2105,6 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestManagerRedeployUnchangedHintsRotation` | Without `--restart` nothing is recreated and the log names `--restart` as the way to apply a rotation |
 | `TestManagerDeployPodmanWritesUnit` | The quadlet unit is written, then daemon-reload and service start |
 | `TestManagerDeployPodmanDryRunSkipsWrite` | Dry-run echoes the systemctl steps without writing the unit |
-| `TestManagerPodmanEUIDGuardSkippedOnDryRun` | The rootless/rootful euid guard does not run under dry-run |
 | `TestManagerDeletePodmanRemovesUnit` | Delete stops the service, removes the unit, and daemon-reloads |
 | `TestManagerDeletePodmanStopFailsServiceActiveBlocksRemoval` | A failed `systemctl stop` proves nothing by itself (`podman info`/Preflight only shows the engine is reachable), so when `serviceState` still reports the unit `active`, Delete blocks the unit removal, the daemon-reload, and (via the purge gate) the data-directory rm, instead of reporting success over a broker still serving traffic |
 | `TestManagerDeletePodmanStopFailsServiceInactiveProceeds` | The same failed stop, but `serviceState` confirms the unit is already `inactive` -- the benign "already stopped" case still proceeds exactly as before |
@@ -2117,7 +2143,7 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestManagerDeployPodmanWriteUnitError` | An unwritable unit path fails deploy |
 | `TestManagerDeployPodmanDaemonReloadError` | A daemon-reload failure propagates |
 | `TestManagerDeployPodmanStartError` | A service-start failure propagates |
-| `TestManagerDeployPodmanEUIDGuardFails` | Rootless-as-root is rejected by the euid guard |
+| `TestManagerDeployPodmanEUIDGuardFails` | Rootless-as-root is rejected by the executor-side call of `GuardPodmanEUID`, which `Deploy` keeps because a wrong-account deploy writes into the secret store before anything can be undone |
 | `TestManagerDeployDockerComposeWriteError` | An unwritable compose path fails deploy |
 | `TestManagerDeployDockerComposeUpError` | A `compose up` failure propagates |
 | `TestManagerDeletePodmanDaemonReloadError` | A daemon-reload failure during delete propagates |
@@ -2129,8 +2155,9 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestManagerStatusPodmanUnitInactiveTolerated` | An inactive unit warns but status still lists the container |
 | `TestManagerStatusDockerRunsNoComposePs` | Status runs no compose at all, even WITH a compose file on disk. It replaced the tolerated-failure test: compose listed the same single container, and its PORTS column -- every published port with both host bindings -- was the widest thing in the report with no way to narrow it, since compose's `--format` takes only `table` or `json` |
 | `TestStatusListingCarriesNoPortsColumn` | The property the format exists for, asserted on the format rather than on engine output no test can produce: `psTableFormat` asks for NAMES/IMAGE/STATUS and never Ports |
-| `TestManagerCheckPodmanEUID` | The euid guard across rootless/rootful x root/non-root, and skipped on a non-POSIX euid |
-| `TestManagerPrepHostRootlessAsRootFailsHard` | PrepHost now shares Deploy's `checkPodmanEUID` and fails hard (one definition, one message) when `podman.rootless=true` but the process is root, instead of only warning and going on to mkdir/chown under the wrong namespace mapping -- neither call is reached once the guard rejects |
+| `TestGuardPodmanEUID` | The ONE definition of the invariant -- the same function `cli.prepare` runs before any podman command -- across rootless/rootful x root/non-root, plus the three cases that pass without asking: docker (no rootless mode in this schema), the Echo runner (a preview reaches no host) and a non-POSIX euid (Windows, where the artifact must still render) |
+| `TestGuardPodmanEUIDMessagesNameTheKeyAndTheFix` | Both refusals name the key, the account found, and both ways out -- re-running differently or editing the file -- since the operator has to choose between them |
+| `TestManagerPrepHostRootlessAsRootFailsHard` | PrepHost shares the one guard definition and fails hard (one definition, one message) when `podman.rootless=true` but the process is root, instead of only warning and going on to mkdir/chown under the wrong namespace mapping -- neither call is reached once the guard rejects |
 | `TestManagerDeployPodmanSecretError` | BOTH halves of the store write, because loading a secret is two commands rather than one (`secret rm --ignore` then `secret create`). Either failing must stop the deploy and name the CONFIG KEY behind the secret, so the operator learns which env-file field to look at rather than which podman verb failed. The `rm` half is deliberately fatal: `--ignore` already absorbs the only benign case (nothing in the store yet), so a failure that survives it is real, and creating a secret beside one that could not be removed would leave the store in a state nobody chose |
 | `TestManagerNilSinks` | Nil log and output sinks fall back to discard and stdout without erroring |
 
@@ -2163,7 +2190,7 @@ how the first version of `TestCheckPodmanHostHealthyReportsEveryRow` failed.
 | `TestCheckPodmanHostIsReadOnly` | `validate`'s own promise, asserted with linger OFF -- the one row the block CAN repair, so the read-only caller reporting it and leaving it alone is the whole test. Every call is `Output`, and none is `enable-linger`, `mkdir`, `chown` or `unshare` |
 | `TestCheckPodmanHostSkipsDockerAndPreview` | Docker probes nothing at all here, and the Echo runner reports `skipped (preview)` rather than asserting against answers it cannot get |
 | `TestCheckPodmanHostRootfulStopsAtEUID` | Rootful podman runs the euid row and nothing else: a privileged engine owns the id mapping and installs units under the system systemd instance. Its nofile ceiling is checked one level up, where it applies to every engine (`limits_test.go`) |
-| `TestCheckPodmanHostEUIDMismatchSkipsTheRest` | The reachability-first rule (k8s `verifyRows`' shape): probed as root, a rootless block would read the WRONG user's linger and runtime directory, so those rows are honest skips and nothing is probed at all |
+| `TestCheckPodmanHostEUIDMismatchProbesNothing` | The reachability-first rule: probed as root, a rootless block would read the WRONG user's linger and runtime directory, so it fails and asks nothing. The `skipped (euid mismatch)` rows are gone with the CLI guard -- `cli.prepare` refuses a mismatch before this block can run, so a report enumerating rows nobody will see would describe a path the operator cannot take |
 | `TestEnsureUserSessionDerivesBothWhenUnset` | The sudo/su/cron case: both variables derived from the euid, the runtime dir probed with `test -d` first, and the report saying `(derived)` |
 | `TestEnsureUserSessionNeverOverwritesInherited` | An operator who set one meant it -- neither value is touched, and the report says `(inherited)` |
 | `TestEnsureUserSessionDerivesEachHalfIndependently` | The middle ground where one survives and the other does not: the derived bus is built from the INHERITED runtime dir, and both origins are named |
@@ -2239,7 +2266,6 @@ hard limits can bind.
 | `TestCheckLimitsRootlessReportsTheSoftLimitWithoutGating` | Only a hard limit can bind: any process raises its own soft limit up to its hard one without privilege, and podman sets the container's from the artifact. So a low soft limit is reported and passes |
 | `TestCheckLimitsPrivilegedSkipsTheUserManager` | Docker and rootful podman run a privileged engine, so there is no user manager in the path to ask about |
 | `TestCheckLimitsSkipsWithoutPosixRlimits` | Windows has no POSIX rlimits, no shell to read them with, and an engine whose kernel is inside a VM -- one honest skip row, and nothing probed |
-| `TestCheckLimitsSkipsOnAnEUIDMismatch` | Probed as root, the rootless rows would answer about an account the deploy will never use, so both skip with the reason. `checkPodmanHost` is what FAILS on the mismatch; this block only declines to answer |
 | `TestParseLimit` | One limit value: a decimal, systemd's `infinity` and the shell's `unlimited` for an absent ceiling, and the two shapes that fail |
 | `TestLimitsCheckAssertsWhatTheArtifactAsks` | Why the thresholds are constants in `internal/config` rather than literals in the check: a check asserting something the artifact does not ask for would pass while the broker started under-provisioned. Both rendered artifacts are searched for the same numbers |
 
@@ -2604,7 +2630,8 @@ Override them on the struct after construction:
 | Seam | Default | Where |
 | --- | --- | --- |
 | `Manager.Resolve` | `net.LookupHost` | internal/container -- DNS probes in `Check`/`PrepHost` |
-| `Manager.Geteuid` | `os.Geteuid` | internal/container -- the rootless/rootful guard (returns -1 on Windows, which skips it) |
+| `Manager.Geteuid` | `os.Geteuid` | internal/container -- the executor-side rootless/rootful guard (returns -1 on Windows, which skips it) |
+| `App.Geteuid` | `nil` (`os.Geteuid`) | internal/cli -- the euid `prepare` hands `container.GuardPodmanEUID`. A test driving a podman command through a NON-Echo runner must set it, or the outcome depends on which account runs the suite |
 | `Manager.Getenv` / `Manager.Setenv` | `os.Getenv` / `os.Setenv` | internal/container -- `ensureUserSession`'s `XDG_RUNTIME_DIR` / `DBUS_SESSION_BUS_ADDRESS` derivation. A seam rather than `t.Setenv` because the code WRITES the environment: a real `os.Setenv` would leak into every test after it, and `newCapMgr` installs an inert pair so no test can reach the real one by accident |
 | `Ops.Hostname` | `os.Hostname` | internal/broker -- node-role detection in `LocalRole` |
 | `Ops.Platform` | `""` (zero value) | internal/broker -- resolves the mate's SEMP port from the bridge network.ports mapping (`sempPort`); set by `ctrOps`, left zero on k8s, which never uses the SEMP channel |

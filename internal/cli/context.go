@@ -107,6 +107,13 @@ type App struct {
 	// would pass or fail on what the CI host happens to be addressed as.
 	LocalAddrs func() (map[string]bool, error)
 
+	// Geteuid reports this process's effective uid, for the podman rootless/rootful
+	// guard prepare runs (container.GuardPodmanEUID). Unset it is os.Geteuid; a test
+	// injects one for the reason Hostname exists -- the suite can no more choose
+	// which account it runs as than rename the machine, so a podman command driven
+	// through a NON-Echo runner would otherwise pass or fail on who ran `go test`.
+	Geteuid func() int
+
 	// kubeContext is the kubeconfig context announceKubeContext resolved at load,
 	// repeated by every destructive Kubernetes prompt (k8sWhat). Empty when it
 	// could not be resolved, when the platform is not Kubernetes, or under a
@@ -185,6 +192,13 @@ func (a *App) fillStandaloneNodeName() {
 // hostname reads this host's name through the App's seam, defaulting to os.Hostname.
 // Same shape as broker.Ops.hostname, and the same reason: a test cannot rename the
 // machine running the suite.
+func (a *App) geteuid() int {
+	if a.Geteuid != nil {
+		return a.Geteuid()
+	}
+	return os.Geteuid()
+}
+
 func (a *App) hostname() (string, error) {
 	fn := a.Hostname
 	if fn == nil {

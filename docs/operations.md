@@ -34,8 +34,9 @@ is "would a different invocation have helped?".
 An env file that cannot be found, cannot be parsed, fails validation, declares no platform
 section or declares several without `--platform` is therefore **2**, not 1 -- you chose that
 file, and no amount of waiting fixes it. So is a command or flag that does not apply to the
-platform the file selected, a bad `--pod`/`--platform`/`--since` value, and
-`--allow-command` on a command that renders without executing.
+platform the file selected, a bad `--pod`/`--platform`/`--since` value,
+`--allow-command` on a command that renders without executing, and a `podman.rootless`
+that disagrees with the account you ran as -- `true` under `sudo`, or `false` without it.
 
 **One documented exception:** a mistyped *top-level* command exits **1**, not 2
 (`solace-util depoy broker`). Cobra produces that error before this tool can classify it,
@@ -65,6 +66,11 @@ binding, start the daemon. It never logs you in or starts anything on your behal
 there is no flag to skip it: previewing a command's effect without touching a cluster is
 what `generate` is for, and a render-only command never runs the preflight because it never
 runs anything.
+
+On podman one check precedes even that probe. The declared `podman.rootless` is compared
+with the account running the command, and a mismatch is refused before `podman info` can
+run as the wrong one -- a rootful `info` succeeding as root says nothing true about the
+rootless user's session. `generate` alone does not check, because it renders from anywhere.
 
 ## Version floors
 
@@ -461,7 +467,7 @@ promises:
 
 | Row | What it asserts | If it fails |
 | --- | --- | --- |
-| `euid` | not root when `rootless: true`, root when `false` | every row below is skipped -- probed as root they would answer about the wrong account |
+| `euid` | not root when `rootless: true`, root when `false` | refused before any row is read and before `podman info` runs, exit 2. Re-run as the account the file names, or change `podman.rootless`. Probed as the wrong account every row below would answer about a user the deploy never uses |
 | `user session` | `XDG_RUNTIME_DIR` names a directory that exists | you are under `sudo`/`su`/cron, or the user has no session |
 | `id mapping` | this user has a subuid/subgid allocation **and** it reaches `container.runUser` | an administrator allocates or widens it (below), then you run `podman system migrate` |
 | `linger` | `loginctl show-user <uid> --property=Linger` reports `yes` | **`broker deploy` enables it for you**; `validate` reports it |
@@ -470,6 +476,9 @@ promises:
 
 The container's rlimits are checked too, but not here: they bind every engine, so they have
 [a section of their own](#the-limits-the-container-actually-gets).
+
+The `euid` row is not a row that can be repaired at all -- it is the precondition the rest of
+the block runs under, and the only fix is a different invocation.
 
 **What decides whether a row is repaired: the privilege it needs, not how easy it is.** The
 tool already performs several unprivileged host changes during prep -- `mkdir -p`, `chmod`,
@@ -695,7 +704,10 @@ See a bare `solace-util examples`, or the same text at [env/sample.yaml](../env/
 apply before it touches a cluster or a host. There is no `--dry-run` and no per-command
 render flag. It prints to stdout and changes nothing: it runs no external command at all,
 which is what makes it the safe way to inspect an env file you did not write (see
-[The command fields are executable content](configuration.md#the-command-fields-are-executable-content)):
+[The command fields are executable content](configuration.md#the-command-fields-are-executable-content)).
+On podman it is also the one command that does not check `podman.rootless` against your
+account, for the same reason -- a rootless file renders under `sudo` and a rootful one
+renders on a laptop, so what you read is the artifact the file describes:
 
 ```
 solace-util broker generate -e dev.yaml                            # namespace + Secrets + CR (kubernetes)
@@ -1522,7 +1534,8 @@ soft limit up to its hard one without privilege, and the engine sets the contain
 artifact. And the two drop-ins are not alternatives -- the unit one is the container's
 ceiling, the `limits.d` one is your shell's, and a rootless host wants both.
 
-`validate` reports all of this and changes nothing, whatever the euid.
+`validate` reports all of this and changes nothing -- once it is running as the account
+`podman.rootless` names. The wrong account is refused before the first row.
 
 ### Podman secret flags
 

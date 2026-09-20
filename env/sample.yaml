@@ -391,7 +391,10 @@ docker:
 podman:
   # command: podman                 # same rules as docker.command; only `podman`
   rootless: false                   # true = user systemd + `podman unshare` chown, and
-                                    # runUser defaults to 1000:0 instead of 1000001:0
+                                    # runUser defaults to 1000:0 instead of 1000001:0.
+                                    # Declared, then checked against who runs the
+                                    # command: true refuses under sudo, false requires
+                                    # it. `generate` alone does not check
   # quadletDir: /etc/containers/systemd   # rootless: $XDG_CONFIG_HOME/containers/systemd
   baseDir: /opt/solace              # mandatory, must be ABSOLUTE. Host directory for
                                     # files this tool writes for podman -- today the
