@@ -10,9 +10,6 @@ one. The broker is shipped as a Linux container, so two layers have to hold: the
 own posture, and the host it lands on. A tool can only own the first, which is what this
 document is about.
 
-[docs/container-security-remediation.md](container-security-remediation.md) records where
-**this** repository currently stands against these rules.
-
 ## The eight rules
 
 | # | Rule | Docker | Podman | Kubernetes |

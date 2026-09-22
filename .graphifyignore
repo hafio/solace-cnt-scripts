@@ -39,3 +39,4 @@ LICENSE
 solace-theme-reference.md
 .broker.yaml
 bash/
+tmp/
