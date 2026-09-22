@@ -40,6 +40,8 @@ needs and is safe to re-run.
 | [docs/configuration.md](docs/configuration.md) | The env file: keys, platform detection, scaling, secrets, replication, the command allowlist, `convert` |
 | [docs/operations.md](docs/operations.md) | Day-2: preflight, config order, HA mechanics, re-deploying, removal, data replication, upgrades, troubleshooting |
 | [docs/developer.md](docs/developer.md) | Build, dev-script tasks, gates, goldens, releases, repo layout |
+| [docs/container-security.md](docs/container-security.md) | The container security rules every platform must satisfy, and how each is expressed -- written to be reused in other projects |
+| [docs/container-security-remediation.md](docs/container-security-remediation.md) | Where this tool stands against those rules, the open gaps and the plan for each |
 | [env/sample.yaml](env/sample.yaml) | The annotated schema -- what a bare `solace-util examples` prints, committed for reference |
 
 ## Requirements

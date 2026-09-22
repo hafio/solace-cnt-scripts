@@ -36,8 +36,7 @@ semp
 # graphify per-machine state: the interpreter path is one host's absolute path, so
 # each machine regenerates its own (the skill writes it in step 1)
 graphify-out/.graphify_python
-# graphify atomic-replace backups, left behind by an interrupted run
-graphify-out/cache/.gfy-replace-*.tmp
+graphify-out/cache
 # Windows-host Docker capture helper, removed 2026-09-16; ignored so it cannot return
 /capture-docker.ps1
 
