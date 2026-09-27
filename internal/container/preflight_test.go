@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -232,7 +233,8 @@ func TestComposeSecretEnvNamesCannotBeSystemVars(t *testing.T) {
 
 // TestComposeSecretEnvIsTheOnlyChildEnvironment guards the assumption the two tests
 // above rest on: if a second code path ever starts adding variables to a child, it
-// must be audited the same way. render.ContainerSecrets is that single source.
+// must be audited the same way. render.ContainerSecrets is that single source: one
+// variable per secret, plus the certificate's DigestEnvVar, which render also names.
 func TestComposeSecretEnvIsTheOnlyChildEnvironment(t *testing.T) {
 	cfg := ctrCfg(config.Docker, "true")
 	m, _, _ := newCapMgr(cfg, config.Docker)
@@ -252,5 +254,27 @@ func TestComposeSecretEnvIsTheOnlyChildEnvironment(t *testing.T) {
 	masked := engine.MaskEnv(raw)
 	if strings.Contains(masked, "secret-pass") || strings.Contains(masked, "test-psk") {
 		t.Errorf("MaskEnv leaked a secret value: %q", masked)
+	}
+	// With a certificate, exactly the variables render names: each EnvVar, and the
+	// certificate's DigestEnvVar.
+	cfg.TLS.Cert, cfg.TLS.CertKey = "certs/tls.crt", "certs/tls.key"
+	var names []string
+	for _, s := range render.ContainerSecrets(cfg, config.Docker) {
+		names = append(names, s.EnvVar())
+		if len(s.SourceFiles) > 0 {
+			names = append(names, s.DigestEnvVar())
+		}
+	}
+	withCert, err := m.composeSecretEnv(true)
+	if err != nil {
+		t.Fatalf("composeSecretEnv: %v", err)
+	}
+	var got []string
+	for _, pair := range withCert {
+		name, _, _ := strings.Cut(pair, "=")
+		got = append(got, name)
+	}
+	if !slices.Equal(got, names) {
+		t.Errorf("child variables = %v, want exactly %v", got, names)
 	}
 }

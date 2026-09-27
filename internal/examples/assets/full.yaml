@@ -281,8 +281,11 @@ kubernetes:
   # imagePullPolicy: IfNotPresent   # Always | IfNotPresent | Never
   updateStrategy: automatedRolling  # automatedRolling | manualPodRestart
   serviceAccount: solace-sa         # optional
-  # securityContext:                # omitted entirely when unset
-  #   runAsUser: "1000001"          # "0" asks OpenShift to auto-assign
+  # securityContext:                # omitted entirely when unset. Ids are plain
+                                    # decimal 0-2147483647; "0" means the operator's
+                                    # default (1000001/1000002), or on OpenShift an
+                                    # id the SCC assigns
+  #   runAsUser: "1000001"
   #   fsGroup: "1000002"
   # containerSecurity:
   #   runAsUser: "1000001"
@@ -396,9 +399,13 @@ docker:
   #     retries: 3
   #     startPeriod: 60s
   # network:
-  #   mode: host                    # host | bridge
-  #   ports:                        # host:container. Omitted in bridge mode, the same
-  #     - 8080:8080                 # 17 ports Kubernetes defaults to are published
+  #   mode: host                    # host | bridge. host publishes nothing: every broker
+                                    # listener binds on this host's own interfaces, so
+                                    # the host firewall decides what reaches it
+  #   ports:                        # host:container, optionally [ip:] first and /tcp or
+  #     - 8080:8080                 # /udp last; either side may be a lo-hi range.
+                                    # Omitted in bridge mode, the same 17 ports
+                                    # Kubernetes defaults to are published
 
 podman:
   # command: podman                 # same rules as docker.command; only `podman`
@@ -408,12 +415,11 @@ podman:
                                     # command: true refuses under sudo, false requires
                                     # it. `generate` alone does not check
   # quadletDir: /etc/containers/systemd   # rootless: $XDG_CONFIG_HOME/containers/systemd
-  baseDir: /opt/solace              # mandatory, must be ABSOLUTE. Host directory for
-                                    # files this tool writes for podman -- today the
-                                    # server-certificate bundle, which holds the PRIVATE
-                                    # KEY, written 0600 in a 0700 directory. Kept
-                                    # separate from quadletDir, which systemd scans.
-                                    # Removed by `broker remove`, NOT by --delete-data
+  # baseDir: /opt/solace            # optional and UNUSED. Earlier builds wrote the
+                                    # server-certificate bundle (the PRIVATE KEY) here;
+                                    # it now rides podman's secret store. When set, must
+                                    # be ABSOLUTE, and deploy/remove delete the old
+                                    # <container.name>-tls-servercertificate.pem in it
   container:
     dataDir: /opt/solace/data       # mandatory, must be ABSOLUTE (see docker above)
   #   name: solace

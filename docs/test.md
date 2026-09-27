@@ -59,7 +59,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-85 test files, 1428 test functions. Three of those are not tests. Two are os/exec
+86 test files, 1447 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -70,24 +70,24 @@ launched from.
 
 | Package | Files | Tests |
 | --- | --- | --- |
-| internal/k8s | 19 | 227 |
+| internal/k8s | 19 | 230 |
 | internal/broker | 22 | 430 |
-| internal/cli | 12 | 200 |
-| internal/config | 15 | 231 |
-| internal/container | 8 | 188 |
+| internal/cli | 12 | 202 |
+| internal/config | 16 | 237 |
+| internal/container | 8 | 194 |
 | internal/convert | 1 | 39 |
-| internal/render | 2 | 43 |
+| internal/render | 2 | 45 |
 | internal/engine | 2 | 27 |
 | internal/output | 1 | 16 |
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **85** | **1428** |
+| **Total** | **86** | **1447** |
 
 
 ## Coverage
 
-Last recorded run, from `scripts/logs/cov.log` (2026-09-27), total **92.9%**. Re-run `cov`
+Last recorded run, from `scripts/logs/cov.log` (2026-09-28), total **93.1%**. Re-run `cov`
 after any change; these figures go stale the moment tests move, and the previous total is
 the floor the next run has to hold.
 
@@ -96,6 +96,34 @@ the floor the next run has to hold.
 which is the evidence that the floor stays comparable across the switch. The same change
 defaulted `GORACE` to `atexit_sleep_ms=0` on race runs: `test` went from 20s to 4s and
 `cov` from 20s to 5s, `internal/engine` from 17.3s to 0.3s.
+
+**93.0% -> 93.1%, and `internal/cli` 83.1% -> 83.6%, `internal/container` 95.5% -> 95.6%,
+`internal/render` 98.6% -> 98.7%, from the certificate's deploy and hot-swap paths.** Every
+new branch arrived with its test: the Kubernetes digest annotation, the change check and the
+pods check, the deploy's restart consent in each of its answers, the hot-swap order on
+Kubernetes, podman's store update and its two failures, and docker's label check including
+the preview and unreadable-file answers. A first run read `internal/container` at 95.1%
+because those last error branches had none; the tests that closed it are in this change.
+86 files and 1447 functions.
+
+**93.0% held, and `internal/config` 96.6% -> 96.7%, from holding the values written as-is
+into an artifact to their consumer's grammar.** The new `artifactvalues.go` (image
+reference, container port entries, health-check timings) arrived with a test per branch
+and every injection case, and the CR's quoted image lines with
+`TestBrokerCRQuotesTheImageReference`; every other package held. A second run after the
+operator bundle's values and the CR's storage sizes joined it
+(`TestValidateK8sArtifactValues`) held every figure. 86 files and 1438 functions.
+
+**92.9% -> 93.0%, from podman's certificate moving into its secret store, the Kubernetes
+security-id check and the quadlet memory key.** Every per-package figure held against the
+run below -- `internal/config` 96.6%, `internal/render` 98.6%, `internal/container` 95.5%,
+`internal/cli` 83.1%, `internal/k8s` 93.3% -- while the total moved: the deleted host-file
+writer (`writeCertBundle`, `removeCertBundle`, `prepBaseDir`) went with its tests, and its
+replacement arrived with a test per branch -- the digest label's three outcomes, the fatal
+certificate-secret removal, the legacy-file clean-up on both commands and its preview and
+error paths, the report's certificate source and `baseDir` row -- plus
+`TestValidateK8sSecurityIDs` and `TestQuadletKeysAreWithinTheFloor`. 85 files and 1433
+functions. The per-package table below is refreshed from this run.
 
 **92.8% -> 92.9%, and `internal/k8s` 92.9% -> 93.3%, `internal/cli` 82.9% -> 83.1%,
 `internal/config` 96.5% -> 96.6%, from the admin Secret's three states.** The new
@@ -233,13 +261,13 @@ path that actually runs.
 | internal/abbrev | 100.0% |
 | internal/output | 100.0% |
 | internal/tools/vulnjudge | 98.9% |
-| internal/config | 96.4% |
-| internal/render | 97.5% |
+| internal/render | 98.7% |
 | internal/convert | 97.4% |
-| internal/broker | 93.2% |
-| internal/container | 95.5% |
-| internal/k8s | 92.8% |
-| internal/cli | 82.8% |
+| internal/config | 96.7% |
+| internal/container | 95.6% |
+| internal/k8s | 93.3% |
+| internal/broker | 92.2% |
+| internal/cli | 83.6% |
 | internal/examples | 90.0% |
 | internal/engine | see below |
 
@@ -290,8 +318,8 @@ Config loading, defaults, validation, and env-file resolution, plus the `Command
 type behind the platform CLI overrides and the execution guard that decides what a
 `Command` may be, the scaling block that sizes the broker on every platform, and the
 platform vocabulary the CLI resolves against, the host-path rules every file-valued
-key is held to, and the two storage stories a Kubernetes deployment may tell.
-231 tests across 15 files.
+key is held to, the grammar every value written as-is into an artifact is held to, and
+the two storage stories a Kubernetes deployment may tell. 237 tests across 16 files.
 
 ### command_test.go
 
@@ -372,6 +400,8 @@ validator and every executor enforce it from one definition.
 | `TestRootlessRunUserFitsAStockSubuidRange` | The arithmetic behind the rootless/privileged split, pinned rather than left in a comment: a subuid range must reach the id itself, so `RootlessRunUser` needs 1001 entries (inside the 65536 `useradd` allocates) while `ImageRunUser` would need 1000002. It also pins gid 0 on both -- the group the image expects, and the only gid needing no subgid allocation since rootless maps container gid 0 to the invoking user's own group -- and fails if `ImageRunUser` ever becomes small enough to fit, since the split would then be unnecessary. Both constants are parsed through one helper, after an earlier version `Atoi`'d the whole `uid:gid` string, discarded the error and silently compared against 0 |
 | `TestValidateK8sKeyValueEntries` | The "key: value" fragments (loadBalancer.annotations, placement.labels*) must carry a key; a value holding a colon is fine because the renderer quotes both halves |
 | `TestValidatePullPolicy` | `kubernetes.imagePullPolicy` enum, including the empty case that keeps the renderer's own IfNotPresent |
+| `TestValidateK8sSecurityIDs` | The four pod security ids (`securityContext.runAsUser`/`fsGroup`, `containerSecurity.runAsUser`/`runAsGroup`) are written into the CR unquoted, where kubectl re-reads them as YAML: all four accept empty, `"0"` (the operator default) and plain decimal up to 2147483647, and refuse every other spelling -- sign, decimal point, exponent, leading zero (`010` would re-read as octal 8), hex, underscore, whitespace, a boolean, a newline that injects a spec key or a `---` document -- plus anything above the pod id ceiling, each error naming the dotted key, the quoted value and the range. A block carrying only `readOnlyRootFilesystem` is unaffected |
+| `TestLoadSecurityIDsAsWritten` | The same check through `Load`: yaml hands a scalar to a string field verbatim, so unquoted `1000001` loads while unquoted `1e6` and `010` reach validation as typed and are refused naming the field |
 | `TestValidateK8sDNSLabels` | The two DNS-1123 shapes Kubernetes really enforces: `kubernetes.namespace`/`name`/`operator.namespace` must be a single LABEL (no dot, 63-char cap), while the three secret-name fields (`adminSecret`/`tlsServerSecret`/`imagePullSecret`) get the looser SUBDOMAIN rule (dots allowed, 253-char cap) that lets `prod.solace-admin-secret` -- accepted by kubectl today -- keep validating; a shared bad-case set (uppercase, leading hyphen, an embedded YAML document separator, colon, space) is rejected by both |
 | `TestValidateK8sOptionalSecretNamesStayOptional` | The regression the DNS-1123 hardening could have introduced: the three secret-name fields and `operator.namespace` were never mandatory, so leaving one blank must still validate exactly as before |
 | `TestValidatePlacementAffinity` | The additive affinity blocks: unknown operator, missing key, In without values, and a pod term with no topologyKey each fail naming the field; a full valid set passes |
@@ -521,6 +551,21 @@ setting.
 | --- | --- |
 | `TestCanonicalDuration` | The round-trip that keeps a free-form string out of an argv: what comes back is produced by `time.Duration.String()`, so it is provably digits plus unit letters and no consumer downstream has to police it |
 
+### artifactvalues_test.go
+
+The values a renderer writes as-is -- the image reference into the quadlet unit, the
+compose file and the CR, the port list and health-check timings into the two container
+artifacts, the operator bundle's image, limits and watch list, the CR's storage sizes --
+where a newline would add a unit key, a `[Service]` command or a YAML document. Each is held to the grammar its consumer accepts. `artifactInjections` is the
+shared table of values that would restructure an artifact, run against every field.
+
+| Test | What it covers |
+| --- | --- |
+| `TestValidateImageReference` | `image.registry`, `image.repo` and `image.tag` against the reference grammar, on all three platforms: a registry host with optional `:port` and path, a lowercase repository path optionally led by a host, a 1-128 character tag not starting with `.` or `-` (no digest). Real forms pass (`localhost:5000/solace/broker`, `ghcr.io/solace`); schemes, trailing or doubled slashes, uppercase paths, spaces and every injection are refused, naming the field and the value |
+| `TestValidContainerPort` | The one publish form accepted: `[ip:]host:container[/tcp\|/udp]`, an IPv6 address in brackets, either side a port or `lo-hi` range, a container range needing an equal host range. A bare or empty side, port 0 or above 65535, a leading zero or sign, an unknown or uppercase protocol, a hostname or an unbracketed IPv6 address, an inverted or mismatched range, surrounding spaces and every injection are refused, naming the entry and the form |
+| `TestValidateContainerArtifactValues` | Both checks through `Validate` on docker and podman: the defaults pass; a bad `network.ports` entry is refused by index in host mode as well as bridge; `healthCheck.interval`/`timeout` must be positive Go durations and `startPeriod` zero or more, with a unitless number, a negative value and an injection refused naming the field |
+| `TestValidateK8sArtifactValues` | The Kubernetes values substituted raw: `kubernetes.operator.image` (repository, optional tag and `@sha256:` digest), `operator.cpu`/`mem` and `storage.msgNodeSize`/`monNodeSize` as Kubernetes quantities with no sign or exponent, and each `operator.watchNamespaces` entry as a DNS-1123 label after the same trimming the watch list gets -- so empty entries and spaces around commas pass while an uppercase or underscored entry, a quote and every injection are refused, naming the field or entry |
+
 ### hostpath_test.go
 
 Every file-valued key an env file carries becomes a host path this process reads, joins
@@ -543,7 +588,7 @@ and the keys deliberately exempt from it.
 | `TestRebaseResolvesAgainstTheEnvFileDirectory` | The join itself: relative values move, absolute ones do not. Covers `broker.domainCerts.dirs[].path` and `.files{}` (a map, so its own write-back loop) alongside the renamed folder fields |
 | `TestRebaseIsANoOpWithoutABaseDir` | The property `internal/convert` and every hand-built `Config` depend on -- `ApplyDefaults` and `Validate` are called directly, with no path to derive a base from, and those paths behave exactly as before |
 | `TestQuadletDirAndDataDirAreNotRebased` | The two deliberate exclusions, each for its own reason: the unit must live where systemd scans, and the data dir is what a recursive delete points at |
-| `TestPodmanBaseDirIsRequiredAndAbsolute` | Both halves of the one mandatory path key. Mandatory rather than defaulted because it receives the server-certificate bundle, which contains a PRIVATE KEY; required absolute rather than rebased because it is a quadlet `Volume=` source, and podman reads a relative source as a NAMED VOLUME -- mounting an empty volume over the certificate with no error at all |
+| `TestPodmanBaseDirIsOptionalButAbsolute` | `podman.baseDir` no longer receives anything -- the certificate rides podman's secret store -- so an unset value validates. A SET one is still refused when relative, naming the key and why: deploy and remove delete the legacy bundle under it, and a relative value would aim that delete at the working directory. Docker never polices it |
 | `TestDataDirMustBeAbsolute` | The one host path REQUIRED absolute rather than resolved, with a message explaining both halves of why: it is a bind-mount source (podman reads a bare one as a named volume) and it is what `broker remove --delete-data` empties |
 | `TestContainerHostDirsExpandATilde` | Replaces `TestContainerHostPathsRefuseATilde`, which pinned an exclusion that is gone. `podman.quadletDir`, `podman.baseDir` and `<platform>.container.dataDir` were the three keys `expandHomePaths` skipped, on the argument that they name the CONTAINER's host while `os.UserHomeDir` answers for this tool's -- and the code says otherwise: this process writes the quadlet unit and the certificate bundle itself (`os.WriteFile`/`os.Remove`) and creates, chowns and `rm -rf`s the data dir through local subprocesses, and the rootless `quadletDir` default is already built from `os.UserHomeDir`. So each of the four container dir keys expands like every other path key, and `checkContainerHostPath` went with the exception it existed for. Two things per field, and the second is what forced `Load`'s ordering change: the value expands, and the EXPANDED value then satisfies `Validate`'s own absoluteness requirement -- `dataDir: ~/solace/data` is not absolute by `IsAbsHostPath`, so a `Validate` that ran first refused it before anything could expand it. The fail-closed half is pinned too, and now comes from `CheckHostPath` ITSELF: one rule, one gate |
 | `TestDomainCertsDirsAreNotDefaulted` | Replaces `TestDomainCertsFolderIsDefaulted`: the retired `folder` key defaulted to `certs`, but its replacement, `dirs`, deliberately does NOT -- an unconfigured file must stay the documented no-op, and defaulting a dir that does not exist would turn that no-op into a hard failure under rule F (an unreadable configured dir is an error) |
@@ -684,7 +729,7 @@ without a live broker;
 fixtures stand in for a captured `show current-config` transcript; and
 `exportconfigReadCounter` wraps `App.PromptIn` to prove a confirmation prompt was never
 actually read, not merely that the command did not block.
-200 tests across 12 files.
+202 tests across 12 files.
 
 Because the platform is a flag rather than the first word of a command, the
 invocations here name it explicitly (`--platform docker`) rather than relying on
@@ -776,6 +821,8 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 | `TestK8sLoginOutcomes` | a transport failure propagates as an error and a canned 200 OK response returns nil, the two real SEMP outcomes engine.Echo's fixed (nil,nil) can never produce; without `semp.adminPass` the password is read back from the admin Secret the broker uses and reaches curl on stdin, never argv, and a failed read never reaches curl |
 | `TestCtrLoginOutcomes` | same as TestK8sLoginOutcomes for the container login path |
 | `TestOpK8sDeployAborts` | `opK8sDeploy`'s error-return arms (CreateNamespace, CreateSecrets, DeployBroker), each failed in its own sub-test with no later step's command issued afterward. Two arms the `deploy all` version had are gone: no Check step, since a deploy runs the per-operation preflight rather than the whole validate report, and no operator-apply step, since the operator has its own noun |
+| `TestK8sDeployRestartsForARenewedCertificate` | A renewed certificate changes only the TLS Secret, which a running pod does not re-read and the operator does not roll out, so a Kubernetes deploy takes the container deploy's consent. The live Secret's digest decides whether anything changed and the primary pod whether anything runs: renewed and running restarts all three pods in `RestartOrder` (monitor first) on `--restart` or a yes, and not on a no or with no terminal; nothing running, or an unchanged digest, restarts nothing even under `--restart` |
+| `TestConfigureServerCertsHotSwapsWithoutARestart` | On Kubernetes the TLS Secret is rewritten FIRST -- what a pod mounts when it next starts -- and then the certificate is loaded over the CLI into all three pods, which is what the running broker serves; no pod is deleted and nothing is rolled out |
 | `TestOpK8sRemoveAborts` | `opK8sRemoveBroker`'s two error-return arms (DeleteBroker, DeleteSecrets): a failed broker- or secrets-deletion stops before the namespace is even inspected. That question is only meaningful once everything this env file owns is gone -- getting it wrong would offer to cascade-delete a namespace still holding a broker whose deletion had failed |
 | `TestRemoveBrokerKeepsTheNamespaceWhileItsPVCsRemain` | The command-level half of `TestRetainedPVCsKeepTheNamespace`: `broker remove --no-prompt` without `--delete-data`, with the occupancy listing returning a kept PVC, issues no `delete namespace` and no PVC delete, and the report names the PVC. `--no-prompt` answers the namespace question yes, so the listing is the only thing standing between kept data and a cascade. The empty-listing arm DOES delete the namespace, which proves the assertion can fail |
 | `TestDeployRefusesAnOperatorPasswordOverKeptData` | The deploy guard runs FIRST: with no admin Secret named and an earlier broker's data PVC present, `broker deploy` is refused naming the PVC and nothing is applied |
@@ -860,7 +907,7 @@ the destructive-confirmation tests use.
 | `TestPlatformFlagRejectsUndeclaredSection` | Naming a platform the file does not describe is refused, naming both what was asked for and what the file declares -- the alternative is deploying from defaults nobody wrote down |
 | `TestPlatformFlagRejectsUnknownValue` | Keeps `k8s` and `k8` out, along with other near-misses (`swarm`) |
 | `TestUnsupportedCommandFailsLoud` | The other half of the one-tree decision: since the tree shows every command everywhere, the refusal is what tells an operator a command does not apply -- and it names where it does apply, so the message is not a dead end. Covers both directions (kubernetes-only commands on docker, container-only on kubernetes) |
-| `TestScopedFlagFailsLoud` | `--restart`, `--all` and `--pod` are refused where they mean nothing rather than accepted and ignored -- a `--restart` that did nothing would read as "already restarted" |
+| `TestScopedFlagFailsLoud` | `--pod` and `--previous` are refused where they mean nothing rather than accepted and ignored -- a `--previous` that did nothing would read as "no earlier run". `--restart` left the table when it came to mean something on Kubernetes too (`TestK8sDeployRestartsForARenewedCertificate`) |
 | `TestUnusableRoleFailsLoud` | A role that was TYPED must never be silently dropped. No command takes a `[role]` positional any more, so every case is the one migration error (`noRolePositional`), on both platforms -- `broker logs backup`, `broker cli backup`, `broker shell monitor`, `broker status backup`, `broker restart backup`, `broker deploy backup`. The two refusal kinds collapsed into one when `rejectRole` went with the positional; the platform half of the guard is now `--pod` being scoped per command, which `TestScopedFlagFailsLoud` covers |
 | `TestRolePositionalTeachesPodFlag` | The likelier half of the H2 migration: an operator on KUBERNETES typing the OLD documented spelling (`shell backup`, `broker logs monitor`, `cli primary`, `broker status backup`, `broker restart backup`, `broker perform semp-login-check backup`) gets an error naming both `--pod` and the role typed, rather than cobra's bare "unknown command" hiding the fact that it merely moved. A `shell typo` subtest pins the other side: a word that is not a role keeps cobra's own wording and never offers the `--pod` hint, since a typo is not a migration |
 | `TestPlatformIsAnnouncedInThePreamble` | The platform is inferred rather than typed by the operator, so it is stated in the preamble -- otherwise the one fact the operator does not type themselves would also be the one they cannot see |
@@ -1764,7 +1811,7 @@ operator, day-2 ops, secrets, and the pod transport, plus the operator's watch-l
 algebra and the namespace occupancy gate, plus the mate channel that reaches a
 replication site in another cluster, and the Secret read that supplies a mate's
 password -- or this broker's own admin password, when the env file does not carry it.
-227 tests across 19 files.
+230 tests across 19 files.
 
 ### adminsecret_test.go
 
@@ -1925,6 +1972,8 @@ instead of the first.
 | `TestCreateSecretsPreflight` | Missing TLS inputs fail before any apply runs |
 | `TestDeleteSecrets` | All configured secrets are deleted; admin-only config deletes one. Both the TLS and the image-pull Secret follow the MATERIAL, not the NAME (`ManagesTLSSecret`/`ManagesImagePullSecret`): a Secret this env file only names, with no credentials behind it, is the operator's own and survives; with credentials (or TLS files) present and no name configured, the delete targets the same DERIVED default `GenSecrets` built the Secret under -- `<kubernetes.name>-image-pull`, `<kubernetes.name>-tls` -- not a skip and not an invented name |
 | `TestUpdateServerCertSecret` | The TLS secret is applied on stdin; files with no name rotate the derived `<kubernetes.name>-tls`; neither a name nor files errors before any call; a named Secret with no files is refused naming where to rotate it; a half pair fails after the probe and before any apply |
+| `TestServerCertChanged` | The comparison a Kubernetes deploy makes before rewriting the TLS Secret: the live digest annotation against the files, read by jsonpath with `--ignore-not-found` so the Secret's data never comes back. No Secret yet, or one this env file does not build (no call at all): unchanged. Equal: unchanged. Different, missing (an earlier build) or unreadable: changed |
+| `TestBrokerPodsExist` | "A broker is already running" is the primary pod existing; an empty answer or a failed read is false, so a preview never offers a restart |
 | `TestCreateSecretsWithNothingToBuildDoesNothing` | With no admin password (referenced or operator-generated admin Secret), no TLS files, no registry credentials and no additional users, CreateSecrets runs nothing at all -- no apply, since `kubectl apply` of an empty stream fails, and no permission probe for a create that never happens |
 | `TestCreateSecretsStopsOnPreflightFailure` | A refused `auth can-i create secrets` stops CreateSecrets before GenSecrets reads the TLS private key off disk -- loading key material for a cluster that will not accept it is work worth not doing |
 | `TestGenBrokerLeadsWithTheNamespace` | The gap this closed: the stream used to start at the Secrets, so piping it at an empty cluster failed -- the Secrets and the CR are namespaced and the namespace was not there yet. `operator generate` had carried its own Namespace document from the start; this half had not. Order is asserted as offsets, since that is the whole property |
@@ -2111,6 +2160,7 @@ AGE column is reproducible.
 | `TestAdminSecretErrors` | An empty password, and no name with no `kubernetes.name` to derive `<kubernetes.name>-admin` from, both error |
 | `TestAdminSecretUnderTheDerivedName` | With a password and no name configured the Secret is built as `<kubernetes.name>-admin`, the name the CR references |
 | `TestTLSSecretErrors` | Unset cert, no secret name with no `kubernetes.name` to derive one from (an unset `kubernetes.tlsServerSecret` alone now derives `<kubernetes.name>-tls`), and missing cert/CA/key files all error |
+| `TestTLSSecretCarriesItsDigest` | The TLS Secret carries `solace-util.sha256` as a quoted annotation (a label value stops at 63 characters; the hex digest is 64) over the key and the `tls.crt` chain, so adding a CA changes it too |
 | `TestAdminSecretCarriesThePSKOnlyWhenSet` | The Kubernetes half of the PSK asymmetry, from the Secret's side. The key rides in the SAME Secret as the credentials -- the CR points at it through a separate field, so one object serves both -- and under the CRD's own spelling (`preshared_auth_key`), not ours. An unset key adds no entry at all: an empty one is a key the operator would honour, and the group then fails to form on it |
 | `TestGenSecretsSkipsATLSSecretItDoesNotOwn` | The fix for a real failure: an env file naming an existing Secret and supplying no cert/key made `broker generate` read `certs/tls.crt` -- an invented path -- and fail on a file the operator never mentioned. The stream still carries the credentials Secret, so this narrows one document rather than the whole thing |
 | `TestGenSecretsBuildsATLSSecretItOwns` | The other arm: with the pair supplied the Secret is rendered as before, under the configured name. `writeTempPEM` is the stub-file helper -- the renderers copy the bytes rather than parsing them |
@@ -2143,7 +2193,7 @@ The host-local Docker/Podman manager, its node-local transport, and the engine
 preflight that precedes every mutating operation, plus the engine `inspect` decode
 behind `broker status` and the server-certificate delivery each engine needs, and the
 host rlimit ceilings every engine is bounded by.
-188 tests across 8 files.
+194 tests across 8 files.
 
 ### runtime_test.go
 
@@ -2168,19 +2218,19 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestPreflightHintIsPlatformShaped` | Docker gets the daemon/group hint; rootful podman gets `sudo systemctl start podman.socket`; rootless podman gets the user-session hint and explicitly NOT a sudo suggestion, which would start the engine its deploy is not using. None of them offers to act on the operator's behalf |
 | `TestPreflightIsPreviewableUnderDryRun` | `--dry-run` echoes the probe and skips its assertion, so previewing needs no engine -- which is why there is no skip flag |
 | `TestComposeSecretEnvNamesCannotBeSystemVars` | The config-side half of the child-environment rule: even with `container.name` set to `PATH`, `LD_PRELOAD`, `ld.preload` or `IFS`, every variable name keeps its fixed literal suffix, so no config value can produce a name the child's loader reads |
-| `TestComposeSecretEnvIsTheOnlyChildEnvironment` | `composeSecretEnv` passes through exactly the secrets `render` declares and invents none, which is the assumption the test above rests on; values stay masked in any display path |
+| `TestComposeSecretEnvIsTheOnlyChildEnvironment` | `composeSecretEnv` passes through exactly the variables `render` names and invents none, which is the assumption the test above rests on: one `EnvVar` per secret, plus the certificate's `DigestEnvVar` when one is configured; values stay masked in any display path |
 
 ### manager_test.go
 
 | Test | What it covers |
 | --- | --- |
 | `TestManagerCheckDryRun` | Preflight report for docker/podman x HA/standalone: title, mode line, runtime version probe, dry-run skip note |
+| `TestCheckEnvReportsBaseDirOnlyWhenSet` | The podman report row names `podman.baseDir` only when it is set, labelled as legacy bundle clean-up only, and leaves it out rather than printing an empty value when unset |
 | `TestManagerCheckDNSFailsLoudInHA` | An unresolvable redundancy host fails the check and is named |
 | `TestManagerCheckStandaloneDNSWarnsOnly` | Standalone tolerates an unresolved name |
 | `TestManagerPrepHostRootlessUsesUnshareChown` | Rootless podman chowns via `podman unshare`, once the whole host-readiness block ahead of it has passed (`healthyRootlessOut`, rootless_test.go), and the `chmod 775` runs in the SAME namespace and lands before that chown -- asserted by call position, plus an anti-assertion that no bare host-side chmod is issued, which on a re-deploy would be refused because the directory already belongs to the subuid |
-| `TestManagerPrepHostCreatesBaseDir` | `podman.baseDir` is created up front rather than by the first `writeArtifact`, at `0700` set explicitly (`mkdir -p` leaves an existing mode alone), and is deliberately NOT given the `775` or the namespace chown: it holds the server-certificate bundle's private key, which the container reads through a bind mount rather than owning |
-| `TestManagerPrepHostDirectoryErrors` | The three ways preparing the two directories can fail -- the baseDir `mkdir`, its `chmod 700`, and the data dir's `chmod 775` -- each stopping prep with a message naming the directory and the operation, which an engine's bare "permission denied" does not. baseDir is given a path of its own so failing on it cannot also match the dataDir under `/opt/solace` |
-| `TestManagerPrepHostDockerHasNoBaseDir` | `baseDir` is a podman key, so the docker path invents no directory and issues no `chmod` at all |
+| `TestManagerPrepHostLeavesBaseDirAlone` | Prep used to create `podman.baseDir` `0700` for the certificate bundle; with the certificate in podman's store, a configured baseDir must not make prep create, chmod or chown anything there |
+| `TestManagerPrepHostDirectoryErrors` | The data dir's rootless `chmod 775` failing stops prep with a message naming what it was trying to do, which an engine's bare "permission denied" does not |
 | `TestPrepHostRootlessDryRunSkipsTheReadinessBlock` | Two read-only blocks run before prep touches the host -- the podman readiness rows and the host limits -- and both skip as a WHOLE under the Echo runner rather than row by row: nothing they assert can be answered without a real host. Prep still previews the work that follows them |
 | `TestManagerDeployDockerComposeWritesFile` | Deploy writes the compose file and runs `compose up -d --force-recreate` |
 | `TestManagerDockerComposeCommandOverride` | A `docker.compose` override (the standalone `docker-compose` binary) is what every compose call goes through |
@@ -2203,7 +2253,7 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestManagerDeletePodmanStopFailsServiceActiveBlocksRemoval` | A failed `systemctl stop` proves nothing by itself (`podman info`/Preflight only shows the engine is reachable), so when `serviceState` still reports the unit `active`, Delete blocks the unit removal, the daemon-reload, and (via the purge gate) the data-directory rm, instead of reporting success over a broker still serving traffic |
 | `TestManagerDeletePodmanStopFailsServiceInactiveProceeds` | The same failed stop, but `serviceState` confirms the unit is already `inactive` -- the benign "already stopped" case still proceeds exactly as before |
 | `TestManagerDeletePodmanStopFailsStateUnknownBlocksRemoval` | The case the guard exists for: the stop failed AND `systemctl is-active` answered nothing, which is what an unreachable rootless systemd user session looks like while `podman info` still succeeds on the engine socket. `is-active` exits non-zero for every state but `active`, so the exit code cannot tell "stopped" from "could not ask" -- only the state text can, and no text means refuse. Pins that silence is never read as "already stopped" |
-| `TestManagerDeletePodmanRemovesSecrets` | Delete removes every secret `createPodmanSecrets` loaded into podman's own store (the same `render.ContainerSecrets` list), so they no longer outlive a `broker remove --delete-data`; a failing removal warns rather than failing a teardown that otherwise succeeded |
+| `TestManagerDeletePodmanRemovesSecrets` | Delete removes every secret `createPodmanSecrets` loaded into podman's own store (the same `render.ContainerSecrets` list), so they no longer outlive a `broker remove --delete-data`; a failing credential removal warns rather than failing a teardown that otherwise succeeded (the certificate is the exception, `TestCertSecretRemovalFailureIsFatal`) |
 | `TestManagerDeletePodmanPurgeRootless` | Rootless purge EMPTIES the data dir through `podman unshare find -mindepth 1 -delete` -- the contents belong to a subuid, so clearing them needs the namespace the chown used -- and asserts no `rm -rf` of the directory itself |
 | `TestManagerDeleteDockerComposeDownWhenFileExists` | With a compose file present, delete runs `compose down` |
 | `TestManagerDeleteDockerPurgeClearsDataDir` | Delete runs `compose down` and, with purge, EMPTIES the data dir with `find -mindepth 1 -delete` -- asserting both that the contents go and that no `rm` removes the directory, which would throw away the ownership and mode prep established |
@@ -2401,10 +2451,12 @@ between an unknown answer and a confident wrong one.
 
 ### secrets_test.go
 
-The server certificate is the one secret the two engines deliver differently -- docker
-inlines it through the compose child's environment, podman cannot (a quadlet unit inlines
-nothing), so it lands as a `0600` host file the unit bind-mounts. These pin both routes,
-the "nothing happened" property on each failure path, and previewability.
+The server certificate is the one secret this package has to READ: its bytes are the key
+then the certificate, built from two host files. Docker hands it to the compose child's
+environment, podman loads it into its secret store with a digest label that drives the
+restart. These pin both routes, the label, the clean-up of the `0600` host file earlier
+builds wrote for podman, the "nothing happened" property on each failure path, and
+previewability.
 
 | Test | What it covers |
 | --- | --- |
@@ -2412,17 +2464,23 @@ the "nothing happened" property on each failure path, and previewability.
 | `TestResolveSecretValuesPreviewReadsNothing` | What keeps a dry run usable before the certificate exists on this host. `compose()` runs on six verbs, so without it a preview of any of them would fail on a missing file -- the same previewability `prepareSecrets` already protects for the pre-shared key |
 | `TestResolveSecretValuesNamesTheUnreadableFile` | The error names the file, the secret AND the env-file key, because this failure reaches the operator from six different verbs |
 | `TestResolveSecretValuesRefusesAKeyBearingCert` | The existing refusal from its new call sites: a `tls.cert` that already contains its private key would produce a bundle carrying the key twice, and the refusal now fires from inside `compose()` on docker and from the bundle write on podman |
-| `TestPodmanResolvesNoFileBackedSecret` | The proof of the split: podman's list has no file-backed entry, so no private key can reach podman's secret store |
-| `TestDeployDockerPassesTheBundleAsEnvNotArgv` | The docker delivery end to end -- the bundle reaches the compose child through its environment and never through an argument vector |
+| `TestPodmanResolvesTheBundle` | Podman resolves exactly one file-backed secret, `<container.name>-tls-servercertificate`, whose value is the key then the certificate -- the same bundle docker gets, since both engines now deliver it as a secret |
+| `TestDeployDockerPassesTheBundleAsEnvNotArgv` | The docker delivery end to end -- the bundle reaches the compose child through its environment and never through an argument vector, and so does its digest (`SOLACE_TLS_SERVERCERTIFICATE_SHA256`), which fills the container label |
 | `TestTeardownVerbsDoNotReadTheCertificate` | A moved certificate must not block recovery. Compose needs every declared secret DEFINED for down/stop/restart but never reads it -- only `up` does -- so those verbs keep working when the file is gone |
 | `TestDeployDockerFailsBeforeWritingTheComposeFile` | "Nothing happened" on the docker side: the certificate is read in `prepareSecrets`, before `deployDocker` rewrites the compose file, so a bad certificate leaves no artifact behind |
-| `TestDeployPodmanWritesTheBundleBeforeTheUnit` | Podman's whole delivery: the file exists before anything starts, at a mode fit for a private key, and the unit bind-mounts exactly that path |
-| `TestDeployPodmanFailsBeforeWritingAnythingOnABadCert` | Podman's half of the same property -- the bundle is built first, so a failure leaves no unit and issues no systemctl call |
-| `TestDeployPodmanFailsWhenTheBundleCannotBeWritten` | The write's error path, and that the message names the artifact rather than surfacing a bare filesystem error. A directory standing where the file belongs is the cheapest way to fail the write without depending on permissions, which differ across the OSes this suite runs on |
-| `TestDeletePodmanRemovesTheBundleAfterTheUnit` | Teardown ordering and the severity choice: the bundle is something the running container consumed, so it goes after the unit is confirmed gone -- and its removal is FATAL rather than a warning, because silently leaving a private key on the host is the outcome least like the rest of this teardown |
-| `TestDeletePodmanToleratesAMissingBundle` | A teardown of a deployment that never had TLS, or whose `tls.cert` was unset since deploy |
-| `TestDryRunNeedsNoCertificateOnDisk` | The previewability guarantee one level up from the pre-shared key's: a preview must work before any certificate exists |
-| `TestEchoDeletePreviewsTheBundleRemoval` | The dry-run half of teardown -- it says what it would remove and removes nothing. Without it the only coverage of that branch would be the deploy-side preview, and a dry run that actually deleted a private key is the mistake worth its own test |
+| `TestDeployPodmanLoadsTheBundleIntoTheStore` | Podman's whole delivery: `secret create --label solace-util.sha256=<digest> <name> -` with the bundle on stdin, the label inspected before the `rm` that discards it, no key material on any argv, the unit mounting it with `Secret=...,target=/mnt/certs/server/tls.pem`, and nothing written under a configured `podman.baseDir` |
+| `TestDeployPodmanFailsBeforeWritingAnythingOnABadCert` | Podman's half of the same property -- the bundle is read before the store is touched, so a failure loads no secret, leaves no unit and issues no systemctl call |
+| `TestLegacyBundleRemovalFailureIsFatal` | The clean-up's error path on deploy and on remove: a non-empty directory standing where the legacy file belongs makes `os.Remove` fail without depending on permissions, and the error names the file, says it holds the PRIVATE KEY, and fails the command; remove still clears the store secrets |
+| `TestCertSecretLabelDrivesTheRestart` | Why the label exists: the unit names the secret, not its value, so a renewed certificate leaves it byte-identical. Against an active unit that is already current, an equal digest leaves the certificate secret in place (no `rm`, no `create`) and is "nothing to do", while a different or missing one -- or a label that cannot be read -- overwrites it, asks to restart and restarts on consent. The credentials are reloaded either way |
+| `TestDockerCertLabelDrivesTheRecreate` | The docker counterpart: compose keeps no secret object, so the digest is a container label read back with `inspect --type container`. Under a current compose file and a running container, an equal label is "nothing to do"; a different or missing one, or an inspect that fails, reports why, asks, and recreates with `--force-recreate` on consent |
+| `TestDockerCertChangedEdges` | The two answers `Deploy` cannot reach, since `prepareSecrets` reads the certificate first: a preview compares nothing and probes nothing, and an unreadable certificate is an error naming the file, with nothing inspected |
+| `TestCertSecretRemovalFailureIsFatal` | The certificate secret holds the private key, so failing to remove it fails the teardown -- naming the secret and the command to remove it by hand -- instead of warning like any other leftover, and the other secrets are still attempted |
+| `TestUpdateServerCertSecretPersistsWithoutRestarting` | The store half of `configure server-certs`, which never restarts: podman overwrites only the certificate secret and only when its label differs or is missing; docker keeps no store, touches nothing and says so; no certificate configured does nothing; an unreachable engine or an unreadable certificate fails, naming the cause, before the store is touched |
+| `TestSecretSummaryNamesTheCertificateSource` | The report reads no file, so the certificate's value is always empty there; on both engines it names its source keys instead of reporting a configured certificate as MISSING, while credentials keep `set`/`MISSING` |
+| `TestLegacyBundleIsRemovedOnDeployAndRemove` | A host an earlier build deployed holds the key as `<baseDir>/<name>-tls-servercertificate.pem`: deploy (after the new unit is written) and remove both delete it -- remove also with TLS no longer configured, since the file outlives the setting -- report it, and leave the directory |
+| `TestDeletePodmanToleratesAMissingBundle` | The normal case after the upgrade: no legacy file under a configured baseDir, or no baseDir at all, fails nothing and says nothing |
+| `TestDryRunNeedsNoCertificateOnDisk` | The previewability guarantee one level up from the pre-shared key's: a preview works before any certificate exists, echoes the store write labelled with the `(preview)` placeholder rather than a digest, never probes the store, and writes nothing |
+| `TestEchoPreviewsTheLegacyBundleRemoval` | The dry-run half of the clean-up on deploy and remove: it says it would remove the legacy file and removes nothing -- a dry run that deleted a private key is the mistake worth its own test |
 | `TestSolaceRowsRefusesAnEngineReturnedNameBackIntoArgv` | Closes a round trip that had no check: the names come out of `<runtime> ps` on this host, not from the env file, and `StatusAll` puts each straight back into an `inspect` argv. The row is still SHOWN -- it is a real container and hiding it would be worse -- but its name is not returned, so nothing further runs against it, and the skip is stated rather than silent |
 
 ---
@@ -2479,7 +2537,7 @@ variable, so what a run prints is decided by the CLI, in one place.
 ## internal/render
 
 Manifest and unit-file rendering, guarded by committed goldens, plus the server
-certificate's two delivery routes. 43 tests across 2 files.
+certificate's delivery on both engines. 45 tests across 2 files.
 
 ### render_test.go
 
@@ -2487,8 +2545,8 @@ certificate's two delivery routes. 43 tests across 2 files.
 | --- | --- |
 | `TestGolden` | Fifteen renderings from the sample env match their goldens: the k8s broker CR (the sample omits `kubernetes.ports`, `timezone` and both security blocks, so this covers the default ports and the omitted branches), the same CR with an explicit port list (a container port differing from the service port, and an explicit protocol), the same CR with timezone and both security blocks set, the podman quadlet for a messaging node (carrying the tier's cpuset), the same unit for the MONITOR role (one cpu and 2g instead of the tier, everything else identical -- the first monitor-role container golden), and the same unit rootless (`User=1000`, `WantedBy=default.target`, the cpuset and every cap unchanged), docker compose in HA and standalone (standalone drops the redundancy block and its PSK secret reference), container env pairs for HA (no `timezone`, so no TZ pair) and standalone (`timezone` set, so the TZ pair is present), the quadlet and compose forms of the opt-in health check, the CR with an explicit pullPolicy plus podAnnotations/podLabels, the CR with node and pod affinity alongside the legacy anti-affinity term, and the CR with loadBalancer annotations, node labels and tolerations (values carrying a colon and a URL, which survive only because both halves are quoted). The two secret-script goldens went with `render.SecretScript`: no container artifact carries a secret value any more |
 | `TestArtifactsCarryNoSecrets` | The externalization guard: with distinctive values in `semp.adminPass`, `redundancy.psk` and an additional user's password, no deployment artifact on any platform (broker CR, quadlet, compose file) contains any of them -- each references the secret by name and `broker deploy` supplies the value |
-| `TestContainerSecretsRedundancy` | HA lists both secrets in a fixed order with the expected broker settings, `FilePathKey`/`MountPath` derive the file form both engines use (the mount is named after the setting, not the host-side secret), and standalone lists the admin password only (no mate link, so no PSK secret). An encrypted server-certificate key adds a third secret reaching the broker as `tls_servercertificate_passphrasefilepath`, and only when the passphrase is actually set |
-| `TestContainerSecretNamesAreHostScoped` | The de-confliction: the host-side name is `<container.name>-<suffix>` (the default name keeps the historical `solace-admin-password`), the in-container target and path never carry that prefix, and `EnvVar` maps `.`/`-` to `_` and prefixes a leading digit so the name stays exportable |
+| `TestContainerSecretsRedundancy` | HA lists the admin password and PSK in a fixed order, with the fixture's server certificate last, the expected broker settings, `FilePathKey`/`MountPath` derive the file form both engines use (the mount is named after the setting, not the host-side secret), and standalone drops the PSK (no mate link). An encrypted server-certificate key adds one more secret reaching the broker as `tls_servercertificate_passphrasefilepath`, and only when the passphrase is actually set |
+| `TestContainerSecretNamesAreHostScoped` | The de-confliction: the host-side name is `<container.name>-<suffix>` (the default name keeps the historical `solace-admin-password`), the in-container target and path never carry that prefix, and `EnvVar` maps `.`/`-` to `_` and prefixes a leading digit so the name stays exportable. Podman's certificate secret, which holds the private key, follows the same scheme: one name on every render of one file, and distinct names for two container names on one host |
 | `TestAdditionalUsersReachBothHalves` | An extra user's password becomes a per-host secret named after it (`ConfigKey` naming the env-file key), while its access level and `*filepath` pointer ride the env pairs and the password does not |
 | `TestQuadletHealthCmdEscapesPercent` | systemd expands %-specifiers in every unit assignment, not just the quoted `Environment=` ones, so a percent-encoded character in a probe URL is doubled or the line is dropped and the health check silently disabled. Quotes and backslashes stay untouched there (the value is unquoted and podman splits it itself), and compose keeps the percent literal since it has no specifier expansion |
 | `TestHealthCmdDefaultsToReadiness` | An enabled block with no cmd polls `/health-check/readiness` on 5550, and an explicit cmd wins |
@@ -2498,7 +2556,7 @@ certificate's two delivery routes. 43 tests across 2 files.
 | `TestQuadletEscape` | systemd `Environment=` escaping of `%`, `"`, and `\` |
 | `TestScalingReachesContainersAsEnv` | Every scaling knob reaches docker and podman as a container environment variable, carrying the env file's values, including an explicit `0`, which is a real setting rather than an absent one. `max-dmr-links` -- the CR's hyphenated spelling -- must never appear there; the container gets `max_dmr_links` instead, since a systemd `Environment=` name cannot carry a hyphen |
 | `TestScalingReachesK8sAsSpecOnly` | The other half of the delivery split: on k8s the same settings are CR fields under `spec.systemScaling` and never pod environment variables. `max-dmr-links` is the one setting whose CR spelling differs from what reaches the container (`max_dmr_links`); the retired camelCase `maxSpoolUsage:` must no longer appear now that the CR uses the same `messagespool_maxspoolusage` name the containers always have |
-| `TestScalingTierReachesEveryArtifact` | One tier value decides the caps in all three artifacts: the broker CR's `messagingNodeCpu`/`messagingNodeMemory`, compose's `cpuset:`/`mem_limit:`, and the quadlet's `PodmanArgs=--cpuset-cpus=`/`Memory=`. It uses 100000, which is no platform's default, so the value is proven read rather than hardcoded -- the goldens only ever show the default tier. Both tier-derived container fields are cleared before the second `ApplyDefaults`, since `setDefault` would otherwise keep the tier-1000 values and the failure would read like a renderer bug. The podman half is rootful, but only incidentally: a rootless unit carries the same cpuset (`TestRootlessQuadletCarriesTheSameCaps`) |
+| `TestScalingTierReachesEveryArtifact` | One tier value decides the caps in all three artifacts: the broker CR's `messagingNodeCpu`/`messagingNodeMemory`, compose's `cpuset:`/`mem_limit:`, and the quadlet's `PodmanArgs=--cpuset-cpus=`/`PodmanArgs=--memory=`. It uses 100000, which is no platform's default, so the value is proven read rather than hardcoded -- the goldens only ever show the default tier. Both tier-derived container fields are cleared before the second `ApplyDefaults`, since `setDefault` would otherwise keep the tier-1000 values and the failure would read like a renderer bug. The podman half is rootful, but only incidentally: a rootless unit carries the same cpuset (`TestRootlessQuadletCarriesTheSameCaps`) |
 | `TestContainerOverridesReachArtifact` | Both container overrides survive to the artifact: `container.mem` and `container.cpuset` each reach compose. The remaining asymmetry is on Kubernetes, where the CPU is a tier-fixed count with no key under any spelling |
 | `TestComposeQuotesTheCpuset` | A rule no golden can cover: compose types `cpuset` as a string and rejects a bare `cpuset: 0`, while every tier value (`0-N`) parses as a string anyway -- so only a single-cpu override reaches it |
 | `TestRootlessQuadletCarriesTheSameCaps` | One fixture rendered twice with only `podman.rootless` flipped. Rootless used to omit the cpuset, since its controller is not delegated to a user slice by default -- but the `user@<uid>.service.d` drop-in this tool requires for the rlimits now sets `Delegate=cpu cpuset io memory pids`, and `checkLimits` refuses a host without it, so both units carry the same caps. Only the run user and the install target differ |
@@ -2513,13 +2571,15 @@ certificate's two delivery routes. 43 tests across 2 files.
 | `TestTLSBlockFollowsTheStates` | The CR's half of `TLSServerSecretName`, the three states again: files with no name reference the DERIVED `<kubernetes.name>-tls`, a name with no files references the Secret as-is, and neither writes no `tls` block at all rather than one the CRD would complete with its `example-tls-secret` default |
 | `TestMonitoringCredentialsSecretFollowsThePassword` | The admin Secret carries `username_monitor_password` only with `semp.monitorPass`, and the operator checks that a named Secret exists but never its keys -- so `spec.monitoringCredentialsSecret` is written only with a monitor password, and omitted without one so the operator generates the credential. `adminCredentialsSecret` is unaffected |
 | `TestAdminCredentialsSecretFollowsTheStates` | The CR's half of `AdminSecretName`: a password with no name puts the derived `<kubernetes.name>-admin` on the admin, monitor and pre-shared-key fields; a name with no password references it and writes neither the monitor nor the key field, even for a Config built in code that carries them, since only a Secret this tool builds carries those entries; neither writes no admin field at all, so the operator generates its own |
-| `TestSecretTargetsAreAbsolutePaths` | The guard for the silent half of the secrets-directory move. Both engines resolve a BARE `target=`/`target:` under their own `/run/secrets`, so if `Target` ever went back to returning just the setting name the file would be created, the container would start, and the broker would look under `secretMount` and find nothing -- with no error from the engine, the tool, or the broker's own startup |
-| `TestSecretsAndCertDoNotNest` | No secret's file can collide with the server certificate's mount, which is the hazard the old layout carried: the cert lived INSIDE the secrets directory, so a setting named `tls.crt` would have been the same path. They are separate trees now, and this asserts it rather than trusting it |
+| `TestSecretTargetsAreAbsolutePaths` | The guard for the silent half of the secrets-directory move. Both engines resolve a BARE `target=`/`target:` under their own `/run/secrets`, so if `Target` ever went back to returning just the setting name the file would be created, the container would start, and the broker would look under `secretMount` and find nothing -- with no error from the engine, the tool, or the broker's own startup. Every credential sits under `secretMount`; the certificate, a secret on podman too now, is held to `certMount` instead |
+| `TestSecretsAndCertDoNotNest` | No secret's file can collide with the server certificate's mount, which is the hazard the old layout carried: the cert lived INSIDE the secrets directory, so a setting named `tls.crt` would have been the same path. They are separate trees now, and this asserts it rather than trusting it, skipping the certificate secret itself |
 | `TestComposeProjectIsDeclaredNotDerived` | With no top-level `name:`, compose takes the project name from the basename of the directory holding the file -- so it changes when the artifact is generated elsewhere or the directory is renamed, and the previous project's containers, network and volumes become orphans `down` no longer finds |
 | `TestComposeProjectFoldsToComposesGrammar` | Compose's project-name grammar is narrower than the container-name grammar config enforces: it lowercases and admits only `_` and `-`, while `My.Broker` is a container name both engines accept. Folding is the right trade -- refusing a perfectly good container name over a compose spelling rule would not be |
 | `TestUnresolvedTierOmitsLimits` | The renderers' fail-safe branch, in two halves. A `Config` built in code -- what the executors are handed -- carries no tier, so the TIER-DERIVED caps must be omitted rather than emitted empty, which the engines and the CRD would reject; and the HARDCODED limits (`shm_size`/`ShmSize=`, the nofile pair, the `[Service]` limits) are not tier-derived and must still be there |
 | `TestArtifactsStateTheirPrivilegePosture` | Rules 1 and 2 of [container-security.md](container-security.md), emitted rather than inherited (rule 7), over every rendered shape -- primary, backup, monitor, standalone, the opt-in health check and bridge networking on both engines, plus the rootless unit, from the shared `containerArtifacts` helper. Each compose file carries exactly one service-level `privileged: false` and a `security_opt:` list naming `no-new-privileges=true`, never the deprecated `:` spelling dockerd warns about on every create. Each quadlet carries exactly one `NoNewPrivileges=true`, and the check is POSITIONAL: the line must sit inside `[Container]`, because `[Service]` has a same-named systemd key that would bind the podman process instead of the container and break rootless podman's setuid id-mapping helpers -- a unit carrying it in the wrong section would pass a plain `Contains` |
 | `TestArtifactsCarryNoWideningTokens` | The negative half of rule 7, and the half that survives a refactor: none of rule 1's widening tokens (`wideningTokens`, the same list the document's audit greps use -- change both together) appears in any rendered compose file or quadlet unit, across the same shapes, so a `PodmanArgs=--privileged` added for one role or a key only bridge mode writes still fails. It first refuses to run on fewer shapes than expected, since an empty render list would make every assertion pass |
+| `TestQuadletKeysAreWithinTheFloor` | Quadlet refuses a unit carrying a key it does not know, so every `[Container]` key is a version floor -- the way `Memory=` (podman 5.5) broke 4.7-5.4 hosts before the memory cap moved to `PodmanArgs=--memory=`. Every key emitted across the shapes that add keys (health check, bridge ports, TLS, HA, rootless, the monitor) must be in `quadletKeysByRelease`, read from podman's tagged source, at or below the documented 4.7 floor; an unknown key fails too, and the fixture must actually reach the keys it covers |
+| `TestBrokerCRQuotesTheImageReference` | A tag such as `10.10` is legal and, bare, a YAML float kubectl would send as 10.1. The CR is parsed back and `spec.image.tag` and the registry-prefixed `spec.image.repository` must both come out as the exact strings configured |
 
 ### servercert_test.go
 
@@ -2532,11 +2592,11 @@ would bless away.
 | Test | What it covers |
 | --- | --- |
 | `TestServerCertFilePathKeyKeepsItsUnderscore` | A spelling neither engine nor broker would complain about getting wrong. Every credential setting appends a BARE `filepath`; the server certificate's carries an underscore, so deriving it from the generic suffix would produce a setting the broker does not read -- and nothing errors on an unknown environment key, so TLS would simply be off with nothing pointing at the cause |
-| `TestServerCertIsADockerOnlySecret` | The one place the secret list differs by platform, and why it must. Docker can source a secret from the compose child's environment, so the bundle reaches the container with nothing written to this host; a quadlet unit cannot inline content, so podman gets the same bytes as a bind-mounted host file. If the certificate appeared in podman's list, `createPodmanSecrets` would load a PRIVATE KEY into podman's secret store |
-| `TestServerCertificateReachesTheContainerOnBothEngines` | The named regression test for a property that previously had only goldens behind it -- a golden break is routinely answered with `-update`, which would silently bless the certificate disappearing from an artifact altogether |
-| `TestServerCertBundlePathIsPosixAndUnderBaseDir` | The one expression the quadlet renderer and the Manager's writer must share. If they drifted, podman would find no file at the source and create a DIRECTORY there instead, and the broker would start with no certificate and no error anywhere |
+| `TestServerCertIsASecretOnBothEngines` | On docker AND podman the certificate is exactly one file-backed secret, named `<container.name>-tls-servercertificate`, appended last, mounted at `certMount`, pointing `certFilePathKey` at it, with no value (render reads no file) and sources `{certKey, cert}` in that order -- and absent when no certificate is configured. Podman used to get a `0600` host file the default non-root broker could not read |
+| `TestServerCertificateReachesTheContainerOnBothEngines` | The named regression test for a property that previously had only goldens behind it -- a golden break is routinely answered with `-update`, which would silently bless the certificate disappearing from an artifact altogether. Compose defines and mounts the secret; the quadlet carries `Secret=<name>-tls-servercertificate,type=mount,target=/mnt/certs/server/tls.pem` and names no host file -- not the operator's certificate or key, not the legacy bundle path, and no `Volume=` at the mount; both point the broker there; neither mentions the mount with no certificate configured |
+| `TestServerCertBundlePathIsPosixAndUnderBaseDir` | The LEGACY path: where earlier builds wrote podman's bundle, and so the one file the clean-up deletes. Forward slashes, directly under `podman.baseDir`, carrying the container name, no doubled separator -- if it drifted, an upgraded host would keep a private key with nothing to say so |
+| `TestComposeLabelsTheCertificateDigest` | Docker's half of the change detection: the compose file labels the container `solace-util.sha256: "${<EnvVar>_SHA256}"`, unescaped so compose fills it from the child's environment, and never carries a digest, so it stays byte-identical across a renewal. No certificate, no label |
 | `TestFileBackedSecretIsExemptFromSecretPreflight` | A message that would otherwise be a lie: `SecretPreflight` blames an empty value with "set it in the env file", which for the certificate is wrong -- `tls.cert` IS set, the bytes just live on the host. Readability is enforced where the files are read instead |
-| `TestPodmanNeverGetsAFileBackedSecret` | The structural guard that replaced the `SecretScript` refusal, and is stronger than it: `ContainerSecrets` never OFFERS a file-backed entry for podman at all. A refusal can be bypassed by a new caller; an absent entry cannot. The certificate still reaches a podman broker -- written to `baseDir` at `0600` and bind-mounted by the unit -- which is exactly why it must not also be in the store, where teardown would try to delete it |
 | `TestComposeEscapesTheDollarSign` | A value compose would otherwise consume before the container saw it. Compose interpolates `$VAR` and `${VAR}` across the whole document from its own environment and turns `$$` back into one `$`. The case that makes this necessary rather than defensive is the health-check command -- a shell command the ENGINE runs inside the broker, where `$(...)` and `$VAR` are legitimate and the config gate permits them on purpose |
 | `TestComposeQuotesIdentifierScalars` | A YAML 1.1 misread the name grammar cannot prevent: `yes`, `no`, `on`, `off`, `true`, `false`, `0123` and `1.5` are all legal container names to both engines, but bare in a compose document they read as a boolean or a number -- so the service key, `container_name` and hostname stop being the string the operator wrote |
 
@@ -2692,6 +2752,7 @@ new fake.
 | internal/broker | `serverCert` (semp_test.go) | The `config.TLS{Cert, CertKey}` pair that makes `sempPort`/`BackupSEMPPreflight`/`BackupRevertActivity` prefer the mate's TLS listener; every TLS-expecting case sets it explicitly since a plaintext broker is what every other test already covers |
 | internal/broker | `assertNoPasswordInArgv` (semp_test.go) | The shared S3 boundary check reused by every mate-SEMP test (plaintext and TLS alike): no argv token may carry the admin password or the RPC body |
 | internal/k8s | `recRunner` / `rrCall` (transport_test.go) | Capturing `engine.Runner` with `outQueue` and `runErrQueue` for scripting multi-step ops, plus `outErrQueue` (per-`Output` errors, so one read in an op can fail while an earlier one succeeds) and `runInputErr` (fails `apply -f -` / `delete -f -`). Both queues fall back to the blanket `outErr`/`runErr` once drained, so a test that sets only those behaves as before. `canI`/`canIErr` answer `Cluster.Preflight`'s `auth can-i` probe out of band (default: permitted) so it never consumes a queued read written for a different call, and `afterPreflight` asserts the probe came first and returns the calls after it |
+| internal/k8s | `tlsCfg` (prep_test.go) | `haCfg` with a certificate pair on disk, so the TLS Secret is one this env file builds under `dev-broker-tls` |
 | internal/k8s | `haCfg`, `saCfg` (names_test.go), `adminCfg` (prep_test.go), `loadK8s` (secrets_test.go) | Config builders |
 | internal/k8s | `checkGolden`, `-update` flag (secrets_test.go) | Golden comparison for the whole package |
 | internal/k8s | `loadFixture`, `testdata/*.json` (inspect_test.go) | Decodes a REAL object captured from a live minikube deployment (operator 1.4.2, broker 10.26.0.8755), trimmed to the fields the decoders read -- the shapes were written against these bytes rather than the schema documentation, which is what caught the broker CR's actual condition types and string-typed booleans |
@@ -2702,16 +2763,19 @@ new fake.
 | internal/abbrev | `sample` (abbrev_test.go) | A set with the shape every real one has -- ordered canonicals, one short form each, one word deliberately carrying none. Build ad-hoc sets with `New` only for the malformed cases |
 | internal/container | `capRunner` / `failOn` (transport_test.go) | Capturing runner whose `fail` (Run family) and `outFail` (Output family) hooks error on a targeted command, driving each error-wrap branch -- `failOn("info")` is how a failed engine preflight is injected. `outFail` exists because the blanket `outErr` cannot single out one of two probes in the same call. `capCall.env` records the extra environment of a `RunEnv` call, which is how the docker secret path is asserted |
 | internal/container | `containsStr`, `maskedKeys` (manager_test.go) | Exact-match lookup in a captured environment, and `engine.MaskEnv` for failure messages -- a test diagnostic must not print a secret either |
-| internal/container | `newEchoMgr`, `newCapMgr`, `ctrCfg` (manager_test.go) | Manager over dry-run Echo, or over the capturing runner for real file writes. `Manager.Confirm` is the injectable restart prompt (nil declines, which is what a non-interactive run must do) and `Manager.Restart` is the `--restart` pre-approval |
+| internal/container | `newEchoMgr`, `newCapMgr`, `ctrCfg` (manager_test.go) | Manager over dry-run Echo, or over the capturing runner for real file writes. `ctrCfg` leaves `podman.baseDir` unset, since deploy and remove delete a file under it; the clean-up tests point it at a `t.TempDir()`. `Manager.Confirm` is the injectable restart prompt (nil declines, which is what a non-interactive run must do) and `Manager.Restart` is the `--restart` pre-approval |
 | internal/container | `assertMode` (manager_test.go) | Permission-bit assertion for the artifacts the manager writes; skipped on Windows, which carries no POSIX mode |
+| internal/container | `certFixture`, `certCreate`, `bundleHash`, `writeLegacyBundle` (secrets_test.go) | A real key and certificate on disk plus the bundle they should produce; the captured `secret create` for a named secret; the `solace-util.sha256` label a bundle gets; and a legacy bundle file under a fresh `podman.baseDir` |
 | internal/cli | `runRoot`, `capture`/`captureStdout`/`captureStderr` (cli_test.go) | Builds a fresh command tree per call and captures a standard stream through a pipe |
 | internal/cli | `runRootWith` (cli_test.go) | `runRoot` with a hook to configure the `App` before `Execute` -- how the confirm-prompt branches are driven deterministically instead of depending on the test process's own stdin. `runRoot` delegates to it with a nil hook, so it is unchanged for every existing test |
 | internal/cli | `opRunner` / `opCall` / `opFailOn` / `opFailOnCount` (cli_test.go) | A fake `engine.Runner` whose failure is targeted by argv substring (or by the Nth matching occurrence, for the repeated identical `apply`/`delete` calls in `broker deploy` and `broker remove`). Ported from internal/container's `capRunner`/`failOn`; this is what makes the orchestration-abort tests possible -- assert step N fails and step N+1 never ran. `Output` answers the k8s `auth can-i` preflight "yes" unless a test supplies its own `output`/`fail` for that call, so the op-level tests stay about the work they were written for |
 | internal/cli | `loadDirect`, `healthyShowRD` (cli_test.go) | Loads a config from an inline YAML body for tests that build an `App` directly with a non-Echo runner, and a canned `show redundancy` transcript that satisfies `broker.primaryRedundancyUp` so a poll succeeds on the first read |
+| internal/cli | `writeK8sTLSEnv`, `tlsSecretDigest`, `isGetPod`/`isDeletePod` (cli_test.go) | A k8s env with a certificate pair on disk (the derived `dev-broker-tls` Secret), the digest the rendered Secret carries (read off `k8s.TLSSecret`, not recomputed), and the two pod calls a certificate restart turns on |
 | internal/cli | `bashEnv`, `writeBashEnv` (cli_test.go) | Minimal legacy env file for the convert command tests |
 | internal/cli | `replEnv`, `replApp`, `siteNamed` (replication_test.go) | A DR pair whose two sites are reached DIFFERENTLY -- one over its own cluster CLI, one over SEMP -- so a dispatch that ignored `via` fails on one site rather than passing on both |
 | internal/convert | `strictDecode` (convert_test.go) | Re-reads generated YAML with `KnownFields(true)`, so an emitted key that is not in the schema fails the test |
 | internal/convert | `ctrEnv`, `convertOK`, `hasWarning` (convert_test.go) | Container-flavoured legacy fixture and warning assertions |
+| internal/config | `artifactInjections`, `validPlatformConfig` (artifactvalues_test.go) | The shared table of values that would restructure an artifact (a new quadlet key, a `[Service]` command, a YAML key, a `---` document, a compose interpolation of a secret), and the valid fixture for any platform from `validK8sConfig`/`validContainerConfig` |
 | internal/config | `envTree`, `writeTempYAML`, `minimalK8s` (config_test.go) | Real temp-dir fixture trees for path resolution and loading, plus the smallest valid k8s document the secret-reference tests append a body to |
 | internal/broker | `scriptedMate`, `twoMates`, `st` (switchplan_test.go) | A MateChannel whose per-VPN state the test controls and which records every write, with an `onRead` hook so a test can move a role at exactly the moment the code re-reads -- which is how the stale-state refusal is provable without a broker |
 | internal/broker | `fakeRun`, `softwareBanner`, `mateReplies` (matechannel_test.go) | A CLI runner that records every script name and body and replies from a table keyed by script name, so a MateChannel test needs no transport and no broker |

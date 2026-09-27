@@ -14,6 +14,8 @@ import (
 
 	"solace/internal/config"
 	"solace/internal/engine"
+	"solace/internal/k8s"
+	"solace/internal/render"
 )
 
 // TestMain severs the package from the real stdin for every test in it.
@@ -132,8 +134,7 @@ func writeCtrStandaloneEnv(t *testing.T) string {
 		"semp:\n" +
 		"  adminPass: " + smokeAdminPass + "\n" +
 		"docker: {}\n" +
-		"podman:\n" +
-		"  baseDir: /opt/solace\n"
+		"podman: {}\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write container standalone env: %v", err)
 	}
@@ -1887,6 +1888,159 @@ func TestOpK8sDeployAborts(t *testing.T) {
 				t.Errorf("opK8sDeploy issued %d apply command(s) after %s failed, want exactly %d (no later step ran)", got, step, n)
 			}
 		})
+	}
+}
+
+// writeK8sTLSEnv is writeK8sDeployAllEnv with a certificate pair on disk, so the
+// deploy builds the derived dev-broker-tls Secret this env file owns.
+func writeK8sTLSEnv(t *testing.T, redundancy string) *config.Config {
+	t.Helper()
+	dir := t.TempDir()
+	crt, key := filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key")
+	for path, body := range map[string]string{
+		crt: "-----BEGIN CERTIFICATE-----\nQ0VSVA==\n-----END CERTIFICATE-----\n",
+		key: "-----BEGIN PRIVATE KEY-----\nS0VZ\n-----END PRIVATE KEY-----\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	yamlBody := "redundancy:\n  enabled: " + redundancy + "\n" +
+		"image:\n  repo: solace-pubsub-standard\n  tag: \"10.10.1.128\"\n" +
+		"semp:\n  adminPass: " + smokeAdminPass + "\n" +
+		"tls:\n  cert: '" + crt + "'\n  certKey: '" + key + "'\n" +
+		"kubernetes:\n" +
+		"  name: dev-broker\n" +
+		"  namespace: solace\n" +
+		"  adminSecret: solace-admin-secret\n" +
+		"  updateStrategy: automatedRolling\n" +
+		"  storage:\n    class: standard\n    msgNodeSize: 30Gi\n"
+	return loadDirect(t, yamlBody, config.K8s)
+}
+
+// tlsSecretDigest is the digest annotation the rendered TLS Secret carries -- read off
+// k8s.TLSSecret rather than recomputed, so these tests follow the one definition.
+func tlsSecretDigest(t *testing.T, cfg *config.Config) string {
+	t.Helper()
+	manifest, err := k8s.TLSSecret(cfg)
+	if err != nil {
+		t.Fatalf("TLSSecret: %v", err)
+	}
+	_, rest, ok := strings.Cut(string(manifest), render.CertDigestLabel+": \"")
+	if !ok || len(rest) < 64 {
+		t.Fatalf("the TLS Secret carries no digest annotation:\n%s", manifest)
+	}
+	return rest[:64]
+}
+
+// isGetPod / isDeletePod pick the two pod calls the certificate restart turns on out of
+// a deploy's call stream, by their leading verbs.
+func isGetPod(c opCall) bool    { return len(c.args) > 1 && c.args[0] == "get" && c.args[1] == "pod" }
+func isDeletePod(c opCall) bool { return len(c.args) > 1 && c.args[0] == "delete" && c.args[1] == "pod" }
+
+// TestK8sDeployRestartsForARenewedCertificate: a renewed certificate changes only the
+// TLS Secret, which a running pod does not re-read and the operator does not roll out,
+// so a Kubernetes deploy takes the consent a container deploy does. The live Secret's
+// digest decides whether anything changed; the pods decide whether anything runs.
+// Renewed and running restarts every pod in RestartOrder on --restart or a yes, and
+// leaves them running without a terminal; unchanged, or nothing running, restarts
+// nothing even under --restart.
+func TestK8sDeployRestartsForARenewedCertificate(t *testing.T) {
+	stale := strings.Repeat("0", 64)
+	for _, tc := range []struct {
+		name        string
+		live        func(current string) string
+		pods        bool
+		restart     bool
+		answer      string
+		wantRestart bool
+	}{
+		{"renewed, running, --restart", func(string) string { return stale }, true, true, "", true},
+		{"renewed, running, answered yes", func(string) string { return stale }, true, false, "y\n", true},
+		{"renewed, running, answered no", func(string) string { return stale }, true, false, "n\n", false},
+		{"renewed, running, no terminal", func(string) string { return stale }, true, false, "", false},
+		{"renewed, nothing running", func(string) string { return stale }, false, true, "", false},
+		{"unchanged, running, --restart", func(cur string) string { return cur }, true, true, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := writeK8sTLSEnv(t, "true")
+			current := tlsSecretDigest(t, cfg)
+			rr := &opRunner{output: func(c opCall) []byte {
+				switch {
+				case opArgvMatch(c, "jsonpath={.metadata.name}"):
+					return []byte("dev-broker-tls\n" + tc.live(current))
+				case isGetPod(c):
+					if tc.pods {
+						return []byte("pod/dev-broker-pubsubplus-p-0\n")
+					}
+					return []byte("")
+				}
+				return k8sDeployAllOutputHook(c)
+			}}
+			a := &App{Cfg: cfg, Platform: config.K8s, Runner: rr, restart: tc.restart,
+				Interactive: func() bool { return tc.answer != "" }, PromptIn: strings.NewReader(tc.answer)}
+			var err error
+			captureStdout(t, func() { err = opK8sDeploy(a) })
+			if err != nil {
+				t.Fatalf("opK8sDeploy: %v", err)
+			}
+			var deleted []string
+			for _, c := range rr.calls {
+				if isDeletePod(c) {
+					deleted = append(deleted, strings.Join(c.args, " "))
+				}
+			}
+			switch {
+			case tc.wantRestart && len(deleted) != 3:
+				t.Errorf("want every pod restarted in RestartOrder, got %v", deleted)
+			case tc.wantRestart && !strings.Contains(deleted[0], "-m-0"):
+				t.Errorf("the monitor restarts first (RestartOrder), got %v", deleted)
+			case !tc.wantRestart && len(deleted) != 0:
+				t.Errorf("no pod may be restarted, got %v", deleted)
+			}
+		})
+	}
+}
+
+// TestConfigureServerCertsHotSwapsWithoutARestart: on Kubernetes the command rewrites
+// the TLS Secret FIRST -- what a pod mounts when it next starts -- and then loads the
+// certificate over the CLI into every node, which is what the running broker serves.
+// It never restarts a pod.
+func TestConfigureServerCertsHotSwapsWithoutARestart(t *testing.T) {
+	cfg := writeK8sTLSEnv(t, "true")
+	rr := &opRunner{output: k8sDeployAllOutputHook}
+	a := &App{Cfg: cfg, Platform: config.K8s, Runner: rr}
+	var err error
+	captureStdout(t, func() { err = opK8sConfigServerCerts(a) })
+	if err != nil {
+		t.Fatalf("configure server-certs: %v", err)
+	}
+	secretAt := -1
+	for i, c := range rr.calls {
+		if strings.Contains(c.stdin, "kubernetes.io/tls") {
+			secretAt = i
+			break
+		}
+	}
+	if secretAt < 0 {
+		t.Fatalf("the TLS Secret must be rewritten:\n%s", rr.dump())
+	}
+	for _, pod := range []string{"dev-broker-pubsubplus-p-0", "dev-broker-pubsubplus-b-0", "dev-broker-pubsubplus-m-0"} {
+		var loaded bool
+		for _, c := range rr.calls[secretAt+1:] {
+			loaded = loaded || opArgvMatch(c, pod)
+		}
+		if !loaded {
+			t.Errorf("the certificate must be loaded into %s after the Secret is rewritten:\n%s", pod, rr.dump())
+		}
+	}
+	if !rr.hasCall("apply-server-certs") {
+		t.Errorf("the CLI load must run:\n%s", rr.dump())
+	}
+	for _, c := range rr.calls {
+		if isDeletePod(c) || opArgvMatch(c, "rollout") {
+			t.Errorf("a hot-swap must never restart a pod: %v", c.args)
+		}
 	}
 }
 

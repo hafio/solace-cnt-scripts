@@ -431,23 +431,16 @@ func TestQuadletDirAndDataDirAreNotRebased(t *testing.T) {
 	}
 }
 
-// TestPodmanBaseDirIsRequiredAndAbsolute pins both halves of the one mandatory path
-// key. It is mandatory rather than defaulted because it receives the
-// server-certificate bundle, which contains a PRIVATE KEY, and where that lands on a
-// host is the operator's decision. It is required absolute rather than rebased for
-// the same reason container.dataDir is: it is a quadlet `Volume=` source, and podman
-// reads a relative source as the name of a NAMED VOLUME, which would mount an empty
-// volume over the certificate with no error at all.
-func TestPodmanBaseDirIsRequiredAndAbsolute(t *testing.T) {
-	// Unset is refused, and the message names the key.
+// TestPodmanBaseDirIsOptionalButAbsolute pins podman.baseDir's reduced role. Nothing
+// is written there any more -- the server certificate rides podman's secret store --
+// so an unset value validates. A SET one is still held absolute rather than rebased:
+// deploy and remove delete the legacy bundle file under it, and a relative value
+// would aim that delete at whatever directory the command ran from.
+func TestPodmanBaseDirIsOptionalButAbsolute(t *testing.T) {
 	c := guardConfig(Podman)
 	c.Podman.BaseDir = ""
-	err := c.Validate(Podman)
-	if err == nil {
-		t.Fatal("an unset podman.baseDir must be refused: it is where the private key lands")
-	}
-	if !strings.Contains(err.Error(), "podman.baseDir") {
-		t.Errorf("error %q must name the key", err)
+	if err := c.Validate(Podman); err != nil {
+		t.Errorf("an unset podman.baseDir must validate: nothing reads it but the legacy clean-up: %v", err)
 	}
 
 	// Relative is refused, and the message says why rather than only that it is invalid.
@@ -459,9 +452,11 @@ func TestPodmanBaseDirIsRequiredAndAbsolute(t *testing.T) {
 			t.Errorf("podman.baseDir %q must be refused", bad)
 			continue
 		}
-		if !strings.Contains(err.Error(), "NAMED VOLUME") {
-			t.Errorf("podman.baseDir %q error %q must explain the named-volume trap, which is what makes a "+
-				"relative value dangerous rather than merely wrong", bad, err)
+		for _, want := range []string{"podman.baseDir", "absolute", "delete"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("podman.baseDir %q error %q must say %q: a relative value aims a delete somewhere "+
+					"unnamed", bad, err, want)
+			}
 		}
 	}
 
@@ -474,11 +469,11 @@ func TestPodmanBaseDirIsRequiredAndAbsolute(t *testing.T) {
 		}
 	}
 
-	// Docker has no such key and must not acquire the requirement.
+	// Docker never looks at it, set or not.
 	d := guardConfig(Docker)
-	d.Podman.BaseDir = ""
+	d.Podman.BaseDir = "relative/base"
 	if err := d.Validate(Docker); err != nil {
-		t.Errorf("docker must not require podman.baseDir: a compose file can inline what a quadlet cannot: %v", err)
+		t.Errorf("docker must not police podman.baseDir: %v", err)
 	}
 }
 

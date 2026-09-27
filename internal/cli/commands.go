@@ -113,10 +113,9 @@ func newBrokerValidateCmd(app *App) *cobra.Command {
 		platformOps(opK8sValidateBroker, opCtrCheck)), brokerValidateLong)
 }
 
-const brokerDeployLong = "Applies every prerequisite -- namespace, secrets, TLS -- before creating the\n" +
-	"broker itself, and is safe to re-run.\n\n" +
-	"Kubernetes readiness is not waited on; use `broker status` to watch it come\n" +
-	"up."
+const brokerDeployLong = "Applies every prerequisite -- namespace, secrets, TLS -- then the broker, and is\n" +
+	"safe to re-run. A running broker is restarted for a change only on consent or\n" +
+	"--restart. Kubernetes readiness is not waited on; `broker status` watches it."
 
 func newBrokerDeployCmd(app *App) *cobra.Command {
 	c := wireExec(app, &cobra.Command{
@@ -133,8 +132,9 @@ func newBrokerDeployCmd(app *App) *cobra.Command {
 	// deploy applies one CR covering every role, so a single pod is not something it
 	// could act on -- hence docker/podman only, refused by name elsewhere.
 	addPodFlag(c, app, config.Docker, config.Podman)
+	// Every platform: on Kubernetes a renewed certificate is the one change the operator
+	// does not roll out itself (opK8sDeploy).
 	addRestartFlag(c, app)
-	flagOnlyOn(c, "restart", config.Docker, config.Podman)
 	return c
 }
 
@@ -388,8 +388,8 @@ func newConfigureDataReplicationCmd(app *App) *cobra.Command {
 	return c
 }
 
-const configureServerCertsLong = "Loads or updates the broker's TLS server certificate, over its own CLI or,\n" +
-	"on Kubernetes with a TLS Secret, via the Secret the operator mounts.\n\n" +
+const configureServerCertsLong = "Updates the stored certificate (the TLS Secret, or podman's secret store), then\n" +
+	"hot-swaps it into the running broker over its CLI, on every node. Never restarts.\n\n" +
 	"--remove takes TLS down immediately on every listener configured to present\n" +
 	"a certificate."
 

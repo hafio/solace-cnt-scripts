@@ -79,8 +79,10 @@ func BrokerCR(c *config.Config) []byte {
 	fmt.Fprintf(&b, "  name: %s\n", c.K8s.Name)
 	fmt.Fprint(&b, "spec:\n")
 	fmt.Fprint(&b, "  image:\n")
-	fmt.Fprintf(&b, "    repository: %s\n", repo)
-	fmt.Fprintf(&b, "    tag: %s\n", c.Image.Tag)
+	// Quoted: a tag such as 10.10 is a valid tag and, bare, a YAML float (10.1). The
+	// characters are held to the reference grammar at load (config.validateImage).
+	fmt.Fprintf(&b, "    repository: %q\n", repo)
+	fmt.Fprintf(&b, "    tag: %q\n", c.Image.Tag)
 	// A closed, already-validated enum, so it is emitted bare like updateStrategy.
 	// Unset keeps the value this renderer has always written.
 	pullPolicy := c.K8s.ImagePullPolicy
@@ -648,7 +650,7 @@ func (s ContainerSecret) MountPath() string {
 // Target returns MountPath rather than deriving a name from it, which makes the two
 // one expression that cannot drift.
 //
-// A path-valued target= is a podman 4.x feature (floor 4.5) and needs compose
+// A path-valued target= is a podman 4.5 feature (the floor is 4.7) and needs compose
 // 2.23.1 on the docker side; both are recorded in docs/operations.md's version
 // floors, and neither is enforced at runtime.
 func (s ContainerSecret) Target() string { return s.MountPath() }
@@ -675,6 +677,16 @@ func (s ContainerSecret) EnvVar() string {
 	return b.String()
 }
 
+// CertDigestLabel is the label carrying the sha256 of the server certificate bundle,
+// which is how a redeploy tells a renewed certificate from an unchanged one without
+// reading the key back: podman puts it on the store secret, docker on the container.
+const CertDigestLabel = "solace-util.sha256"
+
+// DigestEnvVar is the compose-environment variable that fills the container's
+// CertDigestLabel, for the one secret that has a digest: the server certificate. It
+// derives from EnvVar, so it keeps that name's fixed suffix and its de-confliction.
+func (s ContainerSecret) DigestEnvVar() string { return s.EnvVar() + "_SHA256" }
+
 // secretFilePath is the in-container path of the secret feeding setting envKey.
 func secretFilePath(envKey string) string { return secretMount + "/" + envKey }
 
@@ -692,21 +704,21 @@ func ContainerSecrets(c *config.Config, p config.Platform) []ContainerSecret {
 			ConfigKey: s.configKey,
 		})
 	}
-	// The server certificate is the ONE place this list stops being the same on both
-	// engines, and it is appended LAST so no existing index or golden moves.
-	//
-	// Docker only, deliberately. A compose file can source a secret from the
-	// environment, so docker delivers the bundle without writing anything to this
-	// host. A quadlet unit cannot inline content, so podman gets the same bundle as a
-	// host FILE bind-mounted by the unit (ServerCertBundlePath), which is why it must
-	// not appear here: if it did, CreatePodmanSecrets would load a private key into
-	// podman's secret store, and removePodmanSecrets would try to delete it.
+	// The server certificate, appended LAST so no existing index or golden moves. Its
+	// value is the bundle the broker needs in ONE file -- the private key, then the
+	// certificate (broker.ServerCertBundle) -- and both engines deliver it the way they
+	// deliver every other credential: docker from the compose child's environment,
+	// podman from its own secret store, each mounted at certMount with the engine's
+	// default 0444 mode, so any run user can read it, root or not. Nothing is written
+	// to the host. (Podman used to bind-mount a 0600 host file here instead, which the
+	// default non-root broker could not read; container.removeLegacyCertBundle
+	// deletes that file from hosts an earlier build deployed.)
 	//
 	// It is NOT a containerSecretSpecs entry, which is the trap worth naming: EnvPairs
 	// walks that list directly, so a spec would emit a second, wrongly spelled
 	// *filepath pair pointing under secretMount, colliding with the correct one this
-	// renderer already emits (certFilePathKey), and would land on both platforms.
-	if p == config.Docker && c.TLS.Cert != "" && c.TLS.CertKey != "" {
+	// renderer already emits (certFilePathKey).
+	if c.TLS.Cert != "" && c.TLS.CertKey != "" {
 		secrets = append(secrets, ContainerSecret{
 			Name:      prefix + certSuffix,
 			EnvKey:    "tls_servercertificate",
@@ -737,20 +749,17 @@ func ContainerSecrets(c *config.Config, p config.Platform) []ContainerSecret {
 // `$`-expansion, and quadletEscape already handles that.
 func composeEscape(s string) string { return strings.ReplaceAll(s, "$", "$$") }
 
-// ServerCertBundlePath is where podman's copy of the server-certificate bundle
-// lives on the host: the file the quadlet unit bind-mounts at certMount.
-//
-// It exists so the renderer that emits the `Volume=` source and the Manager that
-// writes the file read ONE expression. If they drifted, podman would find no file
-// at the source and create a DIRECTORY there instead -- the same named-volume class
-// of silent failure that the absolute `Volume=` sources exist to avoid, and the
-// broker would start with no certificate.
+// ServerCertBundlePath is where an EARLIER build wrote podman's copy of the
+// server-certificate bundle, as a host file the quadlet unit bind-mounted at
+// certMount. Nothing writes or mounts it any more -- the certificate rides podman's
+// secret store (ContainerSecrets) -- and it survives only so
+// container.removeLegacyCertBundle can delete that file, private key and all, from a
+// host deployed before the change.
 //
 // The container name is in the filename, not just the directory, because two
-// brokers on one host may share a baseDir and must not overwrite each other -- the
-// same reason the host-side secret names carry it. Forward slashes always: the
-// value is a path on the Linux host podman runs on, even when this tool is driven
-// from Windows, so filepath must not touch it.
+// brokers on one host could share a baseDir. Forward slashes always: the value is a
+// path on the Linux host podman runs on, even when this tool is driven from Windows,
+// so filepath must not touch it.
 func ServerCertBundlePath(c *config.Config) string {
 	base := strings.TrimRight(c.Podman.BaseDir, "/")
 	return base + "/" + c.Podman.Container.Name + certSuffix + ".pem"
@@ -903,14 +912,12 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 	// Privileged= key, so rule 1 has nothing to state here and is guarded by
 	// TestArtifactsCarryNoWideningTokens alone.
 	fmt.Fprint(&b, "NoNewPrivileges=true\n")
-	// Memory has a first-class quadlet key; the cpuset has none, so it rides
-	// PodmanArgs -- the documented escape hatch for a podman run flag quadlet does
-	// not map, and the same mechanism the --cpus= line this replaces used.
-	//
-	// ASSUMED, NOT VERIFIED: podman is not installable where this is developed, so
-	// Memory='s presence in the target podman's quadlet and the --cpuset-cpus
-	// spelling come from the documentation. If Memory= predates that version, fold
-	// it into the PodmanArgs line as --memory=.
+	// Both caps ride PodmanArgs -- the documented escape hatch for a podman run
+	// flag quadlet does not map. The cpuset has no quadlet key at all. Memory has
+	// one, but only from podman 5.5, and quadlet REFUSES a key it does not know, so
+	// `Memory=` would fail every unit on 4.7-5.4 hosts; --memory= is a plain podman
+	// run flag every supported podman takes. TestQuadletKeysAreWithinTheFloor holds
+	// every key this function emits to the documented floor.
 	//
 	// Rootless carries the cpuset too. The cpuset controller is not delegated to a
 	// user slice by default -- which is why the unit omitted it before -- but the
@@ -933,7 +940,7 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 		fmt.Fprintf(&b, "PodmanArgs=--cpuset-cpus=%s\n", set)
 	}
 	if mem != "" {
-		fmt.Fprintf(&b, "Memory=%s\n", mem)
+		fmt.Fprintf(&b, "PodmanArgs=--memory=%s\n", mem)
 	}
 	// Constants, so unconditional (config.ContainerShmSize and friends).
 	fmt.Fprintf(&b, "ShmSize=%s\n", config.ContainerShmSize)
@@ -963,17 +970,6 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 		}
 	}
 	fmt.Fprintf(&b, "Volume=%s:%s:Z\n", cb.DataDir, dataMount)
-	// The server certificate, from the bundle THIS TOOL writes rather than from the
-	// operator's own tls.cert: a quadlet unit cannot inline content, and the broker
-	// needs the key and the certificate in one file. Docker gets the same bytes as a
-	// compose secret instead (ContainerSecrets), so this line is podman-only.
-	//
-	// :Z relabels for SELinux, which the old mount deliberately did not do: relabelling
-	// the operator's own certificate would have changed a file they own out from under
-	// them, whereas this file is written and owned exclusively by this tool.
-	if c.TLS.Cert != "" && c.TLS.CertKey != "" {
-		fmt.Fprintf(&b, "Volume=%s:%s:ro,Z\n", ServerCertBundlePath(c), certMount)
-	}
 	for _, pair := range EnvPairs(c, id) {
 		fmt.Fprintf(&b, "Environment=\"%s\"\n", quadletEscape(pair.Assignment()))
 	}
@@ -982,7 +978,8 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 	// broker at the same path), and no secret lands in the unit. The target MUST
 	// stay absolute -- a bare name is resolved under podman's own /run/secrets, and
 	// the broker would then look under secretMount and find nothing, with no error
-	// anywhere (ContainerSecret.Target). Needs podman 4.5 or later.
+	// anywhere (ContainerSecret.Target). The server certificate bundle is one of these
+	// too (ContainerSecrets). Needs podman 4.5 or later.
 	for _, s := range ContainerSecrets(c, p) {
 		fmt.Fprintf(&b, "Secret=%s,type=mount,target=%s\n", s.Name, s.Target())
 	}
@@ -1133,10 +1130,9 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 	}
 	fmt.Fprint(&b, "    volumes:\n")
 	fmt.Fprintf(&b, "      - %q\n", cb.DataDir+":"+dataMount+":Z")
-	// No certificate volume here: on docker the bundle rides the secret machinery
-	// below, sourced from the compose child's environment, so nothing of it is
-	// written beside this file. Podman bind-mounts a tool-written file instead,
-	// because a quadlet unit cannot inline content (see Quadlet).
+	// No certificate volume here: the bundle rides the secret machinery below,
+	// sourced from the compose child's environment, so nothing of it is written
+	// beside this file.
 	fmt.Fprint(&b, "    environment:\n")
 	for _, pair := range EnvPairs(c, id) {
 		// Keys derive from identifier-checked config, so only the value can carry a
@@ -1148,6 +1144,18 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 	// come from this host's environment -- which `deploy` sets for the compose
 	// process -- so nothing secret is written beside this file.
 	secrets := ContainerSecrets(c, p)
+	// The certificate's digest as a container label, so a redeploy can ask the
+	// running container which certificate it was created with -- the docker
+	// counterpart of the label podman's store secret carries. It is interpolated from
+	// the compose child's environment like the secret itself, so this file stays
+	// byte-identical across a renewal and holds no digest of the key. The `$` is
+	// deliberately NOT composeEscape'd: interpolation is the point.
+	for _, s := range secrets {
+		if len(s.SourceFiles) > 0 {
+			fmt.Fprint(&b, "    labels:\n")
+			fmt.Fprintf(&b, "      %s: \"${%s}\"\n", CertDigestLabel, s.DigestEnvVar())
+		}
+	}
 	fmt.Fprint(&b, "    secrets:\n")
 	for _, s := range secrets {
 		fmt.Fprintf(&b, "      - source: %q\n", s.Name)

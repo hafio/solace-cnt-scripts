@@ -1,14 +1,18 @@
 package k8s
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"solace/internal/config"
+	"solace/internal/render"
 )
 
 // secretManifest is a core/v1 Secret rendered to YAML with base64-encoded data,
@@ -18,10 +22,11 @@ import (
 // the argv and out of an echoed command, which the bash form leaked (012:26,36,39,
 // 43).
 type secretManifest struct {
-	name      string
-	namespace string
-	typ       string
-	data      map[string][]byte
+	name        string
+	namespace   string
+	typ         string
+	annotations map[string]string
+	data        map[string][]byte
 }
 
 // render emits the manifest. Data keys are sorted so the output is deterministic
@@ -33,6 +38,19 @@ func (s secretManifest) render() []byte {
 	b.WriteString("metadata:\n")
 	b.WriteString("  name: " + s.name + "\n")
 	b.WriteString("  namespace: " + s.namespace + "\n")
+	if len(s.annotations) > 0 {
+		// Values quoted: an annotation value is a string, and a hex digest that
+		// happens to be all digits would otherwise be read as a number.
+		b.WriteString("  annotations:\n")
+		names := make([]string, 0, len(s.annotations))
+		for k := range s.annotations {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		for _, k := range names {
+			b.WriteString("    " + k + ": " + strconv.Quote(s.annotations[k]) + "\n")
+		}
+	}
 	b.WriteString("type: " + s.typ + "\n")
 	b.WriteString("data:\n")
 	keys := make([]string, 0, len(s.data))
@@ -158,30 +176,51 @@ func TLSSecret(cfg *config.Config) ([]byte, error) {
 		return nil, fmt.Errorf("the TLS secret has no name: set kubernetes.tlsServerSecret, or " +
 			"kubernetes.name so the default <kubernetes.name>-tls can be derived")
 	}
-	crt, err := os.ReadFile(cfg.TLS.Cert)
+	key, crt, err := readTLSMaterial(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("read tls.cert %q: %w", cfg.TLS.Cert, err)
-	}
-	for _, ca := range cfg.TLS.CAs {
-		caBytes, err := os.ReadFile(ca)
-		if err != nil {
-			return nil, fmt.Errorf("read tls CA %q: %w", ca, err)
-		}
-		crt = append(crt, caBytes...)
-	}
-	key, err := os.ReadFile(cfg.TLS.CertKey)
-	if err != nil {
-		return nil, fmt.Errorf("read tls.certKey %q: %w", cfg.TLS.CertKey, err)
+		return nil, err
 	}
 	return secretManifest{
-		name:      name,
-		namespace: cfg.K8s.Namespace,
-		typ:       "kubernetes.io/tls",
+		name:        name,
+		namespace:   cfg.K8s.Namespace,
+		typ:         "kubernetes.io/tls",
+		annotations: map[string]string{render.CertDigestLabel: tlsDigest(key, crt)},
 		data: map[string][]byte{
 			"tls.crt": crt,
 			"tls.key": key,
 		},
 	}.render(), nil
+}
+
+// readTLSMaterial reads the TLS Secret's two entries off disk: the key, and the
+// certificate with every tls.cas file appended, which is the chain tls.crt holds.
+func readTLSMaterial(cfg *config.Config) (key, crt []byte, err error) {
+	crt, err = os.ReadFile(cfg.TLS.Cert)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read tls.cert %q: %w", cfg.TLS.Cert, err)
+	}
+	for _, ca := range cfg.TLS.CAs {
+		caBytes, err := os.ReadFile(ca)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read tls CA %q: %w", ca, err)
+		}
+		crt = append(crt, caBytes...)
+	}
+	key, err = os.ReadFile(cfg.TLS.CertKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read tls.certKey %q: %w", cfg.TLS.CertKey, err)
+	}
+	return key, crt, nil
+}
+
+// tlsDigest is the render.CertDigestLabel value the TLS Secret carries: the sha256 of
+// the key followed by the certificate chain as the Secret holds them, CAs included, so
+// a renewed CA marks the change as surely as a renewed certificate. It is an
+// annotation rather than a label because a label value stops at 63 characters and
+// the hex digest is 64.
+func tlsDigest(key, crt []byte) string {
+	sum := sha256.Sum256(append(append([]byte{}, key...), crt...))
+	return hex.EncodeToString(sum[:])
 }
 
 // dockerAuthEntry is one registry credential in a .dockerconfigjson payload. The

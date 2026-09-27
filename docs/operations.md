@@ -81,7 +81,7 @@ of them at runtime**:
 | Component | Floor | What needs it | If older |
 | --- | --- | --- | --- |
 | Docker Compose | 2.23.1 | The `environment:` secret source in the generated compose file | `broker deploy` fails on the secret source. Loud. On a host with only the standalone v1 binary, set `docker.compose: docker-compose` |
-| podman | 4.5 | `secret rm --ignore`, `secret create` reading the value from stdin, and `Secret=...,type=mount` in the quadlet unit. `NoNewPrivileges=` in the same unit needs only 4.4, so it does not raise the floor | The unknown flag or directive surfaces at deploy time. Loud. This tool deliberately avoids `secret create --replace`, which would work but needs **4.7**, so one flag would raise the floor of the whole tool; remove-then-create is idempotent the same way |
+| podman | 4.7 | `ShmSize=` and `Ulimit=` in the quadlet unit. Below them: `HostName=` (4.6), `Secret=...,type=mount` with an absolute target and the `Health*=` keys (4.5), `NoNewPrivileges=` (4.4), and `secret create --label` for the certificate's change-detection label (4.3). The memory cap rides `PodmanArgs=--memory=` rather than quadlet's own `Memory=` key, which needs **5.5** | Quadlet refuses a unit carrying a key it does not know, so the unit fails to load at deploy time. Loud. `TestQuadletKeysAreWithinTheFloor` holds every key the unit emits to this floor |
 | Solace broker image | 10.26 | The built-in readiness endpoint the opt-in health check uses with no `cmd` of its own | Refused at load: an older tag and an unidentifiable one are both rejected. This is the one floor that IS checked, because the tag is in the env file rather than on the host |
 | EventBroker operator | bundled 1.4.2 | The `PubSubPlusEventBroker` schema this tool renders | `operator deploy` installs the bundled version. An older operator already in the cluster prompts before a downgrade |
 | kubectl / oc | none | Namespace, Secret and the custom resource are all core API shapes plus the operator's own CRD | n/a |
@@ -186,8 +186,15 @@ Steps 3, 4 and 5 can be undone from here: `broker configure domain-certs --remov
 `--enable` on either hardening step -- `no ssl server-certificate` and `no product-key
 <key>` are confirmed CLI forms, so both removals now run for real instead of refusing.
 
-Each step's own scope and failure mode is worth knowing. `server-certs` applies to every
-node in the redundancy group on Kubernetes, or this host's container on docker/podman; if
+Each step's own scope and failure mode is worth knowing. `server-certs` is a **hot-swap and
+never restarts the broker**: it first updates the stored copy -- the TLS Secret on
+Kubernetes, the store secret on podman (left alone when its digest label already matches) --
+so a later restart keeps the new certificate, then loads the certificate over the Solace CLI,
+which is what the running broker serves. It acts on every node in the redundancy group on
+Kubernetes (`--pod` narrows), and on this host's container on docker/podman, so an HA
+container group runs it on each host. Docker keeps no secret store: its container holds the
+certificate it was created with until `broker deploy` recreates it, which that deploy offers
+because the digest label no longer matches. If
 the env file names a Secret it supplies no certificate files for, that Secret is assumed
 managed elsewhere (kubectl, cert-manager) and the command refuses rather than guessing, and
 with a TLS Secret in play -- named in `kubernetes.tlsServerSecret`, or derived as
@@ -416,6 +423,18 @@ Naming the role explicitly is what to do when a host matches no `redundancy.*` e
 matches more than one); when it does match, `solace-util broker deploy -e prod.yaml` alone
 on each host detects and announces the same role.
 
+**One host runs one node: this tool does not deploy an HA group onto a single host.** The
+three nodes are meant to fail independently, and a single host is one failure for all of
+them. The layout also cannot be built from one env file: every role on a host gets the same
+`container.name`, and so the same container, quadlet unit or compose project, data directory
+and secret names -- so deploying a second role on a host that already runs one does not add
+a node, it **replaces** the one that is there (a changed unit, so under the usual restart
+prompt, or at once with `--restart`). With host networking the three would also contend for
+the same ports. Role detection refuses a host that matches more than one `redundancy.*`
+entry, which is what an env file pointing every role at one machine produces; `--pod` skips
+detection but does not make the layout work. Run each role on its own host, as in the
+example above.
+
 **A standalone broker names itself after its host.** `redundancy.<role>.name` is the
 routername and the container's hostname, and with one node it is always this machine --
 so leaving `redundancy.primary.name` out of a standalone docker/podman env file is
@@ -542,10 +561,6 @@ that keeps it writable from outside the container. That is also why the `data di
 question -- a directory prep has already handed over fails a plain `test -w` by design, so
 the row re-asks inside the namespace and accepts a host that is simply ready.
 
-`podman.baseDir` is created too, but it is not part of that pair: it holds the
-server-certificate bundle with its private key, so it stays `0700` and owned by you, and the
-container reads the bundle through a bind mount rather than owning it.
-
 **Where subuid ranges come from.** Usually nowhere you have to think about: `useradd`
 allocates one at account-creation time from `/etc/login.defs` (`SUB_UID_MIN` 100000,
 `SUB_UID_COUNT` 65536 by default), so an ordinary interactive account already has
@@ -639,8 +654,9 @@ does not turn it off again.
 what is already on disk, so the three outcomes are distinguishable:
 
 - **Unchanged, broker running** -- reported as nothing to do; the broker is not touched.
-  With `--restart` it is recreated/restarted anyway, which is how a rotated secret is
-  applied (nothing in the artifact changes when a password does).
+  With `--restart` it is recreated/restarted anyway, which is how a rotated password or
+  pre-shared key is applied (nothing in the artifact changes when one does). A renewed
+  server certificate needs no `--restart`: its digest label marks the change (below).
 - **Broker not running** -- recreated from the current config, so a rotated secret takes
   effect without `--restart`. A stopped container would otherwise be *started* with the
   credentials it was created with; there is no traffic to protect here, so no consent is
@@ -685,23 +701,48 @@ nothing to clean up on teardown), but the value still ends up at rest -- Docker
 materializes each secret into the container's own filesystem as a `0444` root-owned file
 at the absolute `target:` the compose file names (`/mnt/secrets/<setting>`), which is the
 same at-rest exposure class as podman's store. It is not in the container's environment, so
-`docker inspect` does not show it. That now includes the server certificate's **private
-key**, which arrives on the same channel and lands at the same `0444` inside the container --
-the same treatment the admin password already gets there, in a container that runs only the
+`docker inspect` does not show it. That includes the server certificate's **private key**,
+which arrives on the same channel and lands at the same `0444` inside the container -- the
+same treatment the admin password already gets there, in a container that runs only the
 broker.
 
-**Podman is the one platform where this tool writes a secret to the host.** A quadlet unit
-cannot inline file content the way a compose file can, so the server-certificate bundle is
-written to `<podman.baseDir>/<container.name>-tls-servercertificate.pem` at mode `0600` in a
-`0700` directory, and the unit bind-mounts it read-only with an SELinux relabel. That makes
-it a second podman-side persistence layer beside the secret store, and it is why
-`podman.baseDir` is mandatory rather than defaulted: where a private key lands on your host
-is your decision, not this tool's. `broker remove` deletes the file as an artifact, like the
-quadlet unit, and unlike a leftover store secret a failure to delete it is **fatal** --
-silently leaving a private key behind is the outcome least like the rest of that teardown.
-`--delete-data` is not what removes it. A teardown that refuses because the unit could not be
-confirmed stopped deliberately leaves the file in place, since the container may still be
-reading it.
+**The server certificate is a secret on both engines, and never a host file.** The broker
+needs the private key and the certificate in ONE file, so this tool builds that bundle --
+`tls.certKey` then `tls.cert` -- and hands it over like any other credential: docker through
+the compose child's environment, podman through its secret store as
+`<container.name>-tls-servercertificate`. Both mount it at `/mnt/certs/server/tls.pem`,
+`0444`, so the broker can read it whatever `runUser` it runs as, root or not. The secret name
+is derived from `container.name`, the same scheme every other secret uses, so two
+deployments on one host collide only if they also share a container name and a unit file,
+which the engine and systemd already refuse; rootful and rootless deployments keep separate
+secret stores.
+
+**A `solace-util.sha256` digest is how `broker deploy` notices a renewed certificate**, on
+every platform, even though the unit, compose file or CR itself did not change. Podman puts
+it as a label on the store secret. Docker has no secret object to label, so it goes on the
+container: the compose file names `${<NAME>_TLS_SERVERCERTIFICATE_SHA256}`, filled from the
+compose child's environment like the secret itself, so the file stays byte-identical across a
+renewal and holds no digest. Kubernetes puts it as an annotation on the TLS Secret this env
+file builds (a label value stops at 63 characters; the digest is 64), covering the chain in
+`tls.crt`, CAs included. The rule is the same everywhere, and since the name is derived the
+digest decides alone: a **matching** one leaves the certificate as it is; a **different or
+missing** one (a host or cluster an earlier build deployed) means every artifact is applied
+and, **if the broker is running**, you are asked before it restarts -- or it restarts at once
+under `--restart`, and a non-interactive run leaves it running and says how to finish. A
+broker that is not running is simply deployed with the new certificate. The restart is the
+platform's own: podman restarts the unit, docker recreates the container, and Kubernetes
+restarts every pod in `broker restart`'s rolling order, since a Secret's content is not part
+of the pod template and the operator does not roll pods for it. If the same Kubernetes
+deploy also changed the CR, the operator may already be rolling the pods with the new Secret
+mounted, and declining is then the right answer. `broker configure server-certs` is the way
+to apply a renewed certificate with no restart at all.
+
+Earlier builds wrote podman's bundle to `<podman.baseDir>/<container.name>-tls-servercertificate.pem`
+instead, `0600` and owned by container root, which the default non-root broker could not
+read. If `podman.baseDir` is still set, `broker deploy` (once the new unit is written) and
+`broker remove` delete that file, and failing to delete it is **fatal**, because it holds the
+private key. Leave `podman.baseDir` set until every podman host has been redeployed once;
+nothing else reads it.
 
 **Nothing prints the secret values on a container platform any more.** There used to be a
 renderer that emitted `podman secret create` commands and `export` lines for running compose
@@ -808,7 +849,7 @@ container matches the data keys of the equivalent Kubernetes Secret:
 | `semp.additionalUsers[].password` | `/mnt/secrets/username_<username>_password` | `<container.name>-user-<username>-password` |
 | `redundancy.psk` (HA) | `/mnt/secrets/redundancy_authentication_presharedkey_key` | `<container.name>-redundancy-psk` |
 | `tls.certPassphrase` | `/mnt/secrets/tls_servercertificate_passphrase` | `<container.name>-tls-passphrase` |
-| `tls.cert` + `tls.certKey` | `/mnt/certs/server/tls.pem` | `<container.name>-tls-servercertificate` (docker); a host FILE on podman, see below |
+| `tls.cert` + `tls.certKey` | `/mnt/certs/server/tls.pem` | `<container.name>-tls-servercertificate` (one file: the key, then the certificate) |
 
 The host-side name carries `container.name` (default `solace`) so two brokers on one host
 never share a podman store entry or a compose variable. On Kubernetes the operator mounts
@@ -921,14 +962,17 @@ another team put there, and this tool may not have created it in the first place
 
 **Docker and Podman have their own teardown wrinkles**, on top of the `--delete-data` layer.
 The sequence is: stop the container, remove it, remove the compose file or quadlet unit,
-remove the engine secrets and the server-certificate bundle, then ask about the data
-directory -- whose CONTENTS are what `--delete-data` removes; the directory stays.
+remove the engine secrets (and, on podman, any legacy certificate file under
+`podman.baseDir`), then ask about the data directory -- whose CONTENTS are what
+`--delete-data` removes; the directory stays.
 
 - Podman's secret store is a real, separate persistence layer -- `broker remove` removes
   every secret `broker deploy` loaded into it as part of removing the container. A secret
-  that is already gone (or fails to remove) only warns. The server-certificate bundle under
-  `podman.baseDir` is different: failing to remove that one is **fatal**, because leaving a
-  private key on the host is the worst outcome available.
+  that is already gone is a success, and one that fails to remove only warns -- except the
+  server certificate, `<container.name>-tls-servercertificate`: failing to remove that one
+  is **fatal** (after every other secret has been attempted), and so is failing to delete a
+  legacy certificate file under `podman.baseDir`, because leaving a private key on the host
+  is the worst outcome available.
 - If `systemctl stop` (Podman) or `stop` (Docker) fails, the removal aborts before touching
   the unit, the container, or the data directory -- it continues only when the broker is
   *confirmed* down: systemd reporting `inactive`, `failed` or `unknown`, or the engine

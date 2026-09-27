@@ -121,6 +121,13 @@ if you add one, re-run the check there too.
 There is deliberately no schema key, no env var and no binding layer: an env file that could
 approve its own binary would make the allowlist decorative.
 
+**A value written into an artifact as-is is held to its sink's grammar at load.** A quadlet
+unit and every YAML sink (compose, the CR, the operator bundle) are line-structured, so an
+unchecked value carrying a newline adds keys of its own -- a `[Service]` `ExecStartPre=`, a
+`cap_add:`, a second `---` manifest. Either quote it at the sink or check it in
+`internal/config/artifactvalues.go` (or beside the field's other rules), with the injection
+cases in the test. A new schema field that reaches an artifact does neither by default.
+
 **A retired key is retained and refused by name.** `.runtime` became `.command`; the old field
 still parses so a file carrying it fails loud naming its replacement instead of hitting a bare
 unknown-key error. Do the same for any future rename.

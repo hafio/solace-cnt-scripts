@@ -81,6 +81,11 @@ func opK8sDeploy(a *App) error {
 	if err := c.AdminPasswordPreflight(ctx); err != nil {
 		return err
 	}
+	// Before CreateSecrets rewrites the digest this compares against.
+	certChanged, err := c.ServerCertChanged(ctx)
+	if err != nil {
+		return err
+	}
 	if err := c.CreateNamespace(ctx); err != nil {
 		return err
 	}
@@ -95,7 +100,33 @@ func opK8sDeploy(a *App) error {
 	// but not yet established fails differently -- so the CR is read back before this
 	// reports success. Readiness is deliberately NOT waited on; `broker status` is for
 	// watching it come up.
-	return c.ConfirmBrokerApplied(ctx)
+	if err := c.ConfirmBrokerApplied(ctx); err != nil {
+		return err
+	}
+	if !certChanged || !c.BrokerPodsExist(ctx) {
+		return nil
+	}
+	return k8sRestartForCertificate(a, c)
+}
+
+// k8sRestartForCertificate finishes a deploy that renewed the server certificate of a
+// running broker. The Secret is updated, but a pod reads it only when it starts, and a
+// Secret's content is not part of the pod template -- so, unlike a CR change, nothing
+// makes the operator roll the pods. The same consent a container deploy takes: --restart
+// pre-approves, otherwise it asks, and a non-interactive run leaves the broker running
+// and says how to finish. The restart is broker restart's own rolling one.
+//
+// If the same deploy also changed the CR, the operator may already be rolling the pods
+// with the new Secret mounted; declining is then the right answer.
+func k8sRestartForCertificate(a *App, c *k8s.Cluster) error {
+	what := k8sWhat(a, "broker "+a.Cfg.K8s.Name)
+	if !a.restart && !confirmRestart(a, "Restart "+what+" now to serve the renewed server certificate?") {
+		warn("the renewed server certificate is in Secret %s, but the running broker still presents the previous one.",
+			a.Cfg.TLSServerSecretName())
+		warn("re-run with --restart, run `broker restart`, or hot-swap it without a restart: `broker configure server-certs`.")
+		return nil
+	}
+	return c.RestartRolling(bg())
 }
 
 // The namespace and secrets steps are no longer commands of their own: `broker deploy`
@@ -117,11 +148,14 @@ func opK8sDeploy(a *App) error {
 
 // opK8sConfigServerCerts loads, updates or removes the TLS server certificate.
 //
-// The secret-managed path (a TLS Secret named in kubernetes.tlsServerSecret, or derived
-// from tls.cert/certKey -- config.Config.TLSServerSecretName) rewrites the Secret and lets
-// the operator mount it -- nothing is exec'd into the broker and no pod is restarted.
-// Without one there is nothing to load on Kubernetes -- a loaded config with no TLS Secret
-// has no files either -- so the CLI branch below only reports that.
+// Apply is a hot-swap in two halves, and never restarts a pod. With a TLS Secret (named
+// in kubernetes.tlsServerSecret, or derived from tls.cert/certKey --
+// config.Config.TLSServerSecretName) the Secret is rewritten first: it is what a pod
+// mounts when it next starts, so a restart keeps the new certificate. Then the
+// certificate is loaded over the CLI into every node (--pod narrows), which is what the
+// RUNNING broker serves -- a running pod does not re-read its Secret. A named Secret this
+// env file supplies no files for fails at the first half, since there is nothing here to
+// rebuild it or to load from.
 //
 // --remove is CLI-only and spans the same nodes the apply path does. It has no
 // secret-managed form, and refuses rather than inventing one -- see the branch below.
@@ -162,16 +196,17 @@ func opK8sConfigServerCerts(a *App) error {
 		}
 		return k8sOps(a).RemoveServerCerts(bg(), roles...)
 	}
-	if a.Cfg.TLSServerSecretName() != "" {
-		// Whether this env file supplies the files to rebuild it is UpdateServerCertSecret's
-		// question, not this one's: a Secret-backed deployment never wants the CLI path,
-		// and being told the Secret is managed elsewhere beats being asked for a
-		// certificate whose only use would be to overwrite someone else's.
-		return k8sCluster(a).UpdateServerCertSecret(bg())
-	}
 	roles, err := podRoles(a, k8s.HARoles(a.Cfg))
 	if err != nil {
 		return err
+	}
+	if a.Cfg.TLSServerSecretName() != "" {
+		// Whether this env file supplies the files to rebuild it is UpdateServerCertSecret's
+		// question, not this one's: being told the Secret is managed elsewhere beats being
+		// asked for a certificate whose only use would be to overwrite someone else's.
+		if err := k8sCluster(a).UpdateServerCertSecret(bg()); err != nil {
+			return err
+		}
 	}
 	return k8sOps(a).ServerCert(bg(), today(), roles...)
 }

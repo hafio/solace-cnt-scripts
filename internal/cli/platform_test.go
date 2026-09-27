@@ -40,12 +40,6 @@ func writePlatformEnv(t *testing.T, platforms ...config.Platform) string {
 		case config.K8s:
 			body += "kubernetes:\n  name: dev-broker\n  namespace: solace\n" +
 				"  storage:\n    class: standard\n    msgNodeSize: 30Gi\n"
-		case config.Podman:
-			// A bare `podman: {}` no longer loads: baseDir is mandatory, because it
-			// receives the server-certificate bundle and the schema will not pick a
-			// location for a private key. Docker still needs no key of its own, which
-			// is why only this platform gets a body.
-			body += "podman:\n  baseDir: /opt/solace\n"
 		default:
 			body += string(p) + ": {}\n"
 		}
@@ -246,7 +240,8 @@ func TestUnsupportedCommandFailsLoud(t *testing.T) {
 		// gap in the table: the whole `operator` noun is the kubernetes-only surface, and no
 		// COMMAND is container-only any more. `prepare host` was the last one, and its work
 		// folded into `broker deploy`, which applies everywhere. What stayed container-only is
-		// a flag (--restart) and a role reading (--pod), both covered by TestScopedFlagFailsLoud.
+		// a role reading (--pod), covered by TestScopedFlagFailsLoud; --restart now applies
+		// on every platform.
 		//
 		// `broker generate` is deliberately absent too: it is the one verb that means the same
 		// thing on both families -- what `broker deploy` would apply -- so it is refused
@@ -272,14 +267,15 @@ func TestUnsupportedCommandFailsLoud(t *testing.T) {
 
 // TestScopedFlagFailsLoud: a flag that exists on every platform but means
 // something on only one is refused where it means nothing, rather than accepted
-// and ignored -- a --restart that did nothing would read as "already restarted".
+// and ignored -- a --previous that did nothing would read as "no earlier run".
+// (--restart used to be here; it now means something on Kubernetes too, restarting
+// the pods for a renewed certificate -- TestK8sDeployRestartsForARenewedCertificate.)
 func TestScopedFlagFailsLoud(t *testing.T) {
 	for _, tc := range []struct {
 		platform config.Platform
 		args     []string
 		flag     string
 	}{
-		{config.K8s, []string{"broker", "deploy", "--restart"}, "restart"},
 		{config.Docker, []string{"broker", "cli", "--pod", "primary"}, "pod"},
 		{config.Docker, []string{"broker", "logs", "--previous"}, "previous"},
 		{config.Podman, []string{"broker", "logs", "--previous"}, "previous"},

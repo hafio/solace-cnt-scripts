@@ -3,6 +3,8 @@ package container
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +15,6 @@ import (
 	"slices"
 	"strings"
 
-	"solace/internal/broker"
 	"solace/internal/config"
 	"solace/internal/engine"
 	"solace/internal/output"
@@ -197,9 +198,14 @@ func (m *Manager) composeSecretEnv(preview bool) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	env := make([]string, 0, len(secrets))
+	env := make([]string, 0, len(secrets)+1)
 	for _, s := range secrets {
 		env = append(env, s.EnvVar()+"="+s.Value)
+		// The certificate's digest rides beside it, filling the container label the
+		// compose file interpolates (render.CertDigestLabel) -- see dockerCertChanged.
+		if len(s.SourceFiles) > 0 {
+			env = append(env, s.DigestEnvVar()+"="+certDigest(s.Value, preview))
+		}
 	}
 	return env, nil
 }
@@ -275,11 +281,15 @@ func (m *Manager) CheckEnv() {
 		output.KV{Key: "tls", Value: tls},
 	)
 	if m.P == config.Podman {
-		// baseDir is reported because it is where the broker's PRIVATE KEY lands on
-		// this host, which is the most consequential new fact about a podman deploy
-		// and the one thing an operator cannot infer from anywhere else.
-		rows = append(rows, output.KV{Key: "podman", Value: fmt.Sprintf(
-			"rootless=%t quadletDir=%s baseDir=%s", cfg.Podman.Rootless, cfg.Podman.QuadletDir, cfg.Podman.BaseDir)})
+		// baseDir is reported only when set, and labelled for what it still does: the
+		// server certificate now rides podman's secret store, and the directory is
+		// consulted only to delete the bundle file an earlier build wrote there
+		// (removeLegacyCertBundle).
+		podman := fmt.Sprintf("rootless=%t quadletDir=%s", cfg.Podman.Rootless, cfg.Podman.QuadletDir)
+		if cfg.Podman.BaseDir != "" {
+			podman += fmt.Sprintf(" baseDir=%s (legacy bundle clean-up only)", cfg.Podman.BaseDir)
+		}
+		rows = append(rows, output.KV{Key: "podman", Value: podman})
 	} else {
 		// The configured value, like the runtime line above -- CheckEnv reports what
 		// the env file says, and Reachable (next in Check) is what fails loud if the
@@ -411,9 +421,6 @@ func (m *Manager) PrepHost(ctx context.Context) error {
 	if err := m.R.Run(ctx, "mkdir", "-p", cb.DataDir); err != nil {
 		return fmt.Errorf("create data dir %q: %w%s", cb.DataDir, err, m.dataDirHint(cb.DataDir))
 	}
-	if err := m.prepBaseDir(ctx); err != nil {
-		return err
-	}
 	if m.rootlessPodman() {
 		// 775 so the directory stays writable from outside the container once the
 		// chown below moves it to a subuid nobody can become: container gid 0 maps
@@ -441,29 +448,6 @@ func (m *Manager) PrepHost(ctx context.Context) error {
 		return err
 	}
 	return m.registryLogin(ctx)
-}
-
-// prepBaseDir creates podman.baseDir up front rather than leaving it to the first
-// writeArtifact. It is podman-only, and it is NOT chowned into the user namespace
-// or made group-writable: it holds the server-certificate bundle, which contains
-// the PRIVATE KEY, and the container reads that through a bind mount rather than
-// owning it. 0700 is set explicitly because MkdirAll only applies a mode to a
-// directory it CREATES, so a pre-existing 0755 would otherwise survive.
-func (m *Manager) prepBaseDir(ctx context.Context) error {
-	if m.P != config.Podman {
-		return nil
-	}
-	dir := m.Cfg.Podman.BaseDir
-	if dir == "" {
-		return nil
-	}
-	if err := m.R.Run(ctx, "mkdir", "-p", dir); err != nil {
-		return fmt.Errorf("create podman.baseDir %q: %w", dir, err)
-	}
-	if err := m.R.Run(ctx, "chmod", "700", dir); err != nil {
-		return fmt.Errorf("restrict podman.baseDir %q to 0700 (it holds the server private key): %w", dir, err)
-	}
-	return nil
 }
 
 // registryLogin authenticates this host to the image registry when credentials are
@@ -514,11 +498,12 @@ func (m *Manager) Deploy(ctx context.Context, role config.Role) error {
 			return err
 		}
 	}
-	if err := m.prepareSecrets(ctx); err != nil {
+	certChanged, err := m.prepareSecrets(ctx)
+	if err != nil {
 		return err
 	}
 	if m.P == config.Podman {
-		return m.deployPodman(ctx, id)
+		return m.deployPodman(ctx, id, certChanged)
 	}
 	return m.deployDocker(ctx, id)
 }
@@ -534,7 +519,11 @@ func (m *Manager) Deploy(ctx context.Context, role config.Role) error {
 // Re-deploying. An empty value fails loud here
 // rather than deploying a broker with no password -- except under the Echo runner, which
 // must stay previewable before `broker deploy` has generated the HA pre-shared key.
-func (m *Manager) prepareSecrets(ctx context.Context) error {
+//
+// It reports whether the server certificate in podman's store changed
+// (createPodmanSecrets); docker always reports false, since compose re-reads the
+// certificate from the environment on every `up`.
+func (m *Manager) prepareSecrets(ctx context.Context) (bool, error) {
 	// Skipped under the Echo runner: a preview must not need secret values on disk, and
 	// `broker generate` renders name-level references only, so there is nothing to check.
 	if !m.isEcho() {
@@ -542,135 +531,170 @@ func (m *Manager) prepareSecrets(ctx context.Context) error {
 		// file that is both pre-`broker deploy` (empty PSK) and missing its cert files
 		// should report the PSK and its `broker deploy` hint, not the certificate.
 		if err := render.SecretPreflight(m.Cfg, m.P); err != nil {
-			return err
+			return false, err
 		}
 	}
 	// Resolve on BOTH platforms, and discard the result on docker. Docker needs no
 	// secret prepared -- its values ride the compose child's environment -- but
 	// reading the certificate HERE is what makes an unreadable one fail before
-	// deployDocker rewrites the compose file, so "nothing happened" stays true. That
-	// is the same invariant the podman side gets by writing the bundle before the unit.
+	// deployDocker rewrites the compose file, so "nothing happened" stays true. The
+	// podman side gets the same invariant by loading its store before the unit.
 	secrets, err := ResolveSecretValues(m.Cfg, m.P, m.isEcho())
 	if err != nil {
-		return err
+		return false, err
 	}
 	if m.P == config.Podman {
 		return m.createPodmanSecrets(ctx, secrets)
 	}
-	return nil
+	return false, nil
+}
+
+// certDigest is the render.CertDigestLabel value for a certificate bundle: its
+// sha256 in hex. A preview's value is the placeholder, and a hash of it would read as
+// a real digest in the echoed argv, so a preview gets the placeholder itself.
+func certDigest(bundle string, preview bool) string {
+	if preview {
+		return previewValue
+	}
+	sum := sha256.Sum256([]byte(bundle))
+	return hex.EncodeToString(sum[:])
 }
 
 // createPodmanSecrets loads each secret into podman's secret store, feeding the
-// value on stdin so it never reaches an argv or the echoed command.
+// value on stdin so it never reaches an argv or the echoed command. It reports
+// whether the server certificate changed since the last deploy.
 //
-// Remove-then-create, rather than `create --replace`, and the reason is the version
-// floor. `--replace` needs podman 4.7, while the rest of this wiring needs only 4.5
-// -- so using it would raise the floor of the whole tool for one flag whose effect
-// two commands reproduce exactly. `rm --ignore` makes a missing secret a success, so
-// the pair is idempotent the same way --replace was: a redeploy with a rotated value
+// Remove-then-create, rather than `create --replace`: written when the floor was 4.5
+// and --replace needed 4.7, and kept because the pair is idempotent the same way --
+// `rm --ignore` makes a missing secret a success, so a redeploy with a rotated value
 // works, and a first deploy with nothing in the store works.
 //
 // A failure of the rm half is NOT warned away. --ignore already absorbs the only
 // benign case, so anything left is real -- a store this user cannot write, say --
 // and continuing would create a secret next to one that could not be removed.
 //
-// Exported so a caller can rotate ONE secret through this exact
-// path and then restarts the unit, to settle whether a quadlet re-reads the store
-// on start (deployPodman's ASSUMED, NOT VERIFIED branch). Going through Deploy
-// instead would exercise the branching rather than the question.
-func (m *Manager) createPodmanSecrets(ctx context.Context, secrets []render.ContainerSecret) error {
+// The server certificate (the one secret with SourceFiles) is the only one whose
+// change bounces the broker, and it is the only one labelled: the unit names secrets
+// rather than values, so without the label a renewed certificate would leave the unit
+// byte-identical and deployPodman would report "nothing to do". Its name is derived,
+// so the label decides alone: a matching digest leaves the secret in place, and a
+// different or missing one -- a first deploy, or a host an earlier build deployed
+// with the bundle as a host file -- overwrites it and reports the change, which costs
+// at most a consent-gated restart. Every other credential keeps "rotate, then
+// --restart".
+func (m *Manager) createPodmanSecrets(ctx context.Context, secrets []render.ContainerSecret) (bool, error) {
 	r, err := m.runtime()
 	if err != nil {
-		return err
+		return false, err
 	}
+	var certChanged bool
 	for _, s := range secrets {
+		create := []string{"secret", "create"}
+		if len(s.SourceFiles) > 0 {
+			digest := certDigest(s.Value, m.isEcho())
+			if m.certSecretHash(ctx, r, s.Name) == digest {
+				m.progress().Info("server certificate unchanged: podman secret %s already holds it (sha256 matches), "+
+					"left in place.", s.Name)
+				continue
+			}
+			certChanged = true
+			create = append(create, "--label", render.CertDigestLabel+"="+digest)
+		}
 		if err := m.R.Run(ctx, r.Name(), r.Args("secret", "rm", "--ignore", s.Name)...); err != nil {
-			return fmt.Errorf("remove the existing podman secret %q before recreating it (from %s): %w",
+			return false, fmt.Errorf("remove the existing podman secret %q before recreating it (from %s): %w",
 				s.Name, s.ConfigKey, err)
 		}
 		if err := m.R.RunInput(ctx, []byte(s.Value), r.Name(),
-			r.Args("secret", "create", s.Name, "-")...); err != nil {
-			return fmt.Errorf("create podman secret %q from %s: %w", s.Name, s.ConfigKey, err)
+			r.Args(append(create, s.Name, "-")...)...); err != nil {
+			return false, fmt.Errorf("create podman secret %q from %s: %w", s.Name, s.ConfigKey, err)
 		}
 	}
-	return nil
+	return certChanged, nil
 }
 
-// certBundlePath answers where podman's copy of the bundle lives and whether there is
-// one at all. Both halves of the guard say the same thing: the bundle is the private
-// key followed by the certificate, so a deployment missing either configures no broker
-// TLS and has no bundle to write or to remove.
-func (m *Manager) certBundlePath() (string, bool) {
+// UpdateServerCertSecret is the persistence half of `broker configure server-certs` on
+// a container host; the CLI load that follows it is what the running broker serves. It
+// never restarts anything.
+//
+// Podman: the store secret is overwritten under the deploy rule -- a matching digest
+// label leaves it, a different or missing one replaces it -- so the next start of the
+// unit mounts the new certificate. Docker keeps no secret object: the container holds
+// the certificate it was created with, so there is nothing to update, and the next
+// `broker deploy` offers to recreate it because the digest label no longer matches. With
+// no certificate configured it does nothing, and the CLI load reports why.
+func (m *Manager) UpdateServerCertSecret(ctx context.Context) error {
 	if m.Cfg.TLS.Cert == "" || m.Cfg.TLS.CertKey == "" {
-		return "", false
-	}
-	return filepath.FromSlash(render.ServerCertBundlePath(m.Cfg)), true
-}
-
-// writeCertBundle writes podman's copy of the server-certificate bundle to the
-// host, returning whether it changed so deployPodman can fold that into the restart
-// decision. A deployment with no TLS configured writes nothing and reports no change.
-//
-// The Echo guard sits HERE rather than being inherited from writeArtifact, and that
-// is load-bearing: writeArtifact's body is an ordinary argument, so the caller has
-// already evaluated it: broker.ServerCertBundle would have read both files before
-// writeArtifact could decline. A preview must stay possible before the certificate
-// exists on this host.
-//
-// Mode 0600 in a 0700 directory, and the chmod is explicit because os.WriteFile
-// applies its permission only when CREATING a file -- an existing bundle left at
-// 0644 by anything else would be truncated and rewritten still 0644, which for a
-// file containing a private key is not a mode to inherit.
-func (m *Manager) writeCertBundle() (bool, error) {
-	path, ok := m.certBundlePath()
-	if !ok {
-		return false, nil
-	}
-	if m.isEcho() {
-		m.progress().Info("would write server certificate bundle %s (skipped in preview).", path)
-		return true, nil
-	}
-	bundle, err := broker.ServerCertBundle(m.Cfg)
-	if err != nil {
-		return false, err
-	}
-	changed, err := m.writeArtifact(path, bundle, "server certificate bundle", 0o700)
-	if err != nil {
-		return false, err
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return false, fmt.Errorf("restrict the server certificate bundle %q to 0600 (it holds the private key): %w",
-			path, err)
-	}
-	return changed, nil
-}
-
-// removeCertBundle deletes podman's copy of the bundle on teardown. It runs with the
-// other things the container consumes, after the unit is confirmed gone.
-//
-// The failure is FATAL, unlike a leftover store secret's warning, and the difference
-// is the contents: silently leaving a private key on the host is the outcome least
-// like the rest of this teardown's posture. A missing file is not a failure -- a
-// deployment that never had TLS, or whose tls.cert was unset since deploy, has
-// nothing to remove. Only the FILE goes; the directory may hold other brokers'
-// bundles.
-func (m *Manager) removeCertBundle() error {
-	path, ok := m.certBundlePath()
-	if !ok {
 		return nil
 	}
+	if m.P != config.Podman {
+		m.progress().Info("docker keeps no secret store: container %s keeps the certificate it was created with "+
+			"until `broker deploy` recreates it, which that deploy offers once the certificate differs.", m.name())
+		return nil
+	}
+	if err := m.Preflight(ctx); err != nil {
+		return err
+	}
+	secrets, err := ResolveSecretValues(m.Cfg, m.P, m.isEcho())
+	if err != nil {
+		return err
+	}
+	var cert []render.ContainerSecret
+	for _, s := range secrets {
+		if len(s.SourceFiles) > 0 {
+			cert = append(cert, s)
+		}
+	}
+	_, err = m.createPodmanSecrets(ctx, cert)
+	return err
+}
+
+// certSecretHash is the render.CertDigestLabel value on the podman secret name, or empty when
+// the secret is absent, unlabelled or the probe fails -- all of which the caller reads
+// as "changed". Under the Echo runner it answers empty without probing, so a preview
+// counts the certificate as changed, the way it counts every artifact.
+func (m *Manager) certSecretHash(ctx context.Context, r config.Command, name string) string {
 	if m.isEcho() {
-		m.progress().Info("would remove server certificate bundle %s (skipped in preview).", path)
+		return ""
+	}
+	out, err := m.R.Output(ctx, r.Name(), r.Args("secret", "inspect", "--format",
+		`{{index .Spec.Labels "`+render.CertDigestLabel+`"}}`, name)...)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// removeLegacyCertBundle deletes the server-certificate bundle an earlier build wrote
+// to <podman.baseDir>/<name>-tls-servercertificate.pem (render.ServerCertBundlePath),
+// so upgrading does not leave a private key on the host. It runs on every podman
+// deploy, after the new unit is written (so nothing references the file any more),
+// and on every podman remove. The path does not depend on TLS being configured: a
+// host may have dropped tls.cert since the file was written.
+//
+// A missing file, or an unset baseDir, is the normal case and says nothing. A failure
+// to remove an existing one is FATAL, for the same reason a leftover certificate
+// secret is: it holds the broker's private key. Only the FILE goes; the directory may
+// hold other brokers' files.
+func (m *Manager) removeLegacyCertBundle() error {
+	if m.P != config.Podman || m.Cfg.Podman.BaseDir == "" {
+		return nil
+	}
+	path := filepath.FromSlash(render.ServerCertBundlePath(m.Cfg))
+	if m.isEcho() {
+		if fileExists(path) {
+			m.progress().Info("would remove legacy server certificate bundle %s (skipped in preview).", path)
+		}
 		return nil
 	}
 	if err := os.Remove(path); err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("remove the server certificate bundle %q: it holds the broker's PRIVATE KEY and must "+
-			"not be left on this host -- remove it by hand and re-run: %w", path, err)
+		return fmt.Errorf("remove the legacy server certificate bundle %q: an earlier build wrote the broker's "+
+			"PRIVATE KEY there, and the certificate now rides podman's secret store, so the file must not be "+
+			"left on this host -- remove it by hand and re-run: %w", path, err)
 	}
-	m.progress().OK("removed server certificate bundle %s", path)
+	m.progress().OK("removed legacy server certificate bundle %s (the certificate now rides podman's secret store)", path)
 	return nil
 }
 
@@ -724,18 +748,20 @@ func (m *Manager) staleWarning(what string) {
 	m.progress().Warn("re-run with --restart (or restart it yourself) to pick up the change.")
 }
 
-func (m *Manager) deployPodman(ctx context.Context, id config.NodeIdentity) error {
-	// The bundle FIRST, before the unit that bind-mounts it: the file has to exist
-	// before any `systemctl start`, and a failure to build it must abort before any
-	// host state changes at all.
-	certChanged, err := m.writeCertBundle()
-	if err != nil {
-		return err
-	}
+// deployPodman writes the unit and starts or restarts the service. certChanged is
+// createPodmanSecrets' answer: the store was loaded before this runs, so a
+// certificate that could not be read has already aborted the deploy before any unit
+// was written.
+func (m *Manager) deployPodman(ctx context.Context, id config.NodeIdentity, certChanged bool) error {
 	unit := filepath.ToSlash(filepath.Join(m.Cfg.Podman.QuadletDir, m.name()+".container"))
 	svc := m.name() + ".service"
 	changed, err := m.writeArtifact(unit, render.Quadlet(m.Cfg, id), "quadlet unit", 0o755)
 	if err != nil {
+		return err
+	}
+	// Now that no unit on disk bind-mounts it. A running container started from the
+	// old unit keeps its own mount of the file until it is restarted.
+	if err := m.removeLegacyCertBundle(); err != nil {
 		return err
 	}
 	// A rotated certificate under a byte-identical unit must still bounce the broker.
@@ -819,18 +845,34 @@ func (m *Manager) deployDocker(ctx context.Context, id config.NodeIdentity) erro
 	if !running {
 		return m.compose(ctx, "-f", file, "up", "-d", "--force-recreate")
 	}
+	// A renewed certificate under a byte-identical compose file is still a change:
+	// the running container holds the bundle it was created with.
+	what := "the compose file"
+	up := []string{"-f", file, "up", "-d"}
+	if !changed {
+		certChanged, err := m.dockerCertChanged(ctx)
+		if err != nil {
+			return err
+		}
+		if certChanged {
+			m.progress().Info("server certificate differs from the one container %s was created with.", m.name())
+			// --force-recreate so the recreate does not rest on compose noticing the
+			// label's new value in its own config hash.
+			changed, what, up = true, "the server certificate", append(up, "--force-recreate")
+		}
+	}
 	// `compose up -d` recreates the container when the file changed, which bounces
 	// a running broker -- the same hazard podman has, so it takes the same consent.
 	if changed {
 		if !m.approveRestart("container " + m.name()) {
-			m.staleWarning("the compose file")
+			m.staleWarning(what)
 			return nil
 		}
-		return m.compose(ctx, "-f", file, "up", "-d")
+		return m.compose(ctx, up...)
 	}
-	// Nothing changed in the artifact -- but a rotated secret is invisible here by
-	// design: the value lives only in the config and this host's environment, so
-	// there is no on-disk copy to diff. --restart is therefore the explicit way to
+	// Nothing changed in the artifact or the certificate -- but a rotated credential
+	// is invisible here by design: the value lives only in the config and this host's
+	// environment, so there is no on-disk copy to diff. --restart is therefore the explicit way to
 	// push a rotated password or key into the running broker, and it has to force
 	// the recreate that an unchanged compose file would otherwise skip.
 	if m.RestartApproved {
@@ -840,6 +882,39 @@ func (m *Manager) deployDocker(ctx context.Context, id config.NodeIdentity) erro
 	m.progress().Info("container %s is already running on this compose file -- nothing to do.", m.name())
 	m.progress().Info("if you rotated a secret, re-run with --restart to recreate the container with it.")
 	return nil
+}
+
+// dockerCertChanged reports whether the running container was created with a
+// different server certificate from the one configured now, by comparing its
+// render.CertDigestLabel with the current bundle's digest -- docker's counterpart of
+// the podman store secret's label, since compose keeps no secret object to label. A
+// match is "unchanged"; a different or missing label (a container an earlier build
+// created) or a failed inspect counts as changed, which costs at most a
+// consent-gated recreate. With no certificate configured there is nothing to compare.
+func (m *Manager) dockerCertChanged(ctx context.Context) (bool, error) {
+	if m.isEcho() {
+		return false, nil
+	}
+	secrets, err := ResolveSecretValues(m.Cfg, m.P, false)
+	if err != nil {
+		return false, err
+	}
+	for _, s := range secrets {
+		if len(s.SourceFiles) == 0 {
+			continue
+		}
+		r, err := m.runtime()
+		if err != nil {
+			return false, err
+		}
+		out, err := m.R.Output(ctx, r.Name(), r.Args("inspect", "--type", "container", "--format",
+			`{{index .Config.Labels "`+render.CertDigestLabel+`"}}`, m.name())...)
+		if err != nil {
+			return true, nil
+		}
+		return strings.TrimSpace(string(out)) != certDigest(s.Value, false), nil
+	}
+	return false, nil
 }
 
 // serviceActive reports whether this host's broker unit is already active, so
@@ -991,20 +1066,22 @@ func (m *Manager) deletePodman(ctx context.Context) error {
 	if err := m.systemctl(ctx, "daemon-reload"); err != nil {
 		return err
 	}
-	// With the other things the container consumed, now that the unit is gone.
-	if err := m.removeCertBundle(); err != nil {
-		return err
-	}
-	return m.removePodmanSecrets(ctx)
+	// With the other things the container consumed, now that the unit is gone. Both
+	// run even when one fails, and both failures are reported.
+	return errors.Join(m.removeLegacyCertBundle(), m.removePodmanSecrets(ctx))
 }
 
 // removePodmanSecrets removes every secret this deployment loaded into podman's
 // secret store, using the same render.ContainerSecrets(m.Cfg, m.P) that
 // createPodmanSecrets reads them from -- so the create and remove lists cannot
 // drift apart. It runs only after the container/unit is gone (deletePodman's
-// last step): a leftover secret must not fail a teardown that otherwise
-// succeeded, so a "not found" (or any other) rm failure is a warning, not an
-// error, and every secret is still attempted.
+// last step): a leftover credential must not fail a teardown that otherwise
+// succeeded, so its rm failure is a warning, not an error, and every secret is
+// still attempted.
+//
+// The server certificate is the exception: it holds the broker's PRIVATE KEY, so
+// failing to remove it fails the teardown -- after every other secret has been
+// attempted -- rather than leaving the key in the store behind a warning.
 func (m *Manager) removePodmanSecrets(ctx context.Context) error {
 	secrets := render.ContainerSecrets(m.Cfg, m.P)
 	if len(secrets) == 0 {
@@ -1014,6 +1091,7 @@ func (m *Manager) removePodmanSecrets(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var keyErr error
 	for _, s := range secrets {
 		if m.isEcho() {
 			m.progress().Info("would remove podman secret %s (skipped in preview).", s.Name)
@@ -1024,12 +1102,18 @@ func (m *Manager) removePodmanSecrets(ctx context.Context) error {
 		// being a plausible cause once a missing secret is a success, so what is
 		// left really is a failure worth naming.
 		if err := m.R.Run(ctx, r.Name(), r.Args("secret", "rm", "--ignore", s.Name)...); err != nil {
+			if len(s.SourceFiles) > 0 {
+				keyErr = fmt.Errorf("remove podman secret %q: it holds the broker's PRIVATE KEY and must not be "+
+					"left in this host's secret store -- remove it by hand (`%s`) and re-run: %w",
+					s.Name, strings.Join(append([]string{r.Name()}, r.Args("secret", "rm", s.Name)...), " "), err)
+				continue
+			}
 			m.progress().Warn("removing podman secret %s failed: %v", s.Name, err)
 			continue
 		}
 		m.progress().OK("removed podman secret %s", s.Name)
 	}
-	return nil
+	return keyErr
 }
 
 func (m *Manager) deleteDocker(ctx context.Context) error {
@@ -1547,6 +1631,13 @@ func secretSummary(p config.Platform, secrets []render.ContainerSecret) string {
 	}
 	parts := make([]string, 0, len(secrets))
 	for _, s := range secrets {
+		// The certificate's value is read from its files at deploy, never at report
+		// time, so set/MISSING would always say MISSING. The source keys are the
+		// honest answer; whether the files are readable is SecretPreflight's to say.
+		if len(s.SourceFiles) > 0 {
+			parts = append(parts, s.Name+"=(from tls.certKey + tls.cert)")
+			continue
+		}
 		parts = append(parts, s.Name+"="+setOrMissing(s.Value))
 	}
 	return fmt.Sprintf("%s (%s)", strings.Join(parts, " "), store)

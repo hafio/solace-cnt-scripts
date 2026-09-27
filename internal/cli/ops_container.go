@@ -110,9 +110,11 @@ func opCtrRestartBroker(a *App) error {
 //
 // There is no run-everything step, for the same reason there is none on Kubernetes.
 
-// opCtrConfigServerCerts loads the TLS server certificate over the CLI. There is no
-// secret-managed route on containers: the certificate reaches the broker as a mounted
-// file, written by `broker deploy`, so re-loading it here is the only in-place update.
+// opCtrConfigServerCerts hot-swaps the TLS server certificate, never restarting the
+// container: the stored copy is updated first where the engine keeps one (podman's
+// secret store, so the next start mounts it -- Manager.UpdateServerCertSecret), then the
+// certificate is loaded over the CLI into this host's broker, which is what it serves
+// while running. Node-local like every container op, so an HA group runs it on each host.
 func opCtrConfigServerCerts(a *App) error {
 	remove, err := wantRemove(a)
 	if err != nil {
@@ -124,6 +126,9 @@ func opCtrConfigServerCerts(a *App) error {
 			return nil
 		}
 		return ctrOps(a).RemoveServerCerts(bg(), config.Primary)
+	}
+	if err := ctrManager(a).UpdateServerCertSecret(bg()); err != nil {
+		return err
 	}
 	return ctrOps(a).ServerCert(bg(), today(), config.Primary)
 }
@@ -367,14 +372,14 @@ func opCtrGenArtifact(a *App) error {
 // and `broker deploy` creates them itself.
 
 // opCtrRemoveBroker is the prompted teardown of this host's broker: the container, its
-// artifact, its engine secrets and the server-certificate bundle, then -- only if asked
-// for -- the data directory.
+// artifact, its engine secrets (the server certificate among them) and, on podman, any
+// legacy certificate file an earlier build left under podman.baseDir, then -- only if
+// asked for -- the data directory.
 //
 // There is no namespace analog here. The host's data directory is the layer that survives,
 // so it is what --delete-data governs -- its CONTENTS, not the directory, which keeps the
-// ownership prep gave it; removing the certificate bundle is NOT optional and
-// a failure there is fatal, because leaving a private key on the host is the worst outcome
-// available.
+// ownership prep gave it; removing the certificate is NOT optional and a failure there is
+// fatal, because leaving a private key on the host is the worst outcome available.
 func opCtrRemoveBroker(a *App) error {
 	if !confirmDelete(a, containerWhat(a)) {
 		return nil

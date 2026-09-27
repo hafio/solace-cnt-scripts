@@ -257,8 +257,10 @@ under it defaults -- it is what marks the file's platform).
    ```
 
 Re-running `broker deploy` is safe: it compares the rendered artifact with the one on disk
-and only bounces a running broker with `--restart` or your consent. That is also how an
-image-tag bump and a rotated password are applied -- see
+and only bounces a running broker with `--restart` or your consent -- on every platform,
+including for a renewed TLS certificate. That is also how an image-tag bump and a rotated
+password are applied, while `broker configure server-certs` swaps in a renewed certificate
+with no restart at all -- see
 [Docker and Podman mechanics](docs/operations.md#docker-and-podman-mechanics).
 
 ## Common commands

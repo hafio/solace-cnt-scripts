@@ -31,10 +31,6 @@ func guardConfig(p Platform) *Config {
 	c.K8s.Namespace = "solace"
 	c.K8s.Storage.MsgNodeSize = "30Gi"
 	c.Redundancy.Primary.Name = "primary-host"
-	// Mandatory on podman and deliberately not defaulted (it receives a file holding
-	// a private key, so the location is the operator's choice), which means a fixture
-	// that omits it fails validation for a reason unrelated to what these tests cover.
-	c.Podman.BaseDir = "/opt/solace"
 	c.ApplyDefaults(p)
 	return c
 }

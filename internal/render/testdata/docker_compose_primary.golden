@@ -47,6 +47,8 @@ services:
       username_admin_globalaccesslevel: "admin"
       username_admin_passwordfilepath: "/mnt/secrets/username_admin_password"
       redundancy_authentication_presharedkey_keyfilepath: "/mnt/secrets/redundancy_authentication_presharedkey_key"
+    labels:
+      solace-util.sha256: "${SOLACE_TLS_SERVERCERTIFICATE_SHA256}"
     secrets:
       - source: "solace-admin-password"
         target: /mnt/secrets/username_admin_password

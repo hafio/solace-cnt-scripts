@@ -153,7 +153,7 @@ func addOutFlags(c *cobra.Command, app *App) {
 // decision, the same way deleting its data is.
 func addRestartFlag(c *cobra.Command, app *App) {
 	c.Flags().BoolVar(&app.restart, "restart", false,
-		"restart an already-running broker when the deploy artifact changed (otherwise you are asked, and a non-interactive run leaves it running)")
+		"restart an already-running broker when the deploy changed its artifact or its server certificate (otherwise you are asked, and a non-interactive run leaves it running)")
 }
 
 // addAllowCommandFlag wires --allow-command onto one command that executes. It is the

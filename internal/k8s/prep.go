@@ -254,7 +254,12 @@ func (c *Cluster) DeleteSecrets(ctx context.Context) error {
 // certificate files and applies it on stdin, porting the secret-managed path of
 // 051-load-server-cert.sh (051:28-38). Applying on stdin replaces the bash
 // `create secret tls --dry-run|apply`, so the private key never reaches an argv or
-// an echoed command. The broker re-reads the secret; no pod restart here.
+// an echoed command.
+//
+// The Secret is what a pod mounts when it STARTS; a running broker does not re-read
+// it. So this is the persistence half of `broker configure server-certs`, and the
+// CLI load that follows it there (broker.Ops.ServerCert) is what swaps the
+// certificate into the running broker. No pod is restarted here.
 func (c *Cluster) UpdateServerCertSecret(ctx context.Context) error {
 	name := c.Cfg.TLSServerSecretName()
 	if name == "" {
@@ -276,6 +281,51 @@ func (c *Cluster) UpdateServerCertSecret(ctx context.Context) error {
 	}
 	c.logf("updating server-certificate secret %s", name)
 	return c.apply(ctx, manifest)
+}
+
+// ServerCertChanged reports whether the TLS Secret this env file builds is already in
+// the cluster holding a different certificate from the one on disk, read from its
+// render.CertDigestLabel annotation -- the rule the container platforms apply to their
+// labels. It is asked BEFORE CreateSecrets rewrites the annotation.
+//
+// false when there is nothing to compare: no Secret this env file builds, or none in
+// the cluster yet (a first deploy, or TLS newly added -- where the CR's own tls block
+// changes and the operator rolls the pods itself). A Secret with a different or
+// missing annotation (one an earlier build applied) is changed, and so is one that
+// cannot be read, which costs at most a consent-gated restart.
+func (c *Cluster) ServerCertChanged(ctx context.Context) (bool, error) {
+	if !c.Cfg.ManagesTLSSecret() {
+		return false, nil
+	}
+	key, crt, err := readTLSMaterial(c.Cfg)
+	if err != nil {
+		return false, err
+	}
+	name := c.Cfg.TLSServerSecretName()
+	// jsonpath rather than -o json, so the Secret's data -- the private key -- is
+	// never read back into this process. The name line says whether it exists.
+	path := `{.metadata.name}{"\n"}{.metadata.annotations.` + strings.ReplaceAll(render.CertDigestLabel, ".", `\.`) + `}`
+	out, err := c.kubectlOutput(ctx, "get", "secret", name, "-n", c.ns(), "--ignore-not-found", "-o", "jsonpath="+path)
+	if err != nil {
+		c.progress().Warn("could not read TLS Secret %s to compare certificates (%v); treating the certificate as changed.",
+			name, err)
+		return true, nil
+	}
+	found, digest, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+	if found == "" {
+		return false, nil
+	}
+	return strings.TrimSpace(digest) != tlsDigest(key, crt), nil
+}
+
+// BrokerPodsExist reports whether this broker's primary pod exists, which is what
+// "a broker is already running" means to a deploy deciding whether a renewed
+// certificate needs a restart. A runner that answers nothing answers false, so a
+// preview never offers one.
+func (c *Cluster) BrokerPodsExist(ctx context.Context) bool {
+	out, err := c.kubectlOutput(ctx, "get", "pod", podName(c.Cfg, config.Primary), "-n", c.ns(),
+		"--ignore-not-found", "-o", "name")
+	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
 // GenBroker renders everything `broker deploy` applies, in the order it applies it:

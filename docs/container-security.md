@@ -175,8 +175,11 @@ limitation. A silent drop turns into a broker with a blank credential.
 Ask for a read-only root filesystem where the image supports it (broker 10.9 and later -- the
 floor the operator's CRD states for `readOnlyRootFilesystem`), keep
 the writable data directory as the one exception, and mount anything the broker only reads --
-a certificate bundle, a CA directory -- read-only. Restrict any host-side file holding a
-private key to 0600 inside a 0700 directory, and delete it on teardown.
+a CA directory, say -- read-only. A private key is not one of those: hand it over as an engine
+secret like any other credential (rule 5) rather than bind-mounting a host file. A key file
+restricted to 0600 on the host is owned by whoever wrote it, which inside the container is
+root, so the non-root identity from rule 3 cannot read it -- the restriction that protects the
+key on the host is the one that breaks the broker.
 
 ### 7. State the setting, do not inherit it
 
@@ -191,12 +194,24 @@ artifact: one that the emitted negative is present (`privileged: false` in a com
 tokens in rule 1's list, in every spelling that list gives. The negative test is the part that
 survives a refactor; the emitted line is what an operator can read.
 
+Neither test sees a widening key that arrives *inside a value*. A quadlet unit and a YAML file
+are line-structured, so any configurable value written into one as-is -- a published port, a
+health-check interval, an image tag -- can carry a newline and start a key of its own:
+`AddCapability=ALL`, a `[Service]` section with an `ExecStartPre=` that systemd runs as root, a
+`cap_add:` in compose, or a second `---` document in a manifest. Hold every such value to the
+grammar of the line it lands on at load, and test that the injections are refused, not just
+that the rendered defaults are clean.
+
 ### 8. Document the version floor each setting needs
 
 Security settings have floors like any other feature, and a floor failure at deploy time is
 better than a setting that silently does nothing. `NoNewPrivileges=` arrived with Quadlet in
 podman 4.4. The quadlet `Secret=` key needs 4.5 (an absolute `target=` on `--secret` has been
-accepted since 4.4, so the key, not the path, is the 4.5 dependency). This tool documents
+accepted since 4.4, so the key, not the path, is the 4.5 dependency). Quadlet refuses a unit
+carrying a key it does not know, so every key is a floor: `ShmSize=` and `Ulimit=` need 4.7,
+and `Memory=` needs 5.5 -- a memory cap written as `PodmanArgs=--memory=` needs only the
+podman run flag, which every supported podman has. Check each key against the release that
+introduced it, and pin that in a test rather than a comment. This tool documents
 Compose 2.23.1 as its floor for the `environment:` secret source; the public record (compose
 PR #10084, merged 2022-12, already applying uid/gid to environment-sourced secrets) shows the
 source accepted well before that, so treat such a number as the floor a project chose, not the

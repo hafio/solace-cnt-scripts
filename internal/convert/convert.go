@@ -485,17 +485,9 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 			} else {
 				boolean(d, "rootless", "PODMAN_ROOTLESS")
 				d.kv("quadletDir", v.s("QUADLET_DIR"))
-				// podman.baseDir is mandatory in the YAML schema and has NO legacy
-				// equivalent -- the bash scripts had nowhere to put a tool-written
-				// file, because they never built the server-certificate bundle. So a
-				// value is emitted rather than left out: a converted file that cannot
-				// load would make `convert` produce something the operator then has to
-				// debug, which is not what a migration aid is for. It is called out in
-				// the warnings so the choice is visible rather than inherited.
-				d.kv("baseDir", "/opt/solace")
-				warns = append(warns, "podman.baseDir was set to /opt/solace: it is mandatory, it has no legacy "+
-					"equivalent, and it is where the server-certificate bundle (which contains the PRIVATE KEY) "+
-					"is written. Change it if that is not where you want a private key on this host")
+				// No podman.baseDir: it is optional, and its only remaining use is
+				// deleting a certificate file an earlier build of THIS tool wrote --
+				// which the bash scripts never did.
 			}
 			d.block("network", func(d *doc) {
 				d.kv("mode", v.s("SOLBK_NETWORK_MODE"))

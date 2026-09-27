@@ -11,7 +11,7 @@ User=1000001
 Group=0
 NoNewPrivileges=true
 PodmanArgs=--cpuset-cpus=0-1
-Memory=6898m
+PodmanArgs=--memory=6898m
 ShmSize=2g
 Ulimit=nofile=2448:1048576
 Ulimit=memlock=-1
@@ -23,7 +23,6 @@ HealthRetries=3
 HealthStartPeriod=60s
 Network=host
 Volume=/opt/solace/data:/var/lib/solace:Z
-Volume=/etc/solace/solace-tls-servercertificate.pem:/mnt/certs/server/tls.pem:ro,Z
 Environment="routername=solace-primary"
 Environment="nodetype=message_routing"
 Environment="redundancy_activestandbyrole=primary"
@@ -51,6 +50,7 @@ Environment="username_admin_passwordfilepath=/mnt/secrets/username_admin_passwor
 Environment="redundancy_authentication_presharedkey_keyfilepath=/mnt/secrets/redundancy_authentication_presharedkey_key"
 Secret=solace-admin-password,type=mount,target=/mnt/secrets/username_admin_password
 Secret=solace-redundancy-psk,type=mount,target=/mnt/secrets/redundancy_authentication_presharedkey_key
+Secret=solace-tls-servercertificate,type=mount,target=/mnt/certs/server/tls.pem
 
 [Service]
 LimitNOFILE=2448:1048576

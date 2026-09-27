@@ -34,8 +34,7 @@ func writeRootlessPodmanEnv(t *testing.T) string {
 		"semp:\n" +
 		"  adminPass: " + smokeAdminPass + "\n" +
 		"podman:\n" +
-		"  rootless: true\n" +
-		"  baseDir: /opt/solace\n"
+		"  rootless: true\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write rootless podman env: %v", err)
 	}

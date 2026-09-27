@@ -98,6 +98,13 @@ func (c *Config) Validate(p Platform) error {
 		return err
 	}
 
+	// The image reference reaches every platform's artifact as-is -- the quadlet
+	// unit, the compose file and the broker CR -- so it is held to the reference
+	// grammar once here (artifactvalues.go).
+	if err := c.validateImage(); err != nil {
+		return err
+	}
+
 	switch p {
 	case K8s:
 		return c.validateK8s()
@@ -288,9 +295,10 @@ func (c *Config) validateHostPaths(p Platform) error {
 			// something to resolve helpfully. A '~' one is not relative by the time
 			// it arrives here -- expandHomePaths ran first.
 			struct{ field, value string }{"podman.quadletDir", c.Podman.QuadletDir},
-			// Likewise never rebased, and required absolute above: it is a
-			// `Volume=` source, and resolving a relative one would invent a
-			// location for a private key that the operator did not name.
+			// Likewise never rebased, and held absolute above when set: deploy
+			// and remove delete a legacy key file under it, and resolving a
+			// relative one would aim that delete somewhere the operator did not
+			// name.
 			struct{ field, value string }{"podman.baseDir", c.Podman.BaseDir},
 			struct{ field, value string }{"podman.container.dataDir", c.Podman.Container.DataDir},
 		)
@@ -623,6 +631,21 @@ func (c *Config) validateK8s() error {
 	default:
 		return fmt.Errorf("kubernetes.imagePullPolicy must be 'Always', 'IfNotPresent' or 'Never' (got: %q)", c.K8s.ImagePullPolicy)
 	}
+	for _, f := range []struct{ field, value, operatorDefault string }{
+		{"kubernetes.securityContext.runAsUser", c.K8s.SecurityContext.RunAsUser, "1000001"},
+		{"kubernetes.securityContext.fsGroup", c.K8s.SecurityContext.FSGroup, "1000002"},
+		{"kubernetes.containerSecurity.runAsUser", c.K8s.ContainerSecurity.RunAsUser, "1000001"},
+		{"kubernetes.containerSecurity.runAsGroup", c.K8s.ContainerSecurity.RunAsGroup, "1000002"},
+	} {
+		if err := validK8sID(f.field, f.value, f.operatorDefault); err != nil {
+			return err
+		}
+	}
+	// The operator bundle's values and the CR's storage sizes are written into YAML
+	// as-is (artifactvalues.go).
+	if err := c.validateK8sArtifactValues(); err != nil {
+		return err
+	}
 	if err := c.validateK8sPorts(); err != nil {
 		return err
 	}
@@ -782,6 +805,37 @@ func (c *Config) validateK8sPorts() error {
 		servicePorts[serviceN] = i
 	}
 	return nil
+}
+
+// k8sIDRE is a pod security id as plain decimal digits: no sign, no leading zero, no
+// point, exponent, underscore or space. Go's `$` matches only at the very end of the text,
+// so a trailing newline fails too.
+var k8sIDRE = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
+
+// maxK8sID is the largest user or group id Kubernetes accepts on a pod. The CRD types the
+// fields int64, so a larger value would pass the CR and fail only when the operator builds
+// the StatefulSet -- long after `broker deploy` reported success.
+const maxK8sID = 1<<31 - 1
+
+// validK8sID checks one optional security id. These reach the CR unquoted
+// (render.writeSecurity), where kubectl re-reads them as YAML: `010` becomes 8, `1e6` a
+// float, and a value carrying a newline injects spec keys -- or, with `---`, a whole extra
+// manifest that `broker deploy` applies. So only a plain decimal integer is accepted. "0"
+// stays legal: operator 1.4.2 reads it as its default, never as root.
+func validK8sID(field, value, operatorDefault string) error {
+	if value == "" {
+		return nil
+	}
+	if k8sIDRE.MatchString(value) {
+		if _, err := strconv.ParseInt(value, 10, 32); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s %q is invalid: it must be a whole number from 0 to %d in plain decimal digits "+
+		"(no sign, decimal point, exponent, leading zero, underscore or space). It is written into the CR "+
+		"unquoted, where any other spelling is re-read as a different number or as YAML structure, and "+
+		"Kubernetes refuses a pod id outside that range. Use \"0\" or leave it unset for the operator's "+
+		"default (%s, or an id the SCC assigns on OpenShift)", field, value, maxK8sID, operatorDefault)
 }
 
 // validPortNumber parses one port half (container or service) and bounds it to
@@ -1384,24 +1438,20 @@ func (c *Config) validateContainer(p Platform) error {
 		dataKey = "podman.container.dataDir"
 	}
 	req[dataKey] = c.ContainerBlock(p).DataDir
-	if p == Podman {
-		// Mandatory, not defaulted: this directory receives the server-certificate
-		// bundle, which contains a PRIVATE KEY, and where a private key lands on the
-		// host is the operator's call rather than a path this tool picks for them.
-		// A quadlet unit cannot inline file content, which is why podman needs such a
-		// directory at all and docker does not.
-		req["podman.baseDir"] = c.Podman.BaseDir
-	}
 
 	if missing := requireAll(req); len(missing) > 0 {
 		return missingErr(missing)
 	}
 
-	if p == Podman && !IsAbsHostPath(c.Podman.BaseDir) {
-		return fmt.Errorf("podman.baseDir %q must be an absolute path: it is the source of a quadlet `Volume=` "+
-			"line, and podman reads a relative source as the name of a NAMED VOLUME -- so a relative value would "+
-			"mount an empty volume over the server certificate with no error at all (e.g. /opt/solace)",
-			c.Podman.BaseDir)
+	// Optional now (config.PodmanConfig.BaseDir), but still held absolute when set:
+	// deploy and remove DELETE a file under it, and resolving a relative value
+	// against the working directory would aim that delete at a place the operator
+	// did not name.
+	if p == Podman && c.Podman.BaseDir != "" && !IsAbsHostPath(c.Podman.BaseDir) {
+		return fmt.Errorf("podman.baseDir %q must be an absolute path when set: it is where an earlier build wrote "+
+			"the server certificate bundle, which deploy and remove now delete, and a relative path would aim that "+
+			"delete at the working directory. Set it to the directory the old bundle is in (e.g. /opt/solace), or "+
+			"remove the key -- nothing else reads it", c.Podman.BaseDir)
 	}
 
 	// The data dir must be ABSOLUTE, and it is the one host path that is required to
@@ -1555,6 +1605,12 @@ func (c *Config) validateContainer(p Platform) error {
 		} else if err := c.checkHealthCheckVersion(p); err != nil {
 			return err
 		}
+	}
+
+	// The port list and the health-check timings are written into the quadlet and
+	// compose file as-is (artifactvalues.go).
+	if err := c.validateContainerArtifactValues(p); err != nil {
+		return err
 	}
 
 	net := c.NetworkBlock(p)

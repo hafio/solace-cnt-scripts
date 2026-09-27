@@ -504,8 +504,8 @@ solace-util broker configure product-keys [flags]
 
 Load or update the TLS server certificate
 
-Loads or updates the broker's TLS server certificate, over its own CLI or,
-on Kubernetes with a TLS Secret, via the Secret the operator mounts.
+Updates the stored certificate (the TLS Secret, or podman's secret store), then
+hot-swaps it into the running broker over its CLI, on every node. Never restarts.
 
 --remove takes TLS down immediately on every listener configured to present
 a certificate.
@@ -580,11 +580,9 @@ solace-util broker copy into files... [flags]
 
 Deploy the broker and its prerequisites
 
-Applies every prerequisite -- namespace, secrets, TLS -- before creating the
-broker itself, and is safe to re-run.
-
-Kubernetes readiness is not waited on; use `broker status` to watch it come
-up.
+Applies every prerequisite -- namespace, secrets, TLS -- then the broker, and is
+safe to re-run. A running broker is restarted for a change only on consent or
+--restart. Kubernetes readiness is not waited on; `broker status` watches it.
 
 ```
 solace-util broker deploy [flags]
@@ -596,7 +594,7 @@ Also available as: dp
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (docker/podman only) |
-| `--restart` | `false` | restart an already-running broker when the deploy artifact changed (otherwise you are asked, and a non-interactive run leaves it running) (docker/podman only) |
+| `--restart` | `false` | restart an already-running broker when the deploy changed its artifact or its server certificate (otherwise you are asked, and a non-interactive run leaves it running) |
 
 
 ### solace-util broker generate

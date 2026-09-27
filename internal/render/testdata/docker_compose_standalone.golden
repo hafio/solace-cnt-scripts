@@ -36,6 +36,8 @@ services:
       messagespool_maxspoolusage: "100000"
       username_admin_globalaccesslevel: "admin"
       username_admin_passwordfilepath: "/mnt/secrets/username_admin_password"
+    labels:
+      solace-util.sha256: "${SOLACE_TLS_SERVERCERTIFICATE_SHA256}"
     secrets:
       - source: "solace-admin-password"
         target: /mnt/secrets/username_admin_password

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"solace/internal/config"
+	"solace/internal/render"
 )
 
 // update regenerates the testdata goldens for the whole k8s package (secrets,
@@ -601,5 +602,41 @@ func TestAdditionalUsersSecretRefusesAnEmptyPassword(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "appuser") {
 		t.Errorf("error %q should name the user, so the fix is readable off it", err)
+	}
+}
+
+// TestTLSSecretCarriesItsDigest pins what a redeploy compares against: the TLS Secret
+// carries render.CertDigestLabel as a quoted ANNOTATION (a label value stops at 63
+// characters, and the hex digest is 64) holding the sha256 of the key and the chain
+// tls.crt holds -- so a renewed CA changes it as surely as a renewed certificate.
+func TestTLSSecretCarriesItsDigest(t *testing.T) {
+	dir := t.TempDir()
+	crt, key, ca := filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key"), filepath.Join(dir, "ca.crt")
+	writeFile(t, crt, "CERT\n")
+	writeFile(t, key, "KEY\n")
+	writeFile(t, ca, "CA\n")
+	cfg := haCfg()
+	cfg.TLS.Cert, cfg.TLS.CertKey = crt, key
+
+	manifest, err := TLSSecret(cfg)
+	if err != nil {
+		t.Fatalf("TLSSecret: %v", err)
+	}
+	digest := tlsDigest([]byte("KEY\n"), []byte("CERT\n"))
+	if len(digest) != 64 {
+		t.Fatalf("digest %q is not a hex sha256", digest)
+	}
+	want := "  annotations:\n    " + render.CertDigestLabel + ": \"" + digest + "\"\n"
+	if !strings.Contains(string(manifest), want) {
+		t.Errorf("the TLS Secret must carry its digest annotation (%q):\n%s", want, manifest)
+	}
+
+	cfg.TLS.CAs = []string{ca}
+	withCA, err := TLSSecret(cfg)
+	if err != nil {
+		t.Fatalf("TLSSecret: %v", err)
+	}
+	if strings.Contains(string(withCA), digest) {
+		t.Error("adding a CA to the chain must change the digest")
 	}
 }

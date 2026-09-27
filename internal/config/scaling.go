@@ -60,7 +60,7 @@ func tierFor(maxConnections int) (scalingTier, bool) {
 var containerMemRE = regexp.MustCompile(`(?i)^[0-9]+[bkmg]$`)
 
 // containerMem rewrites a tier's Kubernetes quantity into the suffix docker's
-// mem_limit and podman's Memory= accept. Both conventions count in binary units
+// mem_limit and podman's --memory= accept. Both conventions count in binary units
 // -- Kubernetes spells the mebibyte "Mi", the engines spell it "m" -- so this
 // only ever drops a trailing "i", never rescales. It is not a general converter:
 // it sees only the five fixed strings above, and anything without the trailing

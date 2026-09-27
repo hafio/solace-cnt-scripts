@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"solace/internal/config"
 )
 
@@ -37,7 +39,7 @@ const sampleFixture = "../../env/sample.yaml"
 // Set UNCONDITIONALLY, like goldenPodmanBaseDir below. They used to be applied only when
 // the fixture already set them, which stopped being safe once the sample shipped with TLS
 // commented out: the goldens would then have quietly stopped covering the server
-// certificate at all -- the quadlet `Volume=` mount, the compose secret, the CR tls block --
+// certificate at all -- the quadlet and compose secrets, the CR tls block --
 // and a golden that covers less still passes.
 //
 // The fixture supplying TLS is the right way round anyway. What these goldens exist to pin
@@ -47,10 +49,10 @@ const (
 	goldenCertPath    = "/etc/solace/certs/tls.crt"
 	goldenCertKeyPath = "/etc/solace/certs/tls.key"
 
-	// goldenPodmanBaseDir pins podman.baseDir, which reaches the quadlet as the
-	// `Volume=` source of the server-certificate bundle. Set UNCONDITIONALLY, unlike
-	// the two above: the sample declares its own value, and pinning it here is what
-	// keeps the golden from depending on whatever an env file happens to say.
+	// goldenPodmanBaseDir pins podman.baseDir. No artifact reads it any more -- it
+	// only locates the legacy bundle file container.removeLegacyCertBundle deletes --
+	// and pinning it is what lets TestServerCertificateReachesTheContainerOnBothEngines
+	// prove the quadlet no longer names that file. The sample leaves it commented out.
 	goldenPodmanBaseDir = "/etc/solace"
 
 	// goldenTLSSecret pins kubernetes.tlsServerSecret, so the CR golden's tls block shows
@@ -439,9 +441,11 @@ func TestArtifactsCarryNoSecrets(t *testing.T) {
 func TestContainerSecretsRedundancy(t *testing.T) {
 	c := load(t, config.Podman)
 
+	// The fixture configures TLS, so the server certificate rides last on every
+	// count below (TestServerCertIsASecretOnBothEngines pins it).
 	ha := ContainerSecrets(c, config.Podman)
-	if len(ha) != 2 {
-		t.Fatalf("HA secrets = %d, want 2 (admin password + PSK)", len(ha))
+	if len(ha) != 3 {
+		t.Fatalf("HA secrets = %d, want 3 (admin password + PSK + server certificate)", len(ha))
 	}
 	if ha[0].EnvKey != "username_admin_password" || ha[1].EnvKey != "redundancy_authentication_presharedkey_key" {
 		t.Errorf("HA secret env keys = %q, %q", ha[0].EnvKey, ha[1].EnvKey)
@@ -456,17 +460,17 @@ func TestContainerSecretsRedundancy(t *testing.T) {
 	}
 
 	c.Redundancy.Enabled = "false"
-	if standalone := ContainerSecrets(c, config.Podman); len(standalone) != 1 {
-		t.Errorf("standalone secrets = %d, want 1 (admin password only)", len(standalone))
+	if standalone := ContainerSecrets(c, config.Podman); len(standalone) != 2 {
+		t.Errorf("standalone secrets = %d, want 2 (admin password + server certificate, no PSK)", len(standalone))
 	}
 
-	// An encrypted server-certificate key adds a third secret, and only then: an
+	// An encrypted server-certificate key adds one more secret, and only then: an
 	// empty passphrase must not produce one the broker would use to unlock a plain
 	// key. The broker reads it from the mounted file via the *filepath variant.
 	c.TLS.CertPassphrase = "cert-pass"
 	withPass := ContainerSecrets(c, config.Podman)
-	if len(withPass) != 2 {
-		t.Fatalf("standalone + passphrase = %d secrets, want 2", len(withPass))
+	if len(withPass) != 3 {
+		t.Fatalf("standalone + passphrase = %d secrets, want 3", len(withPass))
 	}
 	pass := withPass[1]
 	if pass.EnvKey != "tls_servercertificate_passphrase" {
@@ -507,6 +511,27 @@ func TestContainerSecretNamesAreHostScoped(t *testing.T) {
 	c.Docker.Container.Name = "9lives"
 	if got := ContainerSecrets(c, config.Docker)[0].EnvVar(); got != "_9LIVES_ADMIN_PASSWORD" {
 		t.Errorf("a name starting with a digit must be prefixed to stay exportable, got %q", got)
+	}
+
+	// Podman's certificate secret, which holds the private key, follows the same
+	// scheme: stable across renders of one file, and distinct for two deployments on
+	// one host.
+	cert := func(name string) string {
+		pc := load(t, config.Podman)
+		pc.Podman.Container.Name = name
+		for _, s := range ContainerSecrets(pc, config.Podman) {
+			if len(s.SourceFiles) > 0 {
+				return s.Name
+			}
+		}
+		t.Fatalf("container.name %q: podman has no certificate secret", name)
+		return ""
+	}
+	if a, b := cert("broker-a"), cert("broker-a"); a != b || a != "broker-a-tls-servercertificate" {
+		t.Errorf("one env file must give one certificate secret name on every render: %q, %q", a, b)
+	}
+	if cert("broker-a") == cert("broker-b") {
+		t.Error("two container names on one host must not share a certificate secret")
 	}
 }
 
@@ -933,7 +958,7 @@ func TestScalingTierReachesEveryArtifact(t *testing.T) {
 	p.Podman.Container.CPUSet = ""
 	p.ApplyDefaults(config.Podman)
 	unit := string(Quadlet(p, p.ResolveNode(config.Primary)))
-	if !strings.Contains(unit, "PodmanArgs=--cpuset-cpus=0-7") || !strings.Contains(unit, "Memory=30925m") {
+	if !strings.Contains(unit, "PodmanArgs=--cpuset-cpus=0-7") || !strings.Contains(unit, "PodmanArgs=--memory=30925m") {
 		t.Errorf("quadlet missing the 100000-tier limits:\n%s", unit)
 	}
 }
@@ -1077,7 +1102,7 @@ func TestRootlessQuadletCarriesTheSameCaps(t *testing.T) {
 	ru := string(Quadlet(rootless, rootless.ResolveNode(config.Primary)))
 
 	for _, want := range []string{
-		"PodmanArgs=--cpuset-cpus=0-1", "Memory=6898m", "ShmSize=2g",
+		"PodmanArgs=--cpuset-cpus=0-1", "PodmanArgs=--memory=6898m", "ShmSize=2g",
 		"Ulimit=nofile=2448:1048576", "Ulimit=memlock=-1", "Ulimit=core=-1",
 		"LimitNOFILE=2448:1048576", "LimitMEMLOCK=infinity", "LimitCORE=infinity",
 	} {
@@ -1244,14 +1269,14 @@ func TestMonitorIsSizedForQuorumNotForTheTier(t *testing.T) {
 	unit := string(Quadlet(c, c.ResolveNode(config.Primary)))
 	mon := string(Quadlet(c, c.ResolveNode(config.Monitor)))
 
-	if !strings.Contains(unit, "PodmanArgs=--cpuset-cpus=0-1") || !strings.Contains(unit, "Memory=6898m") {
+	if !strings.Contains(unit, "PodmanArgs=--cpuset-cpus=0-1") || !strings.Contains(unit, "PodmanArgs=--memory=6898m") {
 		t.Errorf("a messaging node keeps the tier's caps:\n%s", unit)
 	}
-	if !strings.Contains(mon, "PodmanArgs=--cpuset-cpus=0") || !strings.Contains(mon, "Memory=2g") {
+	if !strings.Contains(mon, "PodmanArgs=--cpuset-cpus=0") || !strings.Contains(mon, "PodmanArgs=--memory=2g") {
 		t.Errorf("the monitor should take one cpu and 2g:\n%s", mon)
 	}
 	// Not the tier's, which is the whole point.
-	if strings.Contains(mon, "cpuset-cpus=0-1") || strings.Contains(mon, "Memory=6898m") {
+	if strings.Contains(mon, "cpuset-cpus=0-1") || strings.Contains(mon, "memory=6898m") {
 		t.Errorf("the monitor must not carry the messaging tier's caps:\n%s", mon)
 	}
 	for _, same := range []string{
@@ -1375,6 +1400,14 @@ func TestSecretTargetsAreAbsolutePaths(t *testing.T) {
 			t.Errorf("secret %q target %q and mount path %q must be the same expression, or the engine "+
 				"mounts one path while the broker reads another", s.Name, s.Target(), s.MountPath())
 		}
+		// The server certificate is mounted outside secretMount on purpose
+		// (TestSecretsAndCertDoNotNest); every credential sits under it.
+		if len(s.SourceFiles) > 0 {
+			if s.MountPath() != certMount {
+				t.Errorf("the certificate secret %q must mount at %q, got %q", s.Name, certMount, s.MountPath())
+			}
+			continue
+		}
 		if !strings.HasPrefix(s.MountPath(), secretMount+"/") {
 			t.Errorf("secret %q mount path %q must sit under %q", s.Name, s.MountPath(), secretMount)
 		}
@@ -1396,6 +1429,11 @@ func TestSecretsAndCertDoNotNest(t *testing.T) {
 	c.TLS.CertPassphrase = "cert-pass"
 	seen := map[string]string{}
 	for _, s := range ContainerSecrets(c, config.Podman) {
+		// The certificate is itself a secret on podman now; it is the one this test
+		// holds every OTHER secret apart from.
+		if len(s.SourceFiles) > 0 {
+			continue
+		}
 		if other, dup := seen[s.MountPath()]; dup {
 			t.Errorf("secrets %q and %q mount at the same path %q", other, s.Name, s.MountPath())
 		}
@@ -1464,5 +1502,135 @@ func TestComposeProjectFoldsToComposesGrammar(t *testing.T) {
 		if !legal.MatchString(got) {
 			t.Errorf("ComposeProject(%q) = %q, which compose would refuse", in, got)
 		}
+	}
+}
+
+// quadletFloor is the podman floor docs/operations.md documents.
+const quadletFloor = "4.7"
+
+// quadletKeysByRelease is the podman release that first accepts each [Container]
+// key, read from pkg/systemd/quadlet/quadlet.go at each tag. Memory is listed
+// although nothing emits it: it is the key that set the floor at 5.5 before the
+// memory cap moved to PodmanArgs=--memory=, and it stays here so reintroducing it
+// fails below.
+var quadletKeysByRelease = []struct {
+	since string
+	keys  []string
+}{
+	{"4.4", []string{"Image", "ContainerName", "User", "Group", "NoNewPrivileges", "PodmanArgs",
+		"Network", "PublishPort", "Volume", "Environment"}},
+	{"4.5", []string{"HealthCmd", "HealthInterval", "HealthTimeout", "HealthRetries", "HealthStartPeriod",
+		"Secret"}},
+	{"4.6", []string{"HostName"}},
+	{"4.7", []string{"ShmSize", "Ulimit"}},
+	{"5.5", []string{"Memory"}},
+}
+
+// versionAtMost reports whether major.minor a is at or below b.
+func versionAtMost(t *testing.T, a, b string) bool {
+	t.Helper()
+	parse := func(v string) (int, int) {
+		major, minor, ok := strings.Cut(v, ".")
+		x, err1 := strconv.Atoi(major)
+		y, err2 := strconv.Atoi(minor)
+		if !ok || err1 != nil || err2 != nil {
+			t.Fatalf("bad version %q", v)
+		}
+		return x, y
+	}
+	am, an := parse(a)
+	bm, bn := parse(b)
+	return am < bm || (am == bm && an <= bn)
+}
+
+// TestQuadletKeysAreWithinTheFloor: quadlet REFUSES a unit carrying a key it does
+// not know, so every [Container] key is a version floor, and a key newer than the
+// documented one fails a deploy on every older host -- the way Memory= (5.5) did
+// on 4.7-5.4. Every key the renderer emits, across the shapes that add keys
+// (health check, bridge ports, TLS, HA, rootless, the monitor), must be in the table
+// at or below quadletFloor. A key missing from the table fails too: add it with the
+// release that introduced it, and raise the documented floor if that is newer.
+func TestQuadletKeysAreWithinTheFloor(t *testing.T) {
+	full := load(t, config.Podman)
+	full.Image.Tag = modernTag
+	full.Podman.Container.HealthCheck = healthCheckFixture()
+	full.Podman.Container.CPUSet = "0-1"
+	full.Podman.Container.MonitorCPUSet = "0"
+	full.Podman.Network.Mode = "bridge"
+	full.Podman.Network.Ports = []string{"8080:8080"}
+	full.TLS.CertPassphrase = "cert-pass"
+	rootless := load(t, config.Podman)
+	rootless.Podman.Rootless = true
+	rootless.Podman.Container.RunUser = ""
+	rootless.ApplyDefaults(config.Podman)
+
+	quadletKeySince := map[string]string{}
+	for _, r := range quadletKeysByRelease {
+		for _, k := range r.keys {
+			quadletKeySince[k] = r.since
+		}
+	}
+	seen := map[string]bool{}
+	for _, unit := range [][]byte{
+		Quadlet(full, full.ResolveNode(config.Primary)),
+		Quadlet(full, full.ResolveNode(config.Monitor)),
+		Quadlet(rootless, rootless.ResolveNode(config.Primary)),
+	} {
+		section := ""
+		for _, line := range strings.Split(string(unit), "\n") {
+			if strings.HasPrefix(line, "[") {
+				section = line
+				continue
+			}
+			key, _, ok := strings.Cut(line, "=")
+			if section != "[Container]" || !ok {
+				continue
+			}
+			seen[key] = true
+			since, known := quadletKeySince[key]
+			if !known {
+				t.Errorf("quadlet key %s= is not in quadletKeySince: add it with the podman release that "+
+					"introduced it (pkg/systemd/quadlet/quadlet.go at that tag)", key)
+				continue
+			}
+			if !versionAtMost(t, since, quadletFloor) {
+				t.Errorf("quadlet key %s= needs podman %s, above the documented floor %s: quadlet refuses an "+
+					"unknown key, so every older host would fail to load the unit", key, since, quadletFloor)
+			}
+		}
+	}
+	// The fixture must actually reach the keys it exists to cover.
+	for _, key := range []string{"HostName", "ShmSize", "Ulimit", "Secret", "HealthCmd", "PublishPort", "PodmanArgs"} {
+		if !seen[key] {
+			t.Errorf("fixture problem: no rendered unit carried %s=, so its floor went unchecked", key)
+		}
+	}
+}
+
+// TestBrokerCRQuotesTheImageReference: a tag such as 10.10 is a legal tag and, bare,
+// a YAML float, which kubectl would send as 10.1 and the CRD would refuse as not a
+// string. The CR quotes both halves of the reference, so what the operator reads
+// back is exactly what the env file says.
+func TestBrokerCRQuotesTheImageReference(t *testing.T) {
+	c := load(t, config.K8s)
+	c.Image.Registry = "registry.example.com:5000"
+	c.Image.Repo = "solace/solace-pubsub-standard"
+	c.Image.Tag = "10.10"
+	var cr struct {
+		Spec struct {
+			Image struct {
+				Repository any `yaml:"repository"`
+				Tag        any `yaml:"tag"`
+			} `yaml:"image"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal(BrokerCR(c), &cr); err != nil {
+		t.Fatalf("the CR must parse: %v", err)
+	}
+	if got, ok := cr.Spec.Image.Tag.(string); !ok || got != "10.10" {
+		t.Errorf("spec.image.tag = %#v, want the string \"10.10\"", cr.Spec.Image.Tag)
+	}
+	if got, ok := cr.Spec.Image.Repository.(string); !ok || got != "registry.example.com:5000/solace/solace-pubsub-standard" {
+		t.Errorf("spec.image.repository = %#v, want the registry-prefixed string", cr.Spec.Image.Repository)
 	}
 }

@@ -610,11 +610,6 @@ func validContainerConfig(p Platform, redundancy string) *Config {
 	// Mandatory on containers in HA and optional on Kubernetes: nothing distributes a
 	// key across three container hosts, so each env file must carry the same one.
 	c.Redundancy.PSK = "psk-shared-by-all-three-hosts"
-	// Mandatory on podman and deliberately not defaulted: it receives the
-	// server-certificate bundle, which holds a private key, so the schema will not
-	// choose a location. Set here so a fixture meant to be VALID stays valid, and so
-	// the tests below fail for the reason they are actually about.
-	c.Podman.BaseDir = "/opt/solace"
 	c.ApplyDefaults(p)
 	return c
 }
@@ -954,6 +949,82 @@ func TestValidatePullPolicy(t *testing.T) {
 	c.K8s.ImagePullPolicy = "always" // k8s is case-sensitive here
 	if err := c.Validate(K8s); err == nil || !strings.Contains(err.Error(), "kubernetes.imagePullPolicy must be") {
 		t.Errorf("expected a pullPolicy enum error, got: %v", err)
+	}
+}
+
+// TestValidateK8sSecurityIDs: the four pod security ids reach the CR unquoted
+// (render.writeSecurity), where kubectl re-reads them as YAML -- so every spelling other
+// than plain decimal digits is refused at load, naming the field and the value, and so is
+// anything above the pod id ceiling Kubernetes enforces. "0" stays legal: the operator
+// reads it as its default. A block carrying only readOnlyRootFilesystem is unaffected.
+func TestValidateK8sSecurityIDs(t *testing.T) {
+	fields := []struct {
+		name string
+		set  func(*Config, string)
+	}{
+		{"kubernetes.securityContext.runAsUser", func(c *Config, v string) { c.K8s.SecurityContext.RunAsUser = v }},
+		{"kubernetes.securityContext.fsGroup", func(c *Config, v string) { c.K8s.SecurityContext.FSGroup = v }},
+		{"kubernetes.containerSecurity.runAsUser", func(c *Config, v string) { c.K8s.ContainerSecurity.RunAsUser = v }},
+		{"kubernetes.containerSecurity.runAsGroup", func(c *Config, v string) { c.K8s.ContainerSecurity.RunAsGroup = v }},
+	}
+	good := []string{"", "0", "1", "1000001", "2147483647"}
+	shape := []string{"abc", "-1", "+5", "1e6", "1000.0", " 1000", "1000 ", "1000\n", "007", "010", "0x3E8",
+		"1_000", "true", "1000001\n  developer: true", "1000001\n---\nkind: Secret"}
+	rangeBad := []string{"2147483648", "9223372036854775808"}
+	for _, f := range fields {
+		for _, v := range good {
+			t.Run("accepts/"+f.name+"/"+v, func(t *testing.T) {
+				c := validK8sConfig()
+				f.set(c, v)
+				if err := c.Validate(K8s); err != nil {
+					t.Errorf("%s = %q must be accepted: %v", f.name, v, err)
+				}
+			})
+		}
+		for kind, bad := range map[string][]string{"shape": shape, "range": rangeBad} {
+			for _, v := range bad {
+				t.Run(kind+"/"+f.name+"/"+v, func(t *testing.T) {
+					c := validK8sConfig()
+					f.set(c, v)
+					err := c.Validate(K8s)
+					if err == nil {
+						t.Fatalf("%s = %q must be refused", f.name, v)
+					}
+					for _, want := range []string{f.name, strconv.Quote(v), "2147483647"} {
+						if !strings.Contains(err.Error(), want) {
+							t.Errorf("error %q should name %s", err, want)
+						}
+					}
+				})
+			}
+		}
+	}
+	t.Run("only readOnlyRootFilesystem set", func(t *testing.T) {
+		c := validK8sConfig()
+		ro := true
+		c.K8s.ContainerSecurity.ReadOnlyRootFilesystem = &ro
+		if err := c.Validate(K8s); err != nil {
+			t.Errorf("a block with no ids must validate: %v", err)
+		}
+	})
+}
+
+// TestLoadSecurityIDsAsWritten pins that the check sees what the operator TYPED: YAML
+// hands a scalar to a string field verbatim, so an unquoted 1e6 or 010 reaches validation
+// as those characters, not as a number yaml has already reinterpreted.
+func TestLoadSecurityIDsAsWritten(t *testing.T) {
+	ok := writeTempYAML(t, minimalK8s("  securityContext:\n    runAsUser: 1000001\n    fsGroup: 1000002\n"))
+	if _, err := Load(ok, K8s); err != nil {
+		t.Errorf("unquoted decimal ids must load: %v", err)
+	}
+	for _, tc := range []struct{ body, field string }{
+		{"  securityContext:\n    runAsUser: 1e6\n", "kubernetes.securityContext.runAsUser"},
+		{"  securityContext:\n    fsGroup: 010\n", "kubernetes.securityContext.fsGroup"},
+	} {
+		_, err := Load(writeTempYAML(t, minimalK8s(tc.body)), K8s)
+		if err == nil || !strings.Contains(err.Error(), tc.field) {
+			t.Errorf("Load(%q) err = %v, want a refusal naming %s", tc.body, err, tc.field)
+		}
 	}
 }
 

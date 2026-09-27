@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -52,11 +53,10 @@ func ctrCfg(p config.Platform, redundancy string) *config.Config {
 		c.Podman.Container.Mem = "6898m"
 		c.Podman.Container.DataDir = "/opt/solace/data"
 		c.Podman.QuadletDir = "/etc/containers/systemd"
-		// Set by hand for the same reason QuadletDir is: this fixture deliberately
-		// skips ApplyDefaults, and baseDir has no default anyway (it is mandatory).
-		// Leaving it empty would make ServerCertBundlePath resolve to the filesystem
-		// root, and a test that wrote there would be worse than one that failed.
-		c.Podman.BaseDir = "/opt/solace"
+		// No podman.baseDir: it is optional, and deploy and remove DELETE the legacy
+		// bundle file under it (removeLegacyCertBundle) -- so a fixed host path here
+		// would aim every capRunner deploy at a real file. Tests of that clean-up set
+		// it to a t.TempDir().
 		c.Podman.Network.Mode = "host"
 	default:
 		c.Docker.Command = config.Command{"docker"}
@@ -176,6 +176,27 @@ func TestManagerCheckDryRun(t *testing.T) {
 	}
 }
 
+// TestCheckEnvReportsBaseDirOnlyWhenSet: podman.baseDir is optional and consulted
+// only to delete a legacy key file, so the report names it when set, says that is all
+// it does, and leaves it out when unset rather than printing an empty value.
+func TestCheckEnvReportsBaseDirOnlyWhenSet(t *testing.T) {
+	for _, tc := range []struct{ base, want, unwanted string }{
+		{"/srv/solace-base", "baseDir=/srv/solace-base (legacy bundle clean-up only)", ""},
+		{"", "rootless=false quadletDir=/etc/containers/systemd", "baseDir="},
+	} {
+		cfg := ctrCfg(config.Podman, "false")
+		cfg.Podman.BaseDir = tc.base
+		m, buf := newEchoMgr(cfg, config.Podman)
+		m.CheckEnv()
+		if !strings.Contains(buf.String(), tc.want) {
+			t.Errorf("baseDir=%q: report missing %q:\n%s", tc.base, tc.want, buf.String())
+		}
+		if tc.unwanted != "" && strings.Contains(buf.String(), tc.unwanted) {
+			t.Errorf("baseDir=%q: report should not carry %q:\n%s", tc.base, tc.unwanted, buf.String())
+		}
+	}
+}
+
 func TestManagerCheckDNSFailsLoudInHA(t *testing.T) {
 	m, _, buf := newCapMgr(ctrCfg(config.Docker, "true"), config.Docker)
 	m.Resolve = func(host string) bool { return host != "bkp-host" }
@@ -228,77 +249,43 @@ func TestManagerPrepHostRootlessUsesUnshareChown(t *testing.T) {
 	}
 }
 
-// TestManagerPrepHostCreatesBaseDir: podman.baseDir is created up front rather
-// than by the first writeArtifact, and is deliberately NOT part of the 775/chown
-// pair -- it holds the server-certificate bundle, which contains the private key.
-func TestManagerPrepHostCreatesBaseDir(t *testing.T) {
+// TestManagerPrepHostLeavesBaseDirAlone: prep used to create podman.baseDir 0700
+// for the server-certificate bundle. The certificate rides podman's secret store
+// now, so a configured baseDir must not make prep create, chmod or chown anything
+// there -- a directory made for a private key that never arrives is just clutter.
+func TestManagerPrepHostLeavesBaseDirAlone(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.Rootless = true
+	cfg.Podman.BaseDir = "/srv/solace-base"
 	m, rr, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 1000 }
 	rr.outFor = healthyRootlessOut(healthyNrOpen)
 	if err := m.PrepHost(context.Background()); err != nil {
 		t.Fatalf("PrepHost: %v", err)
 	}
-	base := cfg.Podman.BaseDir
-	if !hasCall(rr, "mkdir", []string{"-p", base}) {
-		t.Errorf("prep should create podman.baseDir:\n%+v", rr.calls)
-	}
-	if !hasCall(rr, "chmod", []string{"700", base}) {
-		t.Errorf("baseDir must be 0700 explicitly -- mkdir -p leaves an existing mode alone:\n%+v", rr.calls)
-	}
-	if hasCall(rr, "chmod", []string{"775", base}) {
-		t.Errorf("baseDir must not be group-writable, it holds the private key:\n%+v", rr.calls)
-	}
-	if hasCall(rr, "podman", []string{"unshare", "chown", "1000:0", base}) {
-		t.Errorf("baseDir is read by the container through a bind mount, not owned by it:\n%+v", rr.calls)
-	}
-}
-
-// TestManagerPrepHostDirectoryErrors covers the three ways preparing the two
-// directories can fail. Each is its own return, and each names the directory and
-// what it was trying to do -- an engine's bare "permission denied" says neither.
-//
-// baseDir is a path of its own here rather than the default, so failing on it
-// cannot also match the dataDir underneath /opt/solace.
-func TestManagerPrepHostDirectoryErrors(t *testing.T) {
-	for _, tc := range []struct {
-		name, on, want string
-	}{
-		{"baseDir mkdir", "/srv/solace-base", "create podman.baseDir"},
-		{"baseDir mode", "700", "restrict podman.baseDir"},
-		{"data dir mode", "775", "group-writable"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := ctrCfg(config.Podman, "false")
-			cfg.Podman.Rootless = true
-			cfg.Podman.BaseDir = "/srv/solace-base"
-			m, rr, _ := newCapMgr(cfg, config.Podman)
-			m.Geteuid = func() int { return 1000 }
-			rr.outFor = healthyRootlessOut(healthyNrOpen)
-			rr.fail = failOn(tc.on)
-			err := m.PrepHost(context.Background())
-			if err == nil {
-				t.Fatalf("a failing %s must stop prep", tc.name)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("error should say what failed (%q), got: %v", tc.want, err)
-			}
-		})
-	}
-}
-
-// TestManagerPrepHostDockerHasNoBaseDir: baseDir is a podman key, so the docker
-// path must not invent one.
-func TestManagerPrepHostDockerHasNoBaseDir(t *testing.T) {
-	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
-	if err := m.PrepHost(context.Background()); err != nil {
-		t.Fatalf("PrepHost: %v", err)
-	}
 	for _, c := range rr.calls {
-		if c.name == "chmod" {
-			t.Errorf("docker prep has no directory to chmod: %s %v", c.name, c.args)
+		if slices.Contains(c.args, cfg.Podman.BaseDir) {
+			t.Errorf("prep must not touch podman.baseDir any more: %s %v", c.name, c.args)
 		}
+	}
+}
+
+// TestManagerPrepHostDirectoryErrors covers the data directory's mode failing under
+// rootless: it names the directory and what it was trying to do, which an engine's
+// bare "permission denied" says neither of.
+func TestManagerPrepHostDirectoryErrors(t *testing.T) {
+	cfg := ctrCfg(config.Podman, "false")
+	cfg.Podman.Rootless = true
+	m, rr, _ := newCapMgr(cfg, config.Podman)
+	m.Geteuid = func() int { return 1000 }
+	rr.outFor = healthyRootlessOut(healthyNrOpen)
+	rr.fail = failOn("775")
+	err := m.PrepHost(context.Background())
+	if err == nil {
+		t.Fatal("a failing data dir chmod must stop prep")
+	}
+	if !strings.Contains(err.Error(), "group-writable") {
+		t.Errorf("error should say what failed, got: %v", err)
 	}
 }
 

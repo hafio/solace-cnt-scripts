@@ -765,9 +765,11 @@ func (o Operator) WatchBrokerNSEnabled() bool {
 }
 
 // PodSecurity is the broker pod's securityContext. The ids are strings, not
-// ints, so an explicit "0" (which asks OpenShift to auto-assign) stays
-// distinguishable from an unset field -- the whole block is optional and is
-// omitted from the CR when nothing is set.
+// ints, so an explicit "0" stays distinguishable from an unset field -- the whole
+// block is optional and is omitted from the CR when nothing is set. Operator 1.4.2
+// reads "0" as "use the default" (1000001 for users, 1000002 for groups), or on
+// OpenShift outside the default namespace as "let the SCC assign one" -- never as
+// root. validateK8s holds every id to plain decimal digits (validK8sID).
 type PodSecurity struct {
 	RunAsUser string `yaml:"runAsUser"`
 	FSGroup   string `yaml:"fsGroup"`
@@ -972,17 +974,25 @@ type PodmanConfig struct {
 	// to pick the other mode silently: `sudo` is a refusal, not a second deployment.
 	Rootless   bool   `yaml:"rootless"`   // PODMAN_ROOTLESS
 	QuadletDir string `yaml:"quadletDir"` // QUADLET_DIR override
-	// BaseDir is the host directory for files THIS TOOL writes for podman, as
-	// opposed to Config.BaseDir(), which is the directory the env FILE was loaded
-	// from -- two different bases, so the doc comment says which.
+	// BaseDir is OPTIONAL and UNUSED, bar one legacy clean-up. It is not
+	// Config.BaseDir(), which is the directory the env FILE was loaded from.
 	//
-	// It exists because a quadlet unit cannot inline file content the way a compose
-	// file can, so anything podman must read from a path has to be a real file
-	// somewhere. Today that is the server-certificate bundle, which carries a
-	// PRIVATE KEY -- which is why this is mandatory rather than defaulted: where a
-	// private key lands on the host is the operator's decision, not a value this
-	// tool picks. Deliberately separate from QuadletDir: the unit must live where
-	// systemd scans, and a stray tls.pem in that directory is at best ignored.
+	// It was the mandatory host directory for the server-certificate bundle, a
+	// PRIVATE KEY file the quadlet unit bind-mounted. The certificate now rides
+	// podman's secret store like every other credential, so nothing is written
+	// here. What is left: when set, deploy and remove delete
+	// <baseDir>/<container.name>-tls-servercertificate.pem, the file an earlier build
+	// wrote (container.removeLegacyCertBundle), so an upgraded host is not left
+	// holding a key.
+	//
+	// PLACEHOLDER -- re-check with a deep scan before retiring this key. At the time
+	// of writing its references are: validate.go (held absolute when set, and in the
+	// validateHostPaths list), hostpath.go (expandHomePaths), container/manager.go
+	// (CheckEnv's podman row and removeLegacyCertBundle), render.ServerCertBundlePath,
+	// the tests of each, docs/configuration.md, docs/operations.md and
+	// internal/examples/assets/full.yaml. Once no deployed host can still carry the
+	// legacy file, retire it the way .runtime was: keep the field parsing and refuse
+	// it by name.
 	BaseDir   string    `yaml:"baseDir"`
 	Network   Network   `yaml:"network"`
 	Container Container `yaml:"container"`

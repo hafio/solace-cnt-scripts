@@ -5,8 +5,8 @@ metadata:
   name: dev-broker
 spec:
   image:
-    repository: registry.example.com/solace-pubsub-standard
-    tag: 10.26.0.8755
+    repository: "registry.example.com/solace-pubsub-standard"
+    tag: "10.26.0.8755"
     pullPolicy: IfNotPresent
     pullSecrets:
     - name: solace-image-pull

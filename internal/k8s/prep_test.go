@@ -2,7 +2,9 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -880,5 +882,93 @@ func TestJoinManifestsDropsBlankDocuments(t *testing.T) {
 	got := string(joinManifests([][]byte{[]byte("a: 1\n"), nil, []byte("\n"), []byte("b: 2\n")}))
 	if got != "a: 1\n---\nb: 2\n" {
 		t.Errorf("joinManifests = %q, want the two real documents and one separator", got)
+	}
+}
+
+// tlsCfg is haCfg with a real certificate pair on disk, so the TLS Secret is one this
+// env file builds (config.Config.ManagesTLSSecret) under the derived dev-broker-tls.
+func tlsCfg(t *testing.T) *config.Config {
+	t.Helper()
+	dir := t.TempDir()
+	crt, key := filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key")
+	writeFile(t, crt, "CERT\n")
+	writeFile(t, key, "KEY\n")
+	cfg := haCfg()
+	cfg.TLS.Cert, cfg.TLS.CertKey = crt, key
+	return cfg
+}
+
+// TestServerCertChanged covers the comparison a Kubernetes deploy makes before it
+// rewrites the TLS Secret: the live Secret's digest annotation against the files on
+// disk, read by jsonpath so the Secret's data -- the private key -- never comes back.
+// Absent Secret, or none this env file builds: unchanged (nothing to compare, and a new
+// TLS block rolls the pods through the CR). Equal: unchanged. Different, missing, or
+// unreadable: changed.
+func TestServerCertChanged(t *testing.T) {
+	current := tlsDigest([]byte("KEY\n"), []byte("CERT\n"))
+	for _, tc := range []struct {
+		name string
+		out  string
+		err  error
+		want bool
+	}{
+		{"no Secret yet", "", nil, false},
+		{"same certificate", "dev-broker-tls\n" + current, nil, false},
+		{"renewed certificate", "dev-broker-tls\n" + strings.Repeat("0", 64), nil, true},
+		{"no annotation (an earlier build)", "dev-broker-tls\n", nil, true},
+		{"unreadable", "", errors.New("forbidden"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := &recRunner{out: []byte(tc.out), outErr: tc.err}
+			c := NewCluster(rr, tlsCfg(t), nil, nil)
+			got, err := c.ServerCertChanged(context.Background())
+			if err != nil {
+				t.Fatalf("ServerCertChanged: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("changed = %t, want %t", got, tc.want)
+			}
+			call := rr.last()
+			if !slices.Contains(call.args, "dev-broker-tls") || !slices.Contains(call.args, "--ignore-not-found") {
+				t.Errorf("argv = %v, want a get of the derived Secret that tolerates its absence", call.args)
+			}
+			for _, a := range call.args {
+				if a == "json" || a == "yaml" || (strings.HasPrefix(a, "jsonpath=") && strings.Contains(a, ".data")) {
+					t.Errorf("argv = %v must read only the name and the annotation, never the data", call.args)
+				}
+			}
+		})
+	}
+	t.Run("a Secret this env file does not build", func(t *testing.T) {
+		cfg := haCfg()
+		cfg.K8s.TLSServerSecret = "byo-tls-secret" // no files
+		rr := &recRunner{}
+		got, err := NewCluster(rr, cfg, nil, nil).ServerCertChanged(context.Background())
+		if err != nil || got || len(rr.calls) != 0 {
+			t.Errorf("changed=%t err=%v calls=%v, want an unchanged answer without asking the cluster", got, err, rr.calls)
+		}
+	})
+}
+
+// TestBrokerPodsExist: what "a broker is already running" means to a deploy deciding
+// whether a renewed certificate needs a restart -- the primary pod is there. No answer,
+// or a failed read, is false, so a preview never offers a restart.
+func TestBrokerPodsExist(t *testing.T) {
+	for _, tc := range []struct {
+		out  string
+		err  error
+		want bool
+	}{
+		{"pod/dev-broker-pubsubplus-p-0\n", nil, true},
+		{"", nil, false},
+		{"", errors.New("unreachable"), false},
+	} {
+		rr := &recRunner{out: []byte(tc.out), outErr: tc.err}
+		if got := NewCluster(rr, haCfg(), nil, nil).BrokerPodsExist(context.Background()); got != tc.want {
+			t.Errorf("out=%q err=%v: BrokerPodsExist = %t, want %t", tc.out, tc.err, got, tc.want)
+		}
+		if call := rr.last(); !slices.Contains(call.args, "dev-broker-pubsubplus-p-0") {
+			t.Errorf("argv = %v, want the primary pod", call.args)
+		}
 	}
 }

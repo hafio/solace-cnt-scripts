@@ -30,8 +30,8 @@ semp:
 podman:
   rootless: false                   # true = rootless: user systemd, `podman unshare`,
                                     # and runUser 1000:0 instead of 1000001:0
-  baseDir: /opt/solace              # mandatory, absolute: where this tool writes the
-                                    # server-certificate bundle (contains the PRIVATE
-                                    # KEY). Docker needs no equivalent
+  # baseDir: /opt/solace            # optional and unused: earlier builds wrote the
+                                    # server-certificate bundle here; set it only so
+                                    # deploy/remove delete that old file
   container:
     dataDir: /opt/solace/data       # host bind mount holding the message spool
