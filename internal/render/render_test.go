@@ -53,8 +53,9 @@ const (
 	// keeps the golden from depending on whatever an env file happens to say.
 	goldenPodmanBaseDir = "/etc/solace"
 
-	// goldenTLSSecret pins kubernetes.tlsServerSecret, whose presence is what puts the
-	// tls block in the rendered CR.
+	// goldenTLSSecret pins kubernetes.tlsServerSecret, so the CR golden's tls block shows
+	// a configured name. The files alone would also produce the block, under the derived
+	// <kubernetes.name>-tls (TestTLSBlockFollowsTheStates pins that state).
 	goldenTLSSecret = "solace-tls-secret"
 
 	// goldenCertBundle stands in for the bytes broker.ServerCertBundle would read.
@@ -96,8 +97,8 @@ func load(t *testing.T, p config.Platform) *config.Config {
 	}
 	c.TLS.Cert = goldenCertPath
 	c.TLS.CertKey = goldenCertKeyPath
-	// The k8s CR emits its tls block off this name rather than off the file pair, so it
-	// has to be set here too or the CR golden loses that section.
+	// Pinned so the CR golden's tls block carries a configured name rather than the
+	// <kubernetes.name>-tls the file pair above would otherwise derive.
 	c.K8s.TLSServerSecret = goldenTLSSecret
 	c.Podman.BaseDir = goldenPodmanBaseDir
 	return c
@@ -722,6 +723,109 @@ func TestImagePullSecretBlockFollowsTheStates(t *testing.T) {
 	}
 }
 
+// TestTLSBlockFollowsTheStates pins the CR's half of config.Config.TLSServerSecretName,
+// the same three states TestImagePullSecretBlockFollowsTheStates pins for the pull
+// secret. The renderer asks only "is there a name to reference", so the derived state is
+// the one that matters most here: before the resolver, a supplied cert/key pair with no
+// name configured was refused at load, and a renderer still reading the raw field would
+// quietly drop the tls block the Secret was built for.
+func TestTLSBlockFollowsTheStates(t *testing.T) {
+	c := load(t, config.K8s) // load pins tls.cert/certKey and kubernetes.tlsServerSecret
+
+	// Files supplied, no name: the CR references the DERIVED default, the exact name
+	// internal/k8s.TLSSecret builds the Secret under.
+	c.K8s.TLSServerSecret = ""
+	got := string(BrokerCR(c))
+	if !strings.Contains(got, "  tls:\n    serverTlsConfigSecret: dev-broker-tls\n    enabled: true\n") {
+		t.Errorf("CR must carry the derived TLS Secret name when files are supplied and no name is configured:\n%s", got)
+	}
+
+	// A name and no files: a Secret made by hand or by cert-manager, referenced as-is.
+	c.K8s.TLSServerSecret = "byo-tls-secret"
+	c.TLS.Cert, c.TLS.CertKey = "", ""
+	got = string(BrokerCR(c))
+	if !strings.Contains(got, "    serverTlsConfigSecret: byo-tls-secret\n") {
+		t.Errorf("CR must reference a pre-existing named TLS Secret with no files configured:\n%s", got)
+	}
+
+	// Neither: no tls block at all, rather than one the CRD would complete with its own
+	// example-tls-secret default and a pod that cannot mount it.
+	c.K8s.TLSServerSecret = ""
+	got = string(BrokerCR(c))
+	if strings.Contains(got, "serverTlsConfigSecret") || strings.Contains(got, "\n  tls:\n") {
+		t.Errorf("no name and no files, so the tls block must be absent:\n%s", got)
+	}
+}
+
+// TestMonitoringCredentialsSecretFollowsThePassword: the admin Secret carries
+// username_monitor_password only when semp.monitorPass is set (internal/k8s.AdminSecret),
+// and the operator checks that a named Secret exists but never which keys it holds. So
+// the CR may name it for the monitor user only when that key is there; absent, the
+// operator generates the monitor credential itself. The admin reference is unaffected.
+func TestMonitoringCredentialsSecretFollowsThePassword(t *testing.T) {
+	c := load(t, config.K8s) // the sample sets semp.monitorPass
+	got := string(BrokerCR(c))
+	if !strings.Contains(got, "  monitoringCredentialsSecret: solace-admin-secret\n") {
+		t.Errorf("with a monitor password the CR must point the monitor user at the admin Secret:\n%s", got)
+	}
+
+	c.SEMP.MonitorPass = ""
+	got = string(BrokerCR(c))
+	if strings.Contains(got, "monitoringCredentialsSecret") {
+		t.Errorf("with no monitor password the field must be absent, not pointed at a Secret without the key:\n%s", got)
+	}
+	if !strings.Contains(got, "  adminCredentialsSecret: solace-admin-secret\n") {
+		t.Errorf("dropping the monitor field must leave the admin reference in place:\n%s", got)
+	}
+}
+
+// TestAdminCredentialsSecretFollowsTheStates pins the CR's half of
+// config.Config.AdminSecretName. The monitor and pre-shared-key fields ride on the admin
+// Secret only when this tool BUILDS it, since only then does it carry those entries: a
+// Secret it merely references may lack them, and the operator never checks. The
+// neither state writes no admin field at all, which is what makes the operator
+// generate its own.
+func TestAdminCredentialsSecretFollowsTheStates(t *testing.T) {
+	c := load(t, config.K8s) // the sample sets adminPass, monitorPass, a psk and adminSecret
+
+	// Password, no name: the DERIVED default, on all three fields.
+	c.K8s.AdminSecret = ""
+	got := string(BrokerCR(c))
+	for _, want := range []string{
+		"  adminCredentialsSecret: dev-broker-admin\n",
+		"  monitoringCredentialsSecret: dev-broker-admin\n",
+		"  preSharedAuthKeySecret: dev-broker-admin\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("CR missing %q under the derived admin Secret name:\n%s", want, got)
+		}
+	}
+
+	// A name and no password: referenced only. Config refuses a monitor password or key
+	// here; a Config built in code that still carries them must not point the CR at a
+	// Secret this tool never wrote them into.
+	c.K8s.AdminSecret = "byo-admin"
+	c.SEMP.AdminPass = ""
+	got = string(BrokerCR(c))
+	if !strings.Contains(got, "  adminCredentialsSecret: byo-admin\n") {
+		t.Errorf("CR must reference the named admin Secret with no password configured:\n%s", got)
+	}
+	for _, field := range []string{"monitoringCredentialsSecret", "preSharedAuthKeySecret"} {
+		if strings.Contains(got, field) {
+			t.Errorf("%s must be absent when this tool does not build the admin Secret:\n%s", field, got)
+		}
+	}
+
+	// Neither: no admin field, so the operator generates <name>-pubsubplus-admin-creds.
+	c.K8s.AdminSecret = ""
+	got = string(BrokerCR(c))
+	for _, field := range []string{"adminCredentialsSecret", "monitoringCredentialsSecret", "preSharedAuthKeySecret"} {
+		if strings.Contains(got, field) {
+			t.Errorf("with neither a password nor a name, %s must be absent:\n%s", field, got)
+		}
+	}
+}
+
 // TestSecretPreflight pins the precondition `broker deploy` and `broker generate`
 // share: creating a secret with an empty value leaves the broker with a blank
 // password or mate-link key that only fails later, so it is refused up front.
@@ -987,6 +1091,145 @@ func TestRootlessQuadletCarriesTheSameCaps(t *testing.T) {
 	// What the flag DOES still change.
 	if !strings.Contains(ru, "User=1000\n") || !strings.Contains(ru, "WantedBy=default.target") {
 		t.Errorf("rootless should change the run user and the install target:\n%s", ru)
+	}
+}
+
+// renderedArtifact is one compose file or quadlet unit, named by the shape that
+// produced it.
+type renderedArtifact struct {
+	name string
+	body string
+}
+
+// containerArtifacts renders every compose and quadlet shape the renderers produce
+// from the sample: each role, standalone, the opt-in health check, bridge networking,
+// and on podman rootless too. The privilege tests run over all of them, so a line
+// emitted on one branch and lost on another -- or a widening token added behind a
+// conditional -- cannot pass on the primary alone.
+func containerArtifacts(t *testing.T) (compose, quadlet []renderedArtifact) {
+	t.Helper()
+	shapes := []struct {
+		name  string
+		role  config.Role
+		tweak func(c *config.Config, p config.Platform)
+	}{
+		{"primary", config.Primary, nil},
+		{"backup", config.Backup, nil},
+		{"monitor", config.Monitor, nil},
+		{"standalone", config.Primary, func(c *config.Config, _ config.Platform) { c.Redundancy.Enabled = "false" }},
+		{"health check", config.Primary, func(c *config.Config, p config.Platform) {
+			c.Image.Tag = modernTag
+			if p == config.Docker {
+				c.Docker.Container.HealthCheck = healthCheckFixture()
+			} else {
+				c.Podman.Container.HealthCheck = healthCheckFixture()
+			}
+		}},
+		{"bridge", config.Primary, func(c *config.Config, p config.Platform) {
+			n := &c.Podman.Network
+			if p == config.Docker {
+				n = &c.Docker.Network
+			}
+			n.Mode = "bridge"
+			n.Ports = []string{"8080:8080", "1943:1943", "55555:55555"}
+		}},
+	}
+	for _, s := range shapes {
+		for _, p := range []config.Platform{config.Docker, config.Podman} {
+			c := load(t, p)
+			if s.tweak != nil {
+				s.tweak(c, p)
+			}
+			if p == config.Docker {
+				compose = append(compose, renderedArtifact{s.name, string(Compose(c, c.ResolveNode(s.role)))})
+			} else {
+				quadlet = append(quadlet, renderedArtifact{s.name, string(Quadlet(c, c.ResolveNode(s.role)))})
+			}
+		}
+	}
+	rootless := load(t, config.Podman)
+	rootless.Podman.Rootless = true
+	rootless.Podman.Container.RunUser = ""
+	rootless.ApplyDefaults(config.Podman)
+	quadlet = append(quadlet, renderedArtifact{"rootless", string(Quadlet(rootless, rootless.ResolveNode(config.Primary)))})
+	return compose, quadlet
+}
+
+// TestArtifactsStateTheirPrivilegePosture: rules 1 and 2 of docs/container-security.md,
+// emitted rather than inherited (rule 7). Docker's privileged default is already
+// false and is stated anyway so the artifact shows it; no_new_privs is OFF by default
+// on both engines, so these lines are what actually set it.
+//
+// The quadlet check is positional, not a substring: NoNewPrivileges= is ALSO a
+// systemd [Service] key, where it would bind the podman process rather than the
+// container and break rootless podman's setuid id-mapping helpers. A unit carrying
+// the line in the wrong section would satisfy a plain Contains.
+func TestArtifactsStateTheirPrivilegePosture(t *testing.T) {
+	compose, quadlet := containerArtifacts(t)
+	for _, a := range compose {
+		if n := strings.Count(a.body, "    privileged: false\n"); n != 1 {
+			t.Errorf("%s compose file: want exactly one service-level `privileged: false`, got %d:\n%s", a.name, n, a.body)
+		}
+		if !strings.Contains(a.body, "    security_opt:\n      - no-new-privileges=true\n") {
+			t.Errorf("%s compose file: want `security_opt:` listing `no-new-privileges=true` at service level:\n%s", a.name, a.body)
+		}
+		// The `:` spelling works, but dockerd logs a deprecation warning for it on
+		// every container create.
+		if strings.Contains(a.body, "no-new-privileges:") {
+			t.Errorf("%s compose file: use `no-new-privileges=true`, not the deprecated `:` separator:\n%s", a.name, a.body)
+		}
+	}
+	for _, a := range quadlet {
+		if n := strings.Count(a.body, "NoNewPrivileges=true\n"); n != 1 {
+			t.Errorf("%s quadlet: want exactly one `NoNewPrivileges=true`, got %d:\n%s", a.name, n, a.body)
+			continue
+		}
+		at := strings.Index(a.body, "NoNewPrivileges=true\n")
+		ctr := strings.Index(a.body, "[Container]\n")
+		svc := strings.Index(a.body, "[Service]\n")
+		if ctr < 0 || at < ctr || (svc >= 0 && at > svc) {
+			t.Errorf("%s quadlet: `NoNewPrivileges=true` must sit inside [Container] -- in [Service] it is systemd's "+
+				"own key, binds podman instead of the container, and breaks rootless podman:\n%s", a.name, a.body)
+		}
+	}
+}
+
+// wideningTokens is rule 1's list in docs/container-security.md, in the spellings
+// that section gives: anything in a compose file or quadlet unit that would hand the
+// broker extended privileges, extra capabilities, host devices, kernel tunables, a
+// relaxed SELinux or seccomp confinement, or the host's pid or ipc namespace. The
+// compose keys carry their colon so a word inside a value cannot trip them. The
+// document's audit greps use the same list; change both together.
+var wideningTokens = []string{
+	"privileged: true", "--privileged",
+	"cap_add", "AddCapability=",
+	"devices:", "AddDevice=",
+	"sysctls:", "Sysctl=",
+	"SecurityLabelDisable=", "SeccompProfile=", "unconfined",
+	"pid: host", "ipc: host",
+}
+
+// TestArtifactsCarryNoWideningTokens is the negative half of rule 7, and the half
+// that survives a refactor: the privileged posture above is only as good as the
+// absence of anything that undoes it. It runs over every rendered shape, so a token
+// smuggled in behind a conditional -- a PodmanArgs= for one role, a key only bridge
+// mode writes -- still fails here.
+func TestArtifactsCarryNoWideningTokens(t *testing.T) {
+	compose, quadlet := containerArtifacts(t)
+	// Guards the guard: an empty render list would make every loop below pass.
+	if len(compose) < 6 || len(quadlet) < 7 {
+		t.Fatalf("expected every shape rendered, got %d compose files and %d quadlet units", len(compose), len(quadlet))
+	}
+	for kind, set := range map[string][]renderedArtifact{"compose file": compose, "quadlet": quadlet} {
+		for _, a := range set {
+			for _, tok := range wideningTokens {
+				if strings.Contains(a.body, tok) {
+					t.Errorf("%s %s carries %q, which widens the broker container's privileges "+
+						"(docs/container-security.md, rule 1). Remove it; if the broker genuinely needs it, "+
+						"change the rule first and say why:\n%s", a.name, kind, tok, a.body)
+				}
+			}
+		}
 	}
 }
 

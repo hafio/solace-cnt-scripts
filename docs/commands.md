@@ -505,7 +505,7 @@ solace-util broker configure product-keys [flags]
 Load or update the TLS server certificate
 
 Loads or updates the broker's TLS server certificate, over its own CLI or,
-on Kubernetes with kubernetes.tlsServerSecret set, via the operator's Secret.
+on Kubernetes with a TLS Secret, via the Secret the operator mounts.
 
 --remove takes TLS down immediately on every listener configured to present
 a certificate.
@@ -833,7 +833,8 @@ solace-util broker perform redundancy-test [flags]
 Test an authenticated SEMP request against the broker
 
 Runs an authenticated SEMP request from inside the broker and reports
-whether the credentials were accepted.
+whether the credentials were accepted. On Kubernetes without semp.adminPass it
+reads the password from the admin Secret the broker uses.
 
 Run this after rotating the admin password.
 

@@ -469,9 +469,10 @@ var sectionRules = []SectionRule{
 		Disposition: Apply,
 		Reason: "Overwrites the target's CLI admin password with the source's " +
 			"(semp/all.cli:284, 286); harmless to this tool, since the CLI channel " +
-			"needs no broker credentials, but on Kubernetes adminCredentialsSecret " +
-			"still holds the old value, so pods go out of readiness until " +
-			"semp.adminPass is updated to match.",
+			"needs no broker credentials, but on Kubernetes the admin Secret the CR " +
+			"uses still holds the old value, so the HA standby and monitor pods fail " +
+			"readiness until it is updated to match: semp.adminPass when this tool " +
+			"builds it, otherwise the referenced or operator-generated Secret itself.",
 	},
 	{
 		Section:     "Create LDAP Profile",

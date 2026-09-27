@@ -1975,6 +1975,153 @@ func TestOpK8sRemoveAborts(t *testing.T) {
 	}
 }
 
+// TestRemoveBrokerKeepsTheNamespaceWhileItsPVCsRemain pins, at the command level, the
+// invariant that makes "removals keep the expensive layer" hold on Kubernetes: `broker
+// remove` without --delete-data keeps the PVCs, and a namespace still holding them is
+// never deleted -- not even under --no-prompt, which answers the namespace question yes.
+// Deleting it would cascade the kept PVCs away. The gate lists PVCs explicitly
+// (internal/k8s.occupancyKinds) and TestRetainedPVCsKeepTheNamespace pins that listing;
+// this pins that opK8sRemoveBroker acts on it. The empty arm runs too, so the assertion is
+// known to be able to see a namespace delete at all.
+func TestRemoveBrokerKeepsTheNamespaceWhileItsPVCsRemain(t *testing.T) {
+	hasPair := func(args []string, a, b string) bool {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == a && args[i+1] == b {
+				return true
+			}
+		}
+		return false
+	}
+	run := func(t *testing.T, listing string) (*opRunner, string) {
+		t.Helper()
+		cfg := writeK8sDeployAllEnv(t, "false")
+		rr := &opRunner{output: func(c opCall) []byte {
+			for i, arg := range c.args {
+				if arg == "get" && i+1 < len(c.args) && strings.Contains(c.args[i+1], "persistentvolumeclaims") {
+					return []byte(listing) // non-nil even when empty: the listing answered
+				}
+			}
+			return nil
+		}}
+		a := &App{Cfg: cfg, Platform: config.K8s, Runner: rr, noPrompt: true}
+		var err error
+		out := captureStdout(t, func() { err = opK8sRemoveBroker(a) })
+		if err != nil {
+			t.Fatalf("opK8sRemoveBroker: %v\n%s", err, rr.dump())
+		}
+		return rr, out
+	}
+	deletesNamespace := func(rr *opRunner) bool {
+		for _, c := range rr.calls {
+			if hasPair(c.args, "delete", "namespace") {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("a kept PVC keeps the namespace", func(t *testing.T) {
+		rr, out := run(t, "persistentvolumeclaim/data-dev-broker-pubsubplus-p-0\n")
+		if deletesNamespace(rr) {
+			t.Fatalf("the namespace was deleted while a kept PVC was still in it:\n%s", rr.dump())
+		}
+		if !strings.Contains(out, "data-dev-broker-pubsubplus-p-0") {
+			t.Errorf("the report must name the PVC that kept the namespace:\n%s", out)
+		}
+		for _, c := range rr.calls {
+			if hasPair(c.args, "delete", "pvc") {
+				t.Errorf("no --delete-data, so no PVC may be deleted: %+v", c)
+			}
+		}
+	})
+	t.Run("an empty namespace is removed", func(t *testing.T) {
+		rr, _ := run(t, "")
+		if !deletesNamespace(rr) {
+			t.Errorf("an empty namespace under --no-prompt should be deleted; the assertion above "+
+				"would otherwise be unable to fail:\n%s", rr.dump())
+		}
+	})
+}
+
+// operatorManagedK8sCfg is writeK8sDeployAllEnv in the state where the CR names no admin
+// Secret: no semp.adminPass and no kubernetes.adminSecret, so the operator generates
+// dev-broker-pubsubplus-admin-creds.
+func operatorManagedK8sCfg(t *testing.T) *config.Config {
+	t.Helper()
+	cfg := writeK8sDeployAllEnv(t, "false")
+	cfg.SEMP.AdminPass, cfg.K8s.AdminSecret = "", ""
+	return cfg
+}
+
+// TestDeployRefusesAnOperatorPasswordOverKeptData pins where the guard runs: FIRST, before
+// the namespace or any Secret is applied. An earlier broker's data PVC is still here and
+// no admin Secret is named, so the operator would generate a new random password the kept
+// data ignores -- a deploy that cannot end well is refused before it changes anything.
+func TestDeployRefusesAnOperatorPasswordOverKeptData(t *testing.T) {
+	rr := &opRunner{output: func(c opCall) []byte {
+		switch {
+		case opCanI(c):
+			return nil // answered "yes" by the double itself
+		case opArgvMatch(c, "pubsubpluseventbrokers"):
+			return []byte(`{"items":[]}`)
+		case opArgvMatch(c, "pvc"):
+			return []byte(`{"items":[{"metadata":{"name":"data-dev-broker-pubsubplus-p-0"}}]}`)
+		}
+		return nil
+	}}
+	a := &App{Cfg: operatorManagedK8sCfg(t), Platform: config.K8s, Runner: rr}
+	var err error
+	captureStdout(t, func() { err = opK8sDeploy(a) })
+	if err == nil || !strings.Contains(err.Error(), "data-dev-broker-pubsubplus-p-0") {
+		t.Fatalf("opK8sDeploy err = %v, want the refusal naming the kept PVC", err)
+	}
+	for _, c := range rr.calls {
+		if c.method == "RunInput" {
+			t.Errorf("nothing may be applied once the deploy is refused: %+v", c)
+		}
+	}
+}
+
+// TestRemoveBrokerSaysWhereAnOperatorPasswordLives: with no admin Secret named, the only
+// copy of the password is the operator's generated Secret, which goes with the broker
+// while the data stays. `broker remove` says so -- before it asks -- with the command to
+// copy it; with a Secret this tool built, there is nothing to say.
+func TestRemoveBrokerSaysWhereAnOperatorPasswordLives(t *testing.T) {
+	run := func(cfg *config.Config, liveCR string) string {
+		rr := &opRunner{output: func(c opCall) []byte {
+			if !opCanI(c) && liveCR != "" && opArgvMatch(c, "pubsubpluseventbrokers") {
+				return []byte(liveCR)
+			}
+			return nil
+		}}
+		a := &App{Cfg: cfg, Platform: config.K8s, Runner: rr, noPrompt: true}
+		return captureStderr(t, func() {
+			captureStdout(t, func() {
+				if err := opK8sRemoveBroker(a); err != nil {
+					t.Fatalf("opK8sRemoveBroker: %v", err)
+				}
+			})
+		})
+	}
+	out := run(operatorManagedK8sCfg(t), "")
+	for _, want := range []string{"dev-broker-pubsubplus-admin-creds", "semp.adminPass", "kubectl get secret"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stderr missing %q:\n%s", want, out)
+		}
+	}
+	// The env file dropped its admin Secret since the deploy: the live CR still names
+	// one, which this removal leaves in place -- so that is the Secret to point at, not
+	// an operator-generated one that was never made.
+	live := `{"items":[{"metadata":{"name":"dev-broker"},"spec":{"adminCredentialsSecret":"dev-broker-admin"}}]}`
+	out = run(operatorManagedK8sCfg(t), live)
+	if !strings.Contains(out, "kubernetes.adminSecret: dev-broker-admin") || strings.Contains(out, "pubsubplus-admin-creds") {
+		t.Errorf("with a live CR naming a Secret, the warning must name that Secret:\n%s", out)
+	}
+	if out := run(writeK8sDeployAllEnv(t, "false"), ""); strings.Contains(out, "pubsubplus-admin-creds") {
+		t.Errorf("a Secret this tool built needs no warning:\n%s", out)
+	}
+}
+
 // TestOpCtrVerifyRedundancyRunsCoordinated covers opCtrVerifyRedundancy's
 // actual failover exercise arm (RedundancyCoordinated) rather than only the
 // skip/reject arms already covered by TestCtrRoleGuards. It sets this host as
@@ -2949,6 +3096,51 @@ func TestK8sLoginOutcomes(t *testing.T) {
 			t.Errorf("k8sLogin (transport failure) err = %v, want it to contain 'SEMP request failed'", loginErr)
 		}
 	})
+	// Without semp.adminPass the password comes back out of the admin Secret the broker
+	// uses -- here the referenced kubernetes.adminSecret -- on stdout, and reaches curl on
+	// stdin, never argv.
+	t.Run("no semp.adminPass reads the admin Secret", func(t *testing.T) {
+		noPass := *cfg
+		noPass.SEMP.AdminPass = ""
+		rr := &opRunner{output: func(c opCall) []byte {
+			if strings.Contains(strings.Join(c.args, " "), "jsonpath={.data.username_admin_password}") {
+				return []byte("czNjcmV0Cg==") // "s3cret\n"
+			}
+			return []byte("HTTP/1.1 200 OK\r\n\r\n")
+		}}
+		a := &App{Cfg: &noPass, Platform: config.K8s, Runner: rr}
+		var loginErr error
+		captureStdout(t, func() { loginErr = k8sLogin(a, k8sOps(a), config.Primary) })
+		if loginErr != nil {
+			t.Fatalf("k8sLogin err = %v, want nil", loginErr)
+		}
+		var read, sent bool
+		for _, c := range rr.calls {
+			argv := strings.Join(c.args, " ")
+			if strings.Contains(argv, "s3cret") {
+				t.Errorf("the password reached an argv: %+v", c)
+			}
+			read = read || strings.Contains(argv, "get secret solace-admin-secret -n solace")
+			sent = sent || strings.Contains(c.stdin, "admin:s3cret")
+		}
+		if !read || !sent {
+			t.Errorf("want the Secret read and the password on curl's stdin; read=%v sent=%v:\n%s", read, sent, rr.dump())
+		}
+	})
+	t.Run("a failed Secret read never reaches curl", func(t *testing.T) {
+		noPass := *cfg
+		noPass.SEMP.AdminPass = ""
+		rr := &opRunner{fail: opFailOn("secret")}
+		a := &App{Cfg: &noPass, Platform: config.K8s, Runner: rr}
+		var loginErr error
+		captureStdout(t, func() { loginErr = k8sLogin(a, k8sOps(a), config.Primary) })
+		if loginErr == nil || !strings.Contains(loginErr.Error(), "solace-admin-secret") {
+			t.Errorf("k8sLogin err = %v, want the failed read naming the Secret", loginErr)
+		}
+		if rr.hasCall("curl") {
+			t.Errorf("no login may be attempted without a password:\n%s", rr.dump())
+		}
+	})
 }
 
 // TestCtrLoginOutcomes is ctrLogin's half of TestK8sLoginOutcomes.
@@ -3545,6 +3737,51 @@ func TestRemoveServerCertsRefusedOnASecretManagedDeployment(t *testing.T) {
 		t.Fatal("a CLI removal on a Secret-managed deployment must be refused, not reported as done")
 	}
 	for _, want := range []string{"byo-tls-secret", "tlsServerSecret", "reconcile"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to mention %q", err, want)
+		}
+	}
+	// A Secret this env file never built is not the operator's to delete by hand on this
+	// tool's say-so: that advice belongs only to the Secret-it-built arm.
+	if strings.Contains(err.Error(), "kubectl delete secret") {
+		t.Errorf("err = %q tells the operator to delete a Secret this env file does not own", err)
+	}
+}
+
+// TestRemoveServerCertsRefusedUnderADerivedTLSSecret is the same refusal with no
+// kubernetes.tlsServerSecret at all: tls.cert/certKey alone now build <kubernetes.name>-tls
+// and the CR mounts it, so the deployment is just as Secret-managed, and the routing has
+// to read the resolved name (config.Config.TLSServerSecretName) to know that. Reading the
+// raw field would fall through to a CLI removal the operator reconciles straight back.
+func TestRemoveServerCertsRefusedUnderADerivedTLSSecret(t *testing.T) {
+	dir := t.TempDir()
+	for _, f := range []struct{ name, label string }{{"tls.crt", "CERTIFICATE"}, {"tls.key", "PRIVATE KEY"}} {
+		body := "-----BEGIN " + f.label + "-----\nc3R1Yg==\n-----END " + f.label + "-----\n"
+		if err := os.WriteFile(filepath.Join(dir, f.name), []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", f.name, err)
+		}
+	}
+	path := filepath.Join(dir, "derived.yaml")
+	content := "redundancy:\n  enabled: false\n" +
+		"image:\n  repo: solace-pubsub-standard\n  tag: \"10.10.1.128\"\n" +
+		"semp:\n  adminPass: " + smokeAdminPass + "\n" +
+		"tls:\n  cert: tls.crt\n  certKey: tls.key\n" + // no kubernetes.tlsServerSecret
+		"kubernetes:\n" +
+		"  name: dev-broker\n" +
+		"  namespace: solace\n" +
+		"  adminSecret: solace-admin-secret\n" +
+		"  updateStrategy: automatedRolling\n" +
+		"  storage:\n    class: standard\n    msgNodeSize: 30Gi\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+
+	_, err := runRootWith(t, []string{"broker", "configure", "server-certs", "--remove",
+		"--no-prompt", "--env", path, "--platform", "kubernetes"}, echoRunner)
+	if err == nil {
+		t.Fatal("a CLI removal under a derived TLS Secret must be refused, not reported as done")
+	}
+	for _, want := range []string{"dev-broker-tls", "tls.cert", "reconcile", "kubectl delete secret dev-broker-tls -n solace"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("err = %q, want it to mention %q", err, want)
 		}

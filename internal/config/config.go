@@ -85,7 +85,9 @@ type Config struct {
 // AdditionalUsersSecretName is the Secret carrying admin.additionalUsers, which the broker
 // CR names in spec.extraEnvVarsSecret: <kubernetes.name>-additional-users.
 //
-// Derived rather than configured, unlike adminSecret/tlsServerSecret/imagePullSecret. It
+// Derived only, unlike adminSecret/tlsServerSecret/imagePullSecret, which may be configured
+// and are derived only when left unset (AdminSecretName, TLSServerSecretName,
+// ImagePullSecretName). It
 // holds nothing an operator would want to create themselves -- this tool is the only thing
 // that writes it -- and it cannot collide: two brokers in one namespace would already
 // collide on the CR name itself, and different namespaces cannot collide at all.
@@ -97,6 +99,60 @@ func (c *Config) AdditionalUsersSecretName() string {
 	return c.K8s.Name + "-additional-users"
 }
 
+// ManagesAdminSecret reports whether this tool builds the broker's credentials Secret on
+// Kubernetes, which is true exactly when the env file supplies the admin password to build
+// it from. The rule ManagesTLSSecret and ManagesImagePullSecret follow, for the same
+// reason: naming the Secret (kubernetes.adminSecret) only says the CR should reference
+// one. With no password this tool builds, applies and deletes nothing for it -- the
+// Secret is the operator's own, or, with no name either, the Solace operator generates
+// one itself (OperatorAdminSecretName). semp.adminPassEnv needs no separate check:
+// resolveSecretRefs has already resolved it into SEMP.AdminPass during Load.
+//
+// The monitor password and the pre-shared key are entries of this same Secret, so they
+// need it: validateK8s refuses either without semp.adminPass.
+func (c *Config) ManagesAdminSecret() bool {
+	return c.SEMP.AdminPass != ""
+}
+
+// AdminSecretName is the credentials Secret the broker CR's adminCredentialsSecret names,
+// or "" when the CR omits the field and the operator generates one. ImagePullSecretName's
+// three states: a configured kubernetes.adminSecret always wins, whether this tool builds
+// it (semp.adminPass set) or only references a Secret someone else made; with a password
+// but no name the default <kubernetes.name>-admin is derived; with neither there is
+// nothing to reference. As with TLSServerSecretName, nothing is derived from an empty
+// kubernetes.name, and every reader goes through here rather than K8s.AdminSecret.
+func (c *Config) AdminSecretName() string {
+	if c.K8s.AdminSecret != "" {
+		return c.K8s.AdminSecret
+	}
+	if c.ManagesAdminSecret() && c.K8s.Name != "" {
+		return c.K8s.Name + "-admin"
+	}
+	return ""
+}
+
+// OperatorAdminSecretName is the Secret the Solace operator generates when the CR names
+// no adminCredentialsSecret: <kubernetes.name>-pubsubplus-admin-creds, holding a random
+// username_admin_password. The operator owns it (a controller reference to the CR), so it
+// is deleted with the broker. Spelled here rather than in internal/k8s because
+// validateK8s refuses a kubernetes.adminSecret in the operator's namespace of names, and
+// config must not import k8s; TestOperatorAdminSecretNameMatchesTheBrokerNames in
+// internal/k8s is what stops it drifting from the names that package derives.
+func (c *Config) OperatorAdminSecretName() string {
+	return c.K8s.Name + operatorObjectInfix + "admin-creds"
+}
+
+// operatorObjectInfix is what the Solace operator puts between the CR name and every
+// object it derives from it -- StatefulSets, the Service, and the Secrets it generates.
+const operatorObjectInfix = "-pubsubplus-"
+
+// PSKConfigured reports whether a pre-shared key was supplied, literally or through
+// redundancy.pskEnv. Load resolves pskEnv into PSK, but a Config built in code may carry
+// only the variable name, and the CR, the report and validation must agree on the answer.
+func (c *Config) PSKConfigured() bool {
+	return c.Redundancy.PSK != "" || c.Redundancy.PSKEnv != ""
+}
+
 // ManagesTLSSecret reports whether this tool builds the TLS Secret itself, which is true
 // exactly when the env file supplies the material to build it from. Naming the Secret
 // (kubernetes.tlsServerSecret) only says the broker should USE one: it may already exist,
@@ -104,6 +160,30 @@ func (c *Config) AdditionalUsersSecretName() string {
 // nothing here reads, applies or deletes it.
 func (c *Config) ManagesTLSSecret() bool {
 	return c.TLS.Cert != "" || c.TLS.CertKey != ""
+}
+
+// TLSServerSecretName is the TLS Secret the broker CR's tls block references, or "" when
+// there is none and the CR carries no tls block. ImagePullSecretName's three states, for
+// the same reasons: a configured kubernetes.tlsServerSecret always wins, whether this tool
+// builds the Secret behind it (tls.cert/certKey supplied) or merely points the CR at one
+// that already exists (made by hand, or by cert-manager); with the files but no name the
+// default <kubernetes.name>-tls is derived, so a supplied pair can no longer be silently
+// unused; with neither there is nothing to reference. The default is derived only under
+// ManagesTLSSecret -- never invented for an unnamed Secret with no files behind it -- and
+// only with a kubernetes.name to derive it from, since "-tls" alone is no Secret name.
+//
+// Every reader of the name goes through here rather than K8s.TLSServerSecret: the CR,
+// the Secret built from the files, the delete set and the server-certs routing have to
+// agree on one name, and a derived default read raw at any one of them is a CR pointing
+// at a Secret nothing built.
+func (c *Config) TLSServerSecretName() string {
+	if c.K8s.TLSServerSecret != "" {
+		return c.K8s.TLSServerSecret
+	}
+	if c.ManagesTLSSecret() && c.K8s.Name != "" {
+		return c.K8s.Name + "-tls"
+	}
+	return ""
 }
 
 // ManagesImagePullSecret reports whether this tool builds the broker's image-pull Secret
@@ -285,7 +365,7 @@ func atoiPrefix(s string) (int, bool) {
 // value that reached a Secret key, a compose `target:`, a podman `target=` and a broker
 // setting. The monitor user is likewise fixed at `monitor`.
 type SEMP struct {
-	AdminPass       string           `yaml:"adminPass"`       // SOLBK_ADM_PASS (secret, mandatory)
+	AdminPass       string           `yaml:"adminPass"`       // SOLBK_ADM_PASS (secret; mandatory on docker/podman)
 	AdminPassEnv    string           `yaml:"adminPassEnv"`    // env var holding adminPass instead
 	MonitorPass     string           `yaml:"monitorPass"`     // SOLBK_MON_PASS (k8s, secret)
 	MonitorPassEnv  string           `yaml:"monitorPassEnv"`  // env var holding monitorPass instead
@@ -311,7 +391,8 @@ type AdditionalUser struct {
 }
 
 // TLS is the broker server certificate + trusted CAs, shared by every platform.
-// The name of the k8s Secret built from these files is kubernetes.tlsServerSecret.
+// The k8s Secret built from these files is named by Config.TLSServerSecretName:
+// kubernetes.tlsServerSecret, or <kubernetes.name>-tls when that is unset.
 type TLS struct {
 	Cert    string   `yaml:"cert"`    // SOLBK_TLS_CERT
 	CertKey string   `yaml:"certKey"` // SOLBK_TLS_CERTKEY
@@ -579,8 +660,8 @@ type K8sConfig struct {
 	Command         Command `yaml:"command"`         // KUBE (default: kubectl)
 	Name            string  `yaml:"name"`            // SOLBK_NAME
 	Namespace       string  `yaml:"namespace"`       // SOLBK_NS
-	AdminSecret     string  `yaml:"adminSecret"`     // SOLBK_USR_SECRET: Secret holding the admin/monitor creds
-	TLSServerSecret string  `yaml:"tlsServerSecret"` // SOLBK_SVR_SECRET: TLS Secret built from tls.cert/certKey; enables the CR's TLS block
+	AdminSecret     string  `yaml:"adminSecret"`     // SOLBK_USR_SECRET: optional; see AdminSecretName
+	TLSServerSecret string  `yaml:"tlsServerSecret"` // SOLBK_SVR_SECRET: optional; see TLSServerSecretName
 	ImagePullSecret string  `yaml:"imagePullSecret"` // IMAGEREPO_SECRET: dockerconfigjson Secret; enables imagePullSecrets
 	// ImagePullPolicy is the k8s image pull policy: Always for a moving tag, Never
 	// for an air-gapped cluster with the image preloaded. Empty keeps the CR's own
@@ -1083,9 +1164,10 @@ type Redundancy struct {
 	//
 	// On Kubernetes it is OPTIONAL. Left empty, the operator generates its own key and
 	// spec.preSharedAuthKeySecret is omitted entirely; set, the value becomes the
-	// `preshared_auth_key` entry of the credentials Secret this tool already builds, and
-	// the CR points at that Secret. The CRD fixes that key name, so it is not ours to
-	// choose.
+	// `preshared_auth_key` entry of the credentials Secret this tool builds from
+	// semp.adminPass, and the CR points at that Secret -- so on Kubernetes a key needs
+	// semp.adminPass, and validateK8s refuses one without it. The CRD fixes that key
+	// name, so it is not ours to choose.
 	PSK    string `yaml:"psk"`    // SOLBK_REDUNDANCY_PSK (secret)
 	PSKEnv string `yaml:"pskEnv"` // env var holding psk instead
 }

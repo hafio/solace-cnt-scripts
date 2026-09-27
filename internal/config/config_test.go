@@ -297,8 +297,12 @@ func TestApplyDefaultsK8s(t *testing.T) {
 	if c.K8s.UpdateStrategy != "automatedRolling" {
 		t.Errorf("UpdateStrategy = %q, want automatedRolling", c.K8s.UpdateStrategy)
 	}
-	if c.K8s.AdminSecret != "solace-admin-secret" {
-		t.Errorf("K8s.AdminSecret = %q", c.K8s.AdminSecret)
+	// Not defaulted: whether the admin Secret has a default depends on whether a password
+	// is there to build it from, which is Config.AdminSecretName's question at read time.
+	// Filling the field would make "reference this Secret" and "let the operator generate
+	// one" indistinguishable (adminsecret_test.go pins the states).
+	if c.K8s.AdminSecret != "" {
+		t.Errorf("K8s.AdminSecret = %q, want it left unset for AdminSecretName to resolve", c.K8s.AdminSecret)
 	}
 	if c.Broker.HostDiagnosticDir != "diag-configs" {
 		t.Errorf("HostDiagnosticDir = %q", c.Broker.HostDiagnosticDir)
@@ -581,7 +585,9 @@ func TestValidateK8sMissingMandatory(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing mandatory k8s fields")
 	}
-	want := "these fields must not be empty: image.repo, image.tag, kubernetes.name, kubernetes.namespace, kubernetes.storage.msgNodeSize, semp.adminPass"
+	// semp.adminPass is not among them on Kubernetes: without it the CR references
+	// kubernetes.adminSecret or lets the operator generate one (adminsecret_test.go).
+	want := "these fields must not be empty: image.repo, image.tag, kubernetes.name, kubernetes.namespace, kubernetes.storage.msgNodeSize"
 	if err.Error() != want {
 		t.Errorf("missing-fields message =\n  %q\nwant\n  %q", err.Error(), want)
 	}

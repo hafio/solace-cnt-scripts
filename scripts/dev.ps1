@@ -55,9 +55,15 @@ $DistTargets = @(
   @{ os = 'windows'; arch = 'amd64' }
 )
 
-# -race needs cgo + a C compiler; OFF by default on Windows, enable with SOLACE_RACE=1.
+# -race needs cgo + a C compiler; OFF by default on Windows for `test`, enable with
+# SOLACE_RACE=1. `cov` never races: `test` is the race run, and coverage needs no second one.
 $RaceFlag = @(); $CoverMode = 'count'
-if ($env:SOLACE_RACE -eq '1') { $RaceFlag = @('-race'); $CoverMode = 'atomic' }
+if ($env:SOLACE_RACE -eq '1') { $RaceFlag = @('-race') }
+
+# A race-built binary sleeps GORACE atexit_sleep_ms (default 1000) before every clean
+# exit -- each test binary, and each helper child internal/engine re-runs -- which was
+# most of `test`'s wall time. Default it to 0 only when unset, so an exported value wins.
+if ($RaceFlag.Count -gt 0 -and -not $env:GORACE) { $env:GORACE = 'atexit_sleep_ms=0' }
 
 # Toolchain parity: go.mod's `toolchain` pin is what local and CI must agree on,
 # but an exported GOTOOLCHAIN (`local` especially) silently overrides it and
@@ -200,7 +206,7 @@ function Task-cov {
   # -count=1 forces a real run so a cached test result can't report a stale
   # coverage total and mask a drop below the floor (the previous total in
   # logs/cov.log; local only -- CI is a fresh checkout with no prior log).
-  $c = Cap go test @RaceFlag "-covermode=$CoverMode" "-coverprofile=$prof" -count=1 ./...
+  $c = Cap go test "-covermode=$CoverMode" "-coverprofile=$prof" -count=1 ./...
   if ($c -ne 0) { return $c }
   $c = Cap go tool cover "-html=$prof" "-o" $html
   if ($c -ne 0) { return $c }
@@ -259,6 +265,10 @@ function Task-graphify {
   if (-not (Get-Command graphify -ErrorAction SilentlyContinue)) {
     Warn 'graphify not on PATH; skipping'; return 0
   }
+  # dev.sh widens graphify-out/cache to the group here, because graphify writes its cache
+  # entries 0600 and a POSIX checkout shared by two accounts needs them group-readable.
+  # Windows has no POSIX mode bits, so there is nothing to mirror: the divergence is the
+  # platform's, not drift between the two scripts.
   return (Cap graphify update .)
 }
 
@@ -294,7 +304,9 @@ Tasks:
   all      $($All -join ' ')   (what CI runs, as: all scan)
   full     $($Full -join ' ')   (pre-tag sweep)
 
-Env: SOLACE_RACE=1 enables -race; TARGET_OS/TARGET_ARCH cross-compile a single ``build``.
+Env: SOLACE_RACE=1 enables -race on ``test`` (``cov`` never races); TARGET_OS/TARGET_ARCH
+     cross-compile a single ``build``.
+     GORACE defaults to atexit_sleep_ms=0 on race runs; export it to override.
      GOTOOLCHAIN defaults to go.mod's ``toolchain`` pin; export it to override.
      govulncheck's version lives in go.mod (tool directive), not an env var.
 Logs: $LogDir\<task>.log (each run closes with a timestamped footer)

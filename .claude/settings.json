@@ -1,4 +1,10 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(graphify query *)",
+      "WebFetch(domain:docs.solace.com)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {

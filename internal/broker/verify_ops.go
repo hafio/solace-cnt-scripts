@@ -33,6 +33,12 @@ const (
 // curl config on stdin (curl -K -), so the password never appears in an argv or
 // an echoed command. It reports success and writes an outcome line to Out.
 func (o *Ops) Login(ctx context.Context, role config.Role, user, pass string) (bool, error) {
+	// sempCurl's guard, for the same reason: a line break in a curl -K value ends the
+	// directive and starts another. config refuses one in every password it loads, but
+	// on Kubernetes the password may instead come from a cluster Secret.
+	if strings.ContainsAny(user+pass, "\r\n") {
+		return false, fmt.Errorf("the SEMP login credential contains a line break, which a curl config cannot carry")
+	}
 	// curlConfigLine and defaultSEMPPort, not a hand-written line and a literal: the
 	// escaping rule for a curl config value has one definition (semp.go), and so does
 	// the broker's own plaintext SEMP port.

@@ -17,7 +17,7 @@ image:
   tag: "10.26.0.8755"               # mandatory
 
 semp:
-  adminPass: CHANGE-ME-admin        # secret, mandatory
+  adminPass: CHANGE-ME-admin        # secret; builds the <name>-admin Secret
   monitorPass: CHANGE-ME-monitor    # secret; the operator's monitor user
 
 kubernetes:

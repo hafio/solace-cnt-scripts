@@ -55,6 +55,11 @@ var bashOnly = []string{
 	"THIS_ACTIVESTANDBY",
 }
 
+// legacyAdminSecretDefault is the admin Secret name the bash tool fell back to when
+// SOLBK_USR_SECRET was unset -- the name every legacy Kubernetes deployment that relied
+// on the default was built under.
+const legacyAdminSecretDefault = "solace-admin-secret"
+
 // Convert parses a legacy bash env file and returns the equivalent YAML.
 //
 // platform selects which section the platform-specific variables land in; an
@@ -388,6 +393,14 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 					warns = append(warns, fmt.Sprintf("SOLBK_ADM_SECRET=%q and SOLBK_USR_SECRET=%q disagree; "+
 						"kept SOLBK_USR_SECRET (the canonical name)", alias, adminSecret))
 				}
+			}
+			// The bash tool defaulted this name (SOLBK_USR_SECRET=${SOLBK_USR_SECRET:-
+			// solace-admin-secret}), where this schema derives <kubernetes.name>-admin. A legacy
+			// deployment was built under the bash default, so a file that relied on it gets the
+			// name written out: the converted file must keep pointing its broker at the Secret
+			// it already runs with, not repoint it on the first deploy.
+			if adminSecret == "" {
+				adminSecret = legacyAdminSecretDefault
 			}
 			d.kv("adminSecret", adminSecret)
 			// Both name k8s Secret OBJECTS, so they live beside adminSecret rather than

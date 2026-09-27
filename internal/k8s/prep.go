@@ -95,7 +95,7 @@ func (c *Cluster) DeleteNamespace(ctx context.Context) error {
 // secretPreflight fails loud before any manifest is built when the certificate inputs
 // this tool is about to read are unusable, porting the guard of 012:19-24 so the operator
 // does not later fail to mount a half-built secret. The admin secret's own guards live in
-// AdminSecret.
+// AdminSecret, which runs only when this tool builds that Secret.
 //
 // It is keyed on ManagesTLSSecret, not on the Secret NAME. A named Secret with no files
 // behind it is the bring-your-own case -- the operator created it, the CR references it,
@@ -116,21 +116,48 @@ func (c *Cluster) secretPreflight() error {
 	return nil
 }
 
-// GenSecrets builds every applicable secret (admin always; TLS when
-// kubernetes.tlsServerSecret is set; the image-pull secret when registry
-// credentials are present, config.Config.ManagesImagePullSecret) and
+// ownedSecretNames lists, in apply order, every Secret this env file makes this tool
+// build -- and so the ones `broker remove` deletes. Each entry is keyed on the MATERIAL,
+// never on a name: a Secret the env file only names is someone else's, and one it
+// neither names nor supplies (the admin Secret with no semp.adminPass) is the Solace
+// operator's to generate. GenSecrets and DeleteSecrets both read this one list, so what
+// is built and what is removed cannot drift apart.
+func ownedSecretNames(cfg *config.Config) []string {
+	var names []string
+	add := func(owned bool, name string) {
+		if owned && name != "" {
+			names = append(names, name)
+		}
+	}
+	add(cfg.ManagesAdminSecret(), cfg.AdminSecretName())
+	add(cfg.ManagesTLSSecret(), cfg.TLSServerSecretName())
+	add(cfg.ManagesImagePullSecret(), cfg.ImagePullSecretName())
+	add(len(cfg.SEMP.AdditionalUsers) > 0, cfg.AdditionalUsersSecretName())
+	return names
+}
+
+// GenSecrets builds every Secret this tool owns (ownedSecretNames: the credentials Secret
+// under config.Config.ManagesAdminSecret, TLS under ManagesTLSSecret, the image-pull
+// Secret under ManagesImagePullSecret, the additional users' when there are any) and
 // joins them into one multi-doc manifest -- porting 012's secret set. It is the
 // rendering behind both CreateSecrets and `broker generate`, so what a user
 // reviews is exactly what gets applied. The manifests carry the base64-encoded
 // secret values, so the output is as sensitive as the env file it came from.
+//
+// nil when there is nothing to build -- no admin password, no TLS files, no registry
+// credentials, no additional users -- so neither caller has an empty document to apply.
 func GenSecrets(cfg *config.Config) ([]byte, error) {
-	docs := make([][]byte, 0, 3)
+	docs := make([][]byte, 0, 4)
 
-	admin, err := AdminSecret(cfg)
-	if err != nil {
-		return nil, err
+	// Keyed on the MATERIAL, as every entry below is: with no semp.adminPass the CR
+	// references a Secret someone else made, or none, and there is nothing here to build.
+	if cfg.ManagesAdminSecret() {
+		admin, err := AdminSecret(cfg)
+		if err != nil {
+			return nil, err
+		}
+		docs = append(docs, admin)
 	}
-	docs = append(docs, admin)
 
 	// Keyed on the MATERIAL, not on the name. A named Secret that this env file does not
 	// supply files for is one the operator created themselves -- the CR still references
@@ -164,6 +191,9 @@ func GenSecrets(cfg *config.Config) ([]byte, error) {
 	if users != nil {
 		docs = append(docs, users)
 	}
+	if len(docs) == 0 {
+		return nil, nil
+	}
 	return joinManifests(docs), nil
 }
 
@@ -171,7 +201,16 @@ func GenSecrets(cfg *config.Config) ([]byte, error) {
 // value off the argv and out of an echoed command. The whole manifest is
 // built before the first apply, so a builder error aborts cleanly without leaving
 // a partially-applied secret set.
+//
+// With nothing to build it says so and returns, before any probe: `kubectl apply` of an
+// empty stream fails ("no objects passed to apply"), and a deploy that creates no Secret
+// has no business demanding permission to create one (the deploy.go:112 rule).
 func (c *Cluster) CreateSecrets(ctx context.Context) error {
+	if len(ownedSecretNames(c.Cfg)) == 0 {
+		c.logf("no Secrets to create in %s -- the broker CR references only Secrets that already exist "+
+			"or that the operator generates", c.ns())
+		return nil
+	}
 	if err := c.secretPreflight(); err != nil {
 		return err
 	}
@@ -188,33 +227,21 @@ func (c *Cluster) CreateSecrets(ctx context.Context) error {
 	return c.apply(ctx, manifest)
 }
 
-// DeleteSecrets removes the secrets CreateSecrets created (112): the admin secret
-// always, the TLS and image-pull secrets only when their names are configured. All
-// use --ignore-not-found so a partial or repeat teardown is not an error.
+// DeleteSecrets removes the secrets CreateSecrets created (112): exactly
+// ownedSecretNames, under their resolved names. A Secret this env file only names is not
+// ours to remove -- it may be shared with another workload, and nothing about naming it
+// in this file made it ours -- and the operator's generated ones go with the broker CR
+// that owns them. All use --ignore-not-found so a partial or repeat teardown is not an
+// error, and with nothing to delete there is no permission to probe either.
 func (c *Cluster) DeleteSecrets(ctx context.Context) error {
+	names := ownedSecretNames(c.Cfg)
+	if len(names) == 0 {
+		return nil
+	}
 	if err := c.Preflight(ctx, "delete", "secrets"); err != nil {
 		return err
 	}
-	names := []string{c.Cfg.K8s.AdminSecret}
-	// Only the TLS Secret this tool built. One the operator created and merely pointed the
-	// env file at is not ours to remove -- it may be shared with another workload, and
-	// nothing about naming it in this file made it ours.
-	if c.Cfg.ManagesTLSSecret() && c.Cfg.K8s.TLSServerSecret != "" {
-		names = append(names, c.Cfg.K8s.TLSServerSecret)
-	}
-	// Only the image-pull Secret this tool built, the same rule as the TLS Secret just
-	// above: a named Secret with no credentials behind it is the operator's own, not ours
-	// to remove.
-	if c.Cfg.ManagesImagePullSecret() {
-		names = append(names, c.Cfg.ImagePullSecretName())
-	}
-	if len(c.Cfg.SEMP.AdditionalUsers) > 0 {
-		names = append(names, c.Cfg.AdditionalUsersSecretName())
-	}
 	for _, name := range names {
-		if name == "" {
-			continue
-		}
 		c.logf("deleting secret %s", name)
 		if err := c.kubectl(ctx, "delete", "secret", name, "-n", c.ns(), "--ignore-not-found"); err != nil {
 			return err
@@ -229,14 +256,16 @@ func (c *Cluster) DeleteSecrets(ctx context.Context) error {
 // `create secret tls --dry-run|apply`, so the private key never reaches an argv or
 // an echoed command. The broker re-reads the secret; no pod restart here.
 func (c *Cluster) UpdateServerCertSecret(ctx context.Context) error {
-	if c.Cfg.K8s.TLSServerSecret == "" {
-		return fmt.Errorf("kubernetes.tlsServerSecret must be set to update the server-certificate secret")
+	name := c.Cfg.TLSServerSecretName()
+	if name == "" {
+		return fmt.Errorf("this env file has no TLS Secret to update: set tls.cert and tls.certKey " +
+			"(the Secret is then built as kubernetes.tlsServerSecret, or <kubernetes.name>-tls when that is unset)")
 	}
 	if !c.Cfg.ManagesTLSSecret() {
 		return fmt.Errorf("kubernetes.tlsServerSecret %q names a Secret this env file does not supply the files for, "+
 			"so there is nothing here to rebuild it from.\n"+
 			"  Rotate it where it is managed (kubectl, cert-manager), or set tls.cert and tls.certKey to hand this tool the pair",
-			c.Cfg.K8s.TLSServerSecret)
+			name)
 	}
 	if err := c.Preflight(ctx, "update", "secrets"); err != nil {
 		return err
@@ -245,7 +274,7 @@ func (c *Cluster) UpdateServerCertSecret(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	c.logf("updating server-certificate secret %s", c.Cfg.K8s.TLSServerSecret)
+	c.logf("updating server-certificate secret %s", name)
 	return c.apply(ctx, manifest)
 }
 
@@ -271,11 +300,15 @@ func GenBroker(cfg *config.Config) ([]byte, error) {
 }
 
 // joinManifests concatenates rendered YAML documents with a `---` separator so
-// they apply as one multi-doc stream.
+// they apply as one multi-doc stream. A blank document is dropped rather than joined:
+// GenBroker passes GenSecrets' nil when there is no Secret to build, and the stream
+// must then be the Namespace and the CR with nothing between them.
 func joinManifests(docs [][]byte) []byte {
-	parts := make([]string, len(docs))
-	for i, d := range docs {
-		parts[i] = strings.TrimRight(string(d), "\n")
+	parts := make([]string, 0, len(docs))
+	for _, d := range docs {
+		if part := strings.TrimRight(string(d), "\n"); strings.TrimSpace(part) != "" {
+			parts = append(parts, part)
+		}
 	}
 	return []byte(strings.Join(parts, "\n---\n") + "\n")
 }

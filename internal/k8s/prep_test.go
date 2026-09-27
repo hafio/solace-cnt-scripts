@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -232,20 +233,22 @@ func TestCreateSecretsPreflight(t *testing.T) {
 	})
 }
 
-// TestCreateSecretsFailsWithoutAdminFields proves CreateSecrets can pass
-// secretPreflight (which only validates the TLS inputs) and still fail inside
-// GenSecrets when the admin fields are unset -- a real, reachable misconfiguration
-// that secretPreflight's TLS-only guard does not catch.
-func TestCreateSecretsFailsWithoutAdminFields(t *testing.T) {
-	rr := &recRunner{}
-	c := NewCluster(rr, haCfg(), nil, nil) // no Admin.Pass, no K8s.AdminSecret
-	if err := c.CreateSecrets(context.Background()); err == nil {
-		t.Error("CreateSecrets should fail when the admin secret cannot be built")
-	}
-	// The permission probe runs (it precedes GenSecrets, so key material is never
-	// read for a cluster that would refuse it); no apply may follow.
-	if calls := rr.afterPreflight(t, "create", "secrets"); len(calls) != 0 {
-		t.Errorf("CreateSecrets should abort before any apply; the probe passed, GenSecrets should stop it; got %d calls after it", len(calls))
+// TestCreateSecretsWithNothingToBuildDoesNothing: with no admin password, no TLS files, no
+// registry credentials and no additional users there is no Secret of this tool's to
+// create -- the CR references one that exists, or none and the operator generates it. So
+// nothing runs at all: `kubectl apply` of an empty stream fails, and a permission probe
+// for a create that will not happen demands a right the deploy never uses.
+func TestCreateSecretsWithNothingToBuildDoesNothing(t *testing.T) {
+	for _, adminSecret := range []string{"", "byo-admin"} {
+		cfg := haCfg() // no semp.adminPass
+		cfg.K8s.AdminSecret = adminSecret
+		rr := &recRunner{}
+		if err := NewCluster(rr, cfg, nil, nil).CreateSecrets(context.Background()); err != nil {
+			t.Errorf("adminSecret=%q: nothing to build must not be an error: %v", adminSecret, err)
+		}
+		if len(rr.calls) != 0 {
+			t.Errorf("adminSecret=%q: no call may run with nothing to create; got %+v", adminSecret, rr.calls)
+		}
 	}
 }
 
@@ -362,6 +365,28 @@ func TestDeleteSecrets(t *testing.T) {
 			}
 		}
 	})
+	// The TLS analogue of the derived pull-secret case below: files supplied, no name
+	// configured, so the Secret GenSecrets built is <kubernetes.name>-tls and that is the
+	// name the teardown must delete.
+	t.Run("derived TLS name when files are supplied and no name is configured", func(t *testing.T) {
+		cfg := adminCfg()
+		cfg.TLS.Cert, cfg.TLS.CertKey = "certs/tls.crt", "certs/tls.key"
+		rr := &recRunner{}
+		c := NewCluster(rr, cfg, nil, nil)
+		if err := c.DeleteSecrets(context.Background()); err != nil {
+			t.Fatalf("DeleteSecrets: %v", err)
+		}
+		want := []string{"delete", "secret", "dev-broker-tls", "-n", "solace", "--ignore-not-found"}
+		var saw bool
+		for _, call := range rr.afterPreflight(t, "delete", "secrets") {
+			if eqArgs(call.args, want) {
+				saw = true
+			}
+		}
+		if !saw {
+			t.Errorf("DeleteSecrets calls = %+v, want one deleting the derived TLS name %v", rr.calls, want)
+		}
+	})
 	// With credentials present and no name configured, DeleteSecrets must name the
 	// same DERIVED default GenSecrets built the Secret under -- not skip it, and not
 	// invent a different name.
@@ -405,19 +430,45 @@ func TestDeleteSecretsStopsOnPreflightFailure(t *testing.T) {
 	}
 }
 
-// TestDeleteSecretsSkipsUnconfiguredAdminSecret proves names' unconditional first
-// entry (c.Cfg.K8s.AdminSecret) is silently skipped when blank, rather than issuing
-// `kubectl delete secret ""` -- the case of a partial/legacy deployment that never
-// configured an admin secret but still calls teardown.
+// TestDeleteSecretsSkipsUnconfiguredAdminSecret: with no Secret this tool built there is
+// nothing to delete and no permission to probe. The operator's generated admin Secret is
+// owned by the broker CR and goes with it.
 func TestDeleteSecretsSkipsUnconfiguredAdminSecret(t *testing.T) {
-	cfg := haCfg() // no K8s.AdminSecret, no TLS/pull secret configured
+	cfg := haCfg() // no semp.adminPass, no kubernetes.adminSecret, no TLS/pull secret
 	rr := &recRunner{}
 	c := NewCluster(rr, cfg, nil, nil)
 	if err := c.DeleteSecrets(context.Background()); err != nil {
 		t.Fatalf("DeleteSecrets: %v", err)
 	}
-	if calls := rr.afterPreflight(t, "delete", "secrets"); len(calls) != 0 {
-		t.Errorf("DeleteSecrets should skip the blank admin-secret entry; got %d calls after the probe", len(calls))
+	if len(rr.calls) != 0 {
+		t.Errorf("DeleteSecrets with nothing to delete must run nothing; got %+v", rr.calls)
+	}
+}
+
+// TestDeleteSecretsLeavesAReferencedAdminSecret is the data-loss case: a named admin
+// Secret with no password behind it is someone else's, and `broker remove` must never
+// delete it -- while a Secret the same env file DID build is still removed.
+func TestDeleteSecretsLeavesAReferencedAdminSecret(t *testing.T) {
+	cfg := haCfg()
+	// Referenced only: no semp.adminPass behind the name.
+	cfg.K8s.AdminSecret = "byo-admin"
+	// Built by this env file: TLS files with no name derive dev-broker-tls.
+	cfg.TLS.Cert, cfg.TLS.CertKey = "certs/tls.crt", "certs/tls.key"
+	rr := &recRunner{}
+	if err := NewCluster(rr, cfg, nil, nil).DeleteSecrets(context.Background()); err != nil {
+		t.Fatalf("DeleteSecrets: %v", err)
+	}
+	var sawTLS bool
+	for _, call := range rr.afterPreflight(t, "delete", "secrets") {
+		if strings.Contains(strings.Join(call.args, " "), "byo-admin") {
+			t.Fatalf("a referenced admin Secret must never be deleted: %+v", call)
+		}
+		if eqArgs(call.args, []string{"delete", "secret", "dev-broker-tls", "-n", "solace", "--ignore-not-found"}) {
+			sawTLS = true
+		}
+	}
+	if !sawTLS {
+		t.Errorf("the TLS Secret this env file built must still be deleted: %+v", rr.calls)
 	}
 }
 
@@ -464,11 +515,31 @@ func TestUpdateServerCertSecret(t *testing.T) {
 			t.Errorf("stdin is not the TLS secret:\n%s", got.stdin)
 		}
 	})
-	t.Run("errors without a secret name", func(t *testing.T) {
+	t.Run("errors with no TLS Secret at all", func(t *testing.T) {
 		rr := &recRunner{}
-		c := NewCluster(rr, haCfg(), nil, nil) // no K8s.TLSServerSecret
+		c := NewCluster(rr, haCfg(), nil, nil) // no name and no files: nothing to update
 		if err := c.UpdateServerCertSecret(context.Background()); err == nil {
-			t.Error("UpdateServerCertSecret should fail when kubernetes.tlsServerSecret is unset")
+			t.Error("UpdateServerCertSecret should fail when there is neither a TLS Secret name nor files")
+		}
+		if len(rr.calls) != 0 {
+			t.Errorf("no call may run with nothing to update; got %+v", rr.calls)
+		}
+	})
+	t.Run("rotates the derived name when only the files are supplied", func(t *testing.T) {
+		dir := t.TempDir()
+		crt := filepath.Join(dir, "tls.crt")
+		key := filepath.Join(dir, "tls.key")
+		writeFile(t, crt, "CERT\n")
+		writeFile(t, key, "KEY\n")
+		cfg := haCfg()
+		cfg.TLS.Cert, cfg.TLS.CertKey = crt, key
+		rr := &recRunner{}
+		c := NewCluster(rr, cfg, nil, nil)
+		if err := c.UpdateServerCertSecret(context.Background()); err != nil {
+			t.Fatalf("UpdateServerCertSecret: %v", err)
+		}
+		if got := rr.last(); !strings.Contains(got.stdin, "name: dev-broker-tls") {
+			t.Errorf("the rotation must apply the Secret under the derived name the CR references:\n%s", got.stdin)
 		}
 	})
 	// A named Secret with no files behind it cannot be rebuilt here -- there is nothing
@@ -599,5 +670,215 @@ func TestGenBrokerMatchesWhatDeployApplies(t *testing.T) {
 	}
 	if applied != 3 {
 		t.Fatalf("expected the deploy to apply 3 manifests (namespace, secrets, CR), got %d", applied)
+	}
+}
+
+// TestGenBrokerWithNoSecretsIsNamespaceAndCR is the operator-managed shape: no Secret of
+// this tool's to build, so `broker generate` prints the Namespace and the CR with nothing
+// between them -- no blank document -- and the deploy applies exactly those two, each a
+// real manifest. The recRunner-based sibling above could not tell a blank apply from a
+// real one, which is how an empty `kubectl apply -f -` would have slipped through.
+func TestGenBrokerWithNoSecretsIsNamespaceAndCR(t *testing.T) {
+	cfg := haCfg() // no semp.adminPass, no kubernetes.adminSecret, no TLS, pull or users
+	stream, err := GenBroker(cfg)
+	if err != nil {
+		t.Fatalf("GenBroker: %v", err)
+	}
+	if n := strings.Count(string(stream), "\n---\n"); n != 1 {
+		t.Errorf("want exactly one separator (Namespace, CR), got %d:\n%s", n, stream)
+	}
+	if strings.Contains(string(stream), "kind: Secret") {
+		t.Errorf("no Secret is built, so none may be printed:\n%s", stream)
+	}
+
+	rr := &recRunner{}
+	c := NewCluster(rr, cfg, nil, nil)
+	ctx := context.Background()
+	for _, step := range []func(context.Context) error{c.CreateNamespace, c.CreateSecrets} {
+		if err := step(ctx); err != nil {
+			t.Fatalf("deploy step: %v", err)
+		}
+	}
+	if err := c.DeployBroker(ctx, false); err != nil {
+		t.Fatalf("DeployBroker: %v", err)
+	}
+	var applied int
+	for _, call := range rr.calls {
+		if call.method != "RunInput" {
+			continue
+		}
+		if strings.TrimSpace(call.stdin) == "" {
+			t.Errorf("a blank manifest reached `kubectl apply`: %+v", call)
+			continue
+		}
+		applied++
+	}
+	if applied != 2 {
+		t.Errorf("expected the deploy to apply 2 manifests (namespace, CR), got %d", applied)
+	}
+}
+
+// TestAdminSecretStatesEmitTheirArtifacts pins everything the admin Secret's states emit,
+// in one place and for both directions: what `broker generate` prints, what `broker
+// deploy` applies, and what `broker remove` deletes. Each state is checked for the Secret
+// documents in the stream, the CR's adminCredentialsSecret, the applies (every one a
+// real, non-blank part of the printed stream), and the delete set. The two states in
+// which this tool builds no admin Secret run beside a TLS Secret it does build, which is
+// where a leak would show: the stream and the delete set must carry that Secret and still
+// never the admin one.
+func TestAdminSecretStatesEmitTheirArtifacts(t *testing.T) {
+	withTLS := func(t *testing.T, c *config.Config) {
+		t.Helper()
+		dir := t.TempDir()
+		c.TLS.Cert = writeTempPEM(t, dir, "tls.crt", "CERTIFICATE")
+		c.TLS.CertKey = writeTempPEM(t, dir, "tls.key", "PRIVATE KEY")
+	}
+	cases := []struct {
+		name     string
+		set      func(*testing.T, *config.Config)
+		secrets  []string // Secret documents printed, applied and deleted, sorted
+		crAdmin  string   // the CR's adminCredentialsSecret; "" means the field is absent
+		neverRef string   // a Secret no emitted artifact may build or delete
+	}{
+		{"password and a configured name", func(_ *testing.T, c *config.Config) {
+			c.SEMP.AdminPass, c.K8s.AdminSecret = "pw", "solace-admin-secret"
+		}, []string{"solace-admin-secret"}, "solace-admin-secret", ""},
+		{"password and a derived name", func(_ *testing.T, c *config.Config) {
+			c.SEMP.AdminPass = "pw"
+		}, []string{"dev-broker-admin"}, "dev-broker-admin", ""},
+		{"name only, beside a TLS Secret this tool builds", func(t *testing.T, c *config.Config) {
+			c.K8s.AdminSecret = "byo-admin"
+			withTLS(t, c)
+		}, []string{"dev-broker-tls"}, "byo-admin", "byo-admin"},
+		{"name only, nothing else", func(_ *testing.T, c *config.Config) {
+			c.K8s.AdminSecret = "byo-admin"
+		}, nil, "byo-admin", "byo-admin"},
+		{"neither, beside a TLS Secret this tool builds", func(t *testing.T, c *config.Config) {
+			withTLS(t, c)
+		}, []string{"dev-broker-tls"}, "", "dev-broker-pubsubplus-admin-creds"},
+		{"neither, nothing else", func(*testing.T, *config.Config) {}, nil, "", "dev-broker-pubsubplus-admin-creds"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := haCfg()
+			tc.set(t, cfg)
+
+			// broker generate
+			stream, err := GenBroker(cfg)
+			if err != nil {
+				t.Fatalf("GenBroker: %v", err)
+			}
+			if got := secretNamesIn(string(stream)); !eqArgs(got, tc.secrets) {
+				t.Errorf("generate prints Secrets %v, want %v:\n%s", got, tc.secrets, stream)
+			}
+			adminLine := "  adminCredentialsSecret: " + tc.crAdmin + "\n"
+			switch {
+			case tc.crAdmin != "" && !strings.Contains(string(stream), adminLine):
+				t.Errorf("CR must reference the admin Secret %q:\n%s", tc.crAdmin, stream)
+			case tc.crAdmin == "" && strings.Contains(string(stream), "adminCredentialsSecret"):
+				t.Errorf("CR must name no admin Secret, so the operator generates one:\n%s", stream)
+			}
+
+			// broker deploy: exactly the printed documents, none blank
+			rr := &recRunner{}
+			c := NewCluster(rr, cfg, nil, nil)
+			ctx := context.Background()
+			for _, step := range []func(context.Context) error{c.CreateNamespace, c.CreateSecrets} {
+				if err := step(ctx); err != nil {
+					t.Fatalf("deploy step: %v", err)
+				}
+			}
+			if err := c.DeployBroker(ctx, false); err != nil {
+				t.Fatalf("DeployBroker: %v", err)
+			}
+			var applied []string
+			var appliedSecrets []string
+			for _, call := range rr.calls {
+				if call.method != "RunInput" {
+					continue
+				}
+				body := strings.Trim(call.stdin, "\n")
+				if strings.TrimSpace(body) == "" {
+					t.Errorf("a blank manifest reached `kubectl apply`: %+v", call)
+					continue
+				}
+				if !strings.Contains(string(stream), body) {
+					t.Errorf("deploy applies a manifest generate does not print:\n%s", call.stdin)
+				}
+				applied = append(applied, body)
+				appliedSecrets = append(appliedSecrets, secretNamesIn(call.stdin)...)
+			}
+			sort.Strings(appliedSecrets)
+			if !eqArgs(appliedSecrets, tc.secrets) {
+				t.Errorf("deploy applies Secrets %v, want %v", appliedSecrets, tc.secrets)
+			}
+			wantApplies := 2 // Namespace, CR
+			if len(tc.secrets) > 0 {
+				wantApplies++ // the Secrets, as one stream
+			}
+			if len(applied) != wantApplies {
+				t.Errorf("deploy made %d applies, want %d", len(applied), wantApplies)
+			}
+
+			// broker remove: exactly the Secrets this tool built
+			rr = &recRunner{}
+			if err := NewCluster(rr, cfg, nil, nil).DeleteSecrets(ctx); err != nil {
+				t.Fatalf("DeleteSecrets: %v", err)
+			}
+			var deleted []string
+			for _, call := range rr.calls {
+				if len(call.args) > 2 && call.args[0] == "delete" && call.args[1] == "secret" {
+					deleted = append(deleted, call.args[2])
+				}
+			}
+			sort.Strings(deleted)
+			if !eqArgs(deleted, tc.secrets) {
+				t.Errorf("remove deletes Secrets %v, want %v", deleted, tc.secrets)
+			}
+			if tc.neverRef != "" {
+				for _, name := range append(deleted, appliedSecrets...) {
+					if name == tc.neverRef {
+						t.Errorf("%s is not this tool's to build or delete", tc.neverRef)
+					}
+				}
+			}
+		})
+	}
+}
+
+// secretNamesIn lists, sorted, the metadata.name of every Secret document in a
+// multi-document stream.
+func secretNamesIn(stream string) []string {
+	var names []string
+	for _, doc := range strings.Split(stream, "\n---\n") {
+		if !strings.Contains("\n"+doc, "\nkind: Secret\n") {
+			continue
+		}
+		for _, line := range strings.Split(doc, "\n") {
+			if name, ok := strings.CutPrefix(line, "  name: "); ok {
+				names = append(names, name)
+				break
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// TestGenSecretsBuildsNothingWithoutMaterial: nil, not an empty manifest, when this env
+// file supplies nothing to build a Secret from.
+func TestGenSecretsBuildsNothingWithoutMaterial(t *testing.T) {
+	got, err := GenSecrets(haCfg())
+	if err != nil || got != nil {
+		t.Errorf("GenSecrets = (%q, %v), want (nil, nil)", got, err)
+	}
+}
+
+// TestJoinManifestsDropsBlankDocuments: a blank part is left out rather than joined, so a
+// stream never carries an empty document between two separators.
+func TestJoinManifestsDropsBlankDocuments(t *testing.T) {
+	got := string(joinManifests([][]byte{[]byte("a: 1\n"), nil, []byte("\n"), []byte("b: 2\n")}))
+	if got != "a: 1\n---\nb: 2\n" {
+		t.Errorf("joinManifests = %q, want the two real documents and one separator", got)
 	}
 }

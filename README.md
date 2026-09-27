@@ -150,8 +150,10 @@ finds `env/dev.yaml` here.
 
 ### Kubernetes
 
-At minimum set `image.repo`, `image.tag`, `semp.adminPass`, `kubernetes.name`,
-`kubernetes.namespace`, and `kubernetes.storage.msgNodeSize`.
+At minimum set `image.repo`, `image.tag`, `kubernetes.name`, `kubernetes.namespace`, and
+`kubernetes.storage.msgNodeSize`. Set `semp.adminPass` too, unless `kubernetes.adminSecret`
+names an admin Secret that already exists, or you want the operator to generate one -- see
+[The admin Secret](docs/configuration.md#the-admin-secret).
 
 1. Render the broker manifest to see exactly what would be applied. This needs no cluster
    at all -- `generate` never contacts one and runs nothing:

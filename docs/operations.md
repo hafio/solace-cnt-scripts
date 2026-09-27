@@ -81,7 +81,7 @@ of them at runtime**:
 | Component | Floor | What needs it | If older |
 | --- | --- | --- | --- |
 | Docker Compose | 2.23.1 | The `environment:` secret source in the generated compose file | `broker deploy` fails on the secret source. Loud. On a host with only the standalone v1 binary, set `docker.compose: docker-compose` |
-| podman | 4.5 | `secret rm --ignore`, `secret create` reading the value from stdin, and `Secret=...,type=mount` in the quadlet unit | The unknown flag or directive surfaces at deploy time. Loud. This tool deliberately avoids `secret create --replace`, which would work but needs **4.7**, so one flag would raise the floor of the whole tool; remove-then-create is idempotent the same way |
+| podman | 4.5 | `secret rm --ignore`, `secret create` reading the value from stdin, and `Secret=...,type=mount` in the quadlet unit. `NoNewPrivileges=` in the same unit needs only 4.4, so it does not raise the floor | The unknown flag or directive surfaces at deploy time. Loud. This tool deliberately avoids `secret create --replace`, which would work but needs **4.7**, so one flag would raise the floor of the whole tool; remove-then-create is idempotent the same way |
 | Solace broker image | 10.26 | The built-in readiness endpoint the opt-in health check uses with no `cmd` of its own | Refused at load: an older tag and an unidentifiable one are both rejected. This is the one floor that IS checked, because the tag is in the env file rather than on the host |
 | EventBroker operator | bundled 1.4.2 | The `PubSubPlusEventBroker` schema this tool renders | `operator deploy` installs the bundled version. An older operator already in the cluster prompts before a downgrade |
 | kubectl / oc | none | Namespace, Secret and the custom resource are all core API shapes plus the operator's own CRD | n/a |
@@ -190,8 +190,11 @@ Each step's own scope and failure mode is worth knowing. `server-certs` applies 
 node in the redundancy group on Kubernetes, or this host's container on docker/podman; if
 the env file names a Secret it supplies no certificate files for, that Secret is assumed
 managed elsewhere (kubectl, cert-manager) and the command refuses rather than guessing, and
-with `kubernetes.tlsServerSecret` set, `--remove` refuses too -- the operator would put the
-certificate straight back -- so clear the key instead. `domain-certs` with neither `dirs` nor
+with a TLS Secret in play -- named in `kubernetes.tlsServerSecret`, or derived as
+`<kubernetes.name>-tls` from `tls.cert`/`tls.certKey` -- `--remove` refuses too, since the
+operator would put the certificate straight back; clear those keys and redeploy instead.
+If this env file built that Secret, delete it by hand after the redeploy: once the files are
+gone the env file no longer owns it, so `broker remove` will not. `domain-certs` with neither `dirs` nor
 `files` configured is a logged no-op, not an error; a configured `dirs` entry that cannot be
 read (missing, or unreadable) IS an error, before anything is uploaded -- it is not skipped.
 Every directory is walked one level deep (no subdirectories) for its matching files
@@ -242,7 +245,11 @@ and fails loud on a backup or monitor host, and it reverts the mate over SEMP fi
 downgrades an unreachable mate to a warning, since its own job is local. `semp-login-check`
 passes credentials on stdin as a curl config file so the password never reaches an argv,
 process list or log, and a failed login is reported as a failure of the login itself -- the
-request was made and answered, and the answer was no. `gather-diagnostics` deletes the
+request was made and answered, and the answer was no. On Kubernetes without `semp.adminPass`
+it reads the password from the admin Secret the broker uses -- the referenced
+`kubernetes.adminSecret`, or the operator's generated `<kubernetes.name>-pubsubplus-admin-creds`
+-- which needs `get secrets` in the namespace; see
+[The admin Secret](configuration.md#the-admin-secret). `gather-diagnostics` deletes the
 helper scripts it uploads on every path out, and the in-broker archive once it is safely
 downloaded; a cleanup failure only warns rather than failing the collection, but a failed
 DOWNLOAD fails the command and leaves the bundle on the broker, naming the path to fetch it
@@ -252,7 +259,10 @@ collection to one node. `cli-script`'s in-broker name is the file's own base nam
 which host drove it. `shell-script` deletes the script it uploaded once the run finishes,
 even when it failed, and a script that echoes a secret prints it in the output; neither
 `shell-script` nor `broker shell` validates or reports on what runs beyond that -- they are
-the escape hatch for what this tool does not model.
+the escape hatch for what this tool does not model. On every platform both run under the
+container's `no-new-privileges` bit -- set by the artifact on docker and podman, by the
+operator on Kubernetes -- so `su` and `sudo` fail there; see
+[What the broker cannot gain](#what-the-broker-cannot-gain).
 
 ### Extra CLI users differ by platform
 
@@ -456,6 +466,28 @@ Changing `runUser` on an existing deployment changes who owns the data directory
 deploy` re-chowns it on every run, so a redeploy heals it -- but the broker must be restarted
 to pick the new identity up, and on rootless the host-side ownership moves into the subuid
 range.
+
+### What the broker cannot gain
+
+Both artifacts also deny the broker any privilege beyond that identity, following rules 1 and
+2 of [container-security.md](container-security.md). The compose file states
+`privileged: false` and lists `no-new-privileges=true` under `security_opt:`; the quadlet unit
+carries `NoNewPrivileges=true` in its `[Container]` section. Docker's `privileged` default is
+already false and is written out so the artifact shows it. `no_new_privs` is off by default on
+both engines, so that line is what actually sets it. There is no key to turn either off.
+
+What it changes: no process inside the container can gain privileges through a setuid binary
+or file capabilities, so `su`, `sudo` and helpers like them stop working in there. Nothing this
+tool runs inside the container relies on them -- SEMP calls, CLI scripts and diagnostics all
+run as the container's own user -- but your own content might: a custom `healthCheck.cmd`, a
+`shell-script` body, or what you type at `broker shell`. Root inside the container is still
+reachable from the host with `<runtime> exec -u 0 <name> ...`, which sets the uid directly
+rather than escalating. The setting removes nothing the container starts with, on a rootful
+engine or a rootless one, and does not change who the broker runs as.
+
+The first `broker deploy` after upgrading to a build that emits these lines finds a changed
+artifact, so a running broker needs a restart to pick them up. It is asked for, as with any
+changed artifact -- see [Re-deploying is safe and explicit](#re-deploying-is-safe-and-explicit).
 
 ### Rootless podman prerequisites
 
@@ -780,8 +812,9 @@ container matches the data keys of the equivalent Kubernetes Secret:
 
 The host-side name carries `container.name` (default `solace`) so two brokers on one host
 never share a podman store entry or a compose variable. On Kubernetes the operator mounts
-the credentials Secret itself, so the only data keys that matter are
-`username_admin_password` and `username_monitor_password`.
+the credentials Secret itself -- the one this tool builds, the one you reference, or the one
+it generates ([The admin Secret](configuration.md#the-admin-secret)) -- so the only data keys
+that matter are `username_admin_password` and `username_monitor_password`.
 
 ## Removing a broker: what stays, what goes
 
@@ -794,6 +827,15 @@ commands: it deletes the broker resource, then this deployment's secrets, then c
 namespace. `operator remove` never removes the operator's own namespace, and prints the
 `kubectl delete namespace` line to finish by hand, so the outcome is stated rather than
 inferred. The operator's image-pull secret is removed either way.
+
+Only the Secrets this tool built are deleted: an admin, TLS or image-pull Secret the env file
+only names stays where it is managed. With neither `semp.adminPass` nor
+`kubernetes.adminSecret`, the admin password lives only in the operator's generated
+`<kubernetes.name>-pubsubplus-admin-creds`, which is deleted with the broker while the data
+is kept. `broker remove` says so before it asks, with the command to copy the password: a
+later deploy onto that data needs it, because the broker reads its password only on a fresh
+data volume, and `broker deploy` refuses to let the operator generate a new one over the kept
+data ([The admin Secret](configuration.md#the-admin-secret)).
 
 Deleting the CRDs is the sharper of the two layers, because they are cluster-wide -- it
 cascade-deletes **every** PubSubPlusEventBroker in the cluster, including ones this env file
@@ -1165,9 +1207,13 @@ each is worth knowing before running `import-config` against a Kubernetes broker
 - **`Create Usernames` vs `adminCredentialsSecret`.** This section IS applied (an
   explicit override of the classification's own recommendation), and it overwrites
   the target's CLI admin password with the artifact's. The CLI channel itself does
-  not care -- it needs no broker credential -- but `adminCredentialsSecret` still
-  holds the old value, so every pod fails its readiness probe and the operator has no
-  way to repair that on its own. Update `semp.adminPass` to match and redeploy.
+  not care -- it needs no broker credential -- but the admin Secret the CR uses still
+  holds the old value. The HA standby and monitor pods then fail their readiness
+  probe (a standalone pod and the active node probe only the unauthenticated health
+  check and stay Ready), the operator's startup script can no longer reach SEMP, and
+  the operator cannot repair that on its own. Update the Secret to match: set
+  `semp.adminPass` and redeploy when this tool builds it, or update the referenced or
+  operator-generated Secret itself.
 - **`Create Redundancy PSK` vs `preSharedAuthKeySecret`.** This section is never
   applied, precisely because of this collision: the operator ignores
   `preSharedAuthKeySecret` updates once an HA group already exists, so a CLI-pushed
@@ -1407,7 +1453,12 @@ solace-util broker deploy -e dev.yaml
 ```
 
 `broker deploy` re-applies the custom resource; the operator sees the new tag and rolls the
-pods itself (monitor, then backup, then the active node).
+pods itself (monitor, then backup, then the active node). Any CR change does the same, and one
+can arrive with an upgrade of this tool rather than an edit: an env file with no
+`semp.monitorPass` now omits `spec.monitoringCredentialsSecret`, and one that sets
+`semp.adminPass` without `kubernetes.adminSecret` now derives `<kubernetes.name>-admin` instead
+of `solace-admin-secret`. Either way the first deploy after upgrading rolls the pods -- see
+[Secrets](configuration.md#secrets) and [The admin Secret](configuration.md#the-admin-secret).
 
 **Kubernetes, `updateStrategy: manualPodRestart`**
 

@@ -9,6 +9,7 @@ ContainerName=solace
 HostName=solace-monitor
 User=1000001
 Group=0
+NoNewPrivileges=true
 PodmanArgs=--cpuset-cpus=0
 Memory=2g
 ShmSize=2g

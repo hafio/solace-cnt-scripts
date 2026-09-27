@@ -57,9 +57,11 @@ image:
 # built-in users are `admin` and `monitor` on every platform, which is the broker's own
 # naming and what the Kubernetes operator requires.
 semp:
-  adminPass: CHANGE-ME-admin        # secret, mandatory on every platform
+  adminPass: CHANGE-ME-admin        # secret. Mandatory on docker/podman; on
+                                    # Kubernetes, unset means kubernetes.adminSecret
+                                    # is referenced, or the operator generates one
   # adminPassEnv: SOLACE_ADMIN_PASS # ...or name the variable holding it instead
-  monitorPass: CHANGE-ME-monitor    # Kubernetes monitor user. secret
+  monitorPass: CHANGE-ME-monitor    # Kubernetes monitor user. secret; needs adminPass
   # monitorPassEnv: SOLACE_MON_PASS # ...or name the variable holding it instead
   # additionalUsers:                # extra CLI users beyond admin/monitor. Every field
   #   - username: appuser           # is required; password takes the same
@@ -78,7 +80,9 @@ tls:                                # uncomment cert+certKey together once you h
                                     #
                                     # Leave them out to use a Secret that already
                                     # exists -- name it in kubernetes.tlsServerSecret
-                                    # and nothing here reads a certificate at all
+                                    # and nothing here reads a certificate at all.
+                                    # Kubernetes names the built Secret after
+                                    # kubernetes.tlsServerSecret, or <name>-tls
                                     #
                                     # HOST paths. A relative one resolves against THIS
                                     # FILE's directory; an absolute one is used as-is
@@ -124,8 +128,8 @@ redundancy:
                                     # the SAME value, and an empty one is refused at load.
                                     # OPTIONAL on Kubernetes: left empty, the operator
                                     # generates and distributes its own; set, it becomes
-                                    # the preshared_auth_key entry of
-                                    # kubernetes.adminSecret and the CR points at it.
+                                    # the preshared_auth_key entry of the admin Secret
+                                    # built from semp.adminPass, which it then needs.
   # pskEnv: SOLACE_REDUNDANCY_PSK   # ...or name the variable holding it instead
 
 # broker: platform-neutral post-deployment settings, applied over the broker CLI.
@@ -224,8 +228,8 @@ redundancy:
 #           # pass: ""              # secret; discouraged, this file travels
 #           # passSecret:           # a Secret read with this site's via.kubernetes
 #           #   namespace: solace-dr    # command, or this file's kubernetes.command
-#           #   name: solace-admin-secret
-#           #   key: admin-password
+#           #   name: dr-broker-admin   # the mate's admin Secret
+#           #   key: username_admin_password
 #   vpns:                           # listed = replication ENABLED at both sites. A VPN
 #                                   # replicating on the broker but absent here is SHUT
 #                                   # DOWN by `configure data-replication`
@@ -252,13 +256,21 @@ kubernetes:
                                     # name). Same non-portability as a path key
   name: dev-broker                  # mandatory
   namespace: solace                 # mandatory
-  adminSecret: solace-admin-secret  # Secret holding the admin/monitor credentials
-  # tlsServerSecret: solace-tls-secret  # names the TLS Secret and enables the CR's tls
-                                    # block. WITH tls.cert/certKey above, this tool
-                                    # builds that Secret and removes it on teardown;
-                                    # WITHOUT them the Secret must already exist (made
+  adminSecret: solace-admin-secret  # optional; unset derives <name>-admin when
+                                    # semp.adminPass is set. WITH adminPass, this tool
+                                    # builds the Secret (this name or the derived
+                                    # default) and removes it on teardown; WITHOUT it, a
+                                    # configured name must already exist and is only
+                                    # referenced. Neither: the operator generates
+                                    # <name>-pubsubplus-admin-creds itself
+  # tlsServerSecret: solace-tls-secret  # optional; unset derives <name>-tls when
+                                    # tls.cert/certKey are set. WITH them, this tool
+                                    # builds the Secret (this name or the derived
+                                    # default) and removes it on teardown; WITHOUT
+                                    # them a configured name must already exist (made
                                     # by hand, or by cert-manager) and is only
-                                    # referenced -- never read, written or deleted
+                                    # referenced -- never read, written or deleted.
+                                    # Neither: no tls block in the CR
   imagePullSecret: solace-image-pull   # optional; unset derives <name>-image-pull
                                     # when image.user/pass are set. WITH those
                                     # credentials, this tool builds the Secret (this

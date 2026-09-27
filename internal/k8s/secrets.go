@@ -51,9 +51,15 @@ func (s secretManifest) render() []byte {
 // than derived from anything of ours.
 const pskSecretKey = "preshared_auth_key"
 
+// adminPassKey is the credentials Secret's admin-password entry, the operator's spelling
+// again (spec.adminCredentialsSecret's description names it). It is written here and read
+// back by ReadAdminPassword, so it is spelled once for both.
+const adminPassKey = "username_admin_password"
+
 // AdminSecret builds the Opaque secret holding broker credentials, porting the
-// user-secret of 012:26-32: username_admin_password (mandatory) and an optional
-// username_monitor_password. Fails loud on an empty admin password.
+// user-secret of 012:26-32: username_admin_password and an optional
+// username_monitor_password. It is built only under config.Config.ManagesAdminSecret --
+// GenSecrets asks -- and fails loud on an empty admin password or no name to build under.
 //
 // admin.additionalUsers are deliberately NOT here, and the reason is the operator's:
 // it reads only the two keys above out of this Secret, so extra username_<user>_password
@@ -67,13 +73,17 @@ const pskSecretKey = "preshared_auth_key"
 // in. A separate Secret puts exactly the additional users' material there and nothing else.
 func AdminSecret(cfg *config.Config) ([]byte, error) {
 	if cfg.SEMP.AdminPass == "" {
-		return nil, fmt.Errorf("admin.pass must be set to build the admin secret")
+		return nil, fmt.Errorf("semp.adminPass must be set to build the admin secret")
 	}
-	if cfg.K8s.AdminSecret == "" {
-		return nil, fmt.Errorf("kubernetes.adminSecret (the secret name) must be set")
+	name := cfg.AdminSecretName()
+	if name == "" {
+		// Unreachable from a loaded config: Load requires kubernetes.name, and the
+		// password above then derives <kubernetes.name>-admin.
+		return nil, fmt.Errorf("the admin secret has no name: set kubernetes.adminSecret, or " +
+			"kubernetes.name so the default <kubernetes.name>-admin can be derived")
 	}
 	data := map[string][]byte{
-		"username_admin_password": []byte(cfg.SEMP.AdminPass),
+		adminPassKey: []byte(cfg.SEMP.AdminPass),
 	}
 	if cfg.SEMP.MonitorPass != "" {
 		data["username_monitor_password"] = []byte(cfg.SEMP.MonitorPass)
@@ -89,7 +99,7 @@ func AdminSecret(cfg *config.Config) ([]byte, error) {
 		data[pskSecretKey] = []byte(psk)
 	}
 	return secretManifest{
-		name:      cfg.K8s.AdminSecret,
+		name:      name,
 		namespace: cfg.K8s.Namespace,
 		typ:       "Opaque",
 		data:      data,
@@ -140,8 +150,13 @@ func TLSSecret(cfg *config.Config) ([]byte, error) {
 	if cfg.TLS.Cert == "" || cfg.TLS.CertKey == "" {
 		return nil, fmt.Errorf("tls.cert and tls.certKey must both be set to build the TLS secret")
 	}
-	if cfg.K8s.TLSServerSecret == "" {
-		return nil, fmt.Errorf("kubernetes.tlsServerSecret (the secret name) must be set")
+	name := cfg.TLSServerSecretName()
+	if name == "" {
+		// Unreachable from a loaded config: Load requires kubernetes.name, and the pair above
+		// then derives <kubernetes.name>-tls. Reaching it means a Config built in code with
+		// neither a Secret name nor a kubernetes.name.
+		return nil, fmt.Errorf("the TLS secret has no name: set kubernetes.tlsServerSecret, or " +
+			"kubernetes.name so the default <kubernetes.name>-tls can be derived")
 	}
 	crt, err := os.ReadFile(cfg.TLS.Cert)
 	if err != nil {
@@ -159,7 +174,7 @@ func TLSSecret(cfg *config.Config) ([]byte, error) {
 		return nil, fmt.Errorf("read tls.certKey %q: %w", cfg.TLS.CertKey, err)
 	}
 	return secretManifest{
-		name:      cfg.K8s.TLSServerSecret,
+		name:      name,
 		namespace: cfg.K8s.Namespace,
 		typ:       "kubernetes.io/tls",
 		data: map[string][]byte{

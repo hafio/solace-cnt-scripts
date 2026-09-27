@@ -48,3 +48,9 @@ graphify-out/cache
 /*.cli
 /*.backup
 tmp
+
+# Claude Code per-user local settings. The project conventions live in the tracked
+# .claude/settings.json; this file is whatever permission grants a session records
+# as it runs, and it is per-person, not per-project. Two accounts share this working
+# directory, so without this rule it is untracked noise in one of them.
+.claude/settings.local.json

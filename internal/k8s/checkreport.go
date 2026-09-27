@@ -314,9 +314,8 @@ func (c *Cluster) configRows(rep *checkReport) {
 	// broker's admin user whatever an env file says.
 	rep.credentials = append(rep.credentials,
 		info("admin user", "admin"),
-		info("admin secret", "%s", orNone(cfg.K8s.AdminSecret)),
-		info("passwords", "admin=%s monitor=%s",
-			setOrMissing(cfg.SEMP.AdminPass), setOrNone(cfg.SEMP.MonitorPass != "")),
+		adminSecretRow(cfg),
+		info("passwords", "admin=%s monitor=%s", adminPassState(cfg), monitorPassState(cfg)),
 		additionalUsersRow(cfg),
 	)
 	// The pre-shared key is optional here and mandatory on containers, so an empty one
@@ -326,18 +325,22 @@ func (c *Cluster) configRows(rep *checkReport) {
 	if cfg.RedundancyEnabled() {
 		rep.credentials = append(rep.credentials, pskRow(cfg))
 	}
-	if cfg.K8s.TLSServerSecret != "" {
+	if name := cfg.TLSServerSecretName(); name != "" {
 		// Naming the Secret and supplying the files it is built from are separate
 		// decisions, and the row has to say which one this env file made: otherwise
 		// "tls secret: solace-tls-secret" reads as "this tool will create it" in the
 		// case where it will not, and a missing Secret is only discovered by the
 		// operator failing to mount it.
 		origin := "built from tls.cert/tls.certKey"
+		if cfg.K8s.TLSServerSecret == "" {
+			// The derived default is otherwise invisible until something mounts it.
+			origin += "; name derived from kubernetes.name"
+		}
 		if !cfg.ManagesTLSSecret() {
 			origin = "must already exist -- this env file supplies no cert/key"
 		}
 		rep.credentials = append(rep.credentials,
-			info("tls secret", "%s (%s)", cfg.K8s.TLSServerSecret, origin),
+			info("tls secret", "%s (%s)", name, origin),
 			info("tls files", "cert=%s key=%s cas=%d",
 				orNone(cfg.TLS.Cert), setOrMissing(cfg.TLS.CertKey), len(cfg.TLS.CAs)))
 		if cfg.TLS.CertPassphrase != "" || cfg.TLS.CertPassphraseEnv != "" {
@@ -577,6 +580,65 @@ func (c *Cluster) storageRows(ctx context.Context, rep *checkReport) {
 	rep.broker = append(rep.broker, okRow("storage class", "%s", value))
 }
 
+// adminSecretRow says which of config.Config.AdminSecretName's three states this env file
+// is in, because the report is the only place that shows before a deploy: a Secret this
+// tool builds and removes, one it only references, or none -- the operator generating
+// one. The last is a [WARN], not because it is wrong but because it is the one state in
+// which `broker remove` (which keeps the data) takes the only copy of the password with
+// it: the broker reads its password once, on a fresh data volume, so a later deploy onto
+// that data needs the old password and the operator would generate a new one.
+func adminSecretRow(cfg *config.Config) checkRow {
+	name := cfg.AdminSecretName()
+	switch {
+	case name != "" && cfg.ManagesAdminSecret():
+		origin := "built from semp.adminPass, deleted by broker remove"
+		if cfg.K8s.AdminSecret == "" {
+			origin += "; name derived from kubernetes.name"
+		}
+		return info("admin secret", "%s (%s)", name, origin)
+	case name != "":
+		return info("admin secret", "%s (must already exist -- referenced only, never created or deleted)", name)
+	}
+	gen := cfg.OperatorAdminSecretName()
+	return warnRow("admin secret", "(none) -- the operator generates %s with a random password and deletes it with "+
+		"the broker. Before a `broker remove` that keeps the data, copy that password and set semp.adminPass to it: "+
+		"the broker reads its password only on a fresh data volume, so a deploy onto the kept data needs the old one",
+		gen)
+}
+
+// adminPassState is the admin password's half of the passwords row, in the same terms.
+func adminPassState(cfg *config.Config) string {
+	switch {
+	case cfg.ManagesAdminSecret():
+		return "set"
+	case cfg.AdminSecretName() != "":
+		return "(none -- in the referenced Secret)"
+	}
+	return "(none -- the operator generates its own)"
+}
+
+// monitorPassState says what happens to the broker's monitor user, not only whether a
+// value is set: with none, the CR omits monitoringCredentialsSecret and the operator
+// generates the password itself, which nothing else in the report would reveal.
+func monitorPassState(cfg *config.Config) string {
+	if cfg.SEMP.MonitorPass != "" {
+		return "set"
+	}
+	return "(none -- the operator generates its own)"
+}
+
+// pskRow says which pre-shared key an HA group will authenticate with. Set, the value
+// becomes the preshared_auth_key entry of the credentials Secret and the CR points at it;
+// empty, the CR omits preSharedAuthKeySecret entirely and the operator generates and
+// distributes a key of its own. Both are supported, so this is [INFO] rather than a
+// verdict -- but it is the only place the choice is stated before a deploy makes it.
+func pskRow(cfg *config.Config) checkRow {
+	if !cfg.PSKConfigured() {
+		return info("preshared key", "(not set) -- the operator generates and distributes its own")
+	}
+	return info("preshared key", "set -- %s in %s", pskSecretKey, orNone(cfg.AdminSecretName()))
+}
+
 // additionalUsersRow reports admin.additionalUsers and where their credentials land.
 //
 // They are applied on Kubernetes through a Secret of their own that the CR names in
@@ -589,18 +651,6 @@ func (c *Cluster) storageRows(ctx context.Context, rep *checkReport) {
 //
 // The replacement is planned as a second mounted Secret surfaced as environment variables
 // (see broker.AdditionalUsers). Drop this warning back to an info row when that lands.
-// pskRow says which pre-shared key an HA group will authenticate with. Set, the value
-// becomes the preshared_auth_key entry of the credentials Secret and the CR points at it;
-// empty, the CR omits preSharedAuthKeySecret entirely and the operator generates and
-// distributes a key of its own. Both are supported, so this is [INFO] rather than a
-// verdict -- but it is the only place the choice is stated before a deploy makes it.
-func pskRow(cfg *config.Config) checkRow {
-	if cfg.Redundancy.PSK == "" && cfg.Redundancy.PSKEnv == "" {
-		return info("preshared key", "(not set) -- the operator generates and distributes its own")
-	}
-	return info("preshared key", "set -- %s in %s", pskSecretKey, orNone(cfg.K8s.AdminSecret))
-}
-
 func additionalUsersRow(cfg *config.Config) checkRow {
 	n := len(cfg.SEMP.AdditionalUsers)
 	if n == 0 {

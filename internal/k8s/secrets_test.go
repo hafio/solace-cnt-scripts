@@ -177,7 +177,9 @@ func TestAdminSecretErrors(t *testing.T) {
 		mutate func(c *config.Config)
 	}{
 		{"empty admin pass", func(c *config.Config) { c.SEMP.AdminPass = "" }},
-		{"empty secret name", func(c *config.Config) { c.K8s.AdminSecret = "" }},
+		// An unset kubernetes.adminSecret alone derives <kubernetes.name>-admin, so the
+		// name is missing only with no kubernetes.name to derive it from either.
+		{"no name and nothing to derive one from", func(c *config.Config) { c.K8s.AdminSecret, c.K8s.Name = "", "" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -190,6 +192,21 @@ func TestAdminSecretErrors(t *testing.T) {
 	}
 }
 
+// TestAdminSecretUnderTheDerivedName: with a password and no name configured the Secret
+// is built as <kubernetes.name>-admin, the name the CR's adminCredentialsSecret references
+// (render.TestAdminCredentialsSecretFollowsTheStates).
+func TestAdminSecretUnderTheDerivedName(t *testing.T) {
+	cfg := loadK8s(t)
+	cfg.K8s.AdminSecret = ""
+	got, err := AdminSecret(cfg)
+	if err != nil {
+		t.Fatalf("AdminSecret: %v", err)
+	}
+	if !bytes.Contains(got, []byte("name: dev-broker-admin\n")) {
+		t.Errorf("the admin Secret must be built under the derived name:\n%s", got)
+	}
+}
+
 func TestTLSSecretErrors(t *testing.T) {
 	t.Run("missing cert fields", func(t *testing.T) {
 		cfg := loadK8s(t)
@@ -198,11 +215,17 @@ func TestTLSSecretErrors(t *testing.T) {
 			t.Error("TLSSecret should fail when tls.cert is unset")
 		}
 	})
-	t.Run("empty secret name", func(t *testing.T) {
+	// An unset kubernetes.tlsServerSecret derives <kubernetes.name>-tls, so a missing
+	// name is an error only when there is no kubernetes.name to derive it from either --
+	// a Config built in code, since Load requires the name.
+	t.Run("no name and nothing to derive one from", func(t *testing.T) {
 		cfg := loadK8s(t)
-		cfg.K8s.TLSServerSecret = ""
+		dir := t.TempDir()
+		cfg.TLS.Cert = writeTempPEM(t, dir, "tls.crt", "CERTIFICATE")
+		cfg.TLS.CertKey = writeTempPEM(t, dir, "tls.key", "PRIVATE KEY")
+		cfg.K8s.TLSServerSecret, cfg.K8s.Name = "", ""
 		if _, err := TLSSecret(cfg); err == nil {
-			t.Error("TLSSecret should fail when kubernetes.tlsServerSecret is unset")
+			t.Error("TLSSecret should fail when neither a Secret name nor kubernetes.name is set")
 		}
 	})
 	t.Run("cert file missing", func(t *testing.T) {
@@ -374,6 +397,28 @@ func TestGenSecretsBuildsATLSSecretItOwns(t *testing.T) {
 	for _, want := range []string{"kubernetes.io/tls", "solace-tls-secret"} {
 		if !bytes.Contains(got, []byte(want)) {
 			t.Errorf("the built TLS Secret is missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestGenSecretsBuildsATLSSecretUnderTheDerivedName: with the pair supplied and no name
+// configured, the Secret is built under <kubernetes.name>-tls -- the same name the CR's
+// tls block references (render.TestTLSBlockFollowsTheStates), which is the whole point
+// of both reading config.Config.TLSServerSecretName.
+func TestGenSecretsBuildsATLSSecretUnderTheDerivedName(t *testing.T) {
+	cfg := loadK8s(t)
+	dir := t.TempDir()
+	cfg.K8s.TLSServerSecret = ""
+	cfg.TLS.Cert = writeTempPEM(t, dir, "tls.crt", "CERTIFICATE")
+	cfg.TLS.CertKey = writeTempPEM(t, dir, "tls.key", "PRIVATE KEY")
+
+	got, err := GenSecrets(cfg)
+	if err != nil {
+		t.Fatalf("GenSecrets: %v", err)
+	}
+	for _, want := range []string{"kubernetes.io/tls", "name: dev-broker-tls\n"} {
+		if !bytes.Contains(got, []byte(want)) {
+			t.Errorf("the TLS Secret built under the derived name is missing %q:\n%s", want, got)
 		}
 	}
 }

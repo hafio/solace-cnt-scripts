@@ -527,7 +527,11 @@ func (m *Manager) Deploy(ctx context.Context, role config.Role) error {
 // can reference them instead of carrying them: podman loads each into its own
 // secret store, while docker needs nothing prepared -- its compose secrets read
 // this deployment's values from the environment `compose` is given (see compose),
-// so no secret is ever written to this host's disk. An empty value fails loud here
+// so no secret is written beside the compose file. That is not the same as never
+// reaching this host's disk: compose tars an environment-sourced secret into the
+// container's own filesystem (CopyToContainer, mode 0444), where it rests in the
+// writable layer for the container's lifetime -- docs/operations.md says so under
+// Re-deploying. An empty value fails loud here
 // rather than deploying a broker with no password -- except under the Echo runner, which
 // must stay previewable before `broker deploy` has generated the HA pre-shared key.
 func (m *Manager) prepareSecrets(ctx context.Context) error {

@@ -41,9 +41,9 @@ build/test/scan command. The workflows call task names only, so local runs match
 | `tidy` | `go mod tidy` |
 | `vet` | `go vet ./...` |
 | `build` | Compile -> `dist/solace-util-<os>-<arch>[.exe]`. See [Build](#build) above |
-| `test` | `go test -count=1 ./...` (race on by default on `dev.sh`; opt-in on `dev.ps1`) |
+| `test` | `go test -count=1 ./...` (race on by default on `dev.sh`; opt-in on `dev.ps1` with `SOLACE_RACE=1`). A race run defaults `GORACE` to `atexit_sleep_ms=0` when it is unset, since the race detector's 1s pause before every clean exit -- every test binary, and every helper child `internal/engine` re-runs -- was most of the wall time |
 | `regen` | Rewrite the committed goldens -- see [Goldens](#goldens). Deliberately **outside** `all`/`full`, since a gate must not rewrite what it compares against |
-| `cov` | Coverage profile -> `coverage/coverage.html` + `.out`, prints the total |
+| `cov` | Coverage profile -> `coverage/coverage.html` + `.out`, prints the total. Never races, on either script: `test` is the race run, so `cov` does not repeat it just to collect coverage, and the total does not depend on the cover mode |
 | `scan` | `go tool govulncheck -format json` (version pinned in `go.mod`/`go.sum`), judged by [internal/tools/vulnjudge](../internal/tools/vulnjudge) -- **fatal** on a fixable vulnerability this module calls, **warns and passes** on one with no released fix. Raw stream kept at `scripts/logs/scan.json` |
 | `dist` | Local convenience: cross-compile all four release targets into `dist/`. Also accepted as `binaries` |
 | `graphify` | Refresh `graphify-out/`. Local only; skipped when `CI` is set |

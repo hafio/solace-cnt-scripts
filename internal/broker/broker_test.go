@@ -921,6 +921,20 @@ func TestLogin(t *testing.T) {
 	}
 }
 
+// TestLoginRefusesALineBreak: on Kubernetes the password may come from a cluster Secret
+// rather than the env file, so config's credential checks never saw it, and a line break
+// in a curl -K value starts another directive. Refused before anything is sent.
+func TestLoginRefusesALineBreak(t *testing.T) {
+	ft := &fakeTransport{}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	if _, err := o.Login(context.Background(), config.Primary, "admin", "s3cret\nurl = \"http://x\""); err == nil {
+		t.Fatal("a credential carrying a line break must be refused")
+	}
+	if len(ft.outputs) != 0 {
+		t.Errorf("nothing may be sent once the credential is refused: %+v", ft.outputs)
+	}
+}
+
 func TestLoginFailure(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, _ []string, _ []byte) ([]byte, error) {
 		return []byte("HTTP/1.1 401 Unauthorized\r\n"), nil

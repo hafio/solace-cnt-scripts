@@ -7,9 +7,11 @@ import (
 
 // A TLS Secret can come from either side: this tool builds it from files the env file
 // names, or the operator created it themselves and the env file only says which one the
-// broker should use. `kubernetes.tlsServerSecret` names it in both cases -- what tells the
-// two apart is whether tls.cert/tls.certKey are supplied. These pin that split, and the
-// two half-states it makes possible.
+// broker should use. What tells the two apart is whether tls.cert/tls.certKey are
+// supplied; `kubernetes.tlsServerSecret` names the Secret in both cases, and may be left
+// unset when the files are supplied, since Config.TLSServerSecretName then derives
+// <kubernetes.name>-tls -- the three states imagepullsecret_test.go pins for the
+// image-pull Secret. These pin that split and the half-states it makes possible.
 
 // tlsCfg is a valid Kubernetes config with the TLS fields under the caller's control.
 func tlsCfg(secret, cert, key string) *Config {
@@ -76,21 +78,53 @@ func TestTLSCertAndKeyMustBeSetTogetherOnKubernetes(t *testing.T) {
 	}
 }
 
-// TestSuppliedCertsNeedASecretName: files with no name give the Secret nowhere to be
-// created and the CR no tls block, so the certificate would be silently unused -- the
-// quietest of the failure modes here, and the one worth a loud error.
-func TestSuppliedCertsNeedASecretName(t *testing.T) {
-	err := tlsCfg("", "certs/tls.crt", "certs/tls.key").Validate(K8s)
-	if err == nil {
-		t.Fatal("a cert/key pair with no Secret name must be refused")
+// TestSuppliedCertsDeriveASecretName: files with no name used to be refused, because the
+// Secret had nowhere to be created and the CR no tls block. They now get the derived
+// default instead, so the certificate is used rather than silently dropped -- and the
+// configuration that used to be an error must validate.
+func TestSuppliedCertsDeriveASecretName(t *testing.T) {
+	c := tlsCfg("", "certs/tls.crt", "certs/tls.key")
+	if err := c.Validate(K8s); err != nil {
+		t.Fatalf("a cert/key pair with no Secret name must validate now that the name is derived: %v", err)
 	}
-	if !strings.Contains(err.Error(), "kubernetes.tlsServerSecret") {
-		t.Errorf("error %q should name the missing key", err)
+	if got := c.TLSServerSecretName(); got != "mybroker-tls" {
+		t.Errorf("TLSServerSecretName() = %q, want the derived default %q", got, "mybroker-tls")
 	}
 }
 
-// TestNoTLSAtAllStaysValid: TLS is opt-in on every platform, and the checks above must not
-// have made the plainest deployment fail.
+// TestTLSServerSecretNameFollowsTheStates pins every state of the resolver the CR, the
+// Secret builder, the delete set and the server-certs routing all read. The configured
+// name wins whether or not this tool builds the Secret behind it; a default is derived
+// only when there are files to build it from, never invented for an unnamed Secret with
+// nothing behind it.
+func TestTLSServerSecretNameFollowsTheStates(t *testing.T) {
+	cases := []struct {
+		name, secret, cert, key, want string
+		noK8sName                     bool
+	}{
+		{name: "named and built from files", secret: "custom-tls", cert: "certs/tls.crt", key: "certs/tls.key", want: "custom-tls"},
+		{name: "named, brought by the operator", secret: "byo-tls", want: "byo-tls"},
+		{name: "files but no name derives", cert: "certs/tls.crt", key: "certs/tls.key", want: "mybroker-tls"},
+		{name: "neither names nothing"},
+		// Only a Config built in code gets here -- Load requires kubernetes.name -- but
+		// "-tls" alone is no Secret name, so there is nothing to derive.
+		{name: "files but no kubernetes.name to derive from", cert: "certs/tls.crt", key: "certs/tls.key", noK8sName: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := tlsCfg(tc.secret, tc.cert, tc.key)
+			if tc.noK8sName {
+				c.K8s.Name = ""
+			}
+			if got := c.TLSServerSecretName(); got != tc.want {
+				t.Errorf("TLSServerSecretName() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNoTLSAtAllStaysValid: TLS is opt-in on every platform, and the pairing check above
+// must not have made the plainest deployment fail.
 func TestNoTLSAtAllStaysValid(t *testing.T) {
 	c := tlsCfg("", "", "")
 	c.ApplyDefaults(K8s)

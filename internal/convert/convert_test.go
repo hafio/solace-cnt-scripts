@@ -979,6 +979,17 @@ func TestConvertAdminSecretAlias(t *testing.T) {
 	})
 }
 
+// TestConvertWritesTheLegacyAdminSecretDefault: the bash tool defaulted the admin Secret
+// to solace-admin-secret, and this schema derives <kubernetes.name>-admin instead. A legacy
+// broker was built under the bash default, so a file that relied on it gets the name
+// written out -- converting must not repoint a running broker at a Secret it never had.
+func TestConvertWritesTheLegacyAdminSecretDefault(t *testing.T) {
+	res := convertOK(t, k8sEnv, config.K8s) // no SOLBK_USR_SECRET, no SOLBK_ADM_SECRET
+	if got := strictDecode(t, res.YAML).K8s.AdminSecret; got != "solace-admin-secret" {
+		t.Errorf("kubernetes.adminSecret = %q, want the bash default the legacy broker was built under", got)
+	}
+}
+
 // TestConvertK8sSecretNamesAreK8sOnly covers the container-platform treatment of
 // the two variables that name Kubernetes Secret objects: they cannot land
 // anywhere in a docker/podman file, so each is dropped with the reason and its

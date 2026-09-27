@@ -201,7 +201,10 @@ func (c *Config) ApplyDefaults(p Platform) {
 
 func (c *Config) applyK8sDefaults() {
 	setDefault(&c.K8s.UpdateStrategy, "automatedRolling")
-	setDefault(&c.K8s.AdminSecret, "solace-admin-secret")
+	// kubernetes.adminSecret is deliberately NOT defaulted here. Its default depends on
+	// whether this env file supplies the password to build the Secret from, which is a
+	// read-time question -- Config.AdminSecretName -- and filling the field would erase
+	// the difference between "reference this Secret" and "let the operator generate one".
 	setDefault(&c.K8s.Storage.MonNodeSize, "5Gi")
 	// kubernetes.msgNode.cpu and .mem are not defaulted here: CPU is fixed by the
 	// scaling tier and memory defaults from it, both in applyScalingTierDefaults

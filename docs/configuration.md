@@ -172,11 +172,15 @@ Minimum required (Kubernetes):
 | --- | --- |
 | `image.repo` | Broker image repository |
 | `image.tag` | Image tag |
-| `semp.adminPass` | Broker admin password (never defaulted). The username is always `admin` -- the broker's own name for the built-in account, and there is no key to change it |
 | `kubernetes.name` | Broker / custom-resource name |
 | `kubernetes.namespace` | Target namespace |
 | `kubernetes.storage.msgNodeSize` | Message-node PVC size (e.g. `30Gi`). Mandatory unless `customVolumeMount` covers every node, which leaves nothing to provision |
 | `kubernetes.storage.customVolumeMount.<primary\|backup\|monitor>` | Mount an EXISTING PersistentVolumeClaim for that node instead of provisioning one. Mutually exclusive with `kubernetes.storage.class` -- naming both is refused, since the CRD does not say which wins. All nodes in the redundancy group or none. **`broker remove --delete-data` never deletes these**: the volume may hold data that predates this broker, so it is reported and left for you |
+
+`semp.adminPass` is not required on Kubernetes, unlike docker and podman: without it the CR
+references `kubernetes.adminSecret`, or names no admin Secret and lets the operator generate
+one -- see [The admin Secret](#the-admin-secret). The admin username is always `admin`, the
+broker's own name for the built-in account, and there is no key to change it.
 
 Common optional knobs:
 
@@ -193,8 +197,8 @@ Common optional knobs:
 | `kubernetes.command` | `kubectl` | Cluster CLI (legacy `KUBE`). A scalar is split on whitespace, so it can be a drop-in (`oc`) or a profile (`kubectl --kubeconfig <file>`). **Restricted** -- see [The command fields are executable content](#the-command-fields-are-executable-content) |
 | `docker.command` / `podman.command` | `docker` / `podman` | Container CLI (legacy `CONTAINER_RUNTIME`), same forms and the same restrictions as `kubernetes.command` |
 | `docker.compose` | `<command> compose` | The compose invocation. Set it to `docker-compose` on a host carrying only the standalone v1 binary; same forms and restrictions as `docker.command`, plus the one permitted `compose` subcommand |
-| `<docker\|podman>.container.healthCheck.enabled` | `false` | Adds an engine health check polling the broker's own `/health-check/readiness` on port 5550 every 5s, so `docker ps` and podman's auto-restart see readiness rather than liveness. Needs broker **10.26 or later** and a version-numbered `image.tag`; set `healthCheck.cmd` to supply your own probe instead (which skips the version check). Container-only by design -- on Kubernetes the operator already probes the pods |
-| `kubernetes.tlsServerSecret` | -- | Name of the TLS Secret the broker uses; its presence enables the CR's TLS block. Lives under `kubernetes.*` because it names a Kubernetes Secret object -- the cert/key files themselves stay platform-neutral under `tls.*`. **Naming it does not mean building it**: with `tls.cert`/`tls.certKey` set, this tool builds the Secret and removes it on teardown; without them the Secret must already exist and is only referenced -- see [Bring your own TLS Secret](#bring-your-own-tls-secret) |
+| `<docker\|podman>.container.healthCheck.enabled` | `false` | Adds an engine health check polling the broker's own `/health-check/readiness` on port 5550 every 5s, so `docker ps` and podman's auto-restart see readiness rather than liveness. Needs broker **10.26 or later** and a version-numbered `image.tag`; set `healthCheck.cmd` to supply your own probe instead (which skips the version check). A custom probe runs inside the container under `no-new-privileges`, so it cannot use `su`, `sudo` or a setuid helper -- see [What the broker cannot gain](operations.md#what-the-broker-cannot-gain). Container-only by design -- on Kubernetes the operator already probes the pods |
+| `kubernetes.tlsServerSecret` | -- | Name of the TLS Secret the broker uses; a Secret to reference -- named here, or derived -- is what enables the CR's TLS block. **Optional**: unset derives `<kubernetes.name>-tls` when `tls.cert`/`tls.certKey` are set, and names nothing (no `tls` block) when they are not -- the same three states as `kubernetes.imagePullSecret`. Lives under `kubernetes.*` because it names a Kubernetes Secret object -- the cert/key files themselves stay platform-neutral under `tls.*`. **Naming it does not mean building it**: with `tls.cert`/`tls.certKey` set, this tool builds the Secret and removes it on teardown; without them the Secret must already exist and is only referenced -- see [Bring your own TLS Secret](#bring-your-own-tls-secret) |
 | `tls.cert` / `tls.certKey` | -- | The server certificate and its private key, as two separate host files. **Inseparable on every platform**: setting one without the other is refused at load, in both directions. On docker and podman the broker reads the certificate as ONE file containing the key followed by the certificate, and this tool builds that file from the two halves. Kubernetes takes them as two keys in a Secret and lets the operator assemble them -- a Secret carrying only `tls.crt` is one the broker cannot start a listener over |
 | `tls.cas` | -- | Trusted CA files, applied by `broker configure domain-certs` into the broker's own trust store. They are **not** part of the server certificate and are not mounted into the container or the pod |
 | `<docker\|podman>.container.name` | `solace` | The container's name, and the stem of every derived name (the podman unit and service, the host-side secret names). Held to the engines' own grammar: it must start with a letter or digit, then letters, digits, `.`, `_` or `-`. A name that YAML would read as a boolean or number (`yes`, `off`, `0123`) is legal here and quoted in the generated compose file, so it stays the string you wrote. On docker it is also the compose **project** name, lowercased with anything outside `[a-z0-9_-]` folded to `-`, since compose's grammar is narrower than the engines' -- override with `COMPOSE_PROJECT_NAME` ([operations.md](operations.md#docker-and-podman-mechanics)) |
@@ -202,7 +206,7 @@ Common optional knobs:
 | `podman.baseDir` | -- | **Mandatory on podman**, absolute. Host directory for files this tool writes for podman: today the server-certificate bundle, which contains the private key, written `0600` in a `0700` directory. Mandatory rather than defaulted because where a private key lands on your host is your decision. Kept separate from `quadletDir`, since the unit must live where systemd scans. Removed by `broker remove`, not by `--delete-data`. Docker needs no equivalent: a compose file can inline what a quadlet unit cannot, so docker's bundle never touches the host |
 | `kubernetes.imagePullSecret` | -- | Name of the image-pull Secret the CR references. **Optional**: unset derives `<kubernetes.name>-image-pull` when registry credentials are configured, and names nothing (no `pullSecrets` block) when they are not. **Naming it does not mean building it**, the same rule `kubernetes.tlsServerSecret` follows above. With `image.user`/`image.pass` set (or their `*Env` equivalents), this tool builds the Secret, applies it alongside the operator's fixed-name `regcred`, and removes both on teardown. Without them, a configured name must already exist -- created by hand or by a cluster admin -- and is only referenced, never built or deleted. The credentials themselves stay under `image.*`; docker and podman use them for `<command> login`, having no operator and no `regcred` |
 | `kubernetes.imagePullPolicy` | -- | `Always` \| `IfNotPresent` \| `Never`; unset keeps the CR's own `IfNotPresent` |
-| `kubernetes.adminSecret` | `solace-admin-secret` | Name of the Kubernetes Secret holding the admin/monitor credentials. |
+| `kubernetes.adminSecret` | -- | Name of the Secret holding the broker's admin credentials, which the CR's `adminCredentialsSecret` references. **Optional**: unset derives `<kubernetes.name>-admin` when `semp.adminPass` is set, and names nothing when it is not -- the operator then generates `<kubernetes.name>-pubsubplus-admin-creds`. **Naming it does not mean building it**, the rule the TLS and image-pull Secrets follow. See [The admin Secret](#the-admin-secret) |
 | `kubernetes.operator.namespace` | `pubsubplus-operator-system` | Namespace the cluster-scoped EventBroker Operator is installed to and addressed in. Two rules, neither of which asks the cluster: use this when set, otherwise the fixed default `operator deploy` installs to. So every operator command resolves the SAME namespace, and this tool never searches a cluster to find one -- an unanchored name match could resolve to another team's operator. Stays optional; most deployments never set it |
 | `semp.additionalUsers` | -- | Extra CLI (management) users, each `{username, accessLevel, password\|passwordEnv}` with `accessLevel` one of `none`, `read-only`, `mesh-manager`, `read-write`, `admin`. Created at boot on every platform. The username must start with a letter or `_` and be 1-32 characters (the broker's own rule); on Kubernetes it may not contain `.` or `-` either, because the credentials ride the pod environment there and the kubelet drops variables whose names are not identifiers. See [Extra CLI users differ by platform](operations.md#extra-cli-users-differ-by-platform) |
 | `semp.adminPassEnv` (and every other `*Env`) | -- | Name of an environment variable holding the secret, instead of the value itself. See [Secrets](#secrets) |
@@ -212,7 +216,7 @@ Common optional knobs:
 | `broker.productKeys` | -- | The Solace licence keys `broker configure product-keys` applies. Strings, not paths |
 | `broker.domainCerts` | -- | CA certificates `broker configure domain-certs` loads: `dirs`, a list of directories walked one level deep, plus `files`, explicit `CA-NAME: full host path` entries. Neither is defaulted, so an env file configuring neither is a no-op. A `files` key is checked at LOAD against the same charset and 64-character cap a directory-derived name meets by construction, and an entry with no path is refused there too. The directory WALK waits for the command, since a directory absent from this machine must not fail a `deploy` that never touches certificates. See [operations.md](operations.md#post-deployment-configuration-order) |
 | `kubernetes.securityContext` | -- | `runAsUser`/`fsGroup` for the pod. Omitted entirely when unset |
-| `kubernetes.containerSecurity` | -- | `runAsUser`/`runAsGroup`/`readOnlyRootFilesystem` for the broker container |
+| `kubernetes.containerSecurity` | -- | `runAsUser`/`runAsGroup`/`readOnlyRootFilesystem` for the broker container. The CR has no `privileged` or `allowPrivilegeEscalation` field, so a rendered CR shows neither; the bundled operator 1.4.2 pins `privileged: false`, `allowPrivilegeEscalation: false`, `runAsNonRoot: true`, `capabilities: drop: [ALL]` and `seccompProfile: RuntimeDefault` on the broker container itself -- which makes the operator version part of the security posture, see [container-security.md](container-security.md) |
 | `scaling.*` | see [Scaling](#scaling) | Broker sizing, applied on every platform -- the CR's `spec.systemScaling` on Kubernetes, container environment variables on docker and podman |
 | `scaling.maxConnections` | `100` (Kubernetes) / `1000` (container) | The Solace scaling tier. Fixes how many cores the broker gets and defaults its memory on every platform -- see [Scaling tiers](#scaling-tiers) |
 | `<docker\|podman>.container.mem` | the tier's memory | Container memory limit, in docker's and podman's own `b\|k\|m\|g` suffix (not Kubernetes' `Mi`/`Gi`) |
@@ -230,27 +234,82 @@ the env file's directory
 ## Bring your own TLS Secret
 
 `kubernetes.tlsServerSecret` and `tls.cert`/`tls.certKey` answer different questions --
-what the Secret is CALLED, and what it is built FROM -- and only the first is always this
-tool's business. Which of them you set decides who owns the Secret:
+what the Secret is CALLED, and what it is built FROM. Which of them you set decides who
+owns the Secret, and whether there is one at all:
 
-| `tls.cert` + `tls.certKey` | What happens |
-| --- | --- |
-| set | This tool builds the `kubernetes.io/tls` Secret from those files, `broker generate` prints it ahead of the CR, `broker deploy` applies it, `broker configure server-certs` rotates it, and `broker remove` deletes it |
-| unset | The Secret must already exist -- created by hand, by cert-manager, or by anything else. The CR references it by name and nothing here reads, applies, rotates or deletes it. `broker remove` leaves it alone, and the namespace gate counts it as someone else's |
+| `tls.cert` + `tls.certKey` | `kubernetes.tlsServerSecret` | What happens |
+| --- | --- | --- |
+| set | set, or unset to derive `<kubernetes.name>-tls` | This tool builds the `kubernetes.io/tls` Secret from those files under that name, `broker generate` prints it ahead of the CR, `broker deploy` applies it, `broker configure server-certs` rotates it, and `broker remove` deletes it |
+| unset | set | The Secret must already exist -- created by hand, by cert-manager, or by anything else. The CR references it by name and nothing here reads, applies, rotates or deletes it. `broker remove` leaves it alone, and the namespace gate counts it as someone else's |
+| unset | unset | No TLS Secret and no `tls` block in the CR: the broker serves no TLS from a Secret |
 
 Set the pair or neither: one without the other is refused, because the Secret carries both
 keys and a Secret with only `tls.crt` in it is one the broker cannot start a listener over.
-Supplying the files without naming the Secret is refused too -- the Secret would have no
-name and the CR no `tls` block, so the certificate would be silently unused.
+Supplying the files without naming the Secret is not refused: the name is derived, so the
+certificate always has a Secret to land in and a `tls` block to reach the broker through.
 
-`broker validate` states which of the two it is, so a missing Secret is not first
-discovered by a pod that will not mount.
+`broker validate` states which of them it is, and whether the name was derived, so a
+missing Secret is not first discovered by a pod that will not mount.
 
 **`tls.certPassphrase` is docker/podman only.** The CRD's `spec.tls` carries only
 `serverTlsConfigSecret`, `certFilename`, `certKeyFilename` and `enabled` -- there is no
 passphrase field and no Secret key the operator reads one from. On Kubernetes, supply an
 unencrypted key or decrypt it into the Secret yourself; `broker validate` warns when the
 key is set.
+
+## The admin Secret
+
+The broker CR's `adminCredentialsSecret` names the Secret holding the broker's admin
+password. `semp.adminPass` and `kubernetes.adminSecret` decide which one it is, and who owns
+it -- the three states the TLS and image-pull Secrets have:
+
+| `semp.adminPass` | `kubernetes.adminSecret` | What happens |
+| --- | --- | --- |
+| set | set, or unset to derive `<kubernetes.name>-admin` | This tool builds the Secret under that name, with the monitor password and pre-shared key when those are set; `broker generate` prints it, `broker deploy` applies it and `broker remove` deletes it |
+| unset | set | The Secret must already exist with the key `username_admin_password`. The CR references it and nothing here builds, applies or deletes it |
+| unset | unset | The CR names no admin Secret. The operator generates `<kubernetes.name>-pubsubplus-admin-creds` with a random password, owns it, and deletes it with the broker |
+
+Without `semp.adminPass`, `broker perform semp-login-check` reads the password back from
+whichever Secret the broker uses, which needs `get secrets` in the namespace.
+
+Three combinations are refused at load:
+
+- **`semp.monitorPass` or `redundancy.psk` without `semp.adminPass`.** Both are entries of the
+  Secret this tool builds from the admin password, and without one it builds none. A
+  referenced Secret, or one the operator generates, is never written to. Drop the key and the
+  operator generates its own, or set `semp.adminPass`.
+- **`kubernetes.adminSecret` in the operator's own names for this broker**
+  (`<kubernetes.name>-pubsubplus-...`). The operator owns those Secrets and deletes them with
+  the broker. Copy one under a name of your own and name the copy.
+- **Two Secrets the CR names resolving to one name**, for example
+  `kubernetes.tlsServerSecret: dev-broker-admin` beside a derived admin Secret. One Secret
+  cannot carry both sets of keys.
+
+**The broker reads its admin password once, on a fresh data volume.** Solace applies the
+password key only when a broker boots with no database; changing the Secret later changes
+nothing in the broker. That matters most in the last state. `broker remove` keeps the data
+by default but takes the operator's generated Secret with the broker, so a later deploy onto
+that data would get a new random password the broker ignores -- in HA the standby and monitor
+pods would never become Ready, and nothing would hold the working password. So:
+
+- `broker validate` shows the state, and warns in the last one.
+- `broker remove` in the last state says where the password is and how to copy it first --
+  or, when the running broker's CR still names an admin Secret this env file dropped, that
+  the Secret stays in place and how to keep using it.
+- `broker deploy` in the last state refuses when an earlier broker's data PVCs are still in
+  the namespace, or when the running broker's CR names an admin Secret that the new one would
+  drop. Set `semp.adminPass` to the broker's password, or `kubernetes.adminSecret` to a Secret
+  holding it. The check needs `list` on `pubsubpluseventbrokers` and `persistentvolumeclaims`
+  in the namespace, and is probed first like every other permission. Claims under a custom
+  volume mount are not checked, since they exist before a first deploy.
+
+**Upgrading moves an unset name.** Earlier builds defaulted `kubernetes.adminSecret` to
+`solace-admin-secret`. An env file that sets `semp.adminPass` and no name now derives
+`<kubernetes.name>-admin`: the next deploy builds that Secret and the CR switches to it --
+under `updateStrategy: automatedRolling` the operator rolls the pods, while `manualPodRestart`
+waits for `broker restart` -- and `solace-admin-secret` stays behind, where it keeps the
+namespace from being offered for deletion. Set `kubernetes.adminSecret: solace-admin-secret` to keep the
+old name, or delete the old Secret by hand after the redeploy.
 
 
 ## Scaling
@@ -377,8 +436,26 @@ that edits the file it was handed is a surprise on a file that may be version-co
 env file must carry the same value or the group cannot form. On Kubernetes the operator
 generates and distributes one itself when the key is empty, and the CR's
 `spec.preSharedAuthKeySecret` is then omitted entirely; set it and the value is written as the
-`preshared_auth_key` entry of `kubernetes.adminSecret` -- the same Secret the admin credentials
-live in -- and the CR points at it.
+`preshared_auth_key` entry of the admin Secret this tool builds from `semp.adminPass` -- the
+same Secret the admin credentials live in -- and the CR points at it. So on Kubernetes a key
+needs `semp.adminPass`, and one without it is refused at load.
+
+`semp.monitorPass` follows the same rule on Kubernetes, including needing
+`semp.adminPass`. Set, it is written as the `username_monitor_password` entry of the admin
+Secret this tool builds and the CR's
+`spec.monitoringCredentialsSecret` points there. Unset, the field is omitted and the operator
+generates `<kubernetes.name>-pubsubplus-monitor-creds` with a random password of its own --
+naming the admin Secret without that entry would point the broker's monitor user at a file
+that is not there. Nothing in this tool logs in as the monitor user, and it never enables the
+operator's Prometheus exporter, that user's only consumer. Switching between the two on a live
+broker changes the CR spec, which the operator applies like any other spec change -- a rolling
+restart under `updateStrategy: automatedRolling`. **Upgrading this tool is such a switch** for
+an env file with no `semp.monitorPass`: earlier builds named `kubernetes.adminSecret` for the
+monitor user regardless, so the first `broker deploy` after the upgrade drops the field and
+rolls the pods, with no edit to the env file. Schedule that deploy, or set `semp.monitorPass`
+first to keep the CR as it was -- and, if the env file names no `kubernetes.adminSecret`, set
+`kubernetes.adminSecret: solace-admin-secret` too, since that name moves as well (see
+[The admin Secret](#the-admin-secret)).
 
 The tool never echoes a secret. Values piped to a command on stdin show as
 `<<< (N bytes on stdin)` under `-v/--verbose`, values passed to a child process's environment
@@ -652,7 +729,9 @@ The output carries every secret from the source file verbatim -- treat it like t
 and never commit it. (Switch the values to their `*Env` reference keys afterwards and it
 becomes safe to commit; see [Secrets](#secrets).) `SOLBK_USR_SECRET` converts to
 `kubernetes.adminSecret` (`SOLBK_ADM_SECRET` is accepted as an alias for the same key;
-when both are set and disagree, the canonical `SOLBK_USR_SECRET` wins with a warning),
+when both are set and disagree, the canonical `SOLBK_USR_SECRET` wins with a warning; when
+neither is set, `solace-admin-secret` is written out -- the bash tool's default, which the
+legacy broker was built under, where this schema would derive `<kubernetes.name>-admin`),
 `SOLBK_SVR_SECRET` to `kubernetes.tlsServerSecret`, `IMAGEREPO_SECRET` to
 `kubernetes.imagePullSecret` (on a docker/podman conversion those two are dropped with a
 warning naming that kubernetes-only home -- they name Kubernetes Secret objects, which have

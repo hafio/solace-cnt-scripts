@@ -32,9 +32,15 @@ VERSION="$(git -C "${REPO_ROOT}" describe --tags --dirty --always 2>/dev/null ||
 # matrixes over `build` with TARGET_OS/TARGET_ARCH from BUILD_TARGETS instead.
 DIST_TARGETS=(linux/amd64 linux/arm64 darwin/arm64 windows/amd64)
 
-# -race needs cgo + a C compiler; on by default, disable with SOLACE_RACE=0.
+# -race needs cgo + a C compiler; on by default for `test`, disable with SOLACE_RACE=0.
+# `cov` never races: `test` is the race run, and coverage needs no second one.
 RACE_FLAG=(); COVERMODE="count"
-if [[ "${SOLACE_RACE:-1}" != "0" ]]; then RACE_FLAG=(-race); COVERMODE="atomic"; fi
+if [[ "${SOLACE_RACE:-1}" != "0" ]]; then RACE_FLAG=(-race); fi
+
+# A race-built binary sleeps GORACE atexit_sleep_ms (default 1000) before every clean
+# exit -- each test binary, and each helper child internal/engine re-runs -- which was
+# most of `test`'s wall time. Default it to 0 only when unset, so an exported value wins.
+if [[ ${#RACE_FLAG[@]} -gt 0 && -z "${GORACE:-}" ]]; then export GORACE="atexit_sleep_ms=0"; fi
 
 # Toolchain parity: go.mod's `toolchain` pin is what local and CI must agree on,
 # but an exported GOTOOLCHAIN (`local` especially) silently overrides it and
@@ -152,7 +158,7 @@ task_cov() {
   # -count=1 forces a real run so a cached test result can't report a stale
   # coverage total and mask a drop below the floor (the previous total in
   # logs/cov.log; local only -- CI is a fresh checkout with no prior log).
-  cap go test "${RACE_FLAG[@]}" -covermode="${COVERMODE}" -coverprofile="${prof}" -count=1 ./... || return 1
+  cap go test -covermode="${COVERMODE}" -coverprofile="${prof}" -count=1 ./... || return 1
   cap go tool cover -html="${prof}" -o "${html}" || return 1
   local total; total="$(go tool cover -func="${prof}" | tail -n1)"
   printf '%s\n' "${total}" | tee -a "${LOGFILE}"
@@ -191,6 +197,12 @@ task_graphify() {
   [[ -n "${CI:-}" ]] && { warn "graphify is local-only; skipping in CI"; return 0; }
   command -v graphify >/dev/null 2>&1 || { warn "graphify not on PATH; skipping"; return 0; }
   cap graphify update .
+  # graphify writes its cache entries 0600 whatever the umask, so on a checkout shared by
+  # two accounts every refresh leaves a batch the other cannot read -- it loses their cache
+  # hits and makes the PreToolUse hook's reads unreliable. The directory is gitignored and
+  # disposable, so widening it to the group costs nothing. Never fatal: an entry the other
+  # account owns cannot be chmod'd by this one, and that must not fail the task.
+  chmod -R g+rX graphify-out/cache 2>/dev/null || true
 }
 
 # --- dispatch -------------------------------------------------------------------
@@ -223,7 +235,9 @@ Tasks:
   all      ${ALL}   (what CI runs, as: all scan)
   full     ${FULL}   (pre-tag sweep)
 
-Env: SOLACE_RACE=0 disables -race; TARGET_OS/TARGET_ARCH cross-compile a single \`build\`.
+Env: SOLACE_RACE=0 disables -race on \`test\` (\`cov\` never races); TARGET_OS/TARGET_ARCH
+     cross-compile a single \`build\`.
+     GORACE defaults to atexit_sleep_ms=0 on race runs; export it to override.
      GOTOOLCHAIN defaults to go.mod's \`toolchain\` pin; export it to override.
      govulncheck's version lives in go.mod (tool directive), not an env var.
 Logs: ${LOG_DIR}/<task>.log (each run closes with a timestamped footer)

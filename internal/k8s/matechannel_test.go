@@ -378,6 +378,38 @@ func TestReadSecretKeyGuardsTheCommand(t *testing.T) {
 	}
 }
 
+// TestReadSecretKeyRefusesAControlCharacter: a value read from a cluster has not been
+// through config's credential checks, and it goes on to a `curl -K -` config where an
+// embedded line break starts a new directive. Refused naming the position, never the value.
+func TestReadSecretKeyRefusesAControlCharacter(t *testing.T) {
+	// "ab\ncd" -- a newline INSIDE the value, which trimming the trailing one cannot fix.
+	r := &recRunner{out: []byte("YWIKY2Q=")}
+	ref := &config.ReplPassSecret{Namespace: "ns", Name: "creds", Key: "k"}
+	_, err := ReadSecretKey(r, replCfg(t), replSite(), ref)
+	if err == nil {
+		t.Fatal("a password carrying a control character must be refused")
+	}
+	if !strings.Contains(err.Error(), "control character at byte 2") {
+		t.Errorf("error %q should name the position", err)
+	}
+	if strings.Contains(err.Error(), "ab") || strings.Contains(err.Error(), "cd") {
+		t.Errorf("the error must not carry any of the value: %q", err)
+	}
+}
+
+// TestReadSecretKeyRefusesALineBreakOnlyValue: a value that was only a line break --
+// `--from-file` of a blank line -- decodes to nothing once the trailing newline is
+// dropped. That is no password, and sending an empty one fails a login for a reason in
+// the Secret while counting towards the broker's lockout.
+func TestReadSecretKeyRefusesALineBreakOnlyValue(t *testing.T) {
+	r := &recRunner{out: []byte("Cg==")} // "\n"
+	ref := &config.ReplPassSecret{Namespace: "ns", Name: "creds", Key: "k"}
+	_, err := ReadSecretKey(r, replCfg(t), replSite(), ref)
+	if err == nil || !strings.Contains(err.Error(), "empty once its trailing line break is dropped") {
+		t.Errorf("err = %v, want an empty value refused rather than returned", err)
+	}
+}
+
 func hasPrefixArgv(got, want []string) bool {
 	if len(got) < len(want) {
 		return false

@@ -167,7 +167,7 @@ func TestMateSEMPPasswordReadsTheNamedSecret(t *testing.T) {
 	if !strings.Contains(argv, "dr-creds") || !strings.Contains(argv, "solace-dr") {
 		t.Errorf("read %q, want the MATE's Secret", argv)
 	}
-	if strings.Contains(argv, a.Cfg.K8s.AdminSecret) {
+	if strings.Contains(argv, a.Cfg.AdminSecretName()) {
 		t.Errorf("read %q, want the mate's Secret rather than this deployment's adminSecret", argv)
 	}
 }

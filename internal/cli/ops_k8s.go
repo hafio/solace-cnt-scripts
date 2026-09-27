@@ -76,6 +76,11 @@ func opK8sValidateOperator(a *App) error { return k8sCluster(a).ValidateOperator
 func opK8sDeploy(a *App) error {
 	c := k8sCluster(a)
 	ctx := bg()
+	// Before any change: with no admin Secret named, refuse the deploy that would pair an
+	// earlier broker's password with a new random one (k8s/adminsecret.go).
+	if err := c.AdminPasswordPreflight(ctx); err != nil {
+		return err
+	}
 	if err := c.CreateNamespace(ctx); err != nil {
 		return err
 	}
@@ -112,9 +117,11 @@ func opK8sDeploy(a *App) error {
 
 // opK8sConfigServerCerts loads, updates or removes the TLS server certificate.
 //
-// The secret-managed path (kubernetes.tlsServerSecret set) rewrites the Secret and lets
+// The secret-managed path (a TLS Secret named in kubernetes.tlsServerSecret, or derived
+// from tls.cert/certKey -- config.Config.TLSServerSecretName) rewrites the Secret and lets
 // the operator mount it -- nothing is exec'd into the broker and no pod is restarted.
-// Without it, the certificate is loaded over the broker CLI on every node that needs it.
+// Without one there is nothing to load on Kubernetes -- a loaded config with no TLS Secret
+// has no files either -- so the CLI branch below only reports that.
 //
 // --remove is CLI-only and spans the same nodes the apply path does. It has no
 // secret-managed form, and refuses rather than inventing one -- see the branch below.
@@ -125,15 +132,23 @@ func opK8sConfigServerCerts(a *App) error {
 	}
 	if remove {
 		// Secret-managed deployments have no CLI removal, and must not pretend to: the
-		// operator mounts kubernetes.tlsServerSecret and would reconcile the certificate
+		// operator mounts the TLS Secret and would reconcile the certificate
 		// straight back, so the command would report success over a broker that still
 		// presents it. Say where the certificate actually comes from instead.
-		if a.Cfg.K8s.TLSServerSecret != "" {
+		if name := a.Cfg.TLSServerSecretName(); name != "" {
+			// Clearing the keys also ends this env file's ownership of a Secret it built, so
+			// `broker remove` would no longer delete it: say so, or the advice leaves a
+			// private key behind that also keeps the namespace from ever being offered.
+			after := "the Secret is not this env file's, so it stays where it is managed"
+			if a.Cfg.ManagesTLSSecret() {
+				after = fmt.Sprintf("then delete the Secret by hand -- once the files are gone this env file no "+
+					"longer owns it, so `broker remove` will not: kubectl delete secret %s -n %s", name, a.Cfg.K8s.Namespace)
+			}
 			return fmt.Errorf("the TLS server certificate comes from the Secret %q, which the operator "+
 				"mounts -- removing it over the broker CLI would be undone at the next reconcile.\n"+
-				"  To stop presenting it, clear kubernetes.tlsServerSecret (the CR's TLS block goes with it) "+
-				"and redeploy; the Secret itself is removed by `broker remove` when this env file owns it",
-				a.Cfg.K8s.TLSServerSecret)
+				"  To stop presenting it, clear kubernetes.tlsServerSecret and tls.cert/tls.certKey (the CR's TLS "+
+				"block goes with them) and redeploy; %s",
+				name, after)
 		}
 		// The whole group, like the apply path: a certificate gone from one node and
 		// still loaded on another is a half state nobody asked for. --pod still narrows.
@@ -147,7 +162,7 @@ func opK8sConfigServerCerts(a *App) error {
 		}
 		return k8sOps(a).RemoveServerCerts(bg(), roles...)
 	}
-	if a.Cfg.K8s.TLSServerSecret != "" {
+	if a.Cfg.TLSServerSecretName() != "" {
 		// Whether this env file supplies the files to rebuild it is UpdateServerCertSecret's
 		// question, not this one's: a Secret-backed deployment never wants the CLI path,
 		// and being told the Secret is managed elsewhere beats being asked for a
@@ -371,7 +386,11 @@ func opK8sVerifyLogin(a *App, role config.Role) error {
 // stdout and reports ok=false (not an error) on a failed login, so the handler turns a
 // failed login into a non-zero exit.
 func k8sLogin(a *App, o *broker.Ops, role config.Role) error {
-	ok, err := o.Login(bg(), role, "admin", a.Cfg.SEMP.AdminPass)
+	pass, err := k8sAdminPassword(a)
+	if err != nil {
+		return err
+	}
+	ok, err := o.Login(bg(), role, config.AdminUser, pass)
 	if err != nil {
 		return err
 	}
@@ -379,6 +398,19 @@ func k8sLogin(a *App, o *broker.Ops, role config.Role) error {
 		return fmt.Errorf("SEMP login failed on the %s node (see reason above)", role)
 	}
 	return nil
+}
+
+// k8sAdminPassword is the admin password a SEMP login sends: semp.adminPass when the env
+// file carries it, and otherwise the one in the Secret the broker actually uses -- the
+// referenced kubernetes.adminSecret, or the operator's generated Secret -- read back on
+// stdout, never argv. mateSEMPPassword (replication.go) is the same shape for a DR mate.
+// An empty password is never sent: a login that fails for a reason in the config reads
+// as a broker fault, and repeated failures count towards the broker's lockout.
+func k8sAdminPassword(a *App) (string, error) {
+	if a.Cfg.SEMP.AdminPass != "" {
+		return a.Cfg.SEMP.AdminPass, nil
+	}
+	return k8s.ReadAdminPassword(a.Runner, a.Cfg)
 }
 
 // day-2 ops
@@ -582,8 +614,10 @@ func opK8sOperatorLogs(a *App) error {
 // order `broker deploy` applies them makes this output the artifact rather than a
 // description of one.
 //
-// It therefore carries the admin password, the TLS private key and the registry
-// credential in base64. That is what makes Kubernetes the only platform whose generate
+// It therefore carries whichever of the admin password, the TLS private key and the
+// registry credential this env file supplies, in base64 -- and none of them when it
+// supplies none, since a Secret this tool only references, or one the operator
+// generates, is not in the stream. That is what makes Kubernetes the only platform whose generate
 // output is secret-bearing: a Secret manifest IS the artifact there, whereas a compose
 // file or quadlet unit can only ever reference a secret the engine already holds.
 func opK8sGenBroker(a *App) error {
@@ -620,6 +654,11 @@ func opK8sGenOperator(a *App) error {
 // that keeps the data cannot then cascade it away by deleting the namespace. That hazard
 // is structural rather than documented.
 func opK8sRemoveBroker(a *App) error {
+	// Said BEFORE the question, while keeping the data can still be paired with keeping
+	// the password it needs.
+	if a.Cfg.AdminSecretName() == "" {
+		warnWhereTheAdminPasswordIs(a)
+	}
 	if !confirmDelete(a, k8sWhat(a, "broker "+a.Cfg.K8s.Name)) {
 		return nil
 	}
@@ -635,6 +674,32 @@ func opK8sRemoveBroker(a *App) error {
 		return err
 	}
 	return removeNamespaceIfEmpty(a, c)
+}
+
+// warnWhereTheAdminPasswordIs says where the broker's admin password is when this env file
+// names no admin Secret, because `broker remove` keeps the data and a later deploy onto it
+// needs the password it was first deployed with. The live CR decides which case it is:
+// one that still names an admin Secret -- the env file dropped it since -- keeps that
+// Secret, which this removal leaves in place; otherwise the password is only in the
+// operator's generated Secret, which goes with the broker. A CR that cannot be read gets
+// the second, more cautious, warning. The command shown is this env file's own cluster CLI,
+// so a context or profile in kubernetes.command reaches the same cluster.
+func warnWhereTheAdminPasswordIs(a *App) {
+	cli := "kubectl"
+	if cmd, err := a.Cfg.ClusterCommand(); err == nil {
+		cli = cmd.String()
+	}
+	name, ns, gen := a.Cfg.K8s.Name, a.Cfg.K8s.Namespace, a.Cfg.OperatorAdminSecretName()
+	if live, found, err := k8sCluster(a).LiveAdminSecret(bg()); err == nil && found && live != "" && live != gen {
+		warn("broker %s's CR keeps its admin password in the Secret %s, which this env file no longer names. "+
+			"broker remove leaves that Secret in place; to deploy onto the kept data later, set "+
+			"kubernetes.adminSecret: %s (or semp.adminPass to its password)", name, live, live)
+		return
+	}
+	warn("broker %s's admin password is only in %s, which the Solace operator generated and deletes with the "+
+		"broker. If you keep the data, copy the password first and set semp.adminPass to it -- a later deploy onto "+
+		"that data needs it. This prints it base64-encoded: %s get secret %s -n %s "+
+		"-o jsonpath='{.data.username_admin_password}'", name, gen, cli, gen, ns)
 }
 
 // removeNamespaceIfEmpty offers the namespace for deletion ONLY when nothing else is in

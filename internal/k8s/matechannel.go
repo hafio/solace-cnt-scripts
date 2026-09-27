@@ -103,36 +103,61 @@ func NewMateChannel(r engine.Runner, cfg *config.Config, site config.ReplSite,
 // still keep its password in a cluster this machine can see -- and falls back to this
 // env file's own runtime otherwise.
 //
-// `-o jsonpath` + `--decode` rather than `get -o yaml`: the value never lands in a file,
-// never reaches argv, and only the one key is fetched. The kubectl invocation itself goes
-// through the execution guard, like every other command this tool runs.
+// Only the one key is fetched, with `-o jsonpath`, and decoded here rather than by a
+// shell pipeline: the value never lands in a file and never reaches argv. The kubectl
+// invocation itself goes through the execution guard, like every other command this
+// tool runs.
 func ReadSecretKey(r engine.Runner, cfg *config.Config, site config.ReplSite,
 	ref *config.ReplPassSecret) (string, error) {
 	cmd, err := secretCommand(cfg, site)
 	if err != nil {
 		return "", err
 	}
+	return readSecretKey(r, cmd, ref.Namespace, ref.Name, ref.Key,
+		fmt.Sprintf("replication site %q", site.VirtualRouterName))
+}
+
+// readSecretKey is the one Secret-key reader behind ReadSecretKey and ReadAdminPassword,
+// so there is one kubectl shape, one decode and one set of refusals. whose names what
+// the password is for, in the error text.
+//
+// A value read from a cluster has not been through config's credential checks, and it
+// goes on to a `curl -K -` config on stdin, where an embedded line break starts a new
+// directive. So a control character is refused here, naming its position and never the
+// value.
+func readSecretKey(r engine.Runner, cmd config.Command, namespace, name, key, whose string) (string, error) {
 	// The key is a JSON object member, so a name carrying a dot has to be escaped or
 	// jsonpath reads it as a path step and silently returns nothing.
-	jsonpath := fmt.Sprintf(`{.data.%s}`, strings.ReplaceAll(ref.Key, ".", `\.`))
+	jsonpath := fmt.Sprintf(`{.data.%s}`, strings.ReplaceAll(key, ".", `\.`))
 	out, err := r.Output(context.Background(), cmd.Name(),
-		cmd.Args("get", "secret", ref.Name, "-n", ref.Namespace, "-o", "jsonpath="+jsonpath)...)
+		cmd.Args("get", "secret", name, "-n", namespace, "-o", "jsonpath="+jsonpath)...)
 	if err != nil {
-		return "", fmt.Errorf("read secret %s/%s for replication site %q: %w",
-			ref.Namespace, ref.Name, site.VirtualRouterName, err)
+		return "", fmt.Errorf("read secret %s/%s for %s: %w", namespace, name, whose, err)
 	}
 	enc := strings.TrimSpace(string(out))
 	if enc == "" {
-		return "", fmt.Errorf("secret %s/%s has no key %q, so replication site %q has no password",
-			ref.Namespace, ref.Name, ref.Key, site.VirtualRouterName)
+		return "", fmt.Errorf("secret %s/%s has no key %q, so %s has no password", namespace, name, key, whose)
 	}
 	raw, err := base64.StdEncoding.DecodeString(enc)
 	if err != nil {
-		return "", fmt.Errorf("secret %s/%s key %q is not valid base64", ref.Namespace, ref.Name, ref.Key)
+		return "", fmt.Errorf("secret %s/%s key %q is not valid base64", namespace, name, key)
 	}
 	// A trailing newline is what `echo -n` forgets and `kubectl create secret
 	// --from-file` keeps; it would be sent as part of the password.
-	return strings.TrimRight(string(raw), "\r\n"), nil
+	pass := strings.TrimRight(string(raw), "\r\n")
+	if pass == "" {
+		// A value that was only a line break -- `--from-file` of a blank line -- is no
+		// password, and sending an empty one fails a login for a reason in the Secret.
+		return "", fmt.Errorf("secret %s/%s key %q is empty once its trailing line break is dropped, so %s has "+
+			"no password", namespace, name, key, whose)
+	}
+	for i := 0; i < len(pass); i++ {
+		if pass[i] < 0x20 || pass[i] == 0x7f {
+			return "", fmt.Errorf("secret %s/%s key %q contains a control character at byte %d; the value is a "+
+				"secret and is not shown -- rewrite it without one", namespace, name, key, i)
+		}
+	}
+	return pass, nil
 }
 
 // secretCommand picks the cluster CLI for a secret read: the site's own when it declares

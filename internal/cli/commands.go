@@ -389,7 +389,7 @@ func newConfigureDataReplicationCmd(app *App) *cobra.Command {
 }
 
 const configureServerCertsLong = "Loads or updates the broker's TLS server certificate, over its own CLI or,\n" +
-	"on Kubernetes with kubernetes.tlsServerSecret set, via the operator's Secret.\n\n" +
+	"on Kubernetes with a TLS Secret, via the Secret the operator mounts.\n\n" +
 	"--remove takes TLS down immediately on every listener configured to present\n" +
 	"a certificate."
 
@@ -554,7 +554,8 @@ func newPerformGatherDiagnosticsCmd(app *App) *cobra.Command {
 }
 
 const performSempLoginCheckLong = "Runs an authenticated SEMP request from inside the broker and reports\n" +
-	"whether the credentials were accepted.\n\n" +
+	"whether the credentials were accepted. On Kubernetes without semp.adminPass it\n" +
+	"reads the password from the admin Secret the broker uses.\n\n" +
 	"Run this after rotating the admin password."
 
 func newPerformSempLoginCheckCmd(app *App) *cobra.Command {

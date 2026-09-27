@@ -96,8 +96,29 @@ func BrokerCR(c *config.Config) []byte {
 		fmt.Fprint(&b, "  serviceAccount:\n")
 		fmt.Fprintf(&b, "    name: %s\n", c.K8s.ServiceAccount)
 	}
-	fmt.Fprintf(&b, "  adminCredentialsSecret: %s\n", c.K8s.AdminSecret)
-	fmt.Fprintf(&b, "  monitoringCredentialsSecret: %s\n", c.K8s.AdminSecret)
+	// The three states of config.Config.AdminSecretName: a Secret this tool builds from
+	// semp.adminPass (named, or <kubernetes.name>-admin), one it only references, or none
+	// -- the field omitted, and the Solace operator generates
+	// <kubernetes.name>-pubsubplus-admin-creds with a random password of its own.
+	adminSecret := c.AdminSecretName()
+	if adminSecret != "" {
+		fmt.Fprintf(&b, "  adminCredentialsSecret: %s\n", adminSecret)
+	}
+	// Whether that Secret is one this tool builds, and so carries the entries below. A
+	// Secret it only references may lack them, and the operator never checks.
+	builtAdmin := c.ManagesAdminSecret() && adminSecret != ""
+	// Only with a monitor password: internal/k8s.AdminSecret writes the
+	// username_monitor_password key only when semp.monitorPass is set, and the operator
+	// checks that a named Secret exists but never which keys it carries -- so naming the
+	// admin Secret here without one points the broker's monitor user at a file that is
+	// not there. Omitted, the operator generates <name>-pubsubplus-monitor-creds with a
+	// random password of its own. Keyed on the resolved value, as the Secret builder is.
+	// config.Validate refuses a monitor password without semp.adminPass on Kubernetes, so
+	// from a loaded config builtAdmin is always true here; a Config built in code without
+	// it gets no field rather than one pointing at a Secret without the key.
+	if c.SEMP.MonitorPass != "" && builtAdmin {
+		fmt.Fprintf(&b, "  monitoringCredentialsSecret: %s\n", adminSecret)
+	}
 	// Omitted when there are no additional users, the same way preSharedAuthKeySecret is:
 	// naming a Secret that does not exist would fail the pod on a mount the deployment
 	// never needed. envFrom projects every key of this one into the environment, which is
@@ -109,8 +130,10 @@ func BrokerCR(c *config.Config) []byte {
 	// Omitted entirely when no key is configured: the CRD generates its own in that
 	// case, and naming a Secret that does not carry preshared_auth_key would break a
 	// deployment that would otherwise have worked.
-	if c.Redundancy.PSK != "" || c.Redundancy.PSKEnv != "" {
-		fmt.Fprintf(&b, "  preSharedAuthKeySecret: %s\n", c.K8s.AdminSecret)
+	// Like the monitor password, a key needs semp.adminPass on Kubernetes (config.Validate),
+	// so it always rides in the Secret this tool builds.
+	if c.PSKConfigured() && builtAdmin {
+		fmt.Fprintf(&b, "  preSharedAuthKeySecret: %s\n", adminSecret)
 	}
 	fmt.Fprintf(&b, "  updateStrategy: %s\n", c.K8s.UpdateStrategy)
 	fmt.Fprint(&b, "  podDisruptionBudgetForHA: true\n")
@@ -160,9 +183,14 @@ func BrokerCR(c *config.Config) []byte {
 		fmt.Fprintf(&b, "  timezone: %q\n", c.Timezone)
 	}
 
-	if c.K8s.TLSServerSecret != "" {
+	// Keyed on the resolved name (config.Config.TLSServerSecretName), not the raw field: a
+	// supplied cert/key pair with no name configured builds <kubernetes.name>-tls, and the
+	// CR has to reference that same name. All four fields are always written together --
+	// the CRD defaults serverTlsConfigSecret to example-tls-secret and swaps the two
+	// filename defaults, so leaving any one to the CRD is a pod that cannot mount.
+	if name := c.TLSServerSecretName(); name != "" {
 		fmt.Fprint(&b, "  tls:\n")
-		fmt.Fprintf(&b, "    serverTlsConfigSecret: %s\n", c.K8s.TLSServerSecret)
+		fmt.Fprintf(&b, "    serverTlsConfigSecret: %s\n", name)
 		fmt.Fprint(&b, "    enabled: true\n")
 		fmt.Fprint(&b, "    certFilename: tls.crt\n")
 		fmt.Fprint(&b, "    certKeyFilename: tls.key\n")
@@ -865,6 +893,16 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 	if gid != "" {
 		fmt.Fprintf(&b, "Group=%s\n", gid)
 	}
+	// Deny privilege escalation (docs/container-security.md, rule 2). Quadlet
+	// defaults this to false, so leaving it out leaves no_new_privs unset. It
+	// belongs HERE in [Container], where quadlet turns it into
+	// --security-opt=no-new-privileges on the container: [Service] has a
+	// same-named systemd key that would bind the podman process instead, and
+	// rootless podman needs its setuid newuidmap/newgidmap helpers.
+	// TestArtifactsStateTheirPrivilegePosture pins the section. Quadlet has no
+	// Privileged= key, so rule 1 has nothing to state here and is guarded by
+	// TestArtifactsCarryNoWideningTokens alone.
+	fmt.Fprint(&b, "NoNewPrivileges=true\n")
 	// Memory has a first-class quadlet key; the cpuset has none, so it rides
 	// PodmanArgs -- the documented escape hatch for a podman run flag quadlet does
 	// not map, and the same mechanism the --cpus= line this replaces used.
@@ -1026,6 +1064,16 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 	fmt.Fprintf(&b, "    hostname: %q\n", id.Hostname)
 	fmt.Fprintf(&b, "    user: %q\n", cb.RunUser)
 	fmt.Fprint(&b, "    restart: always\n")
+	// Deny extended privileges and privilege escalation (docs/container-security.md,
+	// rules 1 and 2). privileged: false is docker's default and is stated anyway,
+	// so the artifact shows its posture and a test can pin it (rule 7);
+	// no-new-privileges is OFF by default and is the setting that actually
+	// changes anything. The `=` separator, not `:`, because dockerd logs a
+	// deprecation warning for the `:` form on every create. privileged is a bare
+	// boolean: compose v1's schema rejects the quoted form.
+	fmt.Fprint(&b, "    privileged: false\n")
+	fmt.Fprint(&b, "    security_opt:\n")
+	fmt.Fprint(&b, "      - no-new-privileges=true\n")
 	// Service-level cpuset:/mem_limit: rather than deploy.resources.limits. For
 	// memory that is a choice: the standalone v1 docker-compose binary -- the
 	// documented fallback behind docker.compose -- ignores deploy.resources without

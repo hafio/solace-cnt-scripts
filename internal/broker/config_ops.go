@@ -377,7 +377,7 @@ func (o *Ops) RemoveDomainCerts(ctx context.Context, role config.Role, cas []str
 // destructive command's does, in internal/cli, and this stays the mechanism.
 //
 // No cluster-side counterpart: on a Kubernetes deployment whose certificate comes from
-// kubernetes.tlsServerSecret, the operator owns the mount and would put the certificate
+// a TLS Secret (config.Config.TLSServerSecretName), the operator owns the mount and would put the certificate
 // straight back. The CLI refuses that combination rather than starting a fight it loses.
 func (o *Ops) RemoveServerCerts(ctx context.Context, roles ...config.Role) error {
 	// RunCLI cleans up its own broker-side files on exit; no separate removeCLI.
