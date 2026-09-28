@@ -832,7 +832,8 @@ func TestEchoPreviewsTheLegacyBundleRemoval(t *testing.T) {
 
 // TestSecretSummaryNamesTheCertificateSource: the report reads no file, so the
 // certificate's value is always empty there and set/MISSING would say MISSING for a
-// perfectly good certificate. It names the two source keys instead, on both engines.
+// perfectly good certificate. It names the source keys instead, on both engines --
+// tls.cas too once a chain is configured.
 func TestSecretSummaryNamesTheCertificateSource(t *testing.T) {
 	for _, p := range []config.Platform{config.Docker, config.Podman} {
 		cfg := ctrCfg(p, "false")
@@ -847,6 +848,37 @@ func TestSecretSummaryNamesTheCertificateSource(t *testing.T) {
 		}
 		if !strings.Contains(got, cfg.ContainerBlock(p).Name+"-admin-password=set") {
 			t.Errorf("%s: credentials keep set/MISSING: %q", p, got)
+		}
+		cfg.TLS.CAs = []string{"certs/ca.crt"}
+		if got := secretSummary(p, render.ContainerSecrets(cfg, p)); !strings.Contains(got,
+			name+"=(from tls.certKey + tls.cert + tls.cas)") {
+			t.Errorf("%s: with a chain configured the summary must name tls.cas: %q", p, got)
+		}
+	}
+}
+
+// TestContainerBundleCarriesTheChain: the bundle `broker deploy` hands docker and
+// podman is the same one `configure server-certs` loads -- key, certificate, then the
+// tls.cas chain -- so both present the same chain, and a renewed CA changes the digest
+// label a redeploy compares.
+func TestContainerBundleCarriesTheChain(t *testing.T) {
+	for _, p := range []config.Platform{config.Docker, config.Podman} {
+		cfg := ctrCfg(p, "false")
+		want := certFixture(t, cfg)
+		ca := filepath.Join(t.TempDir(), "intermediate.crt")
+		const caPEM = "-----BEGIN CERTIFICATE-----\nINTERMEDIATE\n-----END CERTIFICATE-----\n"
+		if err := os.WriteFile(ca, []byte(caPEM), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg.TLS.CAs = []string{ca}
+		secrets, err := ResolveSecretValues(cfg, p, false)
+		if err != nil {
+			t.Fatalf("%s: ResolveSecretValues: %v", p, err)
+		}
+		for _, s := range secrets {
+			if len(s.SourceFiles) > 0 && s.Value != want+caPEM {
+				t.Errorf("%s: bundle = %q, want the key, the certificate, then the chain", p, s.Value)
+			}
 		}
 	}
 }

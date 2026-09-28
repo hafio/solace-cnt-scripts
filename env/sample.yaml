@@ -95,8 +95,8 @@ tls:                                # uncomment cert+certKey together once you h
                                     # field, so `validate` warns and Kubernetes needs
                                     # an unencrypted key
   # certPassphraseEnv: SOLACE_TLS_PASS   # ...or name the variable holding it instead
-  # cas:                            # trusted domain CA files
-  #   - certs/ca.crt                # (`broker configure domain-certs`)
+  # cas:                            # the CA chain presented after cert, in order;
+  #   - certs/intermediate.crt      # trusted CAs are broker.domainCerts instead
 
 # The HA group: whether there is one, who is in it, and the key its members
 # authenticate to each other with. Omitting `enabled` means false -- HA provisions three

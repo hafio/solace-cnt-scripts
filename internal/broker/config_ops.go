@@ -18,25 +18,14 @@ const showVPNName = "show-vpn"
 
 // ServerCert loads the TLS server certificate into each of roles over the Solace
 // CLI, porting the CLI branch of 051 (the $SOLBK_SVR_SECRET k8s-secret fast path
-// is handled by the k8s platform, not here). It concatenates key + cert + CAs
-// into the tls-<dt>.crt.key file the broker loads. The private key rides Upload's
-// stdin, so it never appears in an argv or an echoed command.
+// is handled by the k8s platform, not here). It loads ServerCertBundle -- key,
+// certificate, then the tls.cas chain -- as the tls-<dt>.crt.key file, so a hot-swap
+// presents exactly the chain `broker deploy` mounts on the container platforms. The
+// private key rides Upload's stdin, so it never appears in an argv or an echoed command.
 func (o *Ops) ServerCert(ctx context.Context, dt string, roles ...config.Role) error {
-	// The key+cert pair comes from ServerCertBundle so its ORDER has one definition
-	// shared with the bundle the container platforms mount. The CAs are appended
-	// only here: they are not part of the certificate the broker presents, and
-	// including them on this path is existing behaviour kept as-is rather than a
-	// property of the bundle (see ServerCertBundle).
 	bundle, err := ServerCertBundle(o.Cfg)
 	if err != nil {
 		return err
-	}
-	for _, ca := range o.Cfg.TLS.CAs {
-		caBytes, err := os.ReadFile(ca)
-		if err != nil {
-			return fmt.Errorf("read tls CA %q: %w", ca, err)
-		}
-		bundle = append(bundle, caBytes...)
 	}
 
 	file := serverCertFile(dt)
@@ -409,18 +398,17 @@ func (o *Ops) RemoveProductKeys(ctx context.Context, keys []string, roles ...con
 		removeProductKeysScript(keys))
 }
 
-// ServerCertBundle is the broker's server certificate as one PEM: the private KEY
-// followed by the CERTIFICATE, which is the form Solace's
-// tls_servercertificate_filepath expects and the same order the CLI path has always
-// written (hence serverCertFile's .crt.key extension, and the bash ancestor's
-// `cat CERTKEY CERT`).
+// ServerCertBundle is the broker's server certificate as one PEM: the private KEY,
+// then the CERTIFICATE, then every tls.cas file in order -- the chain the broker
+// presents after its own certificate. That is the form Solace's
+// tls_servercertificate_filepath expects and the order the CLI path has always written
+// (hence serverCertFile's .crt.key extension, and the bash ancestor's
+// `cat CERTKEY CERT CAS`). It is the one definition behind the docker/podman secret,
+// its digest label, and `configure server-certs`; the Kubernetes TLS Secret holds the
+// same chain in tls.crt (k8s.readTLSMaterial).
 //
-// It deliberately does NOT append tls.cas. Trusted CAs reach the broker through
-// `config apply domain-certs`, which installs them into the broker's own trust
-// store; they are not part of the server certificate the broker presents. Ops.ServerCert
-// still appends them for now, which is why it adds them itself rather than this
-// returning them -- that difference is deliberate and is on the list to reconcile
-// when the domain-certificate path is revisited.
+// tls.cas is NOT the broker's trust store: trusted CAs are broker.domainCerts, which
+// `configure domain-certs` loads.
 //
 // Order lives in this one expression so changing it is a one-line edit. What the
 // file must contain has never been verified against a live broker; it is recorded
@@ -449,7 +437,15 @@ func ServerCertBundle(cfg *config.Config) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %q: %w", cfg.TLS.CertKey, err)
 	}
-	return append(keyBytes, certBytes...), nil
+	bundle := append(keyBytes, certBytes...)
+	for i, ca := range cfg.TLS.CAs {
+		caBytes, err := os.ReadFile(ca)
+		if err != nil {
+			return nil, fmt.Errorf("read tls.cas[%d] %q: %w", i, ca, err)
+		}
+		bundle = append(bundle, caBytes...)
+	}
+	return bundle, nil
 }
 
 // keyPEMRE matches a PEM private-key header in any of the spellings openssl and its

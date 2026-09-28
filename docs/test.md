@@ -67,7 +67,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-86 test files, 1448 test functions. Three of those are not tests. Two are os/exec
+86 test files, 1449 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -82,7 +82,7 @@ launched from.
 | internal/broker | 22 | 430 |
 | internal/cli | 12 | 203 |
 | internal/config | 16 | 237 |
-| internal/container | 8 | 194 |
+| internal/container | 8 | 195 |
 | internal/convert | 1 | 39 |
 | internal/render | 2 | 45 |
 | internal/engine | 2 | 27 |
@@ -90,7 +90,7 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **86** | **1448** |
+| **Total** | **86** | **1449** |
 
 
 ## Coverage
@@ -1286,9 +1286,9 @@ fixture itself.
 | `TestRedundancySuccess` | The full failover handshake walks its scripted primary and backup sequences to completion |
 | `TestRedundancyStandaloneSkips` | Redundancy makes no calls in standalone mode |
 | `TestDiagnostics` | The dest dir is created, the gather script matches, and both the configs zip and the diagnostics bundle are downloaded under their expected names |
-| `TestServerCertBundleOrder` | What the bundle CONTAINS and in what order, with no transport involved -- so the container platforms and the CLI path are compared against one definition rather than against each other's behaviour. Key before certificate is the order the CLI path has always written; the CAs are deliberately absent, since trusted CAs are installed into the broker's own trust store by `broker configure domain-certs` and are not part of the certificate the broker presents |
+| `TestServerCertBundleOrder` | What the bundle CONTAINS and in what order, with no transport involved -- so the container platforms and the CLI path are compared against one definition rather than against each other's behaviour: the key, the certificate, then the `tls.cas` chain in the order listed (two CAs, so the order is pinned). It is what `broker deploy` mounts on docker/podman and what `configure server-certs` loads, so both present the same chain |
 | `TestServerCertBundleRequiresBothHalves` | The guard including the asymmetric cases: a certificate with no key cannot produce a usable bundle, and neither can a key with no certificate |
-| `TestServerCertBundleReportsAnUnreadableFile` | The error names the path. Once the container platforms build this bundle at deploy time a mistyped path is the likeliest failure, and it has to point at the file rather than at TLS in general |
+| `TestServerCertBundleReportsAnUnreadableFile` | The error names the path, one case per file -- certificate, key, and a `tls.cas` entry (named by its index) -- so whichever is missing is the one reported rather than whichever happens to be read first |
 | `TestServerCertBundleRefusesAKeyBearingCert` | The misconfiguration this concatenation would otherwise turn into a silently wrong file: a `tls.cert` that already carries its private key, alongside a `tls.certKey`, yields a bundle with the key twice. A deployment predating this tool is exactly where a pre-chained file turns up, so the message has to say which of the two fields to change |
 
 ### coverage_test.go
@@ -2202,7 +2202,7 @@ The host-local Docker/Podman manager, its node-local transport, and the engine
 preflight that precedes every mutating operation, plus the engine `inspect` decode
 behind `broker status` and the server-certificate delivery each engine needs, and the
 host rlimit ceilings every engine is bounded by.
-194 tests across 8 files.
+195 tests across 8 files.
 
 ### runtime_test.go
 
@@ -2485,7 +2485,8 @@ previewability.
 | `TestDockerCertChangedEdges` | The two answers `Deploy` cannot reach, since `prepareSecrets` reads the certificate first: a preview compares nothing and probes nothing, and an unreadable certificate is an error naming the file, with nothing inspected |
 | `TestCertSecretRemovalFailureIsFatal` | The certificate secret holds the private key, so failing to remove it fails the teardown -- naming the secret and the command to remove it by hand -- instead of warning like any other leftover, and the other secrets are still attempted |
 | `TestUpdateServerCertSecretPersistsWithoutRestarting` | The store half of `configure server-certs`, which never restarts: podman overwrites only the certificate secret and only when its label differs or is missing; docker keeps no store, touches nothing and says so; no certificate configured does nothing; an unreachable engine or an unreadable certificate fails, naming the cause, before the store is touched |
-| `TestSecretSummaryNamesTheCertificateSource` | The report reads no file, so the certificate's value is always empty there; on both engines it names its source keys instead of reporting a configured certificate as MISSING, while credentials keep `set`/`MISSING` |
+| `TestSecretSummaryNamesTheCertificateSource` | The report reads no file, so the certificate's value is always empty there; on both engines it names its source keys instead of reporting a configured certificate as MISSING -- `tls.cas` too once a chain is configured -- while credentials keep `set`/`MISSING` |
+| `TestContainerBundleCarriesTheChain` | On docker and podman the bundle `broker deploy` resolves is the key, the certificate, then the `tls.cas` chain -- the same bytes `configure server-certs` loads -- so both present the same chain and a renewed CA changes the digest a redeploy compares |
 | `TestLegacyBundleIsRemovedOnDeployAndRemove` | A host an earlier build deployed holds the key as `<baseDir>/<name>-tls-servercertificate.pem`: deploy (after the new unit is written) and remove both delete it -- remove also with TLS no longer configured, since the file outlives the setting -- report it, and leave the directory |
 | `TestDeletePodmanToleratesAMissingBundle` | The normal case after the upgrade: no legacy file under a configured baseDir, or no baseDir at all, fails nothing and says nothing |
 | `TestDryRunNeedsNoCertificateOnDisk` | The previewability guarantee one level up from the pre-shared key's: a preview works before any certificate exists, echoes the store write labelled with the `(preview)` placeholder rather than a digest, never probes the store, and writes nothing |
@@ -2601,7 +2602,7 @@ would bless away.
 | Test | What it covers |
 | --- | --- |
 | `TestServerCertFilePathKeyKeepsItsUnderscore` | A spelling neither engine nor broker would complain about getting wrong. Every credential setting appends a BARE `filepath`; the server certificate's carries an underscore, so deriving it from the generic suffix would produce a setting the broker does not read -- and nothing errors on an unknown environment key, so TLS would simply be off with nothing pointing at the cause |
-| `TestServerCertIsASecretOnBothEngines` | On docker AND podman the certificate is exactly one file-backed secret, named `<container.name>-tls-servercertificate`, appended last, mounted at `certMount`, pointing `certFilePathKey` at it, with no value (render reads no file) and sources `{certKey, cert}` in that order -- and absent when no certificate is configured. Podman used to get a `0600` host file the default non-root broker could not read |
+| `TestServerCertIsASecretOnBothEngines` | On docker AND podman the certificate is exactly one file-backed secret, named `<container.name>-tls-servercertificate`, appended last, mounted at `certMount`, pointing `certFilePathKey` at it, with no value (render reads no file) and sources `{certKey, cert}` in that order, followed by each `tls.cas` file when a chain is configured -- and absent when no certificate is configured. Podman used to get a `0600` host file the default non-root broker could not read |
 | `TestServerCertificateReachesTheContainerOnBothEngines` | The named regression test for a property that previously had only goldens behind it -- a golden break is routinely answered with `-update`, which would silently bless the certificate disappearing from an artifact altogether. Compose defines and mounts the secret; the quadlet carries `Secret=<name>-tls-servercertificate,type=mount,target=/mnt/certs/server/tls.pem` and names no host file -- not the operator's certificate or key, not the legacy bundle path, and no `Volume=` at the mount; both point the broker there; neither mentions the mount with no certificate configured |
 | `TestServerCertBundlePathIsPosixAndUnderBaseDir` | The LEGACY path: where earlier builds wrote podman's bundle, and so the one file the clean-up deletes. Forward slashes, directly under `podman.baseDir`, carrying the container name, no doubled separator -- if it drifted, an upgraded host would keep a private key with nothing to say so |
 | `TestComposeLabelsTheCertificateDigest` | Docker's half of the change detection: the compose file labels the container `solace-util.sha256: "${<EnvVar>_SHA256}"`, unescaped so compose fills it from the child's environment, and never carries a digest, so it stays byte-identical across a renewal. No certificate, no label |

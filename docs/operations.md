@@ -716,7 +716,8 @@ broker.
 
 **The server certificate is a secret on both engines, and never a host file.** The broker
 needs the private key and the certificate in ONE file, so this tool builds that bundle --
-`tls.certKey` then `tls.cert` -- and hands it over like any other credential: docker through
+`tls.certKey`, then `tls.cert`, then the `tls.cas` chain -- and hands it over like any other
+credential: docker through
 the compose child's environment, podman through its secret store as
 `<container.name>-tls-servercertificate`. Both mount it at `/mnt/certs/server/tls.pem`,
 `0444`, so the broker can read it whatever `runUser` it runs as, root or not. The secret name
@@ -731,8 +732,8 @@ it as a label on the store secret. Docker has no secret object to label, so it g
 container: the compose file names `${<NAME>_TLS_SERVERCERTIFICATE_SHA256}`, filled from the
 compose child's environment like the secret itself, so the file stays byte-identical across a
 renewal and holds no digest. Kubernetes puts it as an annotation on the TLS Secret this env
-file builds (a label value stops at 63 characters; the digest is 64), covering the chain in
-`tls.crt`, CAs included. The rule is the same everywhere, and since the name is derived the
+file builds (a label value stops at 63 characters; the digest is 64). On every platform the
+digest covers the `tls.cas` chain too, so a renewed CA is noticed like a renewed certificate. The rule is the same everywhere, and since the name is derived the
 digest decides alone: a **matching** one leaves the certificate as it is; a **different or
 missing** one (a host or cluster an earlier build deployed) means every artifact is applied
 and, **if the broker is running**, you are asked before it restarts -- or it restarts at once
@@ -857,7 +858,7 @@ container matches the data keys of the equivalent Kubernetes Secret:
 | `semp.additionalUsers[].password` | `/mnt/secrets/username_<username>_password` | `<container.name>-user-<username>-password` |
 | `redundancy.psk` (HA) | `/mnt/secrets/redundancy_authentication_presharedkey_key` | `<container.name>-redundancy-psk` |
 | `tls.certPassphrase` | `/mnt/secrets/tls_servercertificate_passphrase` | `<container.name>-tls-passphrase` |
-| `tls.cert` + `tls.certKey` | `/mnt/certs/server/tls.pem` | `<container.name>-tls-servercertificate` (one file: the key, then the certificate) |
+| `tls.cert` + `tls.certKey` (+ `tls.cas`) | `/mnt/certs/server/tls.pem` | `<container.name>-tls-servercertificate` (one file: the key, the certificate, then the chain) |
 
 The host-side name carries `container.name` (default `solace`) so two brokers on one host
 never share a podman store entry or a compose variable. On Kubernetes the operator mounts

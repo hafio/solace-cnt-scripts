@@ -705,14 +705,15 @@ func ContainerSecrets(c *config.Config, p config.Platform) []ContainerSecret {
 		})
 	}
 	// The server certificate, appended LAST so no existing index or golden moves. Its
-	// value is the bundle the broker needs in ONE file -- the private key, then the
-	// certificate (broker.ServerCertBundle) -- and both engines deliver it the way they
-	// deliver every other credential: docker from the compose child's environment,
-	// podman from its own secret store, each mounted at certMount with the engine's
-	// default 0444 mode, so any run user can read it, root or not. Nothing is written
-	// to the host. (Podman used to bind-mount a 0600 host file here instead, which the
-	// default non-root broker could not read; container.removeLegacyCertBundle
-	// deletes that file from hosts an earlier build deployed.)
+	// value is the bundle the broker needs in ONE file -- the private key, the
+	// certificate, then the tls.cas chain (broker.ServerCertBundle) -- and both engines
+	// deliver it the way they deliver every other credential: docker from the compose
+	// child's environment, podman from its own secret store, each mounted at certMount
+	// with the engine's default 0444 mode, so any run user can read it, root or not.
+	// Nothing is written to the host. (Podman used to bind-mount a 0600 host file here
+	// instead, which the default non-root broker could not read;
+	// container.removeLegacyCertBundle deletes that file from hosts an earlier build
+	// deployed.)
 	//
 	// It is NOT a containerSecretSpecs entry, which is the trap worth naming: EnvPairs
 	// walks that list directly, so a spec would emit a second, wrongly spelled
@@ -723,8 +724,9 @@ func ContainerSecrets(c *config.Config, p config.Platform) []ContainerSecret {
 			Name:      prefix + certSuffix,
 			EnvKey:    "tls_servercertificate",
 			ConfigKey: "tls.cert",
-			// Value stays empty here: render may not read a file.
-			SourceFiles: []string{c.TLS.CertKey, c.TLS.Cert},
+			// Value stays empty here: render may not read a file. The order is the
+			// bundle's own (broker.ServerCertBundle): key, certificate, chain.
+			SourceFiles: append([]string{c.TLS.CertKey, c.TLS.Cert}, c.TLS.CAs...),
 			mount:       certMount,
 			filePathKey: certFilePathKey,
 		})

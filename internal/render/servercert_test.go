@@ -89,6 +89,13 @@ func TestServerCertIsASecretOnBothEngines(t *testing.T) {
 		if len(cert.SourceFiles) != 2 || cert.SourceFiles[0] != c.TLS.CertKey || cert.SourceFiles[1] != c.TLS.Cert {
 			t.Errorf("%s: SourceFiles = %v, want {certKey, cert} in that order", p, cert.SourceFiles)
 		}
+		// The tls.cas chain follows, in order, since the bundle carries it.
+		c.TLS.CAs = []string{"/etc/solace/certs/intermediate.crt"}
+		for _, s := range ContainerSecrets(c, p) {
+			if len(s.SourceFiles) > 0 && (len(s.SourceFiles) != 3 || s.SourceFiles[2] != c.TLS.CAs[0]) {
+				t.Errorf("%s: SourceFiles = %v, want {certKey, cert, ca}", p, s.SourceFiles)
+			}
+		}
 
 		// With no certificate configured there is no such secret.
 		c.TLS.Cert, c.TLS.CertKey = "", ""

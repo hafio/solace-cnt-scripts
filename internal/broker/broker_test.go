@@ -1152,11 +1152,10 @@ func uploadedForRole(ft *fakeTransport, role config.Role, dest string) bool {
 // transport involved -- so the container platforms and the CLI path can be compared
 // against one definition rather than against each other's behaviour.
 //
-// Key before certificate is the order the CLI path has always written (hence
-// serverCertFile's .crt.key extension and the bash ancestor's `cat CERTKEY CERT`).
-// The CAs are deliberately absent: trusted CAs are installed into the broker's own
-// trust store by `config apply domain-certs`, and are not part of the certificate
-// the broker presents.
+// Key, then certificate, then the tls.cas chain in the order listed: the order the CLI
+// path has always written (hence serverCertFile's .crt.key extension and the bash
+// ancestor's `cat CERTKEY CERT CAS`), and now what the container platforms mount too, so
+// deploy and a hot-swap present the same chain. Two CAs, so their order is pinned.
 func TestServerCertBundleOrder(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) string {
@@ -1169,18 +1168,14 @@ func TestServerCertBundleOrder(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.TLS.CertKey = write("tls.key", "KEYBYTES\n")
 	cfg.TLS.Cert = write("tls.crt", "CERTBYTES\n")
-	cfg.TLS.CAs = []string{write("ca.pem", "CABYTES\n")}
+	cfg.TLS.CAs = []string{write("intermediate.pem", "INTERBYTES\n"), write("root.pem", "ROOTBYTES\n")}
 
 	got, err := ServerCertBundle(cfg)
 	if err != nil {
 		t.Fatalf("ServerCertBundle: %v", err)
 	}
-	if want := "KEYBYTES\nCERTBYTES\n"; string(got) != want {
-		t.Errorf("bundle = %q, want %q (key then certificate)", got, want)
-	}
-	if strings.Contains(string(got), "CABYTES") {
-		t.Error("the bundle must not carry tls.cas: CAs go into the broker's trust store via " +
-			"`config apply domain-certs`, not into the certificate it presents")
+	if want := "KEYBYTES\nCERTBYTES\nINTERBYTES\nROOTBYTES\n"; string(got) != want {
+		t.Errorf("bundle = %q, want %q (key, certificate, then the chain in order)", got, want)
 	}
 }
 
@@ -1211,15 +1206,20 @@ func TestServerCertBundleReportsAnUnreadableFile(t *testing.T) {
 	if err := os.WriteFile(real, []byte("BYTES\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// One case per half, so whichever file is missing is the one named. A single
-	// case with both missing would only ever prove whichever happens to be read
-	// first, and would silently stop covering the other half if that order changed.
-	for _, tc := range []struct{ name, cert, key, want string }{
-		{"certificate missing", filepath.Join(dir, "missing.crt"), real, "missing.crt"},
-		{"key missing", real, filepath.Join(dir, "missing.key"), "missing.key"},
+	// One case per file, so whichever is missing is the one named. A single case
+	// with all missing would only ever prove whichever happens to be read first, and
+	// would silently stop covering the others if that order changed.
+	for _, tc := range []struct {
+		name, cert, key string
+		cas             []string
+		want            string
+	}{
+		{"certificate missing", filepath.Join(dir, "missing.crt"), real, nil, "missing.crt"},
+		{"key missing", real, filepath.Join(dir, "missing.key"), nil, "missing.key"},
+		{"CA missing", real, real, []string{real, filepath.Join(dir, "missing-ca.pem")}, "tls.cas[1]"},
 	} {
 		cfg := &config.Config{}
-		cfg.TLS.Cert, cfg.TLS.CertKey = tc.cert, tc.key
+		cfg.TLS.Cert, cfg.TLS.CertKey, cfg.TLS.CAs = tc.cert, tc.key, tc.cas
 		_, err := ServerCertBundle(cfg)
 		if err == nil {
 			t.Errorf("%s: ServerCertBundle must fail when a file cannot be read", tc.name)

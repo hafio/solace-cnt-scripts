@@ -1635,7 +1635,11 @@ func secretSummary(p config.Platform, secrets []render.ContainerSecret) string {
 		// time, so set/MISSING would always say MISSING. The source keys are the
 		// honest answer; whether the files are readable is SecretPreflight's to say.
 		if len(s.SourceFiles) > 0 {
-			parts = append(parts, s.Name+"=(from tls.certKey + tls.cert)")
+			from := "tls.certKey + tls.cert"
+			if len(s.SourceFiles) > 2 {
+				from += " + tls.cas"
+			}
+			parts = append(parts, s.Name+"=(from "+from+")")
 			continue
 		}
 		parts = append(parts, s.Name+"="+setOrMissing(s.Value))
