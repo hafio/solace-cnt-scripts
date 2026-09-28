@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -20,9 +21,16 @@ import (
 // ":<directive>" marker.
 func runComplete(t *testing.T, args ...string) (candidates []string, directive string) {
 	t.Helper()
+	return runCompleteVia(t, cobra.ShellCompRequestCmd, args...)
+}
+
+// runCompleteVia is runComplete through a named request: __complete, or the
+// __completeNoDesc alias the default generated scripts call.
+func runCompleteVia(t *testing.T, req string, args ...string) (candidates []string, directive string) {
+	t.Helper()
 	var buf bytes.Buffer
 	root := newRootCmd(&App{})
-	root.SetArgs(append([]string{cobra.ShellCompRequestCmd}, args...))
+	root.SetArgs(append([]string{req}, args...))
 	root.SetOut(&buf)
 	root.SetErr(io.Discard)
 	if err := root.Execute(); err != nil {
@@ -228,27 +236,40 @@ printf '%s\n' "${COMPREPLY[@]}"
 	}
 }
 
-// TestCompletionNoDescriptions: --no-descriptions is honoured on every shell. It
-// switches the request the generated script makes from __complete to
-// __completeNoDesc, which is the only externally visible difference.
-func TestCompletionNoDescriptions(t *testing.T) {
+// TestCompletionDescriptionsAreOptIn: by default every shell's script lists bare
+// names, the way bash does, and --descriptions brings the help text back. The flag
+// switches the request the generated script makes between __completeNoDesc and
+// __complete, which is the only externally visible difference in the script -- so
+// the default request is also driven, to prove it answers with names alone.
+func TestCompletionDescriptionsAreOptIn(t *testing.T) {
 	for _, shell := range []string{"bash", "zsh", "fish", "powershell"} {
 		t.Run(shell, func(t *testing.T) {
-			with, err := runRoot(t, []string{"auto-complete", shell, "--no-descriptions"})
-			if err != nil {
-				t.Fatalf("completion %s --no-descriptions: %v", shell, err)
-			}
-			if !strings.Contains(with, cobra.ShellCompNoDescRequestCmd) {
-				t.Errorf("completion %s --no-descriptions does not request %s", shell, cobra.ShellCompNoDescRequestCmd)
-			}
-			without, err := runRoot(t, []string{"auto-complete", shell})
+			plain, err := runRoot(t, []string{"auto-complete", shell})
 			if err != nil {
 				t.Fatalf("completion %s: %v", shell, err)
 			}
-			if strings.Contains(without, cobra.ShellCompNoDescRequestCmd) {
-				t.Errorf("completion %s requests %s without the flag", shell, cobra.ShellCompNoDescRequestCmd)
+			if !strings.Contains(plain, cobra.ShellCompNoDescRequestCmd) {
+				t.Errorf("completion %s does not request %s by default", shell, cobra.ShellCompNoDescRequestCmd)
+			}
+			described, err := runRoot(t, []string{"auto-complete", shell, "--descriptions"})
+			if err != nil {
+				t.Fatalf("completion %s --descriptions: %v", shell, err)
+			}
+			if strings.Contains(described, cobra.ShellCompNoDescRequestCmd) {
+				t.Errorf("completion %s --descriptions still requests %s", shell, cobra.ShellCompNoDescRequestCmd)
 			}
 		})
+	}
+
+	got, _ := runCompleteVia(t, cobra.ShellCompNoDescRequestCmd, "")
+	if !slices.Contains(got, "broker") {
+		t.Errorf("%s \"\" = %q, want the bare name broker among them", cobra.ShellCompNoDescRequestCmd, got)
+	}
+	for _, c := range got {
+		if strings.Contains(c, "\t") {
+			t.Errorf("%s offered %q: a description rides after the tab, want the name alone",
+				cobra.ShellCompNoDescRequestCmd, c)
+		}
 	}
 }
 

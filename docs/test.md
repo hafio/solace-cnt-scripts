@@ -951,7 +951,8 @@ one `regen` rewrites both goldens.
 Shell completion end to end. The value tests drive cobra's hidden `__complete`
 endpoint through the real tree -- the same request a loaded completion script makes
 on every TAB press -- via the `runComplete` helper, which cannot reuse `runRoot`
-because that discards cobra's own writer. Nothing here loads an env file: the
+because that discards cobra's own writer. `runCompleteVia` is the same helper through
+a named request, for the `__completeNoDesc` alias the default scripts call. Nothing here loads an env file: the
 per-command `PreRunE` never runs for `__complete`, which is what keeps a TAB press
 from parsing config or executing anything. (`TestCompletionNeverReadsTheEnvFile` in
 `platform_test.go` pins that invariant directly, by completing against an env file
@@ -969,7 +970,7 @@ still runs them.
 | Test | What it covers |
 | --- | --- |
 | `TestCompletionScriptsGenerate` | Each of bash/zsh/fish/powershell emits its own script, matched on the line that actually binds the completer to `solace-util`, so a script that generated but wired up nothing still fails |
-| `TestCompletionNoDescriptions` | `--no-descriptions` is honoured on every shell: the generated script requests `__completeNoDesc` instead of `__complete`, and does not without the flag |
+| `TestCompletionDescriptionsAreOptIn` | Every shell's script lists bare names by default: it requests `__completeNoDesc`, and requests `__complete` only with `--descriptions`. Then drives that default request through `runCompleteVia` to prove it answers with names alone -- `broker` is offered and no candidate carries a tab-separated description |
 | `TestBashScriptDoesNotNeedBashCompletion` | The bash script completes on a host without the `bash-completion` package, which cobra's script needs in two places: its fallback init is only a call to `_get_comp_words_by_ref`, and the directory directive is answered with `_filedir -d`. Asserts the init positionally -- the LAST `__solace-util_init_completion` in the file is the one bash keeps, and that definition must need nothing from the package, so emitting our text first (where cobra's copy would override it) fails. `_filedir` is asserted to exist AND to sit behind a `declare -F` guard, since that name belongs to the package and a host that has it must keep its own. Also that the other three scripts are untouched |
 | `TestBashInitFallbackRejoinsSplitWords` | The replacement fills `cur`/`prev`/`words`/`cword` and rejoins what readline split on `=` and `:` -- the reason cobra passes `-n =:`, since `--platform=docker` reaches the completer as three words and leaving them split completes `--platform docker` while offering nothing for `--platform=d`. Drives real `bash`, because the emitted text says nothing about whether the shell agrees; calls the function directly, so the result turns on neither the host having `bash-completion` nor a built `solace-util` being on PATH for the `__complete` round trip. Both bash tests go through `driveBash`, which feeds the script on STDIN rather than as a `-c` argument: as one argv element Go quotes it by MSVCRT rules while Git Bash re-parses by MSYS rules, and the Windows runner then sees an unterminated quote in a script that is valid |
 | `TestBashFiledirFallbackCompletesDirsOnly` | The `_filedir` stand-in answers `-d` with the directories and not the files beside them, which is all `--base-dir` and `broker copy into --dir` ask for. The fixture carries a directory whose name holds a space -- what an unquoted `$(compgen -d)` splits in half, and why the fallback reads with `readarray` -- and two files, which are what `-d` has to exclude. Drives real `bash` in a `t.TempDir()`, dropping `compopt`'s output since it refuses outside a live completion |

@@ -109,7 +109,7 @@ func newCompletionCmd() *cobra.Command {
 // decision rather than reading the flag itself, which keeps the flag variable scoped
 // to the command that declares it.
 func completionShell(shell, long string, gen func(root *cobra.Command, w io.Writer, desc bool) error) *cobra.Command {
-	var noDesc bool
+	var desc bool
 	c := &cobra.Command{
 		Use:               shell,
 		Short:             "Print the " + shell + " completion script",
@@ -118,10 +118,10 @@ func completionShell(shell, long string, gen func(root *cobra.Command, w io.Writ
 		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// os.Stdout, like emit: the script is this command's only stdout.
-			return gen(cmd.Root(), os.Stdout, !noDesc)
+			return gen(cmd.Root(), os.Stdout, desc)
 		},
 	}
-	c.Flags().BoolVar(&noDesc, "no-descriptions", false, "omit the descriptions shown beside each completion")
+	c.Flags().BoolVar(&desc, "descriptions", false, "show the description beside each completion")
 	return c
 }
 

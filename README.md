@@ -120,8 +120,8 @@ Beyond command and flag names it completes the values they take: the env files `
 would actually resolve, `primary`/`backup`/`monitor` for `--pod`, directories for
 `--base-dir` and `--dir`, and the platform names for `--platform`.
 Completion never reads your env file, so a TAB press cannot parse config, run a command, or
-print anything into the shell. Add `--no-descriptions` to drop the help text shown beside
-each suggestion.
+print anything into the shell. Suggestions are listed as bare names, the way bash lists
+them; add `--descriptions` to show each one's help text beside it.
 
 ## Quick start
 

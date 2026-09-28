@@ -248,7 +248,7 @@ solace-util auto-complete bash [flags]
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--no-descriptions` | `false` | omit the descriptions shown beside each completion |
+| `--descriptions` | `false` | show the description beside each completion |
 
 
 ### solace-util auto-complete fish
@@ -269,7 +269,7 @@ solace-util auto-complete fish [flags]
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--no-descriptions` | `false` | omit the descriptions shown beside each completion |
+| `--descriptions` | `false` | show the description beside each completion |
 
 
 ### solace-util auto-complete powershell
@@ -297,7 +297,7 @@ solace-util auto-complete powershell [flags]
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--no-descriptions` | `false` | omit the descriptions shown beside each completion |
+| `--descriptions` | `false` | show the description beside each completion |
 
 
 ### solace-util auto-complete zsh
@@ -318,7 +318,7 @@ solace-util auto-complete zsh [flags]
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--no-descriptions` | `false` | omit the descriptions shown beside each completion |
+| `--descriptions` | `false` | show the description beside each completion |
 
 
 ### solace-util broker
