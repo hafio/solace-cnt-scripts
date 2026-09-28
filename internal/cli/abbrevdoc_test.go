@@ -99,6 +99,7 @@ func renderAbbrevDocs(root *cobra.Command) []byte {
 	var b strings.Builder
 
 	b.WriteString("# Abbreviations\n\n")
+	b.WriteString(supportNoticeMD + "\n")
 	b.WriteString("Every short form `solace-util` accepts, and the word it stands for.\n\n")
 	b.WriteString("**Generated from the abbreviation sets and the command tree -- do not edit by hand.**\n")
 	b.WriteString("Regenerate after adding or removing one:\n\n")

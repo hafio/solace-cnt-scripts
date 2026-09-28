@@ -1,7 +1,7 @@
 // Command solace is a single CLI for deploying and operating Solace PubSub+
 // Event Brokers on Kubernetes (via the EventBroker Operator), Docker, or Podman.
-// It presents the same lifecycle verbs on every platform. Unsupported -- not a
-// Solace product.
+// It presents the same lifecycle verbs on every platform. Not a supported Solace
+// product: supported only by Solace Professional Services.
 package main
 
 import (

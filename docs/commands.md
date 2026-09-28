@@ -1,5 +1,13 @@
 # Command reference
 
+> [!WARNING]
+> **Not a supported Solace product.** `solace-util` was created by Solace
+> Professional Services and is supported only by Solace Professional Services --
+> not by Solace Support. For help with this tool, contact your Solace
+> Professional Services representative rather than opening a Solace Support
+> case. This notice covers this tool only, not the Solace PubSub+ Event Broker
+> or the EventBroker Operator that it deploys and operates.
+
 Every command `solace-util` exposes, with its arguments and flags.
 
 **Generated from the command tree -- do not edit by hand.** Regenerate after any

@@ -12,7 +12,9 @@ describing behaviour and this file is describing a constraint: fix the drift, do
 A single Go binary, `solace-util`, that deploys and operates Solace PubSub+ Event Brokers on
 Kubernetes (via the Solace EventBroker Operator and its PubSubPlusEventBroker CRD), Docker and
 Podman. You describe the broker once in a YAML env file and drive the whole lifecycle from one
-standardized command tree. **Unsupported** -- not a Solace product.
+standardized command tree. **Not a supported Solace product** -- supported only by Solace
+Professional Services. Every doc opens with the README's notice, verbatim
+(`TestEveryDocCarriesTheSupportNotice`); a new doc needs it too.
 
 [README.md](README.md) is the quick start. [docs/configuration.md](docs/configuration.md) is the
 env-file reference, [docs/operations.md](docs/operations.md) the day-2 lifecycle,

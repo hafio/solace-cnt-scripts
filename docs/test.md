@@ -1,5 +1,13 @@
 # Test catalogue
 
+> [!WARNING]
+> **Not a supported Solace product.** `solace-util` was created by Solace
+> Professional Services and is supported only by Solace Professional Services --
+> not by Solace Support. For help with this tool, contact your Solace
+> Professional Services representative rather than opening a Solace Support
+> case. This notice covers this tool only, not the Solace PubSub+ Event Broker
+> or the EventBroker Operator that it deploys and operates.
+
 Every Go test in this repository, grouped by package and file, with a one-line statement of
 what each one proves. Use it to find existing coverage before adding a test, and to spot
 what is *not* covered.
@@ -59,7 +67,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-86 test files, 1447 test functions. Three of those are not tests. Two are os/exec
+86 test files, 1448 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -72,7 +80,7 @@ launched from.
 | --- | --- | --- |
 | internal/k8s | 19 | 230 |
 | internal/broker | 22 | 430 |
-| internal/cli | 12 | 202 |
+| internal/cli | 12 | 203 |
 | internal/config | 16 | 237 |
 | internal/container | 8 | 194 |
 | internal/convert | 1 | 39 |
@@ -82,7 +90,7 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **86** | **1447** |
+| **Total** | **86** | **1448** |
 
 
 ## Coverage
@@ -729,7 +737,7 @@ without a live broker;
 fixtures stand in for a captured `show current-config` transcript; and
 `exportconfigReadCounter` wraps `App.PromptIn` to prove a confirmation prompt was never
 actually read, not merely that the command did not block.
-202 tests across 12 files.
+203 tests across 12 files.
 
 Because the platform is a flag rather than the first word of a command, the
 invocations here name it explicitly (`--platform docker`) rather than relying on
@@ -923,6 +931,7 @@ the destructive-confirmation tests use.
 | Test | What it covers |
 | --- | --- |
 | `TestCommandDocs` | Renders the command reference from the live tree and fails while `docs/commands.md` is stale -- the drift gate for every command path, positional, flag, `Short`/`Long` string, alias, and platform/render-only annotation. This file is also the generator: `-update` rewrites the doc |
+| `TestEveryDocCarriesTheSupportNotice` | Every doc -- the README and every file under `docs/`, generated or not -- opens with its title and then the support notice exactly as `supportNoticeMD` holds it (not a supported Solace product; supported only by Solace Professional Services). The three generated docs get it from their generators, `internal/broker`'s import.md one from a copy this test keeps honest. Skipped under `-update`, since regen rewrites import.md after this package runs |
 
 ### abbrevdoc_test.go
 

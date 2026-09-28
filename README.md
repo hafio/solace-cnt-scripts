@@ -1,5 +1,13 @@
 # solace-util
 
+> [!WARNING]
+> **Not a supported Solace product.** `solace-util` was created by Solace
+> Professional Services and is supported only by Solace Professional Services --
+> not by Solace Support. For help with this tool, contact your Solace
+> Professional Services representative rather than opening a Solace Support
+> case. This notice covers this tool only, not the Solace PubSub+ Event Broker
+> or the EventBroker Operator that it deploys and operates.
+
 A single Go binary that deploys and operates Solace PubSub+ Event Brokers on
 Kubernetes, Docker, or Podman. You describe the broker once in a YAML env file and drive
 the whole lifecycle through one standardized command tree:
@@ -25,10 +33,10 @@ needs and is safe to re-run.
 
 | Platform | State |
 | --- | --- |
-| Kubernetes (via the Solace EventBroker Operator) | Fully supported |
-| Docker / Podman (host-local containers, no operator) | Fully supported |
+| Kubernetes (via the Solace EventBroker Operator) | Fully implemented |
+| Docker / Podman (host-local containers, no operator) | Fully implemented |
 
-> Unsupported -- this is not a Solace product. Use at your own risk.
+"Implemented" is this tool's own status, not Solace support: see the notice at the top.
 
 ## Documentation
 
@@ -53,7 +61,6 @@ needs and is safe to re-run.
   the broker. Podman deploys a systemd **quadlet** unit and needs systemd; Docker deploys
   through **compose**, so that host needs the compose plugin (`docker compose`) or the
   standalone `docker-compose` binary -- set `docker.compose` when it is the latter.
-- **Building from source:** Go 1.27+.
 
 Version-specific caveats (podman secret flags, the compose version the generated file
 needs, wrapper runtimes such as `microk8s kubectl`) are in
@@ -61,20 +68,12 @@ needs, wrapper runtimes such as `microk8s kubectl`) are in
 
 ## Get the binary
 
-Download a release binary for your platform, or build it:
+Download the release binary for your platform. `solace-util version` prints its version,
+the Go toolchain, and the OS/arch it was built for:
 
 ```
-go build -o solace-util .
+solace-util v1.2.3 go1.27.0 linux/amd64
 ```
-
-`solace-util version` prints the stamped version (or `dev` for a plain `go build`), the Go
-toolchain, and the OS/arch it was built for:
-
-```
-solace-util v1.2.3 go1.26.5 linux/amd64
-```
-
-Release builds and cross-compilation are in [docs/developer.md](docs/developer.md#build).
 
 ## Shell completion
 

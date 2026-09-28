@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -63,6 +64,49 @@ func firstDiff(got, want []byte) string {
 	return ""
 }
 
+// supportNoticeMD is the support notice every doc opens with, right under its title: the
+// README's own block, byte for byte. The two generators here write it, internal/broker's
+// import.md generator carries a copy, and TestEveryDocCarriesTheSupportNotice holds every
+// doc -- generated or not -- to this exact text.
+const supportNoticeMD = "" +
+	"> [!WARNING]\n" +
+	"> **Not a supported Solace product.** `solace-util` was created by Solace\n" +
+	"> Professional Services and is supported only by Solace Professional Services --\n" +
+	"> not by Solace Support. For help with this tool, contact your Solace\n" +
+	"> Professional Services representative rather than opening a Solace Support\n" +
+	"> case. This notice covers this tool only, not the Solace PubSub+ Event Broker\n" +
+	"> or the EventBroker Operator that it deploys and operates.\n"
+
+// TestEveryDocCarriesTheSupportNotice: every doc opens with the same support notice,
+// right under its title -- the README and every file under docs/, generated or not -- so
+// none of them is read without it and no copy drifts from the others. The three
+// generated docs get it from their generators; a stale one fails here before regen.
+//
+// Skipped under -update: regen rewrites the generated docs package by package, and
+// internal/broker's import.md is regenerated AFTER this package runs, so checking here
+// would compare against a doc that is mid-rewrite. The `test` gate checks it.
+func TestEveryDocCarriesTheSupportNotice(t *testing.T) {
+	if *update {
+		t.Skip("regen is rewriting the generated docs; the test task checks the notice")
+	}
+	files, err := filepath.Glob(filepath.Join("..", "..", "docs", "*.md"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no docs found under docs/: %v", err)
+	}
+	files = append(files, filepath.Join("..", "..", "README.md"))
+	for _, f := range files {
+		body, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		title, rest, _ := strings.Cut(string(body), "\n")
+		if !strings.HasPrefix(title, "# ") || !strings.HasPrefix(rest, "\n"+supportNoticeMD+"\n") {
+			t.Errorf("%s must open with its title and then, after one blank line, the support notice "+
+				"exactly as supportNoticeMD holds it", f)
+		}
+	}
+}
+
 // renderCommandDocs renders the whole command tree as markdown. It is the single
 // source of truth for docs/commands.md: every fact in the reference is read off
 // the cobra tree, so the doc cannot describe a command that does not exist.
@@ -70,6 +114,7 @@ func renderCommandDocs(root *cobra.Command) []byte {
 	var b strings.Builder
 
 	b.WriteString("# Command reference\n\n")
+	b.WriteString(supportNoticeMD + "\n")
 	b.WriteString("Every command `solace-util` exposes, with its arguments and flags.\n\n")
 	b.WriteString("**Generated from the command tree -- do not edit by hand.** Regenerate after any\n")
 	b.WriteString("command, flag, or description change:\n\n")

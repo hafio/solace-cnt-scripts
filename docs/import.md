@@ -1,5 +1,13 @@
 # What `import-config` applies
 
+> [!WARNING]
+> **Not a supported Solace product.** `solace-util` was created by Solace
+> Professional Services and is supported only by Solace Professional Services --
+> not by Solace Support. For help with this tool, contact your Solace
+> Professional Services representative rather than opening a Solace Support
+> case. This notice covers this tool only, not the Solace PubSub+ Event Broker
+> or the EventBroker Operator that it deploys and operates.
+
 This file is GENERATED from `internal/broker/sections.go` by
 `internal/broker/importdoc_test.go`. Do not edit it by hand: run the `regen` task.
 
