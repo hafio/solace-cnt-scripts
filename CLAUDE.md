@@ -44,8 +44,11 @@ The layering is enforced by convention, not by a compiler, so it is stated here:
 ## Generated files -- never hand-edit one
 
 [docs/commands.md](docs/commands.md), [docs/abbreviation.md](docs/abbreviation.md),
-[docs/import.md](docs/import.md), `env/sample.yaml` and every `testdata/*.golden` are
-**generated**. `test` fails while one is stale, so any change to a command, flag, `Short`,
+[docs/import.md](docs/import.md), `env/sample.yaml`, every `testdata/*.golden` and the `GEN`
+block of `solace-yaml-generator.html` are **generated**. The rest of that page is hand-written
+JavaScript no test runs: a change to `render.BrokerCR`, the Kubernetes Secret or operator
+renderers, or the env-file schema means the matching page edit and the cross-check in
+[docs/developer.md](docs/developer.md#the-env-file-generator-page). `test` fails while one is stale, so any change to a command, flag, `Short`,
 abbreviation, import rule or the schema means regenerating in the same change with the `regen`
 task. `regen` is deliberately outside `all`/`full`: a gate must not rewrite what it compares
 against.

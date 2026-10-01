@@ -88,6 +88,7 @@ while any of them is stale. `regen` is the one task that rewrites them:
 | `internal/k8s/testdata/*.golden` | the k8s package's manifest tests |
 | `internal/convert/testdata/*.golden` | the convert package's conversion tests |
 | [../env/sample.yaml](../env/sample.yaml) | `TestSampleYAMLMatchesTheFullExample` in [internal/examples/examples_test.go](../internal/examples/examples_test.go), from `internal/examples/assets/full.yaml` -- the template a bare `solace-util examples` prints. `regen` runs this package **first**, because the render and k8s goldens are rendered from the sample it rewrites |
+| the `GEN` block of [../solace-yaml-generator.html](../solace-yaml-generator.html) | `TestGeneratorPageEmbedsTheCLI` in [internal/k8s/generatorpage_test.go](../internal/k8s/generatorpage_test.go), from the embedded operator bundle and `config.ApplyDefaults`. Only the block between its `BEGIN GENERATED` and `END GENERATED` lines is rewritten; the rest of the page is hand-written -- see [The env-file generator page](#the-env-file-generator-page) |
 
 `regen` walks `./internal/examples ./internal/cli ./internal/convert ./internal/render
 ./internal/k8s ./internal/broker` in that order (both scripts' `task_regen`/`Task-regen`).
@@ -99,6 +100,43 @@ golden is rendered from it.
 Never hand-edit one. A stale-golden failure names the file and the first differing line;
 the fix is `regen`, then review the diff before committing it. Any command, flag, `Short`
 or `Long` change therefore means regenerating `commands.md` in the same change.
+
+## The env-file generator page
+
+[solace-yaml-generator.html](../solace-yaml-generator.html) is one self-contained page,
+opened from disk in a browser. Its form covers every env-file key; it writes the env file,
+lists what `config.Load` would refuse, and previews the two Kubernetes artifacts:
+`solace-util operator generate` and `solace-util broker generate`. For anything the form can
+express, both previews are meant to be byte-identical to what the CLI renders from the env
+file shown. A value given as an `*Env` reference shows as `<value of $NAME>`, since only the
+CLI reads the variable.
+
+Two halves, kept in step differently:
+
+- **What is copied from Go is generated.** The operator bundle and every default the page
+  shows sit in its `GEN` block. `TestGeneratorPageEmbedsTheCLI` fails while that block is
+  stale -- a bundle bump, a changed default -- and `regen` rewrites it. The test also fails
+  when the bundle gains a template action the page's renderer does not implement, which
+  regen cannot fix: extend `renderOperatorTemplate`, then the test's `pageOperatorActions`.
+- **What is logic is hand-written** -- the env-file emitter and the ports of
+  `render.BrokerCR`, `k8s.GenSecrets`/`GenBroker` and `k8s.GenOperator`. Nothing in the
+  suite runs the JavaScript, so a change to any of those Go renderers or to the env-file
+  schema needs the matching edit in the page, and this cross-check before it ships.
+
+The cross-check. Open the page, set up a scenario, download `env.yaml`, then:
+
+```
+solace-util operator generate -e env.yaml --platform kubernetes > operator.cli.yaml
+solace-util broker generate -e env.yaml --platform kubernetes > broker.cli.yaml
+diff operator.cli.yaml operator.yaml        # the page's Download from each panel
+diff broker.cli.yaml broker.yaml
+solace-util broker generate -e env.yaml --platform docker    # or podman: must load
+```
+
+Both diffs must be empty, using literal secrets and the certificate files picked in the TLS
+section. Run it for the form's defaults; HA with TLS files, registry credentials, additional
+users, a monitor password and a PSK; existing claims with pod metadata and node and pod
+affinity; replication with each kind of `via`; and a rootless podman file.
 
 ## Tests
 
@@ -156,6 +194,7 @@ git tag v0.1.0 && git push origin v0.1.0
 | `internal/tools/vulnjudge` | Dev-only judge the `scan` task pipes govulncheck JSON through. |
 | `internal/examples` | The embedded env-file templates `examples` prints, and the generator for `env/sample.yaml`. |
 | `env/` | Config files. `sample.yaml` is generated -- edit `internal/examples/assets/full.yaml`. |
+| `solace-yaml-generator.html` | The browser env-file generator; its `GEN` block is generated (see [The env-file generator page](#the-env-file-generator-page)). |
 | `docs/` | [commands.md](commands.md) -- generated CLI reference; [abbreviation.md](abbreviation.md) -- generated glossary of every short form; [configuration.md](configuration.md) -- the env file; [operations.md](operations.md) -- day-2 procedures; [developer.md](developer.md) -- this file; [test.md](test.md) -- the catalogue of every test. |
 | `scripts/` | `dev.ps1` / `dev.sh` developer tooling. |
 | `graphify-out/` | Persistent knowledge graph of the repo. Rebuild with the `graphify` task. |

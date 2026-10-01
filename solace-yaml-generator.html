@@ -83,1008 +83,1589 @@ body{font-family:'Inter',system-ui,sans-serif;font-size:.88rem;color:var(--tp);b
 .p-add:hover{background:#00a87d}
 
 @media(max-width:1000px){.sidebar{display:none}.page{height:auto}.main-area{flex-direction:column}.form-scroll,.yaml-scroll{overflow:visible;min-width:0}.yaml-scroll{max-height:none}}
+
+/* Platform-scoped sections: shown only while their platform is ticked */
+.plat-k8s,.plat-ctr,.plat-docker,.plat-podman{display:none}
+.plat-k8s.vis,.plat-ctr.vis,.plat-docker.vis,.plat-podman.vis{display:block}
+.sb-item.plat-k8s,.sb-item.plat-ctr{display:none}
+.sb-item.plat-k8s.vis,.sb-item.plat-ctr.vis{display:block}
+.sub{font-size:.72rem;color:var(--ts);margin:.6rem 0 .4rem;font-weight:600}
+
+/* Generic dynamic rows (users, CA files, endpoints, terms ...) */
+.row{display:flex;gap:.4rem;align-items:flex-start;margin-bottom:.35rem;flex-wrap:wrap}
+.row input,.row select,.row textarea{padding:.3rem .5rem;background:var(--bgi);border:1px solid var(--bc);border-radius:var(--r);font-family:inherit;font-size:.78rem;color:var(--tp);min-width:0}
+.row textarea{font-family:'Consolas','Fira Code',monospace;font-size:.72rem;min-height:2.2rem;flex:2 1 12rem}
+.row input{flex:1 1 7rem}.row .w-s{flex:0 0 5rem}.row .w-m{flex:0 0 8rem}
+.row input[type=file]{flex:1 1 10rem;font-size:.72rem}
+.row .p-rm{background:#fee;color:#c33;border:1px solid #fcc;border-radius:var(--r);width:1.7rem;height:1.7rem;font-size:1rem;font-weight:700;cursor:pointer;padding:0;line-height:1;flex-shrink:0}
+.row .p-rm:hover{background:#fcc}
+.site{border:1px dashed var(--bc);border-radius:var(--r);padding:.6rem;margin-bottom:.6rem}
+
+/* Problems found in the form */
+.probs{background:#fff7e6;border:1px solid var(--so);border-radius:var(--r);padding:.5rem .7rem;margin-bottom:1rem;font-size:.74rem;color:#5a3b00}
+.probs.ok{background:#e9fbf4;border-color:var(--sg);color:#04563f}
+.probs ul{margin:.3rem 0 0 1rem}
+.probs .err{color:#a11}
 </style>
 </head>
 <body>
-<div class="hero"><h1>Solace YAML Generator</h1><div class="sub">Generate Kubernetes deployment manifests</div></div>
+<div class="hero"><h1>Solace YAML Generator</h1><div class="sub">Build a solace-util env file, and preview what <code>operator generate</code> and <code>broker generate</code> render from it</div></div>
 <div class="page">
 
 <!-- Sidebar -->
 <nav class="sidebar" id="sidebar">
-  <div class="sb-hdr">YAML Generation</div>
-  <a class="sb-item active" data-s="s-repo">Image Repository</a>
-  <a class="sb-item" data-s="s-op">Operator</a>
-  <a class="sb-item" data-s="s-broker">Broker</a>
+  <div class="sb-hdr">Every platform</div>
+  <a class="sb-item active" data-s="s-plat">Platforms</a>
+  <a class="sb-item" data-s="s-image">Image</a>
+  <a class="sb-item" data-s="s-red">Redundancy</a>
+  <a class="sb-item" data-s="s-semp">Credentials</a>
+  <a class="sb-item" data-s="s-tls">TLS</a>
   <a class="sb-item" data-s="s-scale">Scaling</a>
-  <a class="sb-item" data-s="s-res">Resources</a>
-  <a class="sb-item" data-s="s-storage">Storage</a>
-  <a class="sb-item" data-s="s-creds">Credentials</a>
-  <a class="sb-item" data-s="s-tls">TLS / SSL</a>
-  <a class="sb-item" data-s="s-secctx">Security Context</a>
-  <a class="sb-item" data-s="s-labels">Node Labels</a>
-  <a class="sb-item" data-s="s-tol">Node Tolerations</a>
-  <a class="sb-item" data-s="s-aa">Anti-Affinity</a>
-  <a class="sb-item" data-s="s-lb">Load Balancer</a>
-  <a class="sb-item" data-s="s-ports">Service Ports</a>
-  <div class="sb-hdr">Docker / Podman</div>
-  <a class="sb-item" data-s="s-ctr">Container Host</a>
-  <a class="sb-item" data-s="s-ctrnet">Container Network</a>
-  <a class="sb-item" data-s="s-nodes">Redundancy Group</a>
-  <div class="sb-hdr">Env Only</div>
-  <a class="sb-item" data-s="s-tlspaths">TLS Cert Paths</a>
-  <a class="sb-item" data-s="s-domcert">Domain Certificates</a>
-  <a class="sb-item" data-s="s-prodkeys">Product Keys</a>
+  <a class="sb-item" data-s="s-broker">Broker operations</a>
+  <a class="sb-item" data-s="s-domcert">Domain certificates</a>
   <a class="sb-item" data-s="s-repl">Replication</a>
-  <a class="sb-item" data-s="s-diag">Diagnostics &amp; CLI</a>
+  <div class="sb-hdr plat-k8s">Kubernetes</div>
+  <a class="sb-item plat-k8s" data-s="s-k8s">Cluster and broker</a>
+  <a class="sb-item plat-k8s" data-s="s-ksecrets">Secret names</a>
+  <a class="sb-item plat-k8s" data-s="s-storage">Storage and memory</a>
+  <a class="sb-item plat-k8s" data-s="s-op">Operator</a>
+  <a class="sb-item plat-k8s" data-s="s-secctx">Security context</a>
+  <a class="sb-item plat-k8s" data-s="s-podmeta">Pod metadata</a>
+  <a class="sb-item plat-k8s" data-s="s-place">Placement</a>
+  <a class="sb-item plat-k8s" data-s="s-lb">Load balancer</a>
+  <a class="sb-item plat-k8s" data-s="s-ports">Service ports</a>
+  <div class="sb-hdr plat-ctr">Docker / Podman</div>
+  <a class="sb-item plat-ctr" data-s="s-engine">Engines</a>
+  <a class="sb-item plat-ctr" data-s="s-ctr">Container</a>
+  <a class="sb-item plat-ctr" data-s="s-health">Health check</a>
+  <a class="sb-item plat-ctr" data-s="s-net">Network</a>
 </nav>
 
 <div class="main-area">
 <!-- Form -->
 <div class="form-scroll" id="formScroll">
 
-  <!-- 1. Image Repository -->
-  <div class="sec" id="s-repo"><h3>Image Repository</h3>
-    <div class="f"><label>Registry Hostname</label><input id="i-repo" placeholder="e.g. repo.tcp.intranet.example.com" oninput="gen()"><div class="h">Prepended to all image paths. Leave blank for default Docker Hub.</div></div>
-    <div class="tgl"><input type="checkbox" id="i-pson" onchange="togOpt('i-pson','ps-fields');gen()"><label for="i-pson">Require image pull secret</label></div>
-    <div class="opt-fields" id="ps-fields">
-      <div class="f"><label>Image Pull Secret Name</label><input id="i-pullsecret" value="registry-pull-secret" oninput="gen()"></div>
-      <div class="fr">
-        <div class="f"><label>Registry Username</label><input id="i-imguser" placeholder="docker-user" oninput="gen()"></div>
-        <div class="f"><label>Registry Password</label><input id="i-imgpass" type="password" placeholder="docker-pass" oninput="gen()"></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 2. Operator -->
-  <div class="sec" id="s-op"><h3>Operator</h3>
-    <div class="f"><label>Operator Namespace</label><input id="i-opns" value="pubsubplus-operator-system" oninput="gen()"></div>
-    <div class="f"><label>Operator Image</label><input id="i-opimg" value="solace/pubsubplus-eventbroker-operator:1.4.0" oninput="gen()"></div>
-    <div class="f"><label>Watch Namespaces</label><input id="i-opwatch" placeholder="e.g. sol-ns1,sol-ns2 (blank = all)" oninput="gen()"><div class="h">Comma-separated list of namespaces the operator monitors.</div></div>
-    <div class="f"><div class="tgl"><input type="checkbox" id="i-opwatchbroker" checked onchange="gen()"><label for="i-opwatchbroker">Also watch the broker namespace</label></div><div class="h">On by default, matching the CLI. Appends the broker namespace to the list above, so leaving both unset watches only the broker's own namespace instead of every namespace.</div></div>
+  <div class="sec" id="s-plat"><h3>Platforms</h3>
+    <div class="h" style="margin-bottom:.5rem">Each ticked platform gets its own section in the env file, and each section declares that platform. A file declaring more than one needs <code>--platform</code> on every command. Blank fields everywhere mean the CLI default; the placeholder shows it.</div>
     <div class="fr">
-      <div class="f"><label>Operator CPU</label><input id="i-opcpu" value="500m" oninput="gen()"></div>
-      <div class="f"><label>Operator Memory</label><input id="i-opmem" value="512Mi" oninput="gen()"></div>
+      <div class="tgl"><input type="checkbox" id="i-pk8s" checked onchange="togPlat();gen()"><label for="i-pk8s">Kubernetes</label></div>
+      <div class="tgl"><input type="checkbox" id="i-pdocker" onchange="togPlat();gen()"><label for="i-pdocker">Docker</label></div>
+      <div class="tgl"><input type="checkbox" id="i-ppodman" onchange="togPlat();gen()"><label for="i-ppodman">Podman</label></div>
     </div>
+    <div class="f"><label>Timezone</label><input id="i-timezone" placeholder="(image default)" oninput="gen()"><div class="h">e.g. Asia/Singapore. Applies to every platform.</div></div>
   </div>
 
-  <!-- 3. Broker -->
-  <div class="sec" id="s-broker"><h3>Broker</h3>
+  <div class="sec" id="s-image"><h3>Image</h3>
     <div class="fr">
-      <div class="f"><label>Broker Name</label><input id="i-bkname" value="solace-event-broker" oninput="gen()"></div>
-      <div class="f"><label>Broker Namespace</label><input id="i-bkns" value="solace-namespace" oninput="gen()"></div>
+      <div class="f"><label>Repository (mandatory)</label><input id="i-repo" value="solace-pubsub-standard" oninput="gen()"></div>
+      <div class="f"><label>Tag (mandatory)</label><input id="i-tag" value="10.26.0.8755" oninput="gen()"><div class="h">A version number, not latest: the health check needs one to prove 10.26+.</div></div>
     </div>
+    <div class="f"><label>Registry</label><input id="i-registry" placeholder="(none: Docker Hub)" oninput="gen()"><div class="h">Prefixed to the broker image and the operator image, e.g. registry.example.com:5000.</div></div>
     <div class="fr">
-      <div class="f"><label>Broker Image</label><input id="i-bkimg" value="solace-pubsub-standard" oninput="gen()"></div>
-      <div class="f"><label>Image Tag</label><input id="i-bktag" value="latest" oninput="gen()"></div>
+      <div class="f"><label>Registry user</label><input id="i-imguser" oninput="gen()"></div>
+      <div class="f"><label>Registry password</label><input id="i-imgpass" type="password" oninput="gen()"></div>
+      <div class="f"><label>...or env var holding it</label><input id="i-imgpassenv" placeholder="REGISTRY_PASS" oninput="gen()"></div>
     </div>
-    <div class="tgl"><input type="checkbox" id="i-ha" onchange="togHA();gen()"><label for="i-ha">High Availability (3-node redundancy)</label></div>
+    <div class="h">With both a user and a password, Kubernetes gets a pull Secret built from them (and the operator a regcred); docker and podman log in.</div>
+  </div>
+
+  <div class="sec" id="s-red"><h3>Redundancy</h3>
+    <div class="tgl"><input type="checkbox" id="i-ha" onchange="togHA();gen()"><label for="i-ha">High availability (primary, backup and monitor)</label></div>
+    <div class="h" style="margin-bottom:.5rem">The node table is read by docker and podman only, and is identical in the env file on all three hosts. Standalone needs no name: the host's own hostname is used.</div>
     <div class="fr">
-      <div class="f"><label>Pod Restart Strategy</label><select id="i-updatestrategy" onchange="gen()"><option value="automatedRolling" selected>Automated Rolling</option><option value="manualPodRestart">Manual Pod Restart</option></select></div>
-      <div class="f"><label>Timezone</label><input id="i-timezone" placeholder="e.g. Asia/Singapore" oninput="gen()"><div class="h">Optional, applies to kubernetes, docker and podman. Blank leaves the broker on the image default.</div></div>
-    </div>
-    <div class="fr">
-      <div class="f"><label>Kubectl Command</label><input id="i-kubectl" placeholder="kubectl" oninput="gen()"><div class="h">Optional. A whole profile works: oc, microk8s kubectl, or kubectl --kubeconfig /path/.kubeconfig-dev. Blank means kubectl.</div></div>
-      <div class="f"><label>Service Account</label><input id="i-svcaccount" placeholder="(namespace default)" oninput="gen()"><div class="h">Optional service account for the broker pods.</div></div>
-    </div>
-  </div>
-
-  <!-- 4. Scaling -->
-  <div class="sec" id="s-scale"><h3>Scaling</h3>
-    <div class="fr">
-      <div class="f"><label>Max Client Connections</label><select id="i-maxconn" onchange="syncTier();gen()"><option value="100" selected>100</option><option value="1000">1,000</option><option value="10000">10,000</option><option value="100000">100,000</option><option value="200000">200,000</option></select></div>
-      <div class="f"><label>Max Spool Usage (MB)</label><input id="i-maxpool" value="10000" oninput="gen()"></div>
-      <div class="f"><label>Max Queue Messages (M)</label><select id="i-maxqmsg" onchange="gen()"><option value="100" selected>100</option><option value="240">240</option><option value="3000">3,000</option></select></div>
-    </div>
-    <div class="fr">
-      <div class="f"><label>Max Kafka Bridges</label><select id="i-maxkb" onchange="gen()"><option value="0" selected>0</option><option value="10">10</option><option value="50">50</option><option value="200">200</option></select></div>
-      <div class="f"><label>Max Kafka Connections</label><select id="i-maxkc" onchange="gen()"><option value="0" selected>0</option><option value="300">300</option><option value="2000">2,000</option><option value="10000">10,000</option></select></div>
-      <div class="f"><label>Max Bridges</label><select id="i-maxbr" onchange="gen()"><option value="25" selected>25</option><option value="500">500</option><option value="5000">5,000</option></select></div>
-    </div>
-    <div class="fr">
-      <div class="f"><label>Max Subscriptions</label><select id="i-maxsub" onchange="gen()"><option value="50000" selected>50,000</option><option value="500000">500,000</option><option value="5000000">5,000,000</option></select></div>
-      <div class="f"><label>Max Guaranteed Msg Size (MB)</label><select id="i-maxgms" onchange="gen()"><option value="10" selected>10</option><option value="30">30</option></select></div>
-    </div>
-  </div>
-
-  <!-- 5. Resources -->
-  <div class="sec" id="s-res"><h3>Resources</h3>
-    <div class="f"><a href="https://docs.solace.com/Admin-Ref/Resource-Calculator/pubsubplus-resource-calculator.html" target="_blank" rel="noopener" style="font-size:.75rem;color:var(--st);text-decoration:none;border-bottom:1px dashed var(--st)">Solace Resource Calculator</a></div>
-    <div class="fr">
-      <div class="f"><label>Messaging Node CPU (fixed by tier)</label><input id="i-bkcpu" value="2" readonly disabled></div>
-      <div class="f"><label>Messaging Node Memory</label><input id="i-bkmem" value="3410Mi" oninput="gen()"></div>
-    </div>
-  </div>
-
-  <!-- 6. Storage -->
-  <div class="sec" id="s-storage"><h3>Storage</h3>
-    <div class="f"><label>Storage Class</label><input id="i-sc" placeholder="e.g. local-path" oninput="gen()"></div>
-    <div class="fr">
-      <div class="f"><label>Messaging Node Storage</label><input id="i-stmsg" value="16100Mi" oninput="gen()"></div>
-      <div class="f"><label>Monitor Node Storage</label><input id="i-stmon" value="2300Mi" oninput="gen()"></div>
-    </div>
-  </div>
-
-  <!-- 7. Credentials -->
-  <div class="sec" id="s-creds"><h3>Credentials</h3>
-    <div class="f"><label>Admin Password</label><input id="i-admpass" type="password" value="adminpassword123" oninput="gen()"><div class="h">Used to create the admin credentials secret.</div></div>
-    <div class="f"><label>Monitor Password</label><input id="i-monpass" type="password" oninput="gen()"><div class="h">Optional. Adds <code>username_monitor_password</code> to the same secret.</div></div>
-    <div class="f"><label>Admin Secret Name</label><input id="i-admsecret" value="solace-admin-secret" oninput="gen()"><div class="h">Holds the admin and monitor credentials, plus any additional CLI user passwords.</div></div>
-    <div class="f"><label>Additional CLI Users</label><textarea id="i-userpass" rows="2" oninput="gen()" placeholder="appuser=password=read-only (one per line)"></textarea><div class="h">One <code>user=password[=accessLevel]</code> per line, where the level is <code>admin</code>, <code>read-write</code>, <code>read-only</code> or <code>none</code> (default <code>none</code>). The user may contain only letters, digits, <code>.</code>, <code>_</code> and <code>-</code> and cannot be <code>admin</code> or <code>monitor</code>; other entries are skipped. On Kubernetes only the password is delivered -- set the level with <code>config exec-cli</code>.</div></div>
-  </div>
-
-  <!-- 8. TLS / SSL -->
-  <div class="sec" id="s-tls"><h3>TLS / SSL</h3>
-    <div class="tgl"><input type="checkbox" id="i-tlson" onchange="togOpt('i-tlson','tls-fields');gen()"><label for="i-tlson">Enable TLS server certificates</label></div>
-    <div class="opt-fields" id="tls-fields">
-      <div class="f"><label>Server Certificate Secret Name</label><input id="i-tlssecret" value="solace-server-secret" oninput="gen()"></div>
-      <div class="f"><label>Server Certificate (.crt / .pem)</label><input type="file" id="i-tlscertfile" accept=".crt,.pem,.cer" onchange="readTlsFile('i-tlscertfile','tlsCertRaw','tlsCertStatus');gen()"><div class="h" id="tlsCertStatus"></div></div>
-      <div class="f"><label>Certificate Private Key (.key)</label><input type="file" id="i-tlskeyfile" accept=".key,.pem" onchange="readTlsFile('i-tlskeyfile','tlsKeyRaw','tlsKeyStatus');gen()"><div class="h" id="tlsKeyStatus"></div></div>
-      <div class="f"><label>CA Certificates (optional, multi-select)</label><input type="file" id="i-tlscafiles" accept=".crt,.pem,.cer" multiple onchange="readTlsCaFiles();gen()"><div class="h" id="tlsCaStatus">Select root and/or intermediate CA certificates to bundle with the server certificate.</div></div>
-    </div>
-  </div>
-
-  <!-- 9. Node Labels (HA only) -->
-  <!-- 9. Security Context -->
-  <div class="sec" id="s-secctx"><h3>Security Context</h3>
-    <div class="tgl"><input type="checkbox" id="i-secctxon" checked onchange="togOpt('i-secctxon','secctx-fields');gen()"><label for="i-secctxon">Configure security context</label></div>
-    <div class="opt-fields vis" id="secctx-fields">
-      <div class="f" style="font-size:.72rem;color:var(--ts);margin-bottom:.5rem;font-weight:600">Pod Security Context (spec.securityContext)</div>
-      <div class="fr">
-        <div class="f"><label>Run As User</label><input id="i-runasuser" value="1000001" oninput="gen()"><div class="h">Default: 1000001 (Solace broker user). Set 0 for OpenShift auto-detect.</div></div>
-        <div class="f"><label>FS Group</label><input id="i-fsgroup" value="1000002" oninput="gen()"><div class="h">Default: 1000002. Set 0 for OpenShift auto-detect.</div></div>
-      </div>
-      <div class="f" style="font-size:.72rem;color:var(--ts);margin-bottom:.5rem;margin-top:.75rem;font-weight:600">Container Security (spec.brokerContainerSecurity)</div>
-      <div class="fr">
-        <div class="f"><label>Container Run As User</label><input id="i-crunasuser" value="1000001" oninput="gen()"></div>
-        <div class="f"><label>Container Run As Group</label><input id="i-crunasgroup" value="1000002" oninput="gen()"></div>
-      </div>
-      <div class="tgl"><input type="checkbox" id="i-readonly" onchange="gen()"><label for="i-readonly">Read-only root filesystem (v10.9+)</label></div>
-    </div>
-  </div>
-
-  <!-- 10. Node Labels -->
-  <div class="sec" id="s-labels"><h3>Node Labels</h3>
-    <div class="tgl"><input type="checkbox" id="i-lblon" onchange="togOpt('i-lblon','lbl-fields');gen()"><label for="i-lblon">Configure node label selectors</label></div>
-    <div class="opt-fields" id="lbl-fields">
-      <div class="f"><label>Primary Node Labels</label><textarea id="i-lblpri" rows="2" oninput="gen()" placeholder="kubernetes.io/hostname: worker-01">kubernetes.io/hostname: worker-01</textarea><div class="h">One key: value per line</div></div>
-      <div class="ha-fields">
-        <div class="f"><label>Backup Node Labels</label><textarea id="i-lblbkp" rows="2" oninput="gen()" placeholder="kubernetes.io/hostname: worker-02">kubernetes.io/hostname: worker-02</textarea></div>
-        <div class="f"><label>Monitor Node Labels</label><textarea id="i-lblmon" rows="2" oninput="gen()" placeholder="kubernetes.io/hostname: worker-03">kubernetes.io/hostname: worker-03</textarea></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 10. Node Tolerations (HA only) -->
-  <div class="sec" id="s-tol"><h3>Node Tolerations</h3>
-    <div class="tgl"><input type="checkbox" id="i-tolon" onchange="togOpt('i-tolon','tol-fields');gen()"><label for="i-tolon">Configure node tolerations</label></div>
-    <div class="opt-fields" id="tol-fields">
-      <div class="f"><label>Primary Tolerations</label><textarea id="i-tolpri" rows="2" oninput="gen()" placeholder="dedicated=solace:NoSchedule"></textarea><div class="h">Format: key=value:effect or key:effect</div></div>
-      <div class="ha-fields">
-        <div class="f"><label>Backup Tolerations</label><textarea id="i-tolbkp" rows="2" oninput="gen()"></textarea></div>
-        <div class="f"><label>Monitor Tolerations</label><textarea id="i-tolmon" rows="2" oninput="gen()"></textarea></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 11. Anti-Affinity -->
-  <div class="sec" id="s-aa"><h3>Anti-Affinity</h3>
-    <div class="tgl"><input type="checkbox" id="i-aaon" onchange="togOpt('i-aaon','aa-fields');gen()"><label for="i-aaon">Configure pod anti-affinity</label></div>
-    <div class="opt-fields" id="aa-fields">
-      <div class="f"><label>Namespaces</label><textarea id="i-aans" rows="2" oninput="gen()" placeholder="One namespace per line"></textarea></div>
-      <div class="f"><label>Weight (1-100)</label><input id="i-aawt" value="100" oninput="gen()"></div>
-    </div>
-  </div>
-
-  <!-- 12. Load Balancer -->
-  <div class="sec" id="s-lb"><h3>Load Balancer</h3>
-    <div class="tgl"><input type="checkbox" id="i-lbon" onchange="togOpt('i-lbon','lb-fields');gen()"><label for="i-lbon">Configure Load Balancer options</label></div>
-    <div class="opt-fields" id="lb-fields">
-      <div class="fr">
-        <div class="f"><label>Static IP (MetalLB)</label><input id="i-lbip" placeholder="e.g. 10.0.0.100" oninput="gen()"></div>
-        <div class="f"><label>IP Address Pool</label><input id="i-ippool" placeholder="e.g. default-pool" oninput="gen()"></div>
-      </div>
-      <div class="f"><label>Extra Annotations</label><textarea id="i-lbanotn" rows="2" oninput="gen()" placeholder="key: value (one per line)"></textarea></div>
-    </div>
-  </div>
-
-  <!-- 13. Service Ports -->
-  <div class="sec" id="s-ports"><h3>Service Ports</h3>
-    <div id="ports-list"></div>
-    <button type="button" class="p-add" onclick="addPortRow()">+ Add port</button>
-    <div class="h" style="margin-top:.5rem">Each row: port name, container port, service port, protocol. Use the <strong>−</strong> button to remove an entry, <strong>+ Add port</strong> to append one.</div>
-  </div>
-
-  <!-- ═══════ DOCKER / PODMAN ═══════ -->
-
-  <!-- 14. Container Host -->
-  <div class="sec" id="s-ctr"><h3>Container Host</h3>
-    <div class="tgl"><input type="checkbox" id="i-ctron" onchange="togOpt('i-ctron','ctr-fields');gen()"><label for="i-ctron">Include docker / podman sections in the env file</label></div>
-    <div class="opt-fields" id="ctr-fields">
-      <div class="f" style="font-size:.72rem;color:var(--ts);margin-bottom:.5rem;font-weight:600">Shared container settings (written to both docker and podman)</div>
-      <div class="fr">
-        <div class="f"><label>Container Name</label><input id="i-ctrname" value="solace" oninput="gen()"></div>
-        <div class="f"><label>Run As (uid:gid)</label><input id="i-ctruser" value="0:0" oninput="gen()"></div>
-      </div>
-      <div class="fr">
-        <div class="f"><label>Data Directory</label><input id="i-ctrdata" value="/opt/solace/data" oninput="gen()"><div class="h">Host path bind-mounted to /var/lib/solace.</div></div>
-        <div class="f"><label>Shared Memory</label><input id="i-ctrshm" value="1g" oninput="gen()"></div>
-        <div class="f"><label>Memory Limit</label><input id="i-ctrmem" value="3410m" oninput="gen()"><div class="h">Docker/podman suffix (b|k|m|g), not Kubernetes' Mi/Gi. Defaults to the scaling tier. CPU has no field: it is fixed by the tier.</div></div>
-      </div>
-      <div class="fr">
-        <div class="f"><label>ulimit nofile</label><input id="i-ctrnofile" value="2448:1048576" oninput="gen()"></div>
-        <div class="f"><label>ulimit memlock</label><input id="i-ctrmemlock" value="-1" oninput="gen()"></div>
-        <div class="f"><label>ulimit core</label><input id="i-ctrcore" value="-1" oninput="gen()"></div>
-      </div>
-      <div class="f" style="font-size:.72rem;color:var(--ts);margin-bottom:.5rem;margin-top:.75rem;font-weight:600">Docker only</div>
-      <div class="fr">
-        <div class="f"><label>Compose File</label><input id="i-dkcompose" placeholder="docker-compose.yml" oninput="gen()"></div>
-        <div class="f"><label>Runtime Binary</label><input id="i-dkruntime" placeholder="docker" oninput="gen()"></div>
-      </div>
-      <div class="f" style="font-size:.72rem;color:var(--ts);margin-bottom:.5rem;margin-top:.75rem;font-weight:600">Podman only</div>
-      <div class="tgl"><input type="checkbox" id="i-pdrootless" onchange="gen()"><label for="i-pdrootless">Rootless (user systemd + podman unshare)</label></div>
-      <div class="fr">
-        <div class="f"><label>Quadlet Directory</label><input id="i-pdquadlet" placeholder="/etc/containers/systemd" oninput="gen()"></div>
-        <div class="f"><label>Runtime Binary</label><input id="i-pdruntime" placeholder="podman" oninput="gen()"></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 15. Container Network -->
-  <div class="sec" id="s-ctrnet"><h3>Container Network</h3>
-    <div class="f"><label>Network Mode</label><select id="i-ctrnetmode" onchange="gen()"><option value="host" selected>host</option><option value="bridge">bridge</option></select><div class="h">bridge requires a non-empty published-ports list.</div></div>
-    <div class="f"><label>Published Ports</label><textarea id="i-ctrports" rows="3" oninput="gen()" placeholder="8080:8080 (host:container, one per line)"></textarea></div>
-  </div>
-
-  <!-- 16. Redundancy Group -->
-  <div class="sec" id="s-nodes"><h3>Redundancy Group</h3>
-    <div class="h" style="margin-bottom:.6rem">Identical on every host. The primary name is the broker's routername and is required for docker/podman; the backup and monitor rows are required only in HA.</div>
-    <div class="fr">
-      <div class="f"><label>Primary Host Name</label><input id="i-npriname" value="solace-primary" oninput="gen()"></div>
-      <div class="f"><label>Primary IP</label><input id="i-npriip" placeholder="10.0.0.11" oninput="gen()"></div>
+      <div class="f"><label>Primary name</label><input id="i-npriname" placeholder="(this host's hostname)" oninput="gen()"></div>
+      <div class="f"><label>Primary address</label><input id="i-npriaddr" placeholder="10.0.0.11" oninput="gen()"></div>
     </div>
     <div class="ha-fields">
       <div class="fr">
-        <div class="f"><label>Backup Host Name</label><input id="i-nbkpname" value="solace-backup" oninput="gen()"></div>
-        <div class="f"><label>Backup IP</label><input id="i-nbkpip" placeholder="10.0.0.12" oninput="gen()"></div>
+        <div class="f"><label>Backup name</label><input id="i-nbkpname" oninput="gen()"></div>
+        <div class="f"><label>Backup address</label><input id="i-nbkpaddr" oninput="gen()"></div>
       </div>
       <div class="fr">
-        <div class="f"><label>Monitor Host Name</label><input id="i-nmonname" value="solace-monitor" oninput="gen()"></div>
-        <div class="f"><label>Monitor IP</label><input id="i-nmonip" placeholder="10.0.0.13" oninput="gen()"></div>
+        <div class="f"><label>Monitor name</label><input id="i-nmonname" oninput="gen()"></div>
+        <div class="f"><label>Monitor address</label><input id="i-nmonaddr" oninput="gen()"></div>
       </div>
-      <div class="f"><label>Redundancy Pre-Shared Key</label><input id="i-npsk" type="password" placeholder="Leave blank; prep host generates one" oninput="gen()"><div class="h">Base64. Must be identical on all three hosts.</div></div>
+      <div class="fr">
+        <div class="f"><label>Pre-shared key</label><input id="i-psk" type="password" oninput="gen()"><div class="h">Mandatory for docker/podman HA: <code>openssl rand -base64 32</code>, the same value on all three hosts. Optional on Kubernetes (the operator generates one), where it needs the admin password.</div></div>
+        <div class="f"><label>...or env var holding it</label><input id="i-pskenv" oninput="gen()"></div>
+      </div>
     </div>
   </div>
 
-  <!-- ═══════ ENV ONLY SECTIONS ═══════ -->
-
-  <!-- 14. Image Credentials - merged into Image Repository section above -->
-
-  <!-- 15. TLS Certificate Paths -->
-  <div class="sec sec-env" id="s-tlspaths"><h3>TLS Certificate Paths</h3>
-    <div class="f"><label>Server Certificate File</label><input id="i-tlscert" placeholder="/path/to/tls.crt" oninput="gen()"></div>
-    <div class="f"><label>Server Certificate Key</label><input id="i-tlskey" placeholder="/path/to/tls.key" oninput="gen()"></div>
-    <div class="f"><label>CA Certificate Chain</label><textarea id="i-tlscas" rows="2" oninput="gen()" placeholder="/path/to/ca/cert (one per line)"></textarea><div class="h">One CA certificate path per line.</div></div>
-  </div>
-
-  <!-- 16. Domain Certificates -->
-  <div class="sec sec-env" id="s-domcert"><h3>Domain Certificates</h3>
-    <div class="f"><label>Certificate Folder</label><input id="i-domfolder" placeholder="/path/to/domain/ca" oninput="gen()"><div class="h">Joined onto each filename below to make broker.domainCerts.files' full host path.</div></div>
-    <div class="f"><label>Certificate Files</label><textarea id="i-domfiles" rows="2" oninput="gen()" placeholder="ca-name=filename.cer (one per line)"></textarea><div class="h">Format: ca-name=filename.cer</div></div>
-  </div>
-
-  <!-- 17. Product Keys -->
-  <div class="sec sec-env" id="s-prodkeys"><h3>Product Keys</h3>
-    <div class="tgl"><input type="checkbox" id="i-pkon" onchange="togOpt('i-pkon','pk-fields');gen()"><label for="i-pkon">Configure product keys</label></div>
-    <div class="opt-fields" id="pk-fields">
-      <div class="f"><label>License Keys</label><textarea id="i-pkeys" rows="3" oninput="gen()" placeholder="One license key per line"></textarea><div class="h">Applied via 057-configure-product-keys.sh</div></div>
+  <div class="sec" id="s-semp"><h3>Credentials</h3>
+    <div class="fr">
+      <div class="f"><label>Admin password</label><input id="i-admpass" type="password" oninput="gen()"><div class="h">Mandatory on docker/podman. On Kubernetes it builds the admin Secret; left out, the CR references kubernetes.adminSecret or the operator generates one.</div></div>
+      <div class="f"><label>...or env var holding it</label><input id="i-admpassenv" placeholder="SOLACE_ADMIN_PASS" oninput="gen()"></div>
     </div>
+    <div class="fr">
+      <div class="f"><label>Monitor password</label><input id="i-monpass" type="password" oninput="gen()"></div>
+      <div class="f"><label>...or env var holding it</label><input id="i-monpassenv" oninput="gen()"></div>
+    </div>
+    <div class="sub">Additional CLI users</div>
+    <div id="users-list"></div>
+    <button type="button" class="p-add" onclick="addUser();gen()">+ Add user</button>
+    <div class="h">A name starts with a letter or <code>_</code>, at most 32 characters; on Kubernetes only letters, digits and <code>_</code>. Name, level and password reach the broker at boot on every platform.</div>
   </div>
 
-  <!-- 18. Replication -->
-  <div class="sec sec-env" id="s-repl"><h3>Replication</h3>
-    <div class="tgl"><input type="checkbox" id="i-replon" onchange="togOpt('i-replon','repl-fields');gen()"><label for="i-replon">Configure data replication</label></div>
+  <div class="sec" id="s-tls"><h3>TLS</h3>
+    <div class="h" style="margin-bottom:.5rem">The paths go into the env file. The file pickers only feed the Secret preview: a browser cannot read a path.</div>
+    <div class="fr">
+      <div class="f"><label>Server certificate path</label><input id="i-tlscert" placeholder="/etc/solace/certs/tls.crt" oninput="gen()"></div>
+      <div class="f"><label>Its file (preview)</label><input type="file" id="i-tlscertfile" onchange="readFile(this)"></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>Private key path</label><input id="i-tlskey" placeholder="/etc/solace/certs/tls.key" oninput="gen()"></div>
+      <div class="f"><label>Its file (preview)</label><input type="file" id="i-tlskeyfile" onchange="readFile(this)"></div>
+    </div>
+    <div class="sub">CA chain, presented after the certificate, in this order</div>
+    <div id="cas-list"></div>
+    <button type="button" class="p-add" onclick="addCA();gen()">+ Add CA</button>
+    <div class="plat-ctr"><div class="fr">
+      <div class="f"><label>Key passphrase (docker/podman)</label><input id="i-tlspass" type="password" oninput="gen()"><div class="h">The Kubernetes CRD has no field for it, so a Kubernetes run refuses one.</div></div>
+      <div class="f"><label>...or env var holding it</label><input id="i-tlspassenv" oninput="gen()"></div>
+    </div></div>
+  </div>
+
+  <div class="sec" id="s-scale"><h3>Scaling</h3>
+    <div class="fr">
+      <div class="f"><label>Max client connections (the tier)</label><select id="i-maxconn" onchange="gen()"></select></div>
+      <div class="f"><label>Max spool usage (MB)</label><input id="i-maxpool" placeholder="(10000 Kubernetes, 100000 container)" oninput="gen()"></div>
+      <div class="f"><label>Max queue messages (M)</label><select id="i-maxqmsg" onchange="gen()"><option value="">default</option><option>100</option><option>240</option><option>3000</option></select></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>Max Kafka bridges</label><select id="i-maxkb" onchange="gen()"><option value="">default</option><option>0</option><option>10</option><option>50</option><option>200</option></select></div>
+      <div class="f"><label>Max Kafka connections</label><select id="i-maxkc" onchange="gen()"><option value="">default</option><option>0</option><option>300</option><option>2000</option><option>10000</option></select></div>
+      <div class="f"><label>Max bridges</label><select id="i-maxbr" onchange="gen()"><option value="">default</option><option>25</option><option>500</option><option>5000</option></select></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>Max subscriptions</label><select id="i-maxsub" onchange="gen()"><option value="">default</option><option>50000</option><option>500000</option><option>5000000</option></select></div>
+      <div class="f"><label>Max guaranteed message size (MB)</label><select id="i-maxgms" onchange="gen()"><option value="">default</option><option>10</option><option>30</option></select></div>
+    </div>
+    <div class="h">The tier fixes the broker's cpu and defaults its memory on every platform. <a href="https://docs.solace.com/Admin-Ref/Resource-Calculator/pubsubplus-resource-calculator.html" target="_blank" rel="noopener">Solace resource calculator</a></div>
+  </div>
+
+  <div class="sec" id="s-broker"><h3>Broker operations</h3>
+    <div class="fr">
+      <div class="f"><label>CLI scripts dir</label><input id="i-clidir" placeholder="cli" oninput="gen()"></div>
+      <div class="f"><label>Diagnostics output dir</label><input id="i-diagdir" placeholder="diag-configs" oninput="gen()"></div>
+    </div>
+    <div class="f"><label>Product keys</label><textarea id="i-pkeys" rows="2" oninput="gen()" placeholder="one licence key per line"></textarea><div class="h">Applied by <code>broker configure product-keys</code>.</div></div>
+  </div>
+
+  <div class="sec" id="s-domcert"><h3>Domain certificates</h3>
+    <div class="sub">Directories walked one level deep</div>
+    <div id="dirs-list"></div>
+    <button type="button" class="p-add" onclick="addDir();gen()">+ Add directory</button>
+    <div class="f" style="margin-top:.5rem"><label>Named files</label><textarea id="i-domfiles" rows="2" oninput="gen()" placeholder="CA-NAME=/full/host/path.cer (one per line)"></textarea><div class="h">A name is letters, digits, <code>_ . -</code>, at most 64 characters. Loaded by <code>broker configure domain-certs</code>.</div></div>
+  </div>
+
+  <div class="sec" id="s-repl"><h3>Replication</h3>
+    <div class="tgl"><input type="checkbox" id="i-replon" onchange="togOpt('i-replon','repl-fields');gen()"><label for="i-replon">Data replication (a DR pair of two sites)</label></div>
     <div class="opt-fields" id="repl-fields">
-      <div class="f"><label>Mate Virtual Router Name</label><input id="i-replmate" placeholder="mate-virtual-router-name" oninput="gen()"></div>
-      <div class="f"><label>SSL Connections</label><textarea id="i-replconn" rows="2" oninput="gen()" placeholder="host:port (one per line)"></textarea></div>
-      <div class="f"><label>Pre-Shared Key</label><input id="i-replpsk" placeholder="Leave blank to auto-generate" oninput="gen()"></div>
+      <div class="h" style="margin-bottom:.5rem">This block is byte-identical at both sites: each broker finds itself by router name, and the other entry is its mate.</div>
+      <div id="sites"></div>
+      <div class="sub">Replicated message VPNs</div>
+      <div id="vpns-list"></div>
+      <button type="button" class="p-add" onclick="addVPN();gen()">+ Add VPN</button>
     </div>
   </div>
 
-  <!-- 19. Diagnostics & CLI -->
-  <div class="sec sec-env" id="s-diag"><h3>Diagnostics &amp; CLI</h3>
-    <div class="f"><label>Diagnostics Output Directory</label><input id="i-diagdir" placeholder="/path/to/diag-configs/dir" oninput="gen()"></div>
-    <div class="f"><label>CLI Scripts Folder</label><input id="i-clifolder" placeholder="cli" oninput="gen()"><div class="h">Optional. Blank takes the CLI default (<code>cli</code>).</div></div>
+  <!-- ======== KUBERNETES ======== -->
+
+  <div class="sec plat-k8s" id="s-k8s"><h3>Kubernetes: cluster and broker</h3>
+    <div class="fr">
+      <div class="f"><label>Broker name (mandatory)</label><input id="i-kname" value="dev-broker" oninput="gen()"><div class="h">A DNS label, at most 48 characters.</div></div>
+      <div class="f"><label>Namespace (mandatory)</label><input id="i-kns" value="solace" oninput="gen()"></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>Cluster command</label><input id="i-kcmd" placeholder="kubectl" oninput="gen()"><div class="h">kubectl or oc, plus arguments (e.g. <code>kubectl --kubeconfig /path</code>). Anything else, such as <code>microk8s kubectl</code>, needs <code>--allow-command</code> on each run.</div></div>
+      <div class="f"><label>Service account</label><input id="i-ksa" placeholder="(namespace default)" oninput="gen()"></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>Update strategy</label><select id="i-kupd" onchange="gen()"><option value="">default (automatedRolling)</option><option>automatedRolling</option><option>manualPodRestart</option></select></div>
+      <div class="f"><label>Image pull policy</label><select id="i-kpull" onchange="gen()"><option value="">default (IfNotPresent)</option><option>Always</option><option>IfNotPresent</option><option>Never</option></select></div>
+    </div>
+  </div>
+
+  <div class="sec plat-k8s" id="s-ksecrets"><h3>Kubernetes: Secret names</h3>
+    <div class="h" style="margin-bottom:.5rem">Leave a name blank to derive it when this file supplies the material (<code>&lt;name&gt;-admin</code>, <code>-tls</code>, <code>-image-pull</code>). A name with no material behind it references a Secret someone else made.</div>
+    <div class="f"><label>Admin Secret</label><input id="i-kadmsecret" oninput="gen()"></div>
+    <div class="f"><label>TLS Secret</label><input id="i-ktlssecret" oninput="gen()"></div>
+    <div class="f"><label>Image pull Secret</label><input id="i-kpullsecret" oninput="gen()"></div>
+  </div>
+
+  <div class="sec plat-k8s" id="s-storage"><h3>Kubernetes: storage and memory</h3>
+    <div class="f"><label>Storage class</label><input id="i-ksc" placeholder="(cluster default)" oninput="gen()"><div class="h">Provisions a volume. Cannot be combined with the existing claims below.</div></div>
+    <div class="fr">
+      <div class="f"><label>Messaging node size</label><input id="i-kmsgsize" value="30Gi" oninput="gen()"><div class="h">Mandatory unless every node mounts an existing claim.</div></div>
+      <div class="f"><label>Monitor node size</label><input id="i-kmonsize" placeholder="5Gi" oninput="gen()"></div>
+      <div class="f"><label>Messaging node memory</label><input id="i-kmem" oninput="gen()"><div class="h">A Kubernetes quantity. CPU has no field: the tier fixes it.</div></div>
+    </div>
+    <div class="sub">Existing PersistentVolumeClaims (never created or deleted by this tool)</div>
+    <div class="fr">
+      <div class="f"><label>Primary claim</label><input id="i-kmnt-primary" oninput="gen()"></div>
+      <div class="f ha-fields"><label>Backup claim</label><input id="i-kmnt-backup" oninput="gen()"></div>
+      <div class="f ha-fields"><label>Monitor claim</label><input id="i-kmnt-monitor" oninput="gen()"></div>
+    </div>
+  </div>
+
+  <div class="sec plat-k8s" id="s-op"><h3>Kubernetes: operator</h3>
+    <div class="fr">
+      <div class="f"><label>Operator image</label><input id="i-opimg" oninput="gen()"><div class="h">Without a registry: image.registry is prefixed.</div></div>
+      <div class="f"><label>Operator namespace</label><input id="i-opns" oninput="gen()"></div>
+    </div>
+    <div class="f"><label>Watch namespaces</label><input id="i-opwatch" placeholder="sol-ns1,sol-ns2" oninput="gen()"></div>
+    <div class="tgl"><input type="checkbox" id="i-opwatchbroker" checked onchange="gen()"><label for="i-opwatchbroker">Also watch the broker namespace</label></div>
+    <div class="h" style="margin-bottom:.5rem">Unticked with no list watches every namespace. <code>operator deploy</code> merges this with what a running operator already watches; the preview shows <code>operator generate</code>.</div>
+    <div class="fr">
+      <div class="f"><label>Operator cpu</label><input id="i-opcpu" oninput="gen()"></div>
+      <div class="f"><label>Operator memory</label><input id="i-opmem" oninput="gen()"></div>
+    </div>
+  </div>
+
+  <div class="sec plat-k8s" id="s-secctx"><h3>Kubernetes: security context</h3>
+    <div class="h" style="margin-bottom:.5rem">Every id is optional and plain decimal; <code>0</code> means the operator's default (1000001/1000002), or on OpenShift an id the SCC assigns. The operator itself pins privileged off, all capabilities dropped and no privilege escalation. A read-only root filesystem is not supported.</div>
+    <div class="fr">
+      <div class="f"><label>Pod runAsUser</label><input id="i-runasuser" oninput="gen()"></div>
+      <div class="f"><label>Pod fsGroup</label><input id="i-fsgroup" oninput="gen()"></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>Container runAsUser</label><input id="i-crunasuser" oninput="gen()"></div>
+      <div class="f"><label>Container runAsGroup</label><input id="i-crunasgroup" oninput="gen()"></div>
+    </div>
+  </div>
+
+  <div class="sec plat-k8s" id="s-podmeta"><h3>Kubernetes: pod metadata</h3>
+    <div class="f"><label>Pod annotations</label><textarea id="i-podann" rows="2" oninput="gen()" placeholder="key: value (one per line)"></textarea></div>
+    <div class="f"><label>Pod labels</label><textarea id="i-podlbl" rows="2" oninput="gen()" placeholder="key: value (one per line)"></textarea></div>
+  </div>
+
+  <div class="sec plat-k8s" id="s-place"><h3>Kubernetes: placement</h3>
+    <div class="f"><label>Primary node labels (nodeSelector)</label><textarea id="i-lblpri" rows="2" oninput="gen()" placeholder="key: value (one per line)"></textarea></div>
+    <div class="ha-fields">
+      <div class="f"><label>Backup node labels</label><textarea id="i-lblbkp" rows="2" oninput="gen()"></textarea></div>
+      <div class="f"><label>Monitor node labels</label><textarea id="i-lblmon" rows="2" oninput="gen()"></textarea></div>
+    </div>
+    <div class="f"><label>Primary tolerations</label><textarea id="i-tolpri" rows="2" oninput="gen()" placeholder="key=value:effect or key:effect (one per line)"></textarea></div>
+    <div class="ha-fields">
+      <div class="f"><label>Backup tolerations</label><textarea id="i-tolbkp" rows="2" oninput="gen()"></textarea></div>
+      <div class="f"><label>Monitor tolerations</label><textarea id="i-tolmon" rows="2" oninput="gen()"></textarea></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>Broker-spread anti-affinity namespaces</label><textarea id="i-aans" rows="2" oninput="gen()" placeholder="(the broker namespace)"></textarea></div>
+      <div class="f"><label>Its weight</label><input id="i-aawt" placeholder="100" oninput="gen()"></div>
+    </div>
+    <div class="sub">Node affinity: preferred terms (expressions one per line: <code>key Operator v1,v2</code>)</div>
+    <div id="napref-list"></div>
+    <button type="button" class="p-add" onclick="addNodePref();gen()">+ Add preferred term</button>
+    <div class="f" style="margin-top:.5rem"><label>Node affinity: required expressions (ANDed)</label><textarea id="i-nareq" rows="2" oninput="gen()" placeholder="solace.com/broker Exists"></textarea><div class="h">Operators: In, NotIn, Exists, DoesNotExist, Gt, Lt. In, NotIn, Gt and Lt need values.</div></div>
+    <div class="sub">Pod affinity terms (weight 1-100 prefers; blank or 0 requires)</div>
+    <div id="paff-list"></div>
+    <button type="button" class="p-add" onclick="addPodTerm('paff-list');gen()">+ Add pod affinity term</button>
+    <div class="sub">Pod anti-affinity terms, after the broker-spread term</div>
+    <div id="panti-list"></div>
+    <button type="button" class="p-add" onclick="addPodTerm('panti-list');gen()">+ Add pod anti-affinity term</button>
+  </div>
+
+  <div class="sec plat-k8s" id="s-lb"><h3>Kubernetes: load balancer</h3>
+    <div class="fr">
+      <div class="f"><label>Static IP (MetalLB)</label><input id="i-lbip" oninput="gen()"></div>
+      <div class="f"><label>Address pool (MetalLB)</label><input id="i-ippool" oninput="gen()"></div>
+    </div>
+    <div class="f"><label>Service annotations</label><textarea id="i-lbanotn" rows="2" oninput="gen()" placeholder="key: value (one per line)"></textarea></div>
+  </div>
+
+  <div class="sec plat-k8s" id="s-ports"><h3>Kubernetes: service ports</h3>
+    <div id="ports-list"></div>
+    <button type="button" class="p-add" onclick="addPort();gen()">+ Add port</button>
+    <button type="button" class="p-add" onclick="resetPorts();gen()">Reset to the defaults</button>
+    <div class="h" style="margin-top:.5rem">Name (a DNS label, at most 15 characters), container port, service port, protocol. Left as the defaults, the env file omits the list.</div>
+  </div>
+
+  <!-- ======== DOCKER / PODMAN ======== -->
+
+  <div class="sec plat-ctr" id="s-engine"><h3>Docker / Podman: engines</h3>
+    <div class="plat-docker">
+      <div class="sub">Docker</div>
+      <div class="fr">
+        <div class="f"><label>Runtime command</label><input id="i-dkcmd" placeholder="docker" oninput="gen()"><div class="h">docker, docker-compose or nerdctl first.</div></div>
+        <div class="f"><label>Compose command</label><input id="i-dkcompose" placeholder="(the runtime plus compose)" oninput="gen()"><div class="h">docker-compose for the standalone v1 binary.</div></div>
+        <div class="f"><label>Compose file</label><input id="i-dkfile" placeholder="docker-compose.yml" oninput="gen()"></div>
+      </div>
+    </div>
+    <div class="plat-podman">
+      <div class="sub">Podman</div>
+      <div class="tgl"><input type="checkbox" id="i-pdrootless" onchange="gen()"><label for="i-pdrootless">Rootless (user systemd; runUser defaults to 1000:0)</label></div>
+      <div class="fr">
+        <div class="f"><label>Runtime command</label><input id="i-pdcmd" placeholder="podman" oninput="gen()"></div>
+        <div class="f"><label>Quadlet dir</label><input id="i-pdquadlet" placeholder="/etc/containers/systemd (rootless: XDG config)" oninput="gen()"></div>
+        <div class="f"><label>Legacy base dir</label><input id="i-pdbasedir" placeholder="(unused)" oninput="gen()"><div class="h">Set only so deploy/remove delete a certificate file an earlier build wrote there.</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sec plat-ctr" id="s-ctr"><h3>Docker / Podman: container</h3>
+    <div class="h" style="margin-bottom:.5rem">Written to every ticked container platform. The artifacts always run with privileged off, every capability dropped and no-new-privileges.</div>
+    <div class="fr">
+      <div class="f"><label>Container name</label><input id="i-cname" placeholder="solace" oninput="gen()"></div>
+      <div class="f"><label>Run user (uid[:gid])</label><input id="i-cuser" placeholder="(1000001:0; rootless podman 1000:0)" oninput="gen()"><div class="h">0:0 is host root on docker and rootful podman.</div></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>Data directory</label><input id="i-cdata" placeholder="/opt/solace/data" oninput="gen()"><div class="h">Absolute. Bind-mounted at /var/lib/solace.</div></div>
+      <div class="f"><label>Memory limit</label><input id="i-cmem" oninput="gen()"><div class="h">b, k, m or g suffix, not Mi/Gi.</div></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>cpuset (messaging nodes)</label><input id="i-ccpuset" oninput="gen()"><div class="h">Which cpus: exactly the tier's count.</div></div>
+      <div class="f"><label>Monitor cpuset</label><input id="i-cmoncpuset" placeholder="0" oninput="gen()"></div>
+      <div class="f"><label>Core-dump limit</label><input id="i-ccore" placeholder="-1 (unlimited)" oninput="gen()"><div class="h">-1 or bytes; 0 keeps none on disk.</div></div>
+    </div>
+  </div>
+
+  <div class="sec plat-ctr" id="s-health"><h3>Docker / Podman: health check</h3>
+    <div class="tgl"><input type="checkbox" id="i-hcon" onchange="gen()"><label for="i-hcon">Enable the engine's health check</label></div>
+    <div class="f"><label>Probe command (one argv token per line)</label><textarea id="i-hccmd" rows="2" oninput="gen()" placeholder="(built-in readiness probe: needs broker 10.26+)"></textarea></div>
+    <div class="fr">
+      <div class="f"><label>Interval</label><input id="i-hcint" placeholder="5s" oninput="gen()"></div>
+      <div class="f"><label>Timeout</label><input id="i-hcto" placeholder="5s" oninput="gen()"></div>
+      <div class="f"><label>Retries</label><input id="i-hcret" placeholder="3" oninput="gen()"></div>
+      <div class="f"><label>Start period</label><input id="i-hcsp" placeholder="60s" oninput="gen()"></div>
+    </div>
+  </div>
+
+  <div class="sec plat-ctr" id="s-net"><h3>Docker / Podman: network</h3>
+    <div class="f"><label>Mode</label><select id="i-netmode" onchange="gen()"><option value="">default (bridge)</option><option>bridge</option><option>host</option></select><div class="h">bridge publishes the list below and nothing else -- nothing at all when it is empty. host is an opt-in widening: every listener binds on every host interface.</div></div>
+    <div class="f"><label>Published ports</label><textarea id="i-netports" rows="3" oninput="gen()" placeholder="host:container, e.g. 8080:8080 or 127.0.0.1:8080:8080/tcp (one per line)"></textarea><div class="h">An HA member also publishes 8300-8302, 8741 and 55555, and SEMP (8080, or 1943 with TLS) for its mate.</div></div>
   </div>
 
 </div>
 
-<!-- YAML Output -->
+<!-- Outputs -->
 <div class="yaml-scroll" id="yamlScroll">
-  <div class="ypanel" id="yp-op">
-    <div class="ypanel-hdr"><span>Operator YAML</span><div class="ypanel-actions"><button class="btn btn-c" onclick="copy('yc-op')">Copy</button><button class="btn btn-d" onclick="dl('yc-op','operator.yaml')">Download</button></div></div>
+  <div class="probs" id="probs"></div>
+  <div class="ypanel" id="yp-env">
+    <div class="ypanel-hdr"><span>Env file</span><div class="ypanel-actions"><button class="btn btn-c" onclick="copy('yc-env')">Copy</button><button class="btn btn-d" onclick="dl('yc-env','env.yaml')">Download</button></div></div>
+    <div class="ycode" id="yc-env"></div>
+  </div>
+  <div class="ypanel plat-k8s" id="yp-op">
+    <div class="ypanel-hdr"><span>solace-util operator generate</span><div class="ypanel-actions"><button class="btn btn-c" onclick="copy('yc-op')">Copy</button><button class="btn btn-d" onclick="dl('yc-op','operator.yaml')">Download</button></div></div>
     <div class="ycode" id="yc-op"></div>
   </div>
-  <div class="ypanel" id="yp-secrets">
-    <div class="ypanel-hdr"><span>Secrets YAML</span><div class="ypanel-actions"><button class="btn btn-c" onclick="copy('yc-secrets')">Copy</button><button class="btn btn-d" onclick="dl('yc-secrets','secrets.yaml')">Download</button></div></div>
-    <div class="ycode" id="yc-secrets"></div>
-  </div>
-  <div class="ypanel" id="yp-broker">
-    <div class="ypanel-hdr"><span>Broker YAML</span><div class="ypanel-actions"><button class="btn btn-c" onclick="copy('yc-broker')">Copy</button><button class="btn btn-d" onclick="dl('yc-broker','broker.yaml')">Download</button></div></div>
+  <div class="ypanel plat-k8s" id="yp-broker">
+    <div class="ypanel-hdr"><span>solace-util broker generate</span><div class="ypanel-actions"><button class="btn btn-c" onclick="copy('yc-broker')">Copy</button><button class="btn btn-d" onclick="dl('yc-broker','broker.yaml')">Download</button></div></div>
     <div class="ycode" id="yc-broker"></div>
-  </div>
-  <div class="ypanel" id="yp-env">
-    <div class="ypanel-hdr"><span>Env File (YAML)</span><div class="ypanel-actions"><button class="btn btn-c" onclick="copy('yc-env')">Copy</button><button class="btn btn-d" onclick="dl('yc-env','env.yaml')">Download</button></div></div>
-    <div class="ycode" id="yc-env"></div>
   </div>
 </div>
 </div></div>
 <div class="toast" id="toast">Copied to clipboard</div>
-
 <script>
+// BEGIN GENERATED -- regen writes this block from internal/k8s; never hand-edit
+const GEN = {
+  "operatorTemplate": "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",
+  "defaults": {
+    "operatorImage": "solace/pubsubplus-eventbroker-operator:1.4.2",
+    "operatorNamespace": "pubsubplus-operator-system",
+    "operatorCpu": "500m",
+    "operatorMem": "512Mi",
+    "updateStrategy": "automatedRolling",
+    "monNodeSize": "5Gi",
+    "kubernetesPorts": [
+      "tcp-ssh=2222",
+      "tcp-semp=8080",
+      "tls-semp=1943",
+      "tcp-smf=55555",
+      "tcp-smfcomp=55003",
+      "tls-smf=55443",
+      "tcp-smfroute=55556",
+      "tcp-web=8008",
+      "tls-web=1443",
+      "tcp-rest=9000",
+      "tls-rest=9443",
+      "tcp-amqp=5672",
+      "tls-amqp=5671",
+      "tcp-mqtt=1883",
+      "tls-mqtt=8883",
+      "tcp-mqttweb=8000",
+      "tls-mqttweb=8443"
+    ],
+    "kubernetesCommand": "kubectl",
+    "cliScriptsDir": "cli",
+    "hostDiagnosticDir": "diag-configs",
+    "scalingKubernetes": {
+      "maxConnections": 100,
+      "maxQueueMessages": 100,
+      "maxSpoolUsageMB": 10000,
+      "maxKafkaBridge": 0,
+      "maxKafkaConnections": 0,
+      "maxBridges": 25,
+      "maxSubscriptions": 50000,
+      "maxGuaranteedMsgMB": 10
+    },
+    "scalingContainer": {
+      "maxConnections": 1000,
+      "maxQueueMessages": 100,
+      "maxSpoolUsageMB": 100000,
+      "maxKafkaBridge": 0,
+      "maxKafkaConnections": 0,
+      "maxBridges": 25,
+      "maxSubscriptions": 50000,
+      "maxGuaranteedMsgMB": 10
+    },
+    "tiers": {
+      "100": {
+        "cpu": "2",
+        "k8sMem": "3410Mi",
+        "containerMem": "3410m",
+        "cpuset": "0-1"
+      },
+      "1000": {
+        "cpu": "2",
+        "k8sMem": "6898Mi",
+        "containerMem": "6898m",
+        "cpuset": "0-1"
+      },
+      "10000": {
+        "cpu": "4",
+        "k8sMem": "12435Mi",
+        "containerMem": "12435m",
+        "cpuset": "0-3"
+      },
+      "100000": {
+        "cpu": "8",
+        "k8sMem": "30925Mi",
+        "containerMem": "30925m",
+        "cpuset": "0-7"
+      },
+      "200000": {
+        "cpu": "12",
+        "k8sMem": "52581Mi",
+        "containerMem": "52581m",
+        "cpuset": "0-11"
+      }
+    },
+    "dockerCommand": "docker",
+    "dockerCompose": "docker compose",
+    "podmanCommand": "podman",
+    "podmanQuadletDir": "/etc/containers/systemd",
+    "runUserDocker": "1000001:0",
+    "runUserPodman": "1000001:0",
+    "runUserPodmanRootless": "1000:0",
+    "containerName": "solace",
+    "dataDir": "/opt/solace/data",
+    "monitorCpuset": "0",
+    "ulimitsCore": "-1",
+    "networkMode": "bridge",
+    "healthCheck": {
+      "interval": "5s",
+      "timeout": "5s",
+      "retries": 3,
+      "startPeriod": "60s"
+    }
+  }
+};
+// END GENERATED
+
+// This page previews the CLI; it is not a second implementation to trust. The env
+// file follows internal/config's schema, and the two manifest panels are ports of
+// internal/k8s.GenOperator and GenBroker (with internal/render.BrokerCR): for anything
+// the form can express they are byte-identical to `solace-util operator generate` and
+// `solace-util broker generate` run on the env file shown. docs/developer.md has the
+// cross-check. Every value the page would otherwise copy from Go -- the operator bundle
+// and each default it shows -- comes from GEN above, which TestGeneratorPageEmbedsTheCLI
+// keeps in step.
+
 const $ = id => document.getElementById(id);
-const V = id => $(id).value.trim();
-const L = id => V(id).split('\n').map(s=>s.trim()).filter(s=>s);
+const V = id => { const e = $(id); return e ? e.value.trim() : ''; };
+const RAW = id => { const e = $(id); return e ? e.value : ''; };  // secrets: exactly as typed
+const CHK = id => { const e = $(id); return !!(e && e.checked); };
+const LINES = s => String(s).split('\n').map(x => x.trim()).filter(Boolean);
+const L = id => LINES(V(id));
+const S = n => ' '.repeat(n);
+const INT = v => { const n = parseInt(v, 10); return isNaN(n) ? 0 : n; };
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-// Toggle helpers
-function togHA(){const ha=$('i-ha').checked;document.querySelectorAll('.ha-fields').forEach(e=>e.classList.toggle('vis',ha))}
+// config.accessLevels
+const ACCESS_LEVELS = ['none', 'read-only', 'mesh-manager', 'read-write', 'admin'];
 
-// TLS file reading - store raw PEM text, encode at YAML generation time
-let tlsCertRaw='',tlsKeyRaw='',tlsCaRaw='';
-function readTlsFile(inputId,varName,statusId){
-  const file=$(inputId).files[0];
-  if(!file){window[varName]='';$(statusId).textContent='';gen();return;}
-  const reader=new FileReader();
-  reader.onload=function(e){
-    window[varName]=e.target.result;
-    $(statusId).textContent=file.name+' loaded ('+e.target.result.length+' bytes)';
-    gen();
-  };
-  reader.readAsText(file);
-}
-function readTlsCaFiles(){
-  const files=$('i-tlscafiles').files;
-  if(!files.length){tlsCaRaw='';$('tlsCaStatus').textContent='No CA certificates selected.';gen();return;}
-  let combined='',loaded=0;const names=[];
-  Array.from(files).forEach(f=>{
-    names.push(f.name);
-    const r=new FileReader();
-    r.onload=function(e){combined+=e.target.result;loaded++;if(loaded===files.length){tlsCaRaw=combined;$('tlsCaStatus').textContent=names.join(', ')+' loaded';gen();}};
-    r.readAsText(f);
-  });
-}
-function togOpt(chkId,fieldsId){$(fieldsId).classList.toggle('vis',$(chkId).checked)}
+// ======== Encodings, matching what the Go renderers emit ========
 
-// CRD blob (gzipped base64)
-const CRD_B64='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';
-let crdCache=null;
-async function getCrd(){
-  if(crdCache)return crdCache;
-  try{const b=Uint8Array.from(atob(CRD_B64),c=>c.charCodeAt(0));const ds=new DecompressionStream('gzip');const w=ds.writable.getWriter();w.write(b);w.close();const r=ds.readable.getReader();let ch=[],d=false;while(!d){const x=await r.read();if(x.value)ch.push(x.value);d=x.done;}crdCache=new TextDecoder().decode(await new Blob(ch).arrayBuffer());crdCache=crdCache.replace(/^\s*echo\s+'/,'').replace(/'\s*$/,'');return crdCache;}catch(e){return '# Error decompressing CRD';}
+// goQuote is strconv.Quote, which every %q in the renderers uses: a printable
+// character (unicode.IsPrint: letters, marks, numbers, punctuation, symbols, ASCII
+// space) as itself, `"` and `\` escaped, everything else as an escape sequence.
+const PRINTABLE = /[\p{L}\p{M}\p{N}\p{P}\p{S} ]/u;
+function goQuote(s) {
+  let o = '"';
+  for (const ch of String(s)) {
+    const c = ch.codePointAt(0);
+    if (ch === '"' || ch === '\\') { o += '\\' + ch; continue; }
+    if (c < 0x80 ? (c >= 0x20 && c < 0x7f) : PRINTABLE.test(ch)) { o += ch; continue; }
+    const short = { '\x07': '\\a', '\b': '\\b', '\f': '\\f', '\n': '\\n', '\r': '\\r', '\t': '\\t', '\v': '\\v' }[ch];
+    if (short) o += short;
+    else if (c < 0x20 || c === 0x7f) o += '\\x' + c.toString(16).padStart(2, '0');
+    else if (c < 0x10000) o += '\\u' + c.toString(16).padStart(4, '0');
+    else o += '\\U' + c.toString(16).padStart(8, '0');
+  }
+  return o + '"';
 }
 
-// ═══════ Tolerations parser ═══════
-function parseTol(lines){
-  if(!lines.length)return '';
-  let o='      tolerations:\n';
-  lines.forEach(l=>{const ci=l.lastIndexOf(':');if(ci<0)return;let kp=l.substring(0,ci).trim();const eff=l.substring(ci+1).trim();if(kp.includes('=')){const ei=kp.indexOf('=');o+=`      - key: "${kp.substring(0,ei)}"\n        operator: "Equal"\n        value: "${kp.substring(ei+1)}"\n        effect: "${eff}"\n`;}else{o+=`      - key: "${kp}"\n        operator: "Exists"\n        effect: "${eff}"\n`;}});
-  return o;
+// Secret values are base64 of their UTF-8 bytes, as Go's []byte(string) gives --
+// btoa alone would encode Latin-1 and throw on anything wider.
+const utf8 = s => new TextEncoder().encode(String(s));
+function concatBytes(...parts) {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) { out.set(p, at); at += p.length; }
+  return out;
 }
-function parseLabels(lines){if(!lines.length)return '';let o='      nodeSelector:\n';lines.forEach(l=>{o+=`        ${l}\n`;});return o;}
-function buildAA(nsLines,wt){if(!nsLines.length)return '';let o='      affinity:\n        podAntiAffinity:\n          preferredDuringSchedulingIgnoredDuringExecution:\n          - weight: '+wt+'\n            podAffinityTerm:\n              topologyKey: kubernetes.io/hostname\n              labelSelector:\n                matchLabels:\n                  app.kubernetes.io/name: pubsubpluseventbroker\n              namespaces:\n';nsLines.forEach(ns=>{o+=`              - ${ns}\n`;});return o;}
-
-// ═══════ YAML highlight ═══════
-function hl(yaml){
-  // Highlight line by line to avoid cross-line regex issues
-  return yaml.split('\n').map(line=>{
-    const el=line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    if(/^\s*---\s*$/.test(el)) return '<span class="d">'+el+'</span>';
-    if(/^\s*#/.test(el)) return '<span class="c">'+el+'</span>';
-    const m=el.match(/^(\s*)([\w\.\-\/][^:]*?):\s+(.+)$/);
-    if(m) return m[1]+'<span class="k">'+m[2]+'</span>: <span class="v">'+m[3]+'</span>';
-    const m2=el.match(/^(\s*)([\w\.\-\/][^:]*?):\s*$/);
-    if(m2) return m2[1]+'<span class="k">'+m2[2]+'</span>:';
-    return el;
-  }).join('\n');
+function b64(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
 }
-
-// ═══════ OPERATOR YAML ═══════
-async function genOp(){
-  const ns=V('i-opns')||'pubsubplus-operator-system',repo=V('i-repo'),img=V('i-opimg')||'docker.io/solace/pubsubplus-eventbroker-operator:1.4.0',cpu=V('i-opcpu')||'500m',mem=V('i-opmem')||'512Mi';
-  // Match the CLI's watchNamespace(): the broker namespace is appended unless the
-  // user opts out, so a blank Watch Namespaces field yields the broker namespace
-  // rather than an empty WATCH_NAMESPACE (which makes the operator watch all).
-  // Entries are trimmed and de-duplicated, first occurrence winning, for the same
-  // reason the CLI does it: the broker namespace is often already in the list, and the
-  // repeat reaches the rendered WATCH_NAMESPACE even though the operator's own cache
-  // collapses it -- an unclean manifest that reads like a mistake.
-  const wns=[],addWns=n=>{n=n.trim();if(n&&!wns.includes(n))wns.push(n);};
-  V('i-opwatch').split(',').forEach(addWns);
-  if($('i-opwatchbroker').checked)addWns(V('i-bkns')||'solace-namespace');
-  const watch=wns.join(',');
-  const fimg=repo?`${repo}/${img}`:img;
-  let crd=await getCrd();crd=crd.replace(/\$\{SOLOP_DERIVED_NS(?::-[^}]*)?\}/g,ns);
-  return crd+`\n---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: pubsubplus-eventbroker-operator-leader-election-role
-  namespace: ${ns}
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - configmaps
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
-  - patch
-  - delete
-- apiGroups:
-  - coordination.k8s.io
-  resources:
-  - leases
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
-  - patch
-  - delete
-- apiGroups:
-  - ""
-  resources:
-  - events
-  verbs:
-  - create
-  - patch
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: pubsubplus-eventbroker-operator-role
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - configmaps
-  - events
-  - namespaces
-  - pods
-  - secrets
-  - serviceaccounts
-  - services
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - apps
-  resources:
-  - deployments
-  - statefulsets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - policy
-  resources:
-  - poddisruptionbudgets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - pubsubplus.solace.com
-  resources:
-  - pubsubpluseventbrokers
-  - pubsubpluseventbrokers/finalizers
-  - pubsubpluseventbrokers/status
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - rbac.authorization.k8s.io
-  resources:
-  - rolebindings
-  - roles
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: pubsubplus-eventbroker-operator-leader-election-rolebinding
-  namespace: ${ns}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: pubsubplus-eventbroker-operator-leader-election-role
-subjects:
-- kind: ServiceAccount
-  name: pubsubplus-eventbroker-operator
-  namespace: ${ns}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: pubsubplus-eventbroker-operator-rolebinding
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: pubsubplus-eventbroker-operator-role
-subjects:
-- kind: ServiceAccount
-  name: pubsubplus-eventbroker-operator
-  namespace: ${ns}
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  labels:
-    app.kubernetes.io/component: controller
-    app.kubernetes.io/name: solace-pubsubplus-eventbroker-operator
-    control-plane: controller-manager
-  name: pubsubplus-eventbroker-operator
-  namespace: ${ns}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      control-plane: controller-manager
-  template:
-    metadata:
-      labels:
-        control-plane: controller-manager
-    spec:
-      containers:
-      - args:
-        - --leader-elect
-        - --zap-log-level=info
-        command:
-        - /manager
-        env:
-        - name: WATCH_NAMESPACE
-          value: "${watch}"
-        image: ${fimg}
-        imagePullPolicy: Always
-        livenessProbe:
-          httpGet:
-            path: /healthz
-            port: 8081
-          initialDelaySeconds: 15
-          periodSeconds: 20
-        name: manager
-        readinessProbe:
-          httpGet:
-            path: /readyz
-            port: 8081
-          initialDelaySeconds: 5
-          periodSeconds: 10
-        resources:
-          limits:
-            cpu: ${cpu}
-            memory: ${mem}
-          requests:
-            cpu: 10m
-            memory: 64Mi
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-            - ALL
-      imagePullSecrets:
-      - name: regcred
-      securityContext:
-        runAsNonRoot: true
-        seccompProfile: {type: RuntimeDefault}
-      serviceAccountName: pubsubplus-eventbroker-operator
-      terminationGracePeriodSeconds: 10`;
+// goJSON is json.Marshal for the plain objects built here: JSON.stringify plus the
+// HTML-safe escapes Go adds for < > & and the two line separators.
+const goJSON = v => JSON.stringify(v).replace(/[<>&\u2028\u2029]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+async function sha256hex(bytes) {
+  // WebCrypto exists only in a secure context: a file:// page or https, not plain http.
+  if (!(globalThis.crypto && crypto.subtle)) throw new Error('its digest needs WebCrypto: open the page from disk or over https');
+  const d = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(d), x => x.toString(16).padStart(2, '0')).join('');
 }
 
-// ═══════ SECRETS YAML ═══════
-// adminUsers parses the extra `user=password[=accessLevel]` lines, dropping any
-// whose user name would not survive the CLI's own check on a secret data key
-// (§3: the user becomes part of the key `username_<user>_password`) or whose
-// access level is not one the broker accepts. The level defaults to the least
-// privileged one, matching what `solace-util convert` picks: handing out rights the
-// input never asked for is the dangerous direction.
-const accessLevels=['admin','read-write','read-only','none'];
-function adminUsers(){
-  return L('i-userpass').map(l=>{
-    const parts=l.split('=');
-    if(parts.length<2)return null;
-    const u=parts[0].trim(),p=parts[1].trim(),lvl=(parts[2]||'none').trim();
-    if(!/^[A-Za-z0-9._-]+$/.test(u)||u==='admin'||u==='monitor')return null;
-    if(!accessLevels.includes(lvl))return null;
-    return {u,p,lvl};
+// ======== Env-file YAML helpers ========
+
+// yq quotes anything a YAML reader could take for something other than a string --
+// a number, a boolean, null, structure -- the rule internal/convert's emitter uses,
+// with the same escapes for a quote, a backslash and every control character.
+function yq(s) {
+  s = String(s);
+  if (/^[A-Za-z][A-Za-z0-9_.\-]*$/.test(s) && !/^(y|n|yes|no|true|false|on|off|null|nil)$/i.test(s)) return s;
+  return '"' + s.replace(/[\\"\x00-\x1f\x7f]/g, c => ({ '\\': '\\\\', '"': '\\"', '\n': '\\n', '\t': '\\t', '\r': '\\r' })[c]
+    || '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0')) + '"';
+}
+const kv = (k, v, ind) => (v !== '' && v != null) ? `${ind}${k}: ${yq(v)}\n` : '';
+const knum = (k, v, ind) => (v !== '' && v != null) ? `${ind}${k}: ${/^[0-9]+$/.test(v) ? String(parseInt(v, 10)) : v}\n` : '';
+const klist = (k, arr, ind) => arr && arr.length ? `${ind}${k}:\n` + arr.map(v => `${ind}  - ${yq(v)}\n`).join('') : '';
+const kmap = (k, pairs, ind) => pairs.length ? `${ind}${k}:\n` + pairs.map(([a, b]) => `${ind}  ${yq(a)}: ${yq(b == null ? '' : b)}\n`).join('') : '';
+const blk = (k, body, ind) => body ? `${ind}${k}:\n${body}` : '';
+// seq is a list of mappings. Each item's fields are rendered at ind+4, and the first
+// line's indent becomes the dash.
+const seq = (k, bodies, ind) => {
+  const b = bodies.filter(Boolean);
+  return b.length ? `${ind}${k}:\n` + b.map(x => ind + '  - ' + x.slice(ind.length + 4)).join('') : '';
+};
+// secKV is a secret and its *Env sibling. Both are written when both are set, so the
+// file says what the form says and the CLI refuses it the way the problems list does.
+const secKV = (k, lit, env, ind) => (lit !== '' ? `${ind}${k}: ${yq(lit)}\n` : '') + (env ? `${ind}${k}Env: ${yq(env)}\n` : '');
+
+// ======== Form plumbing ========
+
+function togOpt(chk, id) { $(id).classList.toggle('vis', CHK(chk)); }
+function togHA() { const ha = CHK('i-ha'); document.querySelectorAll('.ha-fields').forEach(e => e.classList.toggle('vis', ha)); }
+function togPlat() {
+  const k = CHK('i-pk8s'), d = CHK('i-pdocker'), p = CHK('i-ppodman');
+  const set = (sel, on) => document.querySelectorAll(sel).forEach(e => e.classList.toggle('vis', on));
+  set('.plat-k8s', k); set('.plat-ctr', d || p); set('.plat-docker', d); set('.plat-podman', p);
+}
+
+// Files are read as bytes, never as text: the TLS Secret carries them exactly, and its
+// digest is over those bytes.
+const FILES = new WeakMap();
+function readFile(input) {
+  const f = input.files && input.files[0];
+  if (!f) { FILES.delete(input); gen(); return; }
+  const r = new FileReader();
+  r.onload = () => { FILES.set(input, new Uint8Array(r.result)); gen(); };
+  r.readAsArrayBuffer(f);
+}
+const fileBytes = input => (input && FILES.get(input)) || null;
+
+function addRow(listId, html) {
+  const r = document.createElement('div');
+  r.className = 'row';
+  r.innerHTML = html + '<button type="button" class="p-rm" title="Remove" onclick="this.parentElement.remove();gen()">-</button>';
+  $(listId).appendChild(r);
+  return r;
+}
+const rowsOf = listId => Array.from($(listId).children);
+const rq = (r, sel) => { const e = r.querySelector(sel); return e ? e.value.trim() : ''; };
+const rraw = (r, sel) => { const e = r.querySelector(sel); return e ? e.value : ''; };
+const rchk = (r, sel) => { const e = r.querySelector(sel); return !!(e && e.checked); };
+
+function addUser(name = '', level = 'read-only') {
+  addRow('users-list', `<input class="u-name" placeholder="username" value="${esc(name)}" oninput="gen()">` +
+    `<select class="u-level w-m" onchange="gen()">${ACCESS_LEVELS.map(l => `<option${l === level ? ' selected' : ''}>${l}</option>`).join('')}</select>` +
+    `<input class="u-pass" type="password" placeholder="password" oninput="gen()">` +
+    `<input class="u-passenv" placeholder="...or env var" oninput="gen()">`);
+}
+function addCA(path = '') {
+  addRow('cas-list', `<input class="ca-path" placeholder="/etc/solace/certs/ca.pem" value="${esc(path)}" oninput="gen()">` +
+    `<input class="ca-file" type="file" onchange="readFile(this)">`);
+}
+function addDir(path = '', ext = '') {
+  addRow('dirs-list', `<input class="d-path" placeholder="/etc/solace/domain-cas" value="${esc(path)}" oninput="gen()">` +
+    `<input class="d-ext w-m" placeholder="fileExt (cer,crt,pem)" value="${esc(ext)}" oninput="gen()">`);
+}
+function addNodePref() {
+  addRow('napref-list', `<input class="np-w w-s" placeholder="weight" oninput="gen()">` +
+    `<textarea class="np-x" placeholder="topology.kubernetes.io/zone In az-1,az-2" oninput="gen()"></textarea>`);
+}
+function addPodTerm(listId) {
+  addRow(listId, `<input class="pt-w w-s" placeholder="weight" oninput="gen()">` +
+    `<input class="pt-topo" placeholder="topologyKey" oninput="gen()">` +
+    `<textarea class="pt-lbl" placeholder="matchLabels key: value" oninput="gen()"></textarea>` +
+    `<input class="pt-ns" placeholder="namespaces a,b" oninput="gen()">`);
+}
+function addEndpoint(listId) {
+  addRow(listId, `<input class="e-host" placeholder="host" oninput="gen()"><input class="e-port w-s" placeholder="port" oninput="gen()">` +
+    `<select class="e-tr w-m" onchange="gen()">${['', 'plainText', 'compressed', 'ssl'].map(t => `<option value="${t}">${t || '(plainText)'}</option>`).join('')}</select>`);
+}
+function addVPN() {
+  addRow('vpns-list', `<input class="v-name" placeholder="message VPN" oninput="gen()">` +
+    `<input class="v-at" placeholder="active at: a site's virtual router name" oninput="gen()">`);
+}
+function addPort(name = '', cport = '', sport = '', proto = 'TCP') {
+  addRow('ports-list', `<input class="p-name" placeholder="name" value="${esc(name)}" oninput="gen()">` +
+    `<input class="p-cport w-s" placeholder="container" value="${esc(cport)}" oninput="gen()">` +
+    `<input class="p-sport w-s" placeholder="service" value="${esc(sport)}" oninput="gen()">` +
+    `<select class="p-proto w-s" onchange="gen()"><option${proto === 'TCP' ? ' selected' : ''}>TCP</option><option${proto === 'UDP' ? ' selected' : ''}>UDP</option></select>`);
+}
+// parsePort is render.parsePort: name=containerPort[:servicePort][/proto].
+function parsePort(entry) {
+  const i = entry.indexOf('=');
+  const name = i >= 0 ? entry.slice(0, i) : entry;
+  let rest = i >= 0 ? entry.slice(i + 1) : '';
+  let proto = 'TCP';
+  const j = rest.lastIndexOf('/');
+  if (j >= 0) { proto = rest.slice(j + 1); rest = rest.slice(0, j); }
+  let container = rest, service = rest;
+  const k = rest.indexOf(':');
+  if (k >= 0) { container = rest.slice(0, k); service = rest.slice(k + 1); }
+  return { name, container, service, proto };
+}
+function resetPorts() {
+  $('ports-list').innerHTML = '';
+  GEN.defaults.kubernetesPorts.forEach(e => { const p = parsePort(e); addPort(p.name, p.container, p.service, p.proto); });
+}
+function portEntries() {
+  return rowsOf('ports-list').map(r => {
+    const n = rq(r, '.p-name'), c = rq(r, '.p-cport'), s = rq(r, '.p-sport') || c, pr = rq(r, '.p-proto');
+    if (!n && !c) return null;
+    return n + '=' + (s === c ? c : c + ':' + s) + (pr === 'TCP' ? '' : '/' + pr);
   }).filter(Boolean);
 }
 
-function genSecrets(){
-  const ns=V('i-bkns')||'solace-namespace',admSecret=V('i-admsecret')||'solace-admin-secret',admPass=V('i-admpass')||'adminpassword123';
-  const monPass=V('i-monpass');
-  const psOn=$('i-pson').checked,pullSecret=psOn?V('i-pullsecret'):'',tlsOn=$('i-tlson').checked,tlsSecret=V('i-tlssecret');
-  const admB64=btoa(admPass);
-  let y=`# Admin Credentials Secret
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ${admSecret}
-  namespace: ${ns}
-type: Opaque
-data:
-  username_admin_password: ${admB64}`;
-  if(monPass)y+=`\n  username_monitor_password: ${btoa(monPass)}`;
-  adminUsers().forEach(x=>{y+=`\n  username_${x.u}_password: ${btoa(x.p)}`;});
-  if(pullSecret){
-    const user=V('i-imguser')||'user',pass=V('i-imgpass')||'pass',host=V('i-repo')||'https://index.docker.io/v1/';
-    const dockerJson=JSON.stringify({auths:{[host]:{username:user,password:pass,auth:btoa(user+':'+pass)}}});
-    y+=`\n---
-# Image Pull Secret
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ${pullSecret}
-  namespace: ${ns}
-type: kubernetes.io/dockerconfigjson
-data:
-  .dockerconfigjson: ${btoa(dockerJson)}`;
+function buildSites() {
+  $('sites').innerHTML = [1, 2].map(n => `<div class="site" id="site${n}"><div class="sub">Site ${n}</div>
+    <div class="fr"><div class="f"><label>Virtual router name</label><input class="s-vrn" placeholder="v:solace-site${n}" oninput="gen()"></div>
+    <div class="f"><label>Router names (one per line)</label><textarea class="s-rn" rows="2" oninput="gen()"></textarea></div></div>
+    <div class="sub">Endpoints the mate dials</div><div id="s${n}-eps"></div>
+    <button type="button" class="p-add" onclick="addEndpoint('s${n}-eps');gen()">+ Add endpoint</button>
+    <div class="f" style="margin-top:.5rem"><label>How this tool reaches this site when it is the mate</label><select class="s-via" onchange="togVia(${n});gen()"><option value="">not declared</option><option value="kubernetes">kubernetes</option><option value="semp">semp</option></select></div>
+    <div class="opt-fields s-vk"><div class="fr"><div class="f"><label>Command</label><input class="vk-cmd" placeholder="kubectl --context dr" oninput="gen()"></div><div class="f"><label>Namespace</label><input class="vk-ns" oninput="gen()"></div><div class="f"><label>Broker name</label><input class="vk-name" oninput="gen()"></div></div></div>
+    <div class="opt-fields s-vs"><div class="fr"><div class="f"><label>SEMP host</label><input class="vs-host" oninput="gen()"></div><div class="f"><label>Port</label><input class="vs-port" oninput="gen()"></div></div>
+      <div class="fr"><div class="tgl"><input type="checkbox" class="vs-tls" onchange="gen()"><label>https</label></div><div class="tgl"><input type="checkbox" class="vs-insecure" onchange="gen()"><label>skip certificate verification</label></div></div>
+      <div class="fr"><div class="f"><label>Admin password</label><input class="vs-pass" type="password" oninput="gen()"></div><div class="f"><label>...or env var</label><input class="vs-passenv" oninput="gen()"></div></div>
+      <div class="fr"><div class="f"><label>...or Secret namespace</label><input class="vs-sns" oninput="gen()"></div><div class="f"><label>Secret name</label><input class="vs-sname" oninput="gen()"></div><div class="f"><label>Secret key</label><input class="vs-skey" oninput="gen()"></div></div></div>
+  </div>`).join('');
+}
+function togVia(n) {
+  const s = $('site' + n), v = s.querySelector('.s-via').value;
+  s.querySelector('.s-vk').classList.toggle('vis', v === 'kubernetes');
+  s.querySelector('.s-vs').classList.toggle('vis', v === 'semp');
+}
+
+// "key: value" lines, split on the first colon the way render.writeKeyValueEntry does.
+const kvLines = s => LINES(s).map(l => { const i = l.indexOf(':'); return i >= 0 ? [l.slice(0, i).trim(), l.slice(i + 1).trim()] : [l, null]; });
+// "key Operator v1,v2" lines: a node match expression each.
+const parseExprs = s => LINES(s).map(l => {
+  const t = l.split(/\s+/);
+  return { key: t[0] || '', op: t[1] || '', values: t.slice(2).join(' ').split(',').map(x => x.trim()).filter(Boolean) };
+});
+const podTerms = listId => rowsOf(listId).map(r => ({
+  weight: rq(r, '.pt-w'), topo: rq(r, '.pt-topo'), labels: kvLines(rraw(r, '.pt-lbl')),
+  ns: rq(r, '.pt-ns').split(',').map(x => x.trim()).filter(Boolean),
+})).filter(t => t.weight || t.topo || t.labels.length || t.ns.length);
+
+// ======== The model: what the form says, before any default ========
+
+function readModel() {
+  const ha = CHK('i-ha');
+  const node = (n, a) => ({ name: V(n), addr: V(a) });
+  const none = { name: '', addr: '' };
+  const sites = [1, 2].map(n => {
+    const s = $('site' + n);
+    return {
+      vrn: rq(s, '.s-vrn'), routers: LINES(rraw(s, '.s-rn')),
+      eps: rowsOf('s' + n + '-eps').map(r => ({ host: rq(r, '.e-host'), port: rq(r, '.e-port'), tr: rq(r, '.e-tr') })).filter(e => e.host || e.port),
+      via: s.querySelector('.s-via').value,
+      vk: { cmd: rq(s, '.vk-cmd'), ns: rq(s, '.vk-ns'), name: rq(s, '.vk-name') },
+      vs: { host: rq(s, '.vs-host'), port: rq(s, '.vs-port'), tls: rchk(s, '.vs-tls'), insecure: rchk(s, '.vs-insecure'),
+        pass: rraw(s, '.vs-pass'), passEnv: rq(s, '.vs-passenv'), sns: rq(s, '.vs-sns'), sname: rq(s, '.vs-sname'), skey: rq(s, '.vs-skey') },
+    };
+  });
+  return {
+    plat: { k8s: CHK('i-pk8s'), docker: CHK('i-pdocker'), podman: CHK('i-ppodman') },
+    ha, timezone: V('i-timezone'),
+    image: { repo: V('i-repo'), tag: V('i-tag'), registry: V('i-registry'), user: V('i-imguser'), pass: RAW('i-imgpass'), passEnv: V('i-imgpassenv') },
+    red: { primary: node('i-npriname', 'i-npriaddr'), backup: ha ? node('i-nbkpname', 'i-nbkpaddr') : none,
+      monitor: ha ? node('i-nmonname', 'i-nmonaddr') : none, psk: ha ? RAW('i-psk') : '', pskEnv: ha ? V('i-pskenv') : '' },
+    semp: { adminPass: RAW('i-admpass'), adminPassEnv: V('i-admpassenv'), monitorPass: RAW('i-monpass'), monitorPassEnv: V('i-monpassenv'),
+      users: rowsOf('users-list').map(r => ({ username: rq(r, '.u-name'), accessLevel: rq(r, '.u-level'), password: rraw(r, '.u-pass'), passwordEnv: rq(r, '.u-passenv') }))
+        .filter(u => u.username || u.password || u.passwordEnv) },
+    tls: { cert: V('i-tlscert'), certKey: V('i-tlskey'),
+      cas: rowsOf('cas-list').map(r => ({ path: rq(r, '.ca-path'), bytes: fileBytes(r.querySelector('.ca-file')) })).filter(c => c.path),
+      certBytes: fileBytes($('i-tlscertfile')), keyBytes: fileBytes($('i-tlskeyfile')), pass: RAW('i-tlspass'), passEnv: V('i-tlspassenv') },
+    scaling: { maxConnections: V('i-maxconn'), maxQueueMessages: V('i-maxqmsg'), maxSpoolUsageMB: V('i-maxpool'), maxKafkaBridge: V('i-maxkb'),
+      maxKafkaConnections: V('i-maxkc'), maxBridges: V('i-maxbr'), maxSubscriptions: V('i-maxsub'), maxGuaranteedMsgMB: V('i-maxgms') },
+    repl: { on: CHK('i-replon'), sites, vpns: rowsOf('vpns-list').map(r => ({ name: rq(r, '.v-name'), at: rq(r, '.v-at') })).filter(v => v.name || v.at) },
+    broker: { cliDir: V('i-clidir'), diagDir: V('i-diagdir'), productKeys: L('i-pkeys'),
+      dirs: rowsOf('dirs-list').map(r => ({ path: rq(r, '.d-path'), ext: rq(r, '.d-ext') })).filter(d => d.path || d.ext),
+      files: L('i-domfiles').map(l => { const i = l.indexOf('='); return i >= 0 ? [l.slice(0, i).trim(), l.slice(i + 1).trim()] : [l, '']; }) },
+    k8s: { name: V('i-kname'), namespace: V('i-kns'), command: V('i-kcmd'), serviceAccount: V('i-ksa'), updateStrategy: V('i-kupd'), pullPolicy: V('i-kpull'),
+      adminSecret: V('i-kadmsecret'), tlsSecret: V('i-ktlssecret'), pullSecret: V('i-kpullsecret'),
+      storageClass: V('i-ksc'), msgSize: V('i-kmsgsize'), monSize: V('i-kmonsize'), msgMem: V('i-kmem'),
+      mounts: { primary: V('i-kmnt-primary'), backup: ha ? V('i-kmnt-backup') : '', monitor: ha ? V('i-kmnt-monitor') : '' },
+      op: { image: V('i-opimg'), namespace: V('i-opns'), watch: V('i-opwatch'), watchBrokerNs: CHK('i-opwatchbroker'), cpu: V('i-opcpu'), mem: V('i-opmem') },
+      runAsUser: V('i-runasuser'), fsGroup: V('i-fsgroup'), cRunAsUser: V('i-crunasuser'), cRunAsGroup: V('i-crunasgroup'),
+      podAnnotations: kvLines(V('i-podann')), podLabels: kvLines(V('i-podlbl')),
+      lblP: L('i-lblpri'), lblB: ha ? L('i-lblbkp') : [], lblM: ha ? L('i-lblmon') : [],
+      tolP: L('i-tolpri'), tolB: ha ? L('i-tolbkp') : [], tolM: ha ? L('i-tolmon') : [],
+      antiNS: L('i-aans'), antiW: V('i-aawt'),
+      nodePref: rowsOf('napref-list').map(r => ({ weight: rq(r, '.np-w'), match: parseExprs(rraw(r, '.np-x')) })).filter(t => t.weight || t.match.length),
+      nodeReq: parseExprs(V('i-nareq')), podAff: podTerms('paff-list'), podAnti: podTerms('panti-list'),
+      lb: { ip: V('i-lbip'), pool: V('i-ippool'), annotations: L('i-lbanotn') },
+      ports: portEntries() },
+    docker: { command: V('i-dkcmd'), compose: V('i-dkcompose'), composeFile: V('i-dkfile') },
+    podman: { command: V('i-pdcmd'), rootless: CHK('i-pdrootless'), quadletDir: V('i-pdquadlet'), baseDir: V('i-pdbasedir') },
+    ctr: { name: V('i-cname'), runUser: V('i-cuser'), dataDir: V('i-cdata'), mem: V('i-cmem'), cpuset: V('i-ccpuset'), monitorCpuset: V('i-cmoncpuset'), core: V('i-ccore'),
+      hc: { on: CHK('i-hcon'), cmd: LINES(RAW('i-hccmd')), interval: V('i-hcint'), timeout: V('i-hcto'), retries: V('i-hcret'), startPeriod: V('i-hcsp') },
+      netMode: V('i-netmode'), netPorts: L('i-netports') },
+  };
+}
+
+const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+const isCtr = M => M.plat.docker || M.plat.podman;
+const platCount = M => [M.plat.k8s, M.plat.docker, M.plat.podman].filter(Boolean).length;
+
+// ======== Env file ========
+
+function emitEnv(M) {
+  const lit = [M.image.pass, M.semp.adminPass, M.semp.monitorPass, M.red.psk, M.tls.pass]
+    .concat(M.semp.users.map(u => u.password), M.repl.sites.map(s => s.vs.pass)).some(x => x !== '');
+  let y = '# Generated by solace-yaml-generator.html for the solace-util CLI: run any command with\n' +
+    '# -e <this file>' + (platCount(M) > 1 ? ' and --platform, since it declares more than one platform' : '') + '.\n';
+  if (lit) y += '# It carries secrets verbatim: never commit it. Each secret key has an *Env sibling\n# naming an environment variable to read the value from instead.\n';
+  y += '\n';
+
+  const roles = ['primary', 'backup', 'monitor'].map(r => blk(r, kv('name', M.red[r].name, S(4)) + kv('addr', M.red[r].addr, S(4)), S(2))).join('');
+  y += 'redundancy:\n' + kv('enabled', M.ha ? 'true' : 'false', S(2)) + roles + secKV('psk', M.red.psk, M.red.pskEnv, S(2));
+  y += kv('timezone', M.timezone, '');
+
+  y += '\nimage:\n' + kv('repo', M.image.repo, S(2)) + kv('tag', M.image.tag, S(2)) + kv('registry', M.image.registry, S(2)) +
+    kv('user', M.image.user, S(2)) + secKV('pass', M.image.pass, M.image.passEnv, S(2));
+
+  const users = M.semp.users.map(u => kv('username', u.username, S(6)) + kv('accessLevel', u.accessLevel, S(6)) + secKV('password', u.password, u.passwordEnv, S(6)));
+  const semp = secKV('adminPass', M.semp.adminPass, M.semp.adminPassEnv, S(2)) + secKV('monitorPass', M.semp.monitorPass, M.semp.monitorPassEnv, S(2)) +
+    seq('additionalUsers', users, S(2));
+  if (semp) y += '\nsemp:\n' + semp;
+
+  const tls = kv('cert', M.tls.cert, S(2)) + kv('certKey', M.tls.certKey, S(2)) + klist('cas', M.tls.cas.map(c => c.path), S(2)) +
+    (isCtr(M) ? secKV('certPassphrase', M.tls.pass, M.tls.passEnv, S(2)) : '');
+  if (tls) y += '\ntls:\n' + tls;
+
+  const scaling = Object.entries(M.scaling).map(([k, v]) => knum(k, v, S(2))).join('');
+  if (scaling) y += '\nscaling:\n' + scaling;
+
+  if (M.repl.on) {
+    const site = s => {
+      let b = kv('virtualRouterName', s.vrn, S(6)) + klist('routerNames', s.routers, S(6)) +
+        seq('endpoints', s.eps.map(e => kv('host', e.host, S(10)) + knum('port', e.port, S(10)) + kv('transport', e.tr, S(10))), S(6));
+      if (s.via === 'kubernetes') {
+        b += blk('via', blk('kubernetes', kv('command', s.vk.cmd, S(10)) + kv('namespace', s.vk.ns, S(10)) + kv('name', s.vk.name, S(10)), S(8)), S(6));
+      } else if (s.via === 'semp') {
+        const v = s.vs;
+        b += blk('via', blk('semp', kv('host', v.host, S(10)) + knum('port', v.port, S(10)) + (v.tls ? S(10) + 'tls: true\n' : '') +
+          (v.insecure ? S(10) + 'insecure: true\n' : '') + secKV('pass', v.pass, v.passEnv, S(10)) +
+          blk('passSecret', kv('namespace', v.sns, S(12)) + kv('name', v.sname, S(12)) + kv('key', v.skey, S(12)), S(10)), S(8)), S(6));
+      }
+      return b || S(6) + 'virtualRouterName: ""\n';
+    };
+    const r = seq('sites', M.repl.sites.map(site), S(2)) + seq('vpns', M.repl.vpns.map(v => kv('name', v.name, S(6)) + kv('activeAt', v.at, S(6))), S(2));
+    if (r) y += '\nreplication:\n' + r;
   }
-  if(tlsOn&&tlsSecret){
-    // Concatenate cert + CA chain as PEM text, then base64 encode
-    const certPem=tlsCertRaw+(tlsCaRaw?('\n'+tlsCaRaw):'');
-    const certDisplay=certPem?btoa(certPem):'<base64-encoded-certificate>';
-    const keyDisplay=tlsKeyRaw?btoa(tlsKeyRaw):'<base64-encoded-private-key>';
-    let tlsNote=(!tlsCertRaw||!tlsKeyRaw)?'\n# Note: Select certificate and key files above to populate base64 values':'';
-    y+=`\n---
-# TLS Server Certificate Secret${tlsNote}
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ${tlsSecret}
-  namespace: ${ns}
-type: kubernetes.io/tls
-data:
-  tls.crt: ${certDisplay}
-  tls.key: ${keyDisplay}`;
+
+  const dirs = M.broker.dirs.length ? S(4) + 'dirs:\n' + M.broker.dirs.map(d => d.ext
+    ? `${S(6)}- path: ${yq(d.path)}\n${S(8)}fileExt: ${yq(d.ext)}\n` : `${S(6)}- ${yq(d.path)}\n`).join('') : '';
+  const broker = kv('cliScriptsDir', M.broker.cliDir, S(2)) + kv('hostDiagnosticDir', M.broker.diagDir, S(2)) +
+    klist('productKeys', M.broker.productKeys, S(2)) + blk('domainCerts', dirs + kmap('files', M.broker.files, S(4)), S(2));
+  if (broker) y += '\nbroker:\n' + broker;
+
+  if (M.plat.k8s) {
+    const k = M.k8s;
+    let b = kv('command', k.command, S(2)) + kv('name', k.name, S(2)) + kv('namespace', k.namespace, S(2)) +
+      kv('adminSecret', k.adminSecret, S(2)) + kv('tlsServerSecret', k.tlsSecret, S(2)) + kv('imagePullSecret', k.pullSecret, S(2)) +
+      kv('imagePullPolicy', k.pullPolicy, S(2)) + kv('updateStrategy', k.updateStrategy, S(2)) + kv('serviceAccount', k.serviceAccount, S(2));
+    b += blk('storage', kv('class', k.storageClass, S(4)) + kv('msgNodeSize', k.msgSize, S(4)) + kv('monNodeSize', k.monSize, S(4)) +
+      kmap('customVolumeMount', Object.entries(k.mounts).filter(([, v]) => v), S(4)), S(2));
+    b += blk('msgNode', kv('mem', k.msgMem, S(4)), S(2));
+    b += blk('operator', kv('image', k.op.image, S(4)) + kv('namespace', k.op.namespace, S(4)) + kv('watchNamespaces', k.op.watch, S(4)) +
+      (k.op.watchBrokerNs ? '' : S(4) + 'watchBrokerNs: false\n') + kv('cpu', k.op.cpu, S(4)) + kv('mem', k.op.mem, S(4)), S(2));
+    b += blk('securityContext', kv('runAsUser', k.runAsUser, S(4)) + kv('fsGroup', k.fsGroup, S(4)), S(2));
+    b += blk('containerSecurity', kv('runAsUser', k.cRunAsUser, S(4)) + kv('runAsGroup', k.cRunAsGroup, S(4)), S(2));
+    b += kmap('podAnnotations', k.podAnnotations, S(2)) + kmap('podLabels', k.podLabels, S(2));
+    const expr = (e, ind) => kv('key', e.key, ind) + kv('operator', e.op, ind) + klist('values', e.values, ind);
+    const term = t => knum('weight', t.weight, S(8)) + kv('topologyKey', t.topo, S(8)) + kmap('matchLabels', t.labels, S(8)) + klist('namespaces', t.ns, S(8));
+    const nodeAffinity = seq('preferred', k.nodePref.map(t => knum('weight', t.weight, S(10)) + seq('match', t.match.map(e => expr(e, S(14))), S(10))), S(6)) +
+      seq('required', k.nodeReq.map(e => expr(e, S(10))), S(6));
+    b += blk('placement',
+      klist('labelsPrimary', k.lblP, S(4)) + klist('labelsBackup', k.lblB, S(4)) + klist('labelsMonitor', k.lblM, S(4)) +
+      klist('tolerationsPrimary', k.tolP, S(4)) + klist('tolerationsBackup', k.tolB, S(4)) + klist('tolerationsMonitor', k.tolM, S(4)) +
+      klist('antiAffinityNamespaces', k.antiNS, S(4)) + knum('antiAffinityWeight', k.antiW, S(4)) +
+      blk('nodeAffinity', nodeAffinity, S(4)) + seq('podAffinity', k.podAff.map(term), S(4)) + seq('podAntiAffinity', k.podAnti.map(term), S(4)), S(2));
+    b += blk('loadBalancer', kv('ip', k.lb.ip, S(4)) + kv('ipPool', k.lb.pool, S(4)) + klist('annotations', k.lb.annotations, S(4)), S(2));
+    if (!sameList(k.ports, GEN.defaults.kubernetesPorts)) b += k.ports.length ? klist('ports', k.ports, S(2)) : '';
+    y += '\nkubernetes:' + (b ? '\n' + b : ' {}\n');
+  }
+
+  const c = M.ctr, hc = c.hc;
+  const net = kv('mode', c.netMode, S(4)) + klist('ports', c.netPorts, S(4));
+  const health = blk('healthCheck', (hc.on ? S(6) + 'enabled: true\n' : '') + klist('cmd', hc.cmd, S(6)) + kv('interval', hc.interval, S(6)) +
+    kv('timeout', hc.timeout, S(6)) + knum('retries', hc.retries, S(6)) + kv('startPeriod', hc.startPeriod, S(6)), S(4));
+  const ctr = kv('name', c.name, S(4)) + kv('runUser', c.runUser, S(4)) + kv('dataDir', c.dataDir, S(4)) + kv('mem', c.mem, S(4)) +
+    kv('cpuset', c.cpuset, S(4)) + kv('monitorCpuset', c.monitorCpuset, S(4)) + blk('ulimits', kv('core', c.core, S(6)), S(4)) + health;
+  if (M.plat.docker) {
+    const b = kv('command', M.docker.command, S(2)) + kv('compose', M.docker.compose, S(2)) + kv('composeFile', M.docker.composeFile, S(2)) +
+      blk('network', net, S(2)) + blk('container', ctr, S(2));
+    y += '\ndocker:' + (b ? '\n' + b : ' {}\n');
+  }
+  if (M.plat.podman) {
+    const b = kv('command', M.podman.command, S(2)) + (M.podman.rootless ? S(2) + 'rootless: true\n' : '') + kv('quadletDir', M.podman.quadletDir, S(2)) +
+      kv('baseDir', M.podman.baseDir, S(2)) + blk('network', net, S(2)) + blk('container', ctr, S(2));
+    y += '\npodman:' + (b ? '\n' + b : ' {}\n');
   }
   return y;
 }
 
-// ═══════ BROKER YAML ═══════
-function genBroker(){
-  const name=V('i-bkname')||'solace-event-broker',ns=V('i-bkns')||'solace-namespace',repo=V('i-repo'),img=V('i-bkimg')||'solace-pubsub-standard',tag=V('i-bktag')||'latest',ps=$('i-pson').checked?V('i-pullsecret'):'',ha=$('i-ha').checked,admSec=V('i-admsecret')||'solace-admin-secret',sc=V('i-sc'),stMsg=V('i-stmsg'),stMon=V('i-stmon'),cpu=tier().cpu,mem=V('i-bkmem');
-  const fRepo=repo?`${repo}/${img}`:img;
-  const tlsOn=$('i-tlson').checked,tlsSec=V('i-tlssecret');
-  let y=`apiVersion: pubsubplus.solace.com/v1beta1
-kind: PubSubPlusEventBroker
-metadata:
-  namespace: ${ns}
-  name: ${name}
-spec:
-  image:
-    repository: ${fRepo}
-    tag: ${tag}
-    pullPolicy: IfNotPresent
-`;
-  if(ps)y+=`    pullSecrets:
-    - name: ${ps}
-`;
-  y+=`  adminCredentialsSecret: ${admSec}
-  monitoringCredentialsSecret: ${admSec}
-  redundancy: ${ha}
-  updateStrategy: ${V('i-updatestrategy')}
-  podDisruptionBudgetForHA: true
-  systemScaling:
-    system_scaling_maxconnectioncount: ${V('i-maxconn')}
-    system_scaling_maxqueuemessagecount: ${V('i-maxqmsg')}
-    system_scaling_maxkafkabridgecount: ${V('i-maxkb')}
-    system_scaling_maxkafkabrokerconnectioncount: ${V('i-maxkc')}
-    system_scaling_maxbridgecount: ${V('i-maxbr')}
-    system_scaling_maxsubscriptioncount: ${V('i-maxsub')}
-    system_scaling_maxguaranteedmessagesize: ${V('i-maxgms')}
-    maxSpoolUsage: ${V('i-maxpool')}
-    messagingNodeCpu: "${cpu}"
-    messagingNodeMemory: ${mem}
-  storage:
-`;
-  if(sc)y+=`    useStorageClass: ${sc}
-`;
-  y+=`    messagingNodeStorageSize: ${stMsg}
-    monitorNodeStorageSize: ${stMon}
-`;
-  const tzv=V('i-timezone');
-  if(tzv)y+=`  timezone: "${tzv}"\n`;
-  if(tlsOn&&tlsSec)y+=`  tls:
-    serverTlsConfigSecret: ${tlsSec}
-    enabled: true
-    certFilename: tls.crt
-    certKeyFilename: tls.key
-`;
+// ======== What config.Load would refuse ========
 
-  // Security context (pod-level)
-  if($('i-secctxon').checked){
-    const runAsUser=V('i-runasuser')||'1000001';
-    const fsGroup=V('i-fsgroup')||'1000002';
-    y+=`  securityContext:
-    runAsUser: ${runAsUser}
-    fsGroup: ${fsGroup}
-`;
-    // Container security (spec.brokerContainerSecurity)
-    const cRunAsUser=V('i-crunasuser')||'1000001';
-    const cRunAsGroup=V('i-crunasgroup')||'1000002';
-    const readOnly=$('i-readonly').checked;
-    y+=`  brokerContainerSecurity:
-    runAsUser: ${cRunAsUser}
-    runAsGroup: ${cRunAsGroup}
-    readOnlyRootFilesystem: ${readOnly}
-`;
+const REF_DOMAIN_COMP = '(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])';
+const REF_DOMAIN = `${REF_DOMAIN_COMP}(?:\\.${REF_DOMAIN_COMP})*(?::[0-9]+)?`;
+const REF_PATH = '[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*';
+// The regexes are internal/config's, by the same names.
+const imageRegistryRE = new RegExp(`^${REF_DOMAIN}(?:/${REF_PATH})*$`);
+const imageRepoRE = new RegExp(`^(?:${REF_DOMAIN}/)?${REF_PATH}(?:/${REF_PATH})*$`);
+const imageTagRE = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
+const operatorImageRE = new RegExp(`^(?:${REF_DOMAIN}/)?${REF_PATH}(?:/${REF_PATH})*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?(?:@sha256:[a-f0-9]{64})?$`);
+const k8sQuantityRE = /^(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:m|k|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei)?$/;
+const envVarRE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const containerMemRE = /^[0-9]+[bkmg]$/i;
+const identRE = /^[A-Za-z0-9._-]+$/;
+const brokerUsernameRE = /^[A-Za-z_][A-Za-z0-9._-]{0,31}$/;
+const engineContainerNameRE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const runUserRE = /^[A-Za-z0-9._-]+(:[A-Za-z0-9._-]+)?$/;
+const cpuSetRE = /^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$/;
+const dnsLabelRE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+const dnsSubdomainRE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
+const k8sIDRE = /^(0|[1-9][0-9]*)$/;
+const coreLimitRE = /^(?:-1|0|[1-9][0-9]*)$/;
+const durationRE = /^(?:(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:ns|us|ms|s|m|h))+$/;
+// What a host path may not carry (hostpath.go): whitespace, control characters and the
+// shell metacharacters.
+const hostPathBadRE = /[\s"'`$;|&<>()*?[\]{}#!\x00-\x1f\x7f]/;
+const COMMANDS = { kubernetes: ['kubectl', 'oc'], docker: ['docker', 'docker-compose', 'nerdctl'], podman: ['podman'] };
+
+function cpuSetCount(s) {
+  return s.split(',').reduce((n, part) => { const [a, b] = part.split('-').map(Number); return n + (b === undefined ? 1 : b - a + 1); }, 0);
+}
+// isIPv4 and isIPv6 are the shapes net.ParseIP accepts and To4 sorts between.
+const isIPv4 = s => /^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$/.test(s);
+function isIPv6(s) {
+  if (!/^[0-9A-Fa-f:.]+$/.test(s) || !s.includes(':') || (s.match(/::/g) || []).length > 1) return false;
+  const m = /^(.*:)([0-9.]+)$/.exec(s);
+  if (m && m[2].includes('.')) {
+    if (!isIPv4(m[2]) || /^(0*:)*:?(0*:)*ffff:$/i.test(m[1])) return false;  // To4 != nil: a v4 address
+    s = m[1] + '0:0';
   }
+  const groups = s.split(':');
+  if (!s.includes('::') && groups.length !== 8) return false;
+  return groups.length <= 8 && groups.every(g => g === '' || /^[0-9A-Fa-f]{1,4}$/.test(g));
+}
+// validContainerPort is artifactvalues.validContainerPort: [ip:]host:container[/tcp|/udp],
+// either side a port or a lo-hi range, an IPv6 address in brackets.
+function validContainerPort(entry) {
+  let rest = entry;
+  const slash = rest.lastIndexOf('/');
+  if (slash >= 0) { if (!['tcp', 'udp'].includes(rest.slice(slash + 1))) return 'the protocol must be tcp or udp'; rest = rest.slice(0, slash); }
+  let ip = '';
+  if (rest.startsWith('[')) {
+    const end = rest.indexOf(']:');
+    if (end < 0) return 'a bracketed IPv6 address must be followed by :host:container';
+    ip = rest.slice(1, end); rest = rest.slice(end + 2);
+    if (!isIPv6(ip)) return `${goQuote(ip)} is not an IPv6 address`;
+  }
+  let parts = rest.split(':');
+  if (parts.length === 3 && !ip) { ip = parts[0]; parts = parts.slice(1); if (!isIPv4(ip)) return `${goQuote(ip)} is not an IPv4 address (an IPv6 one goes in brackets)`; }
+  else if (parts.length !== 2) return 'it needs exactly a host port and a container port';
+  const side = s => { const m = /^([0-9]+)(?:-([0-9]+))?$/.exec(s); if (!m) return 0; const a = +m[1], b = m[2] === undefined ? a : +m[2];
+    if (String(a) !== m[1] || (m[2] !== undefined && String(b) !== m[2]) || a < 1 || b > 65535 || b < a) return 0; return b - a + 1; };
+  const h = side(parts[0]), c = side(parts[1]);
+  if (!h) return `host side ${goQuote(parts[0])} must be a port 1-65535 or a lo-hi range`;
+  if (!c) return `container side ${goQuote(parts[1])} must be a port 1-65535 or a lo-hi range`;
+  if (c > 1 && h !== c) return `a container range of ${c} ports needs a host range of the same size`;
+  return '';
+}
+const tagVersion = tag => { const m = /^(\d+)\.(\d+)/.exec(tag); return m ? [+m[1], +m[2]] : null; };
 
-  // Node assignment
-  const tolOn=$('i-tolon').checked,lblOn=$('i-lblon').checked,aaOn=$('i-aaon').checked;
-  const tolP=tolOn?L('i-tolpri'):[],tolB=tolOn?L('i-tolbkp'):[],tolM=tolOn?L('i-tolmon'):[];
-  const lblP=lblOn?L('i-lblpri'):[],lblB=lblOn?L('i-lblbkp'):[],lblM=lblOn?L('i-lblmon'):[];
-  const aaNs=aaOn?L('i-aans'):[],aaWt=V('i-aawt')||'100';
-  const hasNA=aaNs.length||tolP.length||tolB.length||tolM.length||lblP.length||lblB.length||lblM.length;
-  if(hasNA){
-    const aa=buildAA(aaNs,aaWt);
-    y+='  nodeAssignment:\n';
-    y+='  - name: Primary\n    spec:\n'+parseTol(tolP)+parseLabels(lblP)+aa;
-    if(ha){
-      y+='  - name: Backup\n    spec:\n'+parseTol(tolB)+parseLabels(lblB)+aa;
-      y+='  - name: Monitor\n    spec:\n'+parseTol(tolM)+parseLabels(lblM)+aa;
+function validate(M) {
+  const P = [];
+  const err = (f, m) => P.push({ e: 1, f, m }), note = (f, m) => P.push({ e: 0, f, m });
+  const path = (f, v, abs) => {
+    if (!v) return;
+    if (hostPathBadRE.test(v)) err(f, `${goQuote(v)} carries whitespace or a shell metacharacter, which a host path may not`);
+    else if (abs && !v.startsWith('/')) err(f, `${goQuote(v)} must be absolute`);
+  };
+  const pair = (f, litV, env) => {
+    if (litV !== '' && env) err(f, `set ${f} or ${f}Env, not both`);
+    if (env && !envVarRE.test(env)) err(f + 'Env', `${goQuote(env)} is not an environment variable name`);
+    if (/[\x00-\x1f\x7f]/.test(litV)) err(f, 'carries a control character');
+  };
+  const n = platCount(M), ctr = isCtr(M);
+  if (!n) err('platforms', 'tick at least one: the CLI finds the platform from the sections a file declares');
+  if (n > 1) note('platforms', 'more than one platform section: every command needs --platform');
+
+  if (!M.image.repo) err('image.repo', 'is mandatory');
+  else if (!imageRepoRE.test(M.image.repo)) err('image.repo', `${goQuote(M.image.repo)} is not a lowercase repository path`);
+  if (!M.image.tag) err('image.tag', 'is mandatory');
+  else if (!imageTagRE.test(M.image.tag)) err('image.tag', `${goQuote(M.image.tag)}: 1-128 letters, digits, _ . -, not starting with . or -; a digest is not supported`);
+  if (M.image.registry && !imageRegistryRE.test(M.image.registry)) err('image.registry', `${goQuote(M.image.registry)} is not a registry host with an optional :port and path`);
+  pair('image.pass', M.image.pass, M.image.passEnv);
+  pair('semp.adminPass', M.semp.adminPass, M.semp.adminPassEnv);
+  pair('semp.monitorPass', M.semp.monitorPass, M.semp.monitorPassEnv);
+  pair('redundancy.psk', M.red.psk, M.red.pskEnv);
+  pair('tls.certPassphrase', M.tls.pass, M.tls.passEnv);
+
+  ['primary', 'backup', 'monitor'].forEach(r => {
+    const nm = M.red[r].name;
+    if (nm && !identRE.test(nm)) err(`redundancy.${r}.name`, `${goQuote(nm)}: letters, digits, . _ - only`);
+    if (ctr && M.ha) {
+      if (!nm) err(`redundancy.${r}.name`, 'is mandatory for docker/podman HA');
+      if (!M.red[r].addr) err(`redundancy.${r}.addr`, 'is mandatory for docker/podman HA');
     }
-  }
-
-  // Service
-  y+=`  service:
-    type: LoadBalancer
-`;
-  const lbOn=$('i-lbon').checked,lbIp=V('i-lbip'),ipp=V('i-ippool'),lbA=L('i-lbanotn');
-  if(lbOn&&(lbIp||ipp||lbA.length)){
-    y+='    annotations:\n';
-    if(lbIp)y+=`      metallb.universe.tf/loadBalancerIPs: ${lbIp}\n      metallb.io/loadBalancerIPs: ${lbIp}\n`;
-    if(ipp)y+=`      metallb.universe.tf/address-pool: ${ipp}\n      metallb.io/address-pool: ${ipp}\n`;
-    lbA.forEach(a=>{y+=`      ${a}\n`;});
-  }
-  y+='    ports:\n';
-  collectPorts().forEach(p=>{y+=`    - containerPort: ${p.cport}\n      name: ${p.name}\n      protocol: ${p.proto}\n      servicePort: ${p.sport}\n`;});
-  return y.replace(/\n$/,'');
-}
-
-// Dynamic port rows
-const DEFAULT_PORTS=[['tcp-semp','8080','8080','TCP'],['tls-semp','1943','1943','TCP'],['tcp-smf','55555','55555','TCP'],['tcp-smfcomp','55003','55003','TCP'],['tls-smf','55443','55443','TCP'],['tcp-smfroute','55556','55556','TCP'],['tcp-web','8008','8008','TCP'],['tls-web','1443','1443','TCP'],['tcp-rest','9000','9000','TCP'],['tls-rest','9443','9443','TCP'],['tcp-amqp','5672','5672','TCP'],['tls-amqp','5671','5671','TCP'],['tcp-mqtt','1883','1883','TCP'],['tls-mqtt','8883','8883','TCP'],['tcp-mqttweb','8000','8000','TCP'],['tls-mqttweb','8443','8443','TCP']];
-function addPortRow(name='',cport='',sport='',proto='TCP'){
-  const r=document.createElement('div');r.className='pr';
-  r.innerHTML=`<input class="p-name" placeholder="name" value="${name}" oninput="gen()"><input class="p-cport" type="number" min="1" max="65535" placeholder="container" value="${cport}" oninput="gen()"><span class="p-sep">:</span><input class="p-sport" type="number" min="1" max="65535" placeholder="service" value="${sport}" oninput="gen()"><select class="p-proto" onchange="gen()"><option ${proto==='TCP'?'selected':''}>TCP</option><option ${proto==='UDP'?'selected':''}>UDP</option></select><button type="button" class="p-rm" title="Remove" onclick="this.parentElement.remove();gen()">−</button>`;
-  $('ports-list').appendChild(r);
-}
-function collectPorts(){
-  return Array.from(document.querySelectorAll('#ports-list .pr')).map(r=>{
-    const name=r.querySelector('.p-name').value.trim();
-    const cport=r.querySelector('.p-cport').value.trim();
-    const sport=r.querySelector('.p-sport').value.trim();
-    const proto=r.querySelector('.p-proto').value;
-    return name&&cport&&sport?{name,cport,sport,proto}:null;
-  }).filter(Boolean);
-}
-function initPorts(){DEFAULT_PORTS.forEach(p=>addPortRow(...p));}
-
-// ═══════ ENV FILE (unified YAML schema) ═══════
-// Mirrors internal/config's schema. Decoding is strict, so only real keys may be
-// emitted; every empty value is left out so the Go defaults apply instead.
-
-// yq quotes anything a YAML reader could misread as a number, bool, null, or
-// structure -- the same rule internal/convert's emitter uses.
-function yq(s){
-  s=String(s);
-  if(/^[A-Za-z][A-Za-z0-9_.\-]*$/.test(s)&&!/^(y|n|yes|no|true|false|on|off|null|nil)$/i.test(s))return s;
-  return '"'+s.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"';
-}
-// kv/klist/blk skip empty values, and blk drops a block whose body came out empty.
-// Solace scaling tiers. maxConnections fixes the broker's CPU and defaults its
-// memory; this mirrors internal/config/scaling.go, so the two move together.
-const TIERS={100:{cpu:'2',mem:'3410Mi'},1000:{cpu:'2',mem:'6898Mi'},10000:{cpu:'4',mem:'12435Mi'},
-             100000:{cpu:'8',mem:'30925Mi'},200000:{cpu:'12',mem:'52581Mi'}};
-function tier(){return TIERS[V('i-maxconn')]||TIERS[100];}
-// ctrMem rewrites a Kubernetes quantity into the suffix docker and podman accept
-// (they reject Mi/Gi); both count in binary units, so only the trailing i goes.
-function ctrMem(m){return /i$/.test(m)?m.slice(0,-1).toLowerCase():m;}
-// isTierMem reports a memory field still holding some tier's default, so syncTier
-// can refresh it on a tier change without discarding a hand-typed value.
-function isTierMem(v){return v===''||Object.values(TIERS).some(t=>t.mem===v||ctrMem(t.mem)===v);}
-// syncTier pushes the selected tier into the resource fields. CPU is always
-// overwritten -- it is not the user's to set -- while memory is only refreshed
-// when it has not been customised.
-function syncTier(){
-  const t=tier(),cpu=$('i-bkcpu'),mem=$('i-bkmem'),ctr=$('i-ctrmem');
-  if(cpu)cpu.value=t.cpu;
-  if(mem&&isTierMem(mem.value))mem.value=t.mem;
-  if(ctr&&isTierMem(ctr.value))ctr.value=ctrMem(t.mem);
-}
-function kv(k,v,ind){return v?`${ind}${k}: ${yq(v)}\n`:'';}
-function knum(k,v,ind){return v!==''&&v!=null?`${ind}${k}: ${v}\n`:'';}
-function klist(k,arr,ind){if(!arr||!arr.length)return '';let o=`${ind}${k}:\n`;arr.forEach(v=>{o+=`${ind}  - ${yq(v)}\n`;});return o;}
-function blk(name,body,ind){return body?`${ind}${name}:\n${body}`:'';}
-
-function genEnv(){
-  const ha=$('i-ha').checked,tlsOn=$('i-tlson').checked,lbOn=$('i-lbon').checked,pkOn=$('i-pkon').checked,
-        replOn=$('i-replon').checked,psOn=$('i-pson').checked,lblOn=$('i-lblon').checked,
-        tolOn=$('i-tolon').checked,aaOn=$('i-aaon').checked,secOn=$('i-secctxon').checked,
-        ctrOn=$('i-ctron').checked;
-
-  let y='# Generated by the Solace YAML Generator.\n';
-  y+='# Env file for the `solace-util` CLI: solace-util <platform> <verb> -e <this file>\n';
-  y+='# It carries secrets verbatim -- review before use, and never commit it.\n\n';
-  y+=`redundancy: ${ha?'"yes"':'"no"'}\n`;
-  y+=kv('timezone',V('i-timezone'),'');   // cross-platform: the CR's timezone and the containers' TZ
-  y+='\n';
-
-  y+='image:\n'+kv('repo',V('i-bkimg'),'  ')+kv('tag',V('i-bktag'),'  ')+kv('registry',V('i-repo'),'  ')
-    +(psOn?kv('user',V('i-imguser'),'  ')+kv('pass',V('i-imgpass'),'  '):'');
-
-  const users=adminUsers();
-  // additionalUsers is a list of mappings, so it is built here rather than through
-  // klist (which emits scalars). Every field is required by the schema.
-  let usersBlock='';
-  users.forEach(x=>{usersBlock+=`    - username: ${x.u}\n      accessLevel: ${x.lvl}\n      password: ${yq(x.p)}\n`;});
-  y+='\nadmin:\n'+kv('pass',V('i-admpass'),'  ')+kv('monitorPass',V('i-monpass'),'  ')
-    +(usersBlock?'  additionalUsers:\n'+usersBlock:'');
-  // Say so rather than dropping a rejected entry in silence -- the CLI fails
-  // loud on the same input, so a quietly missing user would be a nasty surprise.
-  const skipped=L('i-userpass').length-users.length;
-  if(skipped)y+=`  # ${skipped} user entr${skipped===1?'y':'ies'} skipped: write user=password[=accessLevel], where the\n`
-    +`  # name matches [A-Za-z0-9._-]+ (not admin/monitor) and the level is one of ${accessLevels.join('|')}\n`;
-
-  // The Secret NAMES (tlsServerSecret, imagePullSecret) are Kubernetes-only and
-  // land in the kubernetes: section below; tls: carries only the cert material.
-  const cas=L('i-tlscas'),tlsSec=tlsOn?V('i-tlssecret'):'';
-  const tlsBody=kv('cert',V('i-tlscert'),'  ')+kv('certKey',V('i-tlskey'),'  ')+klist('cas',cas,'  ');
-  if(tlsBody)y+='\n'+blk('tls',tlsBody,'');
-
-  y+='\nscaling:\n'
-    +knum('maxConnections',V('i-maxconn'),'  ')
-    +knum('maxQueueMessages',V('i-maxqmsg'),'  ')
-    +knum('maxSpoolUsageMB',V('i-maxpool'),'  ')
-    +knum('maxKafkaBridge',V('i-maxkb'),'  ')
-    +knum('maxKafkaConnections',V('i-maxkc'),'  ')
-    +knum('maxBridges',V('i-maxbr'),'  ')
-    +knum('maxSubscriptions',V('i-maxsub'),'  ')
-    +knum('maxGuaranteedMsgMB',V('i-maxgms'),'  ');
-
-  if(replOn){
-    const rb=kv('mate',V('i-replmate'),'  ')+klist('connSsl',L('i-replconn'),'  ')+kv('psk',V('i-replpsk'),'  ');
-    if(rb)y+='\n'+blk('replication',rb,'');
-  }
-
-  // ── broker (platform-neutral: cli scripts, diag dir, product keys, domain certs) ──
-  // domainCerts.files values are now FULL host paths (schema change): each
-  // "ca-name=filename.cer" line is joined onto the folder field here, since
-  // the generator has no directory-walk of its own to offer as broker.domainCerts.dirs.
-  const dfiles=L('i-domfiles'),dfolder=V('i-domfolder').replace(/\/+$/,'');
-  let filesBody='';
-  dfiles.forEach(d=>{const p=d.split('=');if(p.length===2){
-    const name=p[1].trim();
-    const full=dfolder?dfolder+'/'+name:name;
-    filesBody+=`      ${yq(p[0].trim())}: ${yq(full)}\n`;
-  }});
-  const brokerBody=kv('cliScriptsDir',V('i-clifolder'),'  ')+kv('hostDiagnosticDir',V('i-diagdir'),'  ')
-    +(pkOn?klist('productKeys',L('i-pkeys'),'  '):'')
-    +blk('domainCerts',blk('files',filesBody,'    '),'  ');
-  if(brokerBody)y+='\n'+blk('broker',brokerBody,'');
-
-  // ── kubernetes ──
-  y+='\nkubernetes:\n'+kv('command',V('i-kubectl'),'  ')+kv('name',V('i-bkname'),'  ')+kv('namespace',V('i-bkns'),'  ')
-    +kv('adminSecret',V('i-admsecret'),'  ')
-    +kv('tlsServerSecret',tlsSec,'  ')
-    +(psOn?kv('imagePullSecret',V('i-pullsecret'),'  '):'')
-    +kv('updateStrategy',V('i-updatestrategy'),'  ')+kv('serviceAccount',V('i-svcaccount'),'  ');
-  y+=blk('storage',kv('class',V('i-sc'),'    ')+kv('msgNode',V('i-stmsg'),'    ')+kv('monNode',V('i-stmon'),'    '),'  ');
-  // No cpu key: it is fixed by the scaling tier, and the loader rejects one.
-  y+=blk('msgNode',kv('mem',V('i-bkmem'),'    '),'  ');
-  // watchBrokerNs defaults to true in the schema, so it is only emitted when the
-  // user turned it off -- keeping the output to "what the source actually set".
-  y+=blk('operator',kv('image',V('i-opimg'),'    ')+kv('namespace',V('i-opns'),'    ')
-    +kv('watchNamespaces',V('i-opwatch'),'    ')
-    +($('i-opwatchbroker').checked?'':'    watchBrokerNs: false\n')
-    +kv('cpu',V('i-opcpu'),'    ')+kv('mem',V('i-opmem'),'    '),'  ');
-  if(secOn){
-    y+=blk('securityContext',kv('runAsUser',V('i-runasuser'),'    ')+kv('fsGroup',V('i-fsgroup'),'    '),'  ');
-    y+=blk('containerSecurity',kv('runAsUser',V('i-crunasuser'),'    ')+kv('runAsGroup',V('i-crunasgroup'),'    ')
-      +`    readOnlyRootFilesystem: ${$('i-readonly').checked}\n`,'  ');
-  }
-  // Labels apply in standalone too, so they are not gated on HA; tolerations and
-  // load-balancer annotations reach the env file rather than only the broker CR.
-  const lblP=lblOn?L('i-lblpri'):[],lblB=lblOn&&ha?L('i-lblbkp'):[],lblM=lblOn&&ha?L('i-lblmon'):[];
-  const tolP=tolOn?L('i-tolpri'):[],tolB=tolOn&&ha?L('i-tolbkp'):[],tolM=tolOn&&ha?L('i-tolmon'):[];
-  const aaNs=aaOn?L('i-aans'):[];
-  y+=blk('placement',
-    klist('labelsPrimary',lblP,'    ')+klist('labelsBackup',lblB,'    ')+klist('labelsMonitor',lblM,'    ')
-    +klist('tolerationsPrimary',tolP,'    ')+klist('tolerationsBackup',tolB,'    ')+klist('tolerationsMonitor',tolM,'    ')
-    +klist('antiAffinityNamespaces',aaNs,'    ')+(aaNs.length?knum('antiAffinityWeight',V('i-aawt')||'100','    '):''),'  ');
-  y+=blk('loadBalancer',
-    kv('ip',lbOn?V('i-lbip'):'','    ')+kv('ipPool',lbOn?V('i-ippool'):'','    ')
-    +klist('annotations',lbOn?L('i-lbanotn'):[],'    '),'  ');
-  const ports=collectPorts().map(p=>{
-    const pp=p.cport===p.sport?p.cport:`${p.cport}:${p.sport}`;
-    return p.name+'='+pp+(p.proto==='TCP'?'':'/'+p.proto);
   });
-  y+=klist('ports',ports,'  ');
+  if (ctr && M.ha && M.red.psk === '' && !M.red.pskEnv) err('redundancy.psk', 'is mandatory for docker/podman HA: generate one with `openssl rand -base64 32` and use the same value on all three hosts');
 
-  // ── docker / podman / nodes ──
-  if(ctrOn){
-    const cblock=kv('name',V('i-ctrname'),'    ')+kv('runUser',V('i-ctruser'),'    ')
-      +kv('shmSize',V('i-ctrshm'),'    ')+kv('mem',V('i-ctrmem'),'    ')+kv('dataDir',V('i-ctrdata'),'    ')
-      +blk('ulimits',kv('nofile',V('i-ctrnofile'),'      ')+kv('memlock',V('i-ctrmemlock'),'      ')
-        +kv('core',V('i-ctrcore'),'      '),'    ');
-    const nblock=kv('mode',V('i-ctrnetmode'),'    ')+klist('ports',L('i-ctrports'),'    ');
-
-    y+='\ndocker:\n'+kv('command',V('i-dkruntime'),'  ')
-      +kv('composeFile',V('i-dkcompose'),'  ')+blk('network',nblock,'  ')+blk('container',cblock,'  ');
-    y+='\npodman:\n'+kv('command',V('i-pdruntime'),'  ')
-      +`  rootless: ${$('i-pdrootless').checked}\n`
-      +kv('quadletDir',V('i-pdquadlet'),'  ')+blk('network',nblock,'  ')+blk('container',cblock,'  ');
-
-    let nodes=blk('primary',kv('name',V('i-npriname'),'    ')+kv('ip',V('i-npriip'),'    '),'  ');
-    if(ha){
-      nodes+=blk('backup',kv('name',V('i-nbkpname'),'    ')+kv('ip',V('i-nbkpip'),'    '),'  ');
-      nodes+=blk('monitor',kv('name',V('i-nmonname'),'    ')+kv('ip',V('i-nmonip'),'    '),'  ');
-      nodes+=kv('psk',V('i-npsk'),'  ');
-    }
-    if(nodes)y+='\n'+blk('nodes',nodes,'');
+  const admin = M.semp.adminPass !== '' || !!M.semp.adminPassEnv;
+  if (ctr && !admin) err('semp.adminPass', 'is mandatory on docker/podman');
+  if (M.plat.k8s && !admin) {
+    if (M.semp.monitorPass !== '' || M.semp.monitorPassEnv) err('semp.monitorPass', 'needs semp.adminPass on Kubernetes: it rides the admin Secret this tool builds');
+    if (M.red.psk !== '' || M.red.pskEnv) err('redundancy.psk', 'needs semp.adminPass on Kubernetes: it rides the admin Secret this tool builds');
   }
-  return y.replace(/\n+$/,'\n');
+  const seenUser = {};
+  M.semp.users.forEach((u, i) => {
+    const f = `semp.additionalUsers[${i}]`;
+    if (!u.username) err(f, 'has no username');
+    else {
+      if (!brokerUsernameRE.test(u.username)) err(f, `${goQuote(u.username)}: a letter or _ first, then letters, digits, . _ -, at most 32`);
+      else if (M.plat.k8s && !envVarRE.test(u.username)) err(f, `${goQuote(u.username)}: on Kubernetes only letters, digits and _, since it becomes an environment variable name`);
+      if (u.username === 'admin' || u.username === 'monitor') err(f, `${u.username} is the broker's own user`);
+      if (seenUser[u.username]) err(f, `${u.username} is listed twice`);
+      seenUser[u.username] = 1;
+    }
+    if (u.password === '' && !u.passwordEnv) err(f, 'needs a password');
+    pair(f + '.password', u.password, u.passwordEnv);
+  });
+
+  if ((M.tls.cert === '') !== (M.tls.certKey === '')) err('tls.cert', 'tls.cert and tls.certKey are set together or not at all');
+  path('tls.cert', M.tls.cert); path('tls.certKey', M.tls.certKey);
+  M.tls.cas.forEach((c, i) => path(`tls.cas[${i}]`, c.path));
+  if (M.plat.k8s && ctr && (M.tls.pass !== '' || M.tls.passEnv)) err('tls.certPassphrase', 'is refused on a Kubernetes run, whose CRD has no field for it: keep it out of a file that also declares kubernetes');
+
+  Object.entries(M.scaling).forEach(([k, v]) => { if (v !== '' && !/^[0-9]+$/.test(v)) err('scaling.' + k, `${goQuote(v)} is not a whole number`); });
+
+  path('broker.cliScriptsDir', M.broker.cliDir); path('broker.hostDiagnosticDir', M.broker.diagDir);
+  M.broker.dirs.forEach((d, i) => { if (!d.path) err(`broker.domainCerts.dirs[${i}]`, 'has no path'); path(`broker.domainCerts.dirs[${i}]`, d.path); });
+  const seenCA = {};
+  M.broker.files.forEach(([nm, p], i) => {
+    const f = `broker.domainCerts.files[${i}]`;
+    if (!/^[A-Za-z0-9_.-]{1,64}$/.test(nm) || nm.includes('..')) err(f, `${goQuote(nm)}: letters, digits, _ . -, at most 64, no ..`);
+    if (!p) err(f, `${nm} has no path: write CA-NAME=/full/host/path`);
+    path(f, p);
+    if (seenCA[nm]) err(f, `${nm} is listed twice`);
+    seenCA[nm] = 1;
+  });
+
+  if (M.repl.on) validateRepl(M, err);
+  if (M.plat.k8s) validateK8s(M, err, note);
+  if (ctr) validateCtr(M, err, note);
+  return P;
 }
 
-// ═══════ Main gen ═══════
-let gt;
-function gen(){clearTimeout(gt);gt=setTimeout(async()=>{
-  const opY=await genOp();$('yc-op').innerHTML=hl(opY);$('yc-op').dataset.raw=opY;
-  const secY=genSecrets();$('yc-secrets').innerHTML=hl(secY);$('yc-secrets').dataset.raw=secY;
-  const bkY=genBroker();$('yc-broker').innerHTML=hl(bkY);$('yc-broker').dataset.raw=bkY;
-  const envY=genEnv();$('yc-env').innerHTML=hl(envY);$('yc-env').dataset.raw=envY;
-},120);}
+function validateRepl(M, err) {
+  const vrns = M.repl.sites.map(s => s.vrn);
+  M.repl.sites.forEach((s, i) => {
+    const f = `replication.sites[${i}]`;
+    if (!s.vrn) err(f + '.virtualRouterName', 'is mandatory');
+    if (!s.routers.length) err(f + '.routerNames', 'needs at least one router name');
+    if (!s.eps.length) err(f + '.endpoints', 'needs at least one endpoint');
+    const perTr = {}, seen = {};
+    s.eps.forEach((e, j) => {
+      const g = `${f}.endpoints[${j}]`;
+      if (!e.host) err(g, 'has no host');
+      if (!/^[0-9]+$/.test(e.port) || INT(e.port) < 1 || INT(e.port) > 65535) err(g, 'needs a port 1-65535');
+      const tr = e.tr || 'plainText';
+      perTr[tr] = (perTr[tr] || 0) + 1;
+      if (perTr[tr] > 2) err(g, `at most two ${tr} endpoints`);
+      const key = e.host + ':' + e.port + '/' + tr;
+      if (seen[key]) err(g, 'is listed twice');
+      seen[key] = 1;
+    });
+    if (s.via === 'kubernetes') {
+      if (!s.vk.cmd || !s.vk.ns || !s.vk.name) err(f + '.via.kubernetes', 'needs command, namespace and name');
+    } else if (s.via === 'semp') {
+      const v = s.vs;
+      if (!v.host) err(f + '.via.semp.host', 'is mandatory');
+      if (!/^[0-9]+$/.test(v.port) || INT(v.port) < 1 || INT(v.port) > 65535) err(f + '.via.semp.port', 'needs a port 1-65535');
+      const ways = [v.pass !== '', !!v.passEnv, !!(v.sns || v.sname || v.skey)].filter(Boolean).length;
+      if (ways !== 1) err(f + '.via.semp', 'needs exactly one of pass, passEnv or passSecret');
+      if ((v.sns || v.sname || v.skey) && !(v.sns && v.sname && v.skey)) err(f + '.via.semp.passSecret', 'needs namespace, name and key');
+    }
+  });
+  if (vrns[0] && vrns[0] === vrns[1]) err('replication.sites', 'the two virtual router names must differ');
+  const overlap = M.repl.sites[0].routers.filter(r => M.repl.sites[1].routers.includes(r));
+  if (overlap.length) err('replication.sites', `${overlap.join(', ')} is named at both sites`);
+  const seenV = {};
+  M.repl.vpns.forEach((v, i) => {
+    const f = `replication.vpns[${i}]`;
+    if (!v.name) err(f, 'has no name');
+    if (seenV[v.name]) err(f, `${v.name} is listed twice`);
+    seenV[v.name] = 1;
+    if (!vrns.includes(v.at) || !v.at) err(f + '.activeAt', `${goQuote(v.at)} is not either site's virtualRouterName`);
+  });
+}
 
-function copy(id){navigator.clipboard.writeText($(id).dataset.raw).then(()=>{$('toast').classList.add('show');setTimeout(()=>$('toast').classList.remove('show'),1200);});}
-function dl(id,fn){const b=new Blob([$(id).dataset.raw],{type:'text/plain'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=fn;a.click();URL.revokeObjectURL(a.href);}
+function validateK8s(M, err, note) {
+  const k = M.k8s, D = GEN.defaults;
+  if (!k.name) err('kubernetes.name', 'is mandatory');
+  else if (!dnsLabelRE.test(k.name) || k.name.length > 48) err('kubernetes.name', `${goQuote(k.name)}: a lowercase DNS label, at most 48 characters`);
+  if (!k.namespace) err('kubernetes.namespace', 'is mandatory');
+  else if (!dnsLabelRE.test(k.namespace) || k.namespace.length > 63) err('kubernetes.namespace', `${goQuote(k.namespace)}: a lowercase DNS label, at most 63 characters`);
+  if (k.command) { const w = k.command.split(/\s+/)[0]; if (!COMMANDS.kubernetes.includes(w)) note('kubernetes.command', `${w} is not kubectl or oc: every run needs --allow-command ${w}`); }
+  const C = k8sConfig(M);
+  const names = [['kubernetes.adminSecret', adminSecretName(C)], ['kubernetes.tlsServerSecret', tlsSecretName(C)], ['kubernetes.imagePullSecret', imagePullSecretName(C)]];
+  names.forEach(([f, v]) => { if (v && (!dnsSubdomainRE.test(v) || v.length > 253)) err(f, `${goQuote(v)}: a lowercase DNS subdomain`); });
+  const taken = {};
+  names.forEach(([f, v]) => { if (!v) return; if (taken[v]) err(f, `${v} is also ${taken[v]}: each Secret needs its own name`); taken[v] = f; });
+  if (k.adminSecret && k.name && k.adminSecret.startsWith(k.name + '-pubsubplus-')) err('kubernetes.adminSecret', `${k.name}-pubsubplus-* is the operator's own name space`);
+  const roles = M.ha ? ['primary', 'backup', 'monitor'] : ['primary'];
+  const mounted = roles.filter(r => k.mounts[r]);
+  if (mounted.length && mounted.length < roles.length) err('kubernetes.storage.customVolumeMount', 'mounts every node of the group or none');
+  if (mounted.length && k.storageClass) err('kubernetes.storage', 'class provisions a volume and customVolumeMount mounts an existing one: name one of them');
+  if (!k.msgSize && mounted.length < roles.length) err('kubernetes.storage.msgNodeSize', 'is mandatory unless every node mounts an existing claim');
+  [['kubernetes.storage.msgNodeSize', k.msgSize], ['kubernetes.storage.monNodeSize', k.monSize], ['kubernetes.msgNode.mem', k.msgMem],
+    ['kubernetes.operator.cpu', k.op.cpu], ['kubernetes.operator.mem', k.op.mem]].forEach(([f, v]) => {
+    if (v && !k8sQuantityRE.test(v)) err(f, `${goQuote(v)} is not a Kubernetes quantity, like 500m, 2, 512Mi or 30Gi`);
+  });
+  [['kubernetes.securityContext.runAsUser', k.runAsUser], ['kubernetes.securityContext.fsGroup', k.fsGroup],
+    ['kubernetes.containerSecurity.runAsUser', k.cRunAsUser], ['kubernetes.containerSecurity.runAsGroup', k.cRunAsGroup]].forEach(([f, v]) => {
+    if (v && (!k8sIDRE.test(v) || Number(v) > 2147483647)) err(f, `${goQuote(v)} must be a whole number from 0 to 2147483647 in plain decimal`);
+  });
+  if (k.op.image && !operatorImageRE.test(k.op.image)) err('kubernetes.operator.image', `${goQuote(k.op.image)} is not a repository path with an optional :tag and @sha256:<digest>`);
+  k.op.watch.split(',').map(s => s.trim()).filter(Boolean).forEach(ns => { if (!dnsLabelRE.test(ns)) err('kubernetes.operator.watchNamespaces', `${goQuote(ns)} is not a namespace`); });
+  const mapField = (f, pairs) => {
+    const seen = {};
+    pairs.forEach(([a, b]) => {
+      if (!a || b === null) err(f, `${goQuote(a)} needs the form key: value`);
+      if (seen[a]) err(f, `${a} is listed twice`);
+      seen[a] = 1;
+    });
+  };
+  mapField('kubernetes.podAnnotations', k.podAnnotations); mapField('kubernetes.podLabels', k.podLabels);
+  [['kubernetes.placement.labelsPrimary', k.lblP], ['kubernetes.placement.labelsBackup', k.lblB], ['kubernetes.placement.labelsMonitor', k.lblM],
+    ['kubernetes.loadBalancer.annotations', k.lb.annotations]].forEach(([f, list]) => list.forEach(e => { if (e.indexOf(':') <= 0) err(f, `${goQuote(e)} needs the form key: value`); }));
+  if (k.antiW && (!/^[0-9]+$/.test(k.antiW) || INT(k.antiW) < 1 || INT(k.antiW) > 100)) err('kubernetes.placement.antiAffinityWeight', 'is a weight from 1 to 100');
+  const ops = ['In', 'NotIn', 'Exists', 'DoesNotExist', 'Gt', 'Lt'];
+  const exprs = (f, list) => list.forEach(e => {
+    if (!e.key) err(f, 'an expression needs a key');
+    if (!ops.includes(e.op)) err(f, `${goQuote(e.op)} is not one of ${ops.join(', ')}`);
+    if (['In', 'NotIn', 'Gt', 'Lt'].includes(e.op) && !e.values.length) err(f, `${e.op} needs values`);
+  });
+  k.nodePref.forEach((t, i) => {
+    const f = `kubernetes.placement.nodeAffinity.preferred[${i}]`;
+    if (!/^[0-9]+$/.test(t.weight) || INT(t.weight) < 1 || INT(t.weight) > 100) err(f, 'needs a weight from 1 to 100');
+    if (!t.match.length) err(f, 'needs at least one expression');
+    exprs(f, t.match);
+  });
+  exprs('kubernetes.placement.nodeAffinity.required', k.nodeReq);
+  [['podAffinity', k.podAff], ['podAntiAffinity', k.podAnti]].forEach(([kind, list]) => list.forEach((t, i) => {
+    const f = `kubernetes.placement.${kind}[${i}]`;
+    if (!t.topo) err(f, 'needs a topologyKey');
+    if (t.weight && (!/^[0-9]+$/.test(t.weight) || INT(t.weight) > 100)) err(f, 'weight is 0 (required) or 1-100 (preferred)');
+    mapField(f + '.matchLabels', t.labels);
+  }));
+  const seenP = { n: {}, c: {}, s: {} };
+  k.ports.forEach(e => {
+    const p = parsePort(e), f = 'kubernetes.ports';
+    if (!dnsLabelRE.test(p.name) || p.name.length > 15) err(f, `${goQuote(p.name)}: a port name is a DNS label, at most 15 characters`);
+    [p.container, p.service].forEach(x => { if (!/^[0-9]+$/.test(x) || INT(x) < 1 || INT(x) > 65535) err(f, `${goQuote(e)}: ports are 1-65535`); });
+    if (!/^(tcp|udp)$/i.test(p.proto)) err(f, `${goQuote(e)}: the protocol is TCP or UDP`);
+    [['n', p.name, 'name'], ['c', p.container, 'container port'], ['s', p.service, 'service port']].forEach(([key, v, what]) => {
+      if (seenP[key][v]) err(f, `${what} ${v} is used twice`);
+      seenP[key][v] = 1;
+    });
+  });
+  const maxConn = M.scaling.maxConnections || String(D.scalingKubernetes.maxConnections);
+  if (!D.tiers[maxConn]) err('scaling.maxConnections', `${maxConn} is not a scaling tier (one of ${Object.keys(D.tiers).join(', ')})`);
+  if (M.semp.adminPassEnv || M.semp.monitorPassEnv || M.red.pskEnv || M.image.passEnv || M.semp.users.some(u => u.passwordEnv))
+    note('preview', 'a value read from an environment variable shows as <value of $NAME> in the Secrets: the CLI reads the variable');
+  if ((M.tls.cert || M.tls.certKey) && (!M.tls.certBytes || !M.tls.keyBytes || M.tls.cas.some(c => !c.bytes)))
+    note('preview', 'pick the certificate, key and CA files to preview the TLS Secret: the CLI reads them from the paths');
+}
 
-// ═══════ Scroll spy ═══════
-const sbItems=document.querySelectorAll('.sb-item[data-s]');
-const formScroll=$('formScroll');
-formScroll.addEventListener('scroll',()=>{let cur=null;sbItems.forEach(si=>{const sec=$(si.dataset.s);if(sec){const r=sec.getBoundingClientRect();const fr=formScroll.getBoundingClientRect();if(r.top<=fr.top+fr.height*.3)cur=si;}});sbItems.forEach(s=>s.classList.remove('active'));if(cur)cur.classList.add('active');});
-sbItems.forEach(si=>si.addEventListener('click',()=>{const sec=$(si.dataset.s);if(sec)sec.scrollIntoView({behavior:'smooth',block:'start'});}));
+function validateCtr(M, err, note) {
+  const c = M.ctr, D = GEN.defaults;
+  if (c.name && (!engineContainerNameRE.test(c.name) || c.name.length > 100)) err('container.name', `${goQuote(c.name)}: a letter or digit first, then letters, digits, . _ -, at most 100`);
+  if (c.runUser && !runUserRE.test(c.runUser)) err('container.runUser', `${goQuote(c.runUser)} is not uid[:gid]`);
+  if (/^0(:|$)/.test(c.runUser)) note('container.runUser', 'uid 0 is host root on docker and rootful podman; rootless podman maps it to you');
+  path('container.dataDir', c.dataDir, true);
+  if (c.mem && !containerMemRE.test(c.mem)) err('container.mem', `${goQuote(c.mem)}: a number with a b, k, m or g suffix -- not the Mi/Gi Kubernetes takes`);
+  const tier = D.tiers[M.scaling.maxConnections || String(D.scalingContainer.maxConnections)];
+  if (!tier) err('scaling.maxConnections', `not a scaling tier (one of ${Object.keys(D.tiers).join(', ')})`);
+  if (c.cpuset) {
+    if (!cpuSetRE.test(c.cpuset)) err('container.cpuset', `${goQuote(c.cpuset)} is not a list or range of cpu ids, like 0-3 or 0,2,4`);
+    else if (tier && cpuSetCount(c.cpuset) !== INT(tier.cpu)) err('container.cpuset', `names ${cpuSetCount(c.cpuset)} cpus, but the tier sizes the broker for ${tier.cpu}`);
+  }
+  if (c.monitorCpuset && (!cpuSetRE.test(c.monitorCpuset) || cpuSetCount(c.monitorCpuset) !== 1)) err('container.monitorCpuset', 'is exactly one cpu id');
+  if (c.core && (!coreLimitRE.test(c.core) || BigInt(c.core) > 9223372036854775807n)) err('container.ulimits.core', `${goQuote(c.core)}: -1 for unlimited, or a size in bytes as a plain whole number`);
+  const hc = c.hc;
+  [['interval', hc.interval, false], ['timeout', hc.timeout, false], ['startPeriod', hc.startPeriod, true]].forEach(([k, v, zeroOK]) => {
+    if (!v) return;
+    const zero = /^0+(\.0*)?([a-z]+)?$/.test(v);
+    if (!(durationRE.test(v) || v === '0') || (zero && !zeroOK)) err('container.healthCheck.' + k, `${goQuote(v)} is not a duration ${zeroOK ? 'of zero or more' : 'greater than zero'}, like 5s or 1m30s`);
+  });
+  if (hc.retries && !/^[0-9]+$/.test(hc.retries)) err('container.healthCheck.retries', 'is a whole number');
+  if (hc.on && !hc.cmd.length) {
+    const v = tagVersion(M.image.tag);
+    if (!v) err('container.healthCheck', `the built-in probe needs broker 10.26+, which image.tag ${goQuote(M.image.tag)} cannot prove: use a version-numbered tag or your own cmd`);
+    else if (v[0] < 10 || (v[0] === 10 && v[1] < 26)) err('container.healthCheck', `the built-in probe needs broker 10.26+, and image.tag is ${M.image.tag}: upgrade, or set your own cmd`);
+  }
+  c.netPorts.forEach((e, i) => { const why = validContainerPort(e); if (why) err(`network.ports[${i}]`, `${goQuote(e)} is invalid: ${why}`); });
+  if (M.ha && (c.netMode || D.networkMode) === 'bridge' && !c.netPorts.length) note('network', 'bridge with no ports publishes nothing, so an HA group cannot form: list 8300-8302, 8741, 55555 and SEMP, or choose host');
+  const cmdNote = (f, cmd, list) => { if (!cmd) return; const w = cmd.split(/\s+/)[0]; if (!list.includes(w)) note(f, `${w} is not one of ${list.join(', ')}: every run needs --allow-command ${w}`); };
+  if (M.plat.docker) {
+    cmdNote('docker.command', M.docker.command, COMMANDS.docker);
+    cmdNote('docker.compose', M.docker.compose, COMMANDS.docker);
+    path('docker.composeFile', M.docker.composeFile);
+  }
+  if (M.plat.podman) {
+    cmdNote('podman.command', M.podman.command, COMMANDS.podman);
+    path('podman.quadletDir', M.podman.quadletDir);
+    path('podman.baseDir', M.podman.baseDir, true);
+  }
+  function path(f, v, abs) {
+    if (!v) return;
+    if (hostPathBadRE.test(v)) err(f, `${goQuote(v)} carries whitespace or a shell metacharacter, which a host path may not`);
+    else if (abs && !v.startsWith('/')) err(f, `${goQuote(v)} must be absolute`);
+  }
+}
 
-initPorts();
-gen();
+// ======== Kubernetes: the config Load would hand the renderers ========
+
+// k8sConfig is ApplyDefaults(K8s) for what the page models, plus the derived names. A
+// value read from an environment variable cannot be known here, so it stands in as a
+// placeholder: the shape of every manifest is still exact.
+function k8sConfig(M) {
+  const D = GEN.defaults, k = M.k8s, sk = D.scalingKubernetes;
+  const num = (v, d) => (v === '' || INT(v) === 0) ? d : INT(v);  // setDefaultInt: 0 is unset
+  const scaling = {};
+  Object.keys(sk).forEach(key => { scaling[key] = num(M.scaling[key], sk[key]); });
+  const tier = D.tiers[String(scaling.maxConnections)];
+  const resolve = (litV, env) => env ? `<value of $${env}>` : litV;
+  let antiNS = k.antiNS.slice(), antiW = INT(k.antiW);
+  if (antiNS.length) { if (!antiW) antiW = 100; } else if (k.namespace) { antiNS = [k.namespace]; if (!antiW) antiW = 100; }
+  return {
+    name: k.name, namespace: k.namespace, registry: M.image.registry, repo: M.image.repo, tag: M.image.tag,
+    imageUser: M.image.user, imagePass: resolve(M.image.pass, M.image.passEnv),
+    pullPolicy: k.pullPolicy, serviceAccount: k.serviceAccount,
+    adminSecret: k.adminSecret, tlsSecret: k.tlsSecret, pullSecret: k.pullSecret,
+    adminPass: resolve(M.semp.adminPass, M.semp.adminPassEnv), monitorPass: resolve(M.semp.monitorPass, M.semp.monitorPassEnv),
+    psk: resolve(M.red.psk, M.red.pskEnv), pskConfigured: M.red.psk !== '' || !!M.red.pskEnv,
+    users: M.semp.users.map(u => ({ username: u.username, accessLevel: u.accessLevel, password: resolve(u.password, u.passwordEnv) })),
+    redundancy: M.ha, updateStrategy: k.updateStrategy || D.updateStrategy, scaling,
+    cpu: tier ? tier.cpu : '', msgMem: k.msgMem || (tier ? tier.k8sMem : ''),
+    storage: { class: k.storageClass, mounts: k.mounts, msgSize: k.msgSize, monSize: k.monSize || D.monNodeSize },
+    timezone: M.timezone,
+    tls: { cert: M.tls.cert, certKey: M.tls.certKey, certBytes: M.tls.certBytes || new Uint8Array(), keyBytes: M.tls.keyBytes || new Uint8Array(),
+      caBytes: M.tls.cas.map(c => c.bytes || new Uint8Array()) },
+    sec: { runAsUser: k.runAsUser, fsGroup: k.fsGroup }, csec: { runAsUser: k.cRunAsUser, runAsGroup: k.cRunAsGroup },
+    podAnnotations: k.podAnnotations.filter(([a]) => a), podLabels: k.podLabels.filter(([a]) => a),
+    pl: { tolP: k.tolP, tolB: k.tolB, tolM: k.tolM, lblP: k.lblP, lblB: k.lblB, lblM: k.lblM, antiNS, antiW,
+      nodePref: k.nodePref, nodeReq: k.nodeReq, podAff: k.podAff, podAnti: k.podAnti },
+    lb: k.lb, ports: k.ports.length ? k.ports : D.kubernetesPorts.slice(),
+    op: { image: k.op.image || D.operatorImage, namespace: k.op.namespace, cpu: k.op.cpu || D.operatorCpu, mem: k.op.mem || D.operatorMem,
+      watch: k.op.watch, watchBrokerNs: k.op.watchBrokerNs },
+  };
+}
+
+// The derived Secret names: config.Config.AdminSecretName, TLSServerSecretName,
+// ImagePullSecretName and their Manages* rules.
+const managesAdmin = C => C.adminPass !== '';
+const managesTLS = C => C.tls.cert !== '' || C.tls.certKey !== '';
+const managesPull = C => C.imageUser !== '' && C.imagePass !== '';
+const adminSecretName = C => C.adminSecret || (managesAdmin(C) && C.name ? C.name + '-admin' : '');
+const tlsSecretName = C => C.tlsSecret || (managesTLS(C) && C.name ? C.name + '-tls' : '');
+const imagePullSecretName = C => C.pullSecret || (managesPull(C) ? C.name + '-image-pull' : '');
+
+// ======== Kubernetes: Secrets (internal/k8s/secrets.go) ========
+
+const byteOrder = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+function secretManifest(name, ns, typ, annotations, data) {
+  let b = 'apiVersion: v1\nkind: Secret\nmetadata:\n' + `  name: ${name}\n  namespace: ${ns}\n`;
+  const ann = annotations ? Object.keys(annotations).sort(byteOrder) : [];
+  if (ann.length) b += '  annotations:\n' + ann.map(k => `    ${k}: ${goQuote(annotations[k])}\n`).join('');
+  b += `type: ${typ}\ndata:\n`;
+  Object.keys(data).sort(byteOrder).forEach(k => { b += `  ${k}: ${b64(data[k])}\n`; });
+  return b;
+}
+function dockerRegistrySecret(name, ns, C) {
+  const auth = b64(utf8(C.imageUser + ':' + C.imagePass));
+  const payload = goJSON({ auths: { [C.registry]: { username: C.imageUser, password: C.imagePass, auth } } });
+  return secretManifest(name, ns, 'kubernetes.io/dockerconfigjson', null, { '.dockerconfigjson': utf8(payload) });
+}
+// joinManifests is internal/k8s.joinManifests: blank documents dropped, `---` between.
+function joinManifests(docs) {
+  const parts = docs.map(d => String(d || '').replace(/\n+$/, '')).filter(p => p.trim() !== '');
+  return parts.join('\n---\n') + '\n';
+}
+async function genSecrets(C) {
+  const docs = [];
+  if (managesAdmin(C)) {
+    const data = { username_admin_password: utf8(C.adminPass) };
+    if (C.monitorPass !== '') data.username_monitor_password = utf8(C.monitorPass);
+    if (C.psk !== '') data.preshared_auth_key = utf8(C.psk);
+    docs.push(secretManifest(adminSecretName(C), C.namespace, 'Opaque', null, data));
+  }
+  if (managesTLS(C)) {
+    if (!C.tls.cert || !C.tls.certKey) {
+      // TLSSecret refuses half a pair, which fails `broker generate` outright.
+      docs.push('# broker generate fails here: tls.cert and tls.certKey must both be set\n');
+    } else {
+      const crt = concatBytes(C.tls.certBytes, ...C.tls.caBytes), key = C.tls.keyBytes;
+      try {
+        docs.push(secretManifest(tlsSecretName(C), C.namespace, 'kubernetes.io/tls',
+          { 'solace-util.sha256': await sha256hex(concatBytes(key, crt)) }, { 'tls.crt': crt, 'tls.key': key }));
+      } catch (e) {
+        docs.push('# the TLS Secret is not previewed: ' + e.message + '\n');
+      }
+    }
+  }
+  if (managesPull(C)) docs.push(dockerRegistrySecret(imagePullSecretName(C), C.namespace, C));
+  if (C.users.length) {
+    const data = {};
+    C.users.forEach(u => {
+      data[`username_${u.username}_globalaccesslevel`] = utf8(u.accessLevel);
+      data[`username_${u.username}_password`] = utf8(u.password);
+    });
+    docs.push(secretManifest(C.name + '-additional-users', C.namespace, 'Opaque', null, data));
+  }
+  return docs.length ? joinManifests(docs) : '';
+}
+
+// ======== Kubernetes: the broker CR (internal/render.BrokerCR) ========
+
+// parseToleration is render.parseToleration: "key[=value]:effect", the key before the
+// first ':', the effect after the last.
+function parseToleration(s) {
+  const first = s.indexOf(':'), last = s.lastIndexOf(':');
+  const keyPart = first >= 0 ? s.slice(0, first) : s;
+  const effect = last >= 0 ? s.slice(last + 1) : '';
+  const eq = keyPart.indexOf('=');
+  return eq >= 0 ? [keyPart.slice(0, eq), keyPart.slice(eq + 1), effect, true] : [keyPart, '', effect, false];
+}
+function keyValueEntry(indent, entry) {
+  const i = entry.indexOf(':');
+  const key = i >= 0 ? entry.slice(0, i) : entry, value = i >= 0 ? entry.slice(i + 1) : '';
+  return `${indent}${goQuote(key.trim())}: ${goQuote(value.trim())}\n`;
+}
+function stringMap(header, pairs) {
+  if (!pairs.length) return '';
+  const m = Object.fromEntries(pairs.map(([a, b]) => [a, b == null ? '' : b]));
+  return header + Object.keys(m).sort(byteOrder).map(k => `    ${goQuote(k)}: ${goQuote(m[k])}\n`).join('');
+}
+function matchExprs(indent, exprs) {
+  return exprs.map(e => `${indent}- key: ${goQuote(e.key)}\n${indent}  operator: ${e.op}\n` +
+    (e.values.length ? `${indent}  values:\n` + e.values.map(v => `${indent}  - ${goQuote(v)}\n`).join('') : '')).join('');
+}
+function podTermSelector(indent, t) {
+  let b = '';
+  const m = Object.fromEntries(t.labels.map(([a, v]) => [a, v == null ? '' : v]));
+  const keys = Object.keys(m).sort(byteOrder);
+  if (keys.length) b += `${indent}labelSelector:\n${indent}  matchLabels:\n` + keys.map(k => `${indent}    ${goQuote(k)}: ${goQuote(m[k])}\n`).join('');
+  if (t.ns.length) b += `${indent}namespaces:\n` + t.ns.map(ns => `${indent}- ${goQuote(ns)}\n`).join('');
+  return b;
+}
+function podTermsBlock(kind, terms, legacyNS, legacyWeight) {
+  let b = `        ${kind}:\n`;
+  const preferred = terms.filter(t => INT(t.weight) > 0), required = terms.filter(t => !(INT(t.weight) > 0));
+  if (legacyNS.length || preferred.length) {
+    b += '          preferredDuringSchedulingIgnoredDuringExecution:\n';
+    if (legacyNS.length) {
+      b += `          - weight: ${legacyWeight}\n            podAffinityTerm:\n              topologyKey: kubernetes.io/hostname\n` +
+        '              labelSelector:\n                matchLabels:\n                  app.kubernetes.io/name: pubsubpluseventbroker\n' +
+        '              namespaces:\n' + legacyNS.map(ns => `              - ${ns}\n`).join('');
+    }
+    preferred.forEach(t => { b += `          - weight: ${INT(t.weight)}\n            podAffinityTerm:\n              topologyKey: ${goQuote(t.topo)}\n` + podTermSelector('              ', t); });
+  }
+  if (required.length) {
+    b += '          requiredDuringSchedulingIgnoredDuringExecution:\n';
+    required.forEach(t => { b += `          - topologyKey: ${goQuote(t.topo)}\n` + podTermSelector('            ', t); });
+  }
+  return b;
+}
+function writeNode(name, tols, labels, pl, anti) {
+  let b = `  - name: ${name}\n    spec:\n`;
+  if (tols.length) {
+    b += '      tolerations:\n';
+    tols.forEach(t => {
+      const [key, val, eff, equal] = parseToleration(t);
+      b += `      - key: ${goQuote(key)}\n` + (equal ? `        operator: "Equal"\n        value: ${goQuote(val)}\n` : '        operator: "Exists"\n') +
+        `        effect: ${goQuote(eff)}\n`;
+    });
+  }
+  if (labels.length) b += '      nodeSelector:\n' + labels.map(l => keyValueEntry('        ', l)).join('');
+  const legacyNS = anti ? pl.antiNS : [];
+  const hasNode = pl.nodePref.length > 0 || pl.nodeReq.length > 0, hasPod = pl.podAff.length > 0, hasAnti = legacyNS.length > 0 || pl.podAnti.length > 0;
+  if (!hasNode && !hasPod && !hasAnti) return b;
+  b += '      affinity:\n';
+  if (hasNode) {
+    b += '        nodeAffinity:\n';
+    if (pl.nodePref.length) {
+      b += '          preferredDuringSchedulingIgnoredDuringExecution:\n';
+      pl.nodePref.forEach(t => { b += `          - weight: ${INT(t.weight)}\n            preference:\n              matchExpressions:\n` + matchExprs('              ', t.match); });
+    }
+    if (pl.nodeReq.length) {
+      b += '          requiredDuringSchedulingIgnoredDuringExecution:\n            nodeSelectorTerms:\n            - matchExpressions:\n' + matchExprs('              ', pl.nodeReq);
+    }
+  }
+  if (hasPod) b += podTermsBlock('podAffinity', pl.podAff, [], 0);
+  if (hasAnti) b += podTermsBlock('podAntiAffinity', pl.podAnti, legacyNS, pl.antiW);
+  return b;
+}
+function nodeAssignment(C) {
+  const pl = C.pl;
+  const hasTol = pl.tolP.length + pl.tolB.length + pl.tolM.length > 0;
+  const hasLabels = pl.lblP.length + pl.lblB.length + pl.lblM.length > 0;
+  const hasAnti = pl.antiNS.length > 0;
+  const hasAff = pl.nodePref.length > 0 || pl.nodeReq.length > 0 || pl.podAff.length > 0 || pl.podAnti.length > 0;
+  if (!hasTol && !hasLabels && !hasAnti && !hasAff) return '';
+  let b = '  nodeAssignment:\n' + writeNode('Primary', pl.tolP, pl.lblP, pl, hasAnti);
+  if (C.redundancy) b += writeNode('Backup', pl.tolB, pl.lblB, pl, hasAnti) + writeNode('Monitor', pl.tolM, pl.lblM, pl, hasAnti);
+  return b;
+}
+function brokerCR(C) {
+  const repo = C.registry ? C.registry + '/' + C.repo : C.repo;
+  let b = 'apiVersion: pubsubplus.solace.com/v1beta1\nkind: PubSubPlusEventBroker\nmetadata:\n' +
+    `  namespace: ${C.namespace}\n  name: ${C.name}\nspec:\n  image:\n` +
+    `    repository: ${goQuote(repo)}\n    tag: ${goQuote(C.tag)}\n    pullPolicy: ${C.pullPolicy || 'IfNotPresent'}\n`;
+  const pull = imagePullSecretName(C);
+  if (pull) b += `    pullSecrets:\n    - name: ${pull}\n`;
+  if (C.serviceAccount) b += `  serviceAccount:\n    name: ${C.serviceAccount}\n`;
+  const admin = adminSecretName(C);
+  if (admin) b += `  adminCredentialsSecret: ${admin}\n`;
+  const builtAdmin = managesAdmin(C) && admin !== '';
+  if (C.monitorPass !== '' && builtAdmin) b += `  monitoringCredentialsSecret: ${admin}\n`;
+  if (C.users.length) b += `  extraEnvVarsSecret: ${C.name}-additional-users\n`;
+  b += `  redundancy: ${C.redundancy ? 'true' : 'false'}\n`;
+  if (C.pskConfigured && builtAdmin) b += `  preSharedAuthKeySecret: ${admin}\n`;
+  b += `  updateStrategy: ${C.updateStrategy}\n  podDisruptionBudgetForHA: true\n`;
+  const s = C.scaling;
+  b += '  systemScaling:\n' +
+    `    system_scaling_maxconnectioncount: ${s.maxConnections}\n` +
+    `    system_scaling_maxqueuemessagecount: ${s.maxQueueMessages}\n` +
+    `    system_scaling_maxkafkabridgecount: ${s.maxKafkaBridge}\n` +
+    `    system_scaling_maxkafkabrokerconnectioncount: ${s.maxKafkaConnections}\n` +
+    `    system_scaling_maxbridgecount: ${s.maxBridges}\n` +
+    `    system_scaling_maxsubscriptioncount: ${s.maxSubscriptions}\n` +
+    `    system_scaling_maxguaranteedmessagesize: ${s.maxGuaranteedMsgMB}\n` +
+    `    messagespool_maxspoolusage: ${s.maxSpoolUsageMB}\n`;
+  if (C.cpu) b += `    messagingNodeCpu: ${goQuote(C.cpu)}\n`;
+  b += `    messagingNodeMemory: ${C.msgMem}\n  storage:\n`;
+  if (C.storage.class) b += `    useStorageClass: ${C.storage.class}\n`;
+  const mounts = [['Primary', 'primary'], ['Backup', 'backup'], ['Monitor', 'monitor']].filter(([, r]) => C.storage.mounts[r]);
+  if (mounts.length) b += '    customVolumeMount:\n' + mounts.map(([t, r]) => `    - name: ${t}\n      persistentVolumeClaim:\n        claimName: ${C.storage.mounts[r]}\n`).join('');
+  if (C.storage.msgSize) b += `    messagingNodeStorageSize: ${C.storage.msgSize}\n`;
+  if (C.storage.monSize) b += `    monitorNodeStorageSize: ${C.storage.monSize}\n`;
+  if (C.timezone) b += `  timezone: ${goQuote(C.timezone)}\n`;
+  const tls = tlsSecretName(C);
+  if (tls) b += `  tls:\n    serverTlsConfigSecret: ${tls}\n    enabled: true\n    certFilename: tls.crt\n    certKeyFilename: tls.key\n`;
+  if (C.sec.runAsUser || C.sec.fsGroup) {
+    b += '  securityContext:\n' + (C.sec.runAsUser ? `    runAsUser: ${C.sec.runAsUser}\n` : '') + (C.sec.fsGroup ? `    fsGroup: ${C.sec.fsGroup}\n` : '');
+  }
+  if (C.csec.runAsUser || C.csec.runAsGroup) {
+    b += '  brokerContainerSecurity:\n' + (C.csec.runAsUser ? `    runAsUser: ${C.csec.runAsUser}\n` : '') + (C.csec.runAsGroup ? `    runAsGroup: ${C.csec.runAsGroup}\n` : '');
+  }
+  b += stringMap('  podAnnotations:\n', C.podAnnotations) + stringMap('  podLabels:\n', C.podLabels) + nodeAssignment(C);
+  b += '  service:\n    type: LoadBalancer\n';
+  const lb = C.lb;
+  if (lb.ip || lb.pool || lb.annotations.length) {
+    b += '    annotations:\n';
+    if (lb.ip) b += `      metallb.universe.tf/loadBalancerIPs: ${lb.ip}\n      metallb.io/loadBalancerIPs: ${lb.ip}\n`;
+    if (lb.pool) b += `      metallb.universe.tf/address-pool: ${lb.pool}\n      metallb.io/address-pool: ${lb.pool}\n`;
+    b += lb.annotations.map(a => keyValueEntry('      ', a)).join('');
+  }
+  b += '    ports:\n' + C.ports.map(e => {
+    const p = parsePort(e);
+    return `    - containerPort: ${p.container}\n      name: ${p.name}\n      protocol: ${p.proto}\n      servicePort: ${p.service}\n`;
+  }).join('');
+  return b;
+}
+// genBroker is internal/k8s.GenBroker: the Namespace, the Secrets, then the CR.
+async function genBroker(C) {
+  return joinManifests([`apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ${C.namespace}\n`, await genSecrets(C), brokerCR(C)]);
+}
+
+// ======== Kubernetes: the operator (internal/k8s/operator.go) ========
+
+let OP_TMPL = null;
+async function operatorTemplate() {
+  if (OP_TMPL !== null) return OP_TMPL;
+  if (typeof DecompressionStream === 'undefined') throw new Error('this browser has no DecompressionStream, which the operator preview needs');
+  const bin = atob(GEN.operatorTemplate);
+  const bytes = Uint8Array.from(bin, ch => ch.charCodeAt(0));
+  OP_TMPL = await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+  return OP_TMPL;
+}
+// renderOperatorTemplate implements exactly the text/template actions the bundle uses
+// -- five plain substitutions and one `{{- if .PullSecret}}...{{- end}}`, whose `{{-`
+// trims the whitespace before each tag -- which TestGeneratorPageEmbedsTheCLI pins
+// (pageOperatorActions), so a new action fails the build rather than this preview.
+function renderOperatorTemplate(t, v) {
+  t = t.replace(/\s*\{\{- if \.PullSecret\}\}([\s\S]*?)\s*\{\{- end\}\}/g, (_, body) => (v.PullSecret ? body : ''));
+  ['Namespace', 'WatchNamespace', 'Image', 'CPU', 'Mem'].forEach(k => { t = t.split('{{.' + k + '}}').join(v[k]); });
+  return t;
+}
+// joinYAMLDocs is internal/k8s.joinYAMLDocs.
+function joinYAMLDocs(docs) {
+  if (!docs.length) return '';
+  return docs.map((d, i) => (i > 0 ? '\n---\n' : '') + d.replace(/^\n+|\n+$/g, '') + '\n').join('');
+}
+// desiredWatch is internal/k8s.desiredWatch: the list, the broker namespace appended,
+// trimmed and de-duplicated with the first occurrence winning.
+function desiredWatch(C) {
+  let list = C.op.watch;
+  if (C.op.watchBrokerNs) list += ',' + C.namespace;
+  const out = [], seen = {};
+  list.split(',').map(s => s.trim()).forEach(ns => { if (ns && !seen[ns]) { seen[ns] = 1; out.push(ns); } });
+  return out;
+}
+// genOperator is internal/k8s.GenOperator: the bundle, and with registry credentials the
+// regcred Secret spliced in right after the bundle's own Namespace document.
+async function genOperator(C) {
+  const opNS = C.op.namespace || GEN.defaults.operatorNamespace;
+  const pull = managesPull(C);
+  const bundle = renderOperatorTemplate(await operatorTemplate(), {
+    Namespace: opNS, WatchNamespace: desiredWatch(C).join(','), Image: C.registry ? C.registry + '/' + C.op.image : C.op.image,
+    CPU: C.op.cpu, Mem: C.op.mem, PullSecret: pull,
+  });
+  if (!pull) return bundle;
+  const docs = bundle.split(/^---[ \t]*$/m);
+  let at = 0;
+  for (let i = 0; i < docs.length; i++) { if (/^kind:[ \t]*Namespace[ \t]*$/m.test(docs[i])) { at = i + 1; break; } }
+  const ns = joinYAMLDocs(docs.slice(0, at).filter(d => d.trim() !== ''));
+  const rest = joinYAMLDocs(docs.slice(at).filter(d => d.trim() !== ''));
+  if (!ns) throw new Error('operator bundle has no Namespace document to apply first');
+  return joinYAMLDocs([ns, dockerRegistrySecret('regcred', opNS, C), rest]);
+}
+
+// ======== Rendering the page ========
+
+function hl(yaml) {
+  return yaml.split('\n').map(line => {
+    const el = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    if (/^\s*---\s*$/.test(el)) return '<span class="d">' + el + '</span>';
+    if (/^\s*#/.test(el)) return '<span class="c">' + el + '</span>';
+    const m = el.match(/^(\s*-?\s*)([\w.\-\/"][^:]*?):\s+(.+)$/);
+    if (m) return m[1] + '<span class="k">' + m[2] + '</span>: <span class="v">' + m[3] + '</span>';
+    const m2 = el.match(/^(\s*-?\s*)([\w.\-\/"][^:]*?):\s*$/);
+    if (m2) return m2[1] + '<span class="k">' + m2[2] + '</span>:';
+    return el;
+  }).join('\n');
+}
+function setPanel(id, text) { $(id).innerHTML = hl(text); $(id).dataset.raw = text; }
+function showProblems(P) {
+  const errs = P.filter(p => p.e), notes = P.filter(p => !p.e);
+  const li = p => `<li${p.e ? ' class="err"' : ''}><code>${esc(p.f)}</code> ${esc(p.m)}</li>`;
+  $('probs').className = 'probs' + (errs.length ? '' : ' ok');
+  $('probs').innerHTML = (errs.length ? `<strong>The CLI will refuse this env file: ${errs.length} problem${errs.length > 1 ? 's' : ''}.</strong>`
+    : '<strong>The CLI should load this env file.</strong> It is the authority: run <code>solace-util broker generate -e env.yaml</code> to be sure.') +
+    (P.length ? '<ul>' + errs.concat(notes).map(li).join('') + '</ul>' : '');
+}
+// Placeholders that follow the tier, so a blank field always shows what it will get.
+function placeholders(M) {
+  const D = GEN.defaults;
+  const kt = D.tiers[M.scaling.maxConnections || String(D.scalingKubernetes.maxConnections)];
+  const ct = D.tiers[M.scaling.maxConnections || String(D.scalingContainer.maxConnections)];
+  $('i-kmem').placeholder = kt ? kt.k8sMem + ' (the tier)' : '';
+  $('i-cmem').placeholder = ct ? ct.containerMem + ' (the tier)' : '';
+  $('i-ccpuset').placeholder = ct ? ct.cpuset + ' (the tier)' : '';
+}
+
+let gt = null;
+function gen() { clearTimeout(gt); gt = setTimeout(render, 120); }
+async function render() {
+  const M = readModel();
+  showProblems(validate(M));
+  setPanel('yc-env', emitEnv(M));
+  placeholders(M);
+  if (!M.plat.k8s) return;
+  const C = k8sConfig(M);
+  try { setPanel('yc-op', await genOperator(C)); } catch (e) { setPanel('yc-op', '# ' + e.message + '\n'); }
+  try { setPanel('yc-broker', await genBroker(C)); } catch (e) { setPanel('yc-broker', '# ' + e.message + '\n'); }
+}
+
+function copy(id) { navigator.clipboard.writeText($(id).dataset.raw || '').then(() => { $('toast').classList.add('show'); setTimeout(() => $('toast').classList.remove('show'), 1200); }); }
+function dl(id, fn) { const b = new Blob([$(id).dataset.raw || ''], { type: 'text/plain' }); const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = fn; a.click(); URL.revokeObjectURL(a.href); }
+
+// Scroll spy
+const sbItems = document.querySelectorAll('.sb-item[data-s]');
+const formScroll = $('formScroll');
+formScroll.addEventListener('scroll', () => {
+  let cur = null;
+  sbItems.forEach(si => { const sec = $(si.dataset.s); if (sec && sec.offsetParent !== null) { const r = sec.getBoundingClientRect(), fr = formScroll.getBoundingClientRect(); if (r.top <= fr.top + fr.height * .3) cur = si; } });
+  sbItems.forEach(s => s.classList.remove('active'));
+  if (cur) cur.classList.add('active');
+});
+sbItems.forEach(si => si.addEventListener('click', () => { const sec = $(si.dataset.s); if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' }); }));
+
+function init() {
+  if (!GEN) {
+    $('probs').innerHTML = '<strong>This page has no generated block yet.</strong> Run the regen task (<code>./scripts/dev.sh regen</code>), which writes it from internal/k8s.';
+    return;
+  }
+  const D = GEN.defaults;
+  $('i-maxconn').innerHTML = `<option value="">default (${D.scalingKubernetes.maxConnections} Kubernetes, ${D.scalingContainer.maxConnections} docker/podman)</option>` +
+    Object.keys(D.tiers).map(Number).sort((a, b) => a - b).map(n => `<option>${n}</option>`).join('');
+  [['i-maxqmsg', 'maxQueueMessages'], ['i-maxkb', 'maxKafkaBridge'], ['i-maxkc', 'maxKafkaConnections'], ['i-maxbr', 'maxBridges'],
+    ['i-maxsub', 'maxSubscriptions'], ['i-maxgms', 'maxGuaranteedMsgMB']].forEach(([id, k]) => {
+    const same = D.scalingKubernetes[k] === D.scalingContainer[k];
+    $(id).options[0].textContent = same ? `default (${D.scalingKubernetes[k]})` : `default (${D.scalingKubernetes[k]} Kubernetes, ${D.scalingContainer[k]} docker/podman)`;
+  });
+  $('i-maxpool').placeholder = `${D.scalingKubernetes.maxSpoolUsageMB} Kubernetes, ${D.scalingContainer.maxSpoolUsageMB} docker/podman`;
+  [['i-opimg', D.operatorImage], ['i-opns', D.operatorNamespace], ['i-opcpu', D.operatorCpu], ['i-opmem', D.operatorMem],
+    ['i-kmonsize', D.monNodeSize], ['i-kcmd', D.kubernetesCommand], ['i-clidir', D.cliScriptsDir], ['i-diagdir', D.hostDiagnosticDir],
+    ['i-dkcmd', D.dockerCommand], ['i-dkcompose', D.dockerCompose], ['i-pdcmd', D.podmanCommand],
+    ['i-pdquadlet', D.podmanQuadletDir + ' (rootless: XDG config)'], ['i-cname', D.containerName],
+    ['i-cuser', `${D.runUserDocker}; rootless podman ${D.runUserPodmanRootless}`], ['i-cdata', D.dataDir],
+    ['i-cmoncpuset', D.monitorCpuset], ['i-ccore', D.ulimitsCore + ' (unlimited)'], ['i-hcint', D.healthCheck.interval],
+    ['i-hcto', D.healthCheck.timeout], ['i-hcret', String(D.healthCheck.retries)], ['i-hcsp', D.healthCheck.startPeriod]].forEach(([id, v]) => { $(id).placeholder = v; });
+  $('i-kupd').options[0].textContent = `default (${D.updateStrategy})`;
+  $('i-netmode').options[0].textContent = `default (${D.networkMode})`;
+  resetPorts();
+  buildSites();
+  addEndpoint('s1-eps'); addEndpoint('s2-eps');
+  togPlat(); togHA();
+  gen();
+}
+init();
 </script>
 </body>
 </html>

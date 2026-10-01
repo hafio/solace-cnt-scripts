@@ -67,7 +67,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-86 test files, 1459 test functions. Three of those are not tests. Two are os/exec
+87 test files, 1460 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -78,7 +78,7 @@ launched from.
 
 | Package | Files | Tests |
 | --- | --- | --- |
-| internal/k8s | 19 | 230 |
+| internal/k8s | 20 | 231 |
 | internal/broker | 22 | 430 |
 | internal/cli | 12 | 203 |
 | internal/config | 16 | 240 |
@@ -90,7 +90,7 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **86** | **1459** |
+| **Total** | **87** | **1460** |
 
 
 ## Coverage
@@ -1825,7 +1825,7 @@ operator, day-2 ops, secrets, and the pod transport, plus the operator's watch-l
 algebra and the namespace occupancy gate, plus the mate channel that reaches a
 replication site in another cluster, and the Secret read that supplies a mate's
 password -- or this broker's own admin password, when the env file does not carry it.
-230 tests across 19 files.
+231 tests across 20 files.
 
 ### adminsecret_test.go
 
@@ -2198,6 +2198,12 @@ AGE column is reproducible.
 | `TestTransportUploadQuotesDest` | Single-quote escaping stops a metacharacter in a path breaking out of the redirect |
 | `TestTransportCopy` | `kubectl cp` argv in both directions with the namespace flag |
 | `TestTransportEchoHidesUploadBody` | End to end over Echo: the uploaded body shows as a byte count, never in the traced line, and the exec is still echoed against the primary pod and names this script's own broker-side files. Anchored on the pod and `sh -c` rather than a fragment of the generated skeleton, which is multi-line and shell-quoted |
+
+### generatorpage_test.go
+
+| Test | What it covers |
+| --- | --- |
+| `TestGeneratorPageEmbedsTheCLI` | Pins `solace-yaml-generator.html` to the CLI it previews. Its `GEN` block must hold the embedded operator bundle -- compared by decompressed text, so a gzip change between Go releases is not a diff -- and every default the page shows, each derived here from `config.ApplyDefaults` (operator image, namespace and resources, update strategy, monitor storage size, the Kubernetes ports, both scaling defaults, each tier's cpu and memory, the engine commands, run users, container name, data dir, monitor cpuset, core limit, network mode, health-check timings); a mismatch names the field, and `-update` rewrites only the block. Fails too when the bundle uses a template action outside `pageOperatorActions`, the ones the page's renderer implements -- a JavaScript change regen cannot make |
 
 ---
 

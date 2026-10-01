@@ -50,6 +50,7 @@ needs and is safe to re-run.
 | [docs/developer.md](docs/developer.md) | Build, dev-script tasks, gates, goldens, releases, repo layout |
 | [docs/container-security.md](docs/container-security.md) | The container security rules every platform must satisfy, and how each is expressed -- written to be reused in other projects |
 | [env/sample.yaml](env/sample.yaml) | The annotated schema -- what a bare `solace-util examples` prints, committed for reference |
+| [solace-yaml-generator.html](solace-yaml-generator.html) | A form, opened in a browser, that builds an env file and previews what `operator generate` and `broker generate` render from it. The CLI stays the authority -- see [docs/developer.md](docs/developer.md#the-env-file-generator-page) |
 
 ## Requirements
 
