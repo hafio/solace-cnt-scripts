@@ -45,7 +45,6 @@ spec:
   brokerContainerSecurity:
     runAsUser: 1000001
     runAsGroup: 1000002
-    readOnlyRootFilesystem: false
   nodeAssignment:
   - name: Primary
     spec:

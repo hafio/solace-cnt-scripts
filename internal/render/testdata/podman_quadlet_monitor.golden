@@ -10,6 +10,7 @@ HostName=solace-monitor
 User=1000001
 Group=0
 NoNewPrivileges=true
+DropCapability=all
 PodmanArgs=--cpuset-cpus=0
 PodmanArgs=--memory=2g
 ShmSize=2g

@@ -371,9 +371,13 @@ func assertContainerBlockDefaults(t *testing.T, b Container, wantRunUser string)
 		t.Errorf("DataDir = %q, want /opt/solace/data", b.DataDir)
 	}
 	// The retired keys must stay EMPTY: validateRetiredContainerKeys reads any value
-	// here as the operator's own, so a default would fail every container load.
-	if b.ShmSize != "" || b.Ulimits != (Ulimits{}) {
+	// here as the operator's own, so a default would fail every container load. core
+	// is the live one, and takes Solace's recommended unlimited.
+	if b.ShmSize != "" || b.Ulimits.NoFile != "" || b.Ulimits.MemLock != "" {
 		t.Errorf("retired keys were defaulted: shmSize=%q ulimits=%+v", b.ShmSize, b.Ulimits)
+	}
+	if b.Ulimits.Core != ContainerCore {
+		t.Errorf("Ulimits.Core = %q, want the default %q", b.Ulimits.Core, ContainerCore)
 	}
 	// The health check stays disabled by default, but its timings are filled so the
 	// block only needs `enabled` and `cmd` to be useful.
@@ -418,8 +422,9 @@ func TestApplyDefaultsDocker(t *testing.T) {
 	if c.Docker.Compose.String() != "docker compose" {
 		t.Errorf("Docker.Compose = %q, want 'docker compose'", c.Docker.Compose)
 	}
-	if c.Docker.Network.Mode != "host" {
-		t.Errorf("Docker.Network.Mode = %q, want host", c.Docker.Network.Mode)
+	// Bridge, not host: host networking is a widening, so it is opted into.
+	if c.Docker.Network.Mode != "bridge" {
+		t.Errorf("Docker.Network.Mode = %q, want bridge", c.Docker.Network.Mode)
 	}
 	if c.Docker.Container.Name != "solace" {
 		t.Errorf("Docker.Container.Name = %q, want solace", c.Docker.Container.Name)
@@ -445,8 +450,8 @@ func TestApplyDefaultsPodmanRootful(t *testing.T) {
 	if c.Podman.Command.String() != "podman" {
 		t.Errorf("Podman.Command = %q, want podman", c.Podman.Command)
 	}
-	if c.Podman.Network.Mode != "host" {
-		t.Errorf("Podman.Network.Mode = %q, want host", c.Podman.Network.Mode)
+	if c.Podman.Network.Mode != "bridge" {
+		t.Errorf("Podman.Network.Mode = %q, want bridge", c.Podman.Network.Mode)
 	}
 	if c.Podman.Container.Name != "solace" {
 		t.Errorf("Podman.Container.Name = %q, want solace", c.Podman.Container.Name)
@@ -681,39 +686,55 @@ func TestValidateContainerMissingMandatory(t *testing.T) {
 	}
 }
 
-// TestApplyBridgePortDefaults covers the bridge-mode port list: k8s has always
-// defaulted its ports, while bridge mode published nothing unless every port was
-// listed by hand. Host mode is untouched -- there is nothing to publish there.
-func TestApplyBridgePortDefaults(t *testing.T) {
+// TestBridgePortsArePassThrough: the container port list is never defaulted, unlike
+// kubernetes.ports. Which ports a broker exposes, and on which address, is the
+// operator's decision, so the default bridge mode with no list publishes nothing, an
+// explicit list is kept exactly as written, and host mode is left alone too.
+func TestBridgePortsArePassThrough(t *testing.T) {
 	for _, p := range []Platform{Docker, Podman} {
 		c := &Config{}
-		if p == Docker {
-			c.Docker.Network.Mode = "bridge"
-		} else {
-			c.Podman.Network.Mode = "bridge"
-		}
 		c.ApplyDefaults(p)
-		got := c.NetworkBlock(p).Ports
-		if len(got) != len(defaultK8sPorts()) {
-			t.Errorf("%s bridge ports = %d entries, want the k8s port count %d", p, len(got), len(defaultK8sPorts()))
+		if n := c.NetworkBlock(p); n.Mode != "bridge" || len(n.Ports) != 0 {
+			t.Errorf("%s default network = %+v, want bridge with nothing published", p, n)
 		}
-		if len(got) > 0 && got[0] != "2222:2222" {
-			t.Errorf("%s bridge ports[0] = %q, want host:container pairs derived from the k8s set", p, got[0])
-		}
-	}
 
-	// Host mode (the default) stays empty, and an explicit list is never replaced.
-	c := &Config{}
-	c.ApplyDefaults(Docker)
-	if len(c.Docker.Network.Ports) != 0 {
-		t.Errorf("host mode should publish nothing, got %v", c.Docker.Network.Ports)
+		listed := []string{"127.0.0.1:18080:8080", "55555:55555/tcp"}
+		c2 := &Config{}
+		c2.Docker.Network.Ports = append([]string(nil), listed...)
+		c2.Podman.Network.Ports = append([]string(nil), listed...)
+		c2.ApplyDefaults(p)
+		if got := c2.NetworkBlock(p).Ports; !reflect.DeepEqual(got, listed) {
+			t.Errorf("%s: an explicit port list must be kept as written, got %v want %v", p, got, listed)
+		}
+
+		c3 := &Config{}
+		c3.Docker.Network.Mode = "host"
+		c3.Podman.Network.Mode = "host"
+		c3.ApplyDefaults(p)
+		if n := c3.NetworkBlock(p); n.Mode != "host" || len(n.Ports) != 0 {
+			t.Errorf("%s: host mode must be kept and publish nothing, got %+v", p, n)
+		}
 	}
-	c2 := &Config{}
-	c2.Docker.Network.Mode = "bridge"
-	c2.Docker.Network.Ports = []string{"8080:8080"}
-	c2.ApplyDefaults(Docker)
-	if len(c2.Docker.Network.Ports) != 1 {
-		t.Errorf("an explicit port list must be left alone, got %v", c2.Docker.Network.Ports)
+}
+
+// TestContainerCoreLimitSpellings: the engines take -1 for unlimited and systemd takes
+// infinity, so the one configured value has two spellings, and an empty value -- a
+// Config built in code without ApplyDefaults -- falls back to the default rather than
+// rendering `Ulimit=core=` with nothing after it.
+func TestContainerCoreLimitSpellings(t *testing.T) {
+	for _, tc := range []struct{ core, engine, systemd string }{
+		{"", "-1", "infinity"},
+		{"-1", "-1", "infinity"},
+		{"0", "0", "0"},
+		{"1073741824", "1073741824", "1073741824"},
+	} {
+		b := Container{Ulimits: Ulimits{Core: tc.core}}
+		if got := b.CoreLimit(); got != tc.engine {
+			t.Errorf("CoreLimit(%q) = %q, want %q", tc.core, got, tc.engine)
+		}
+		if got := b.SystemdCoreLimit(); got != tc.systemd {
+			t.Errorf("SystemdCoreLimit(%q) = %q, want %q", tc.core, got, tc.systemd)
+		}
 	}
 }
 
@@ -831,21 +852,23 @@ func TestValidateHealthCheck(t *testing.T) {
 	})
 }
 
+// TestValidateContainerBridge: bridge is legal with or without ports. An empty list
+// publishes nothing, which is the operator's call -- it used to be refused, back when
+// config.Load filled a default set a hand-built config lacked.
 func TestValidateContainerBridge(t *testing.T) {
-	// Bridge without ports -> error.
-	c := validContainerConfig(Docker, "true")
-	c.Docker.Network.Mode = "bridge"
-	c.Docker.Network.Ports = nil
-	if err := c.Validate(Docker); err == nil || !strings.Contains(err.Error(), "network.mode=bridge requires") {
-		t.Errorf("expected bridge-without-ports error, got: %v", err)
-	}
-
-	// Bridge with ports -> ok.
-	c2 := validContainerConfig(Docker, "true")
-	c2.Docker.Network.Mode = "bridge"
-	c2.Docker.Network.Ports = []string{"55555:55555"}
-	if err := c2.Validate(Docker); err != nil {
-		t.Errorf("bridge with ports Validate returned error: %v", err)
+	for _, p := range []Platform{Docker, Podman} {
+		for _, ports := range [][]string{nil, {"55555:55555"}} {
+			c := validContainerConfig(p, "true")
+			n := &c.Docker.Network
+			if p == Podman {
+				n = &c.Podman.Network
+			}
+			n.Mode = "bridge"
+			n.Ports = ports
+			if err := c.Validate(p); err != nil {
+				t.Errorf("%s bridge with ports %v Validate returned error: %v", p, ports, err)
+			}
+		}
 	}
 }
 
@@ -956,7 +979,7 @@ func TestValidatePullPolicy(t *testing.T) {
 // (render.writeSecurity), where kubectl re-reads them as YAML -- so every spelling other
 // than plain decimal digits is refused at load, naming the field and the value, and so is
 // anything above the pod id ceiling Kubernetes enforces. "0" stays legal: the operator
-// reads it as its default. A block carrying only readOnlyRootFilesystem is unaffected.
+// reads it as its default.
 func TestValidateK8sSecurityIDs(t *testing.T) {
 	fields := []struct {
 		name string
@@ -999,14 +1022,34 @@ func TestValidateK8sSecurityIDs(t *testing.T) {
 			}
 		}
 	}
-	t.Run("only readOnlyRootFilesystem set", func(t *testing.T) {
-		c := validK8sConfig()
-		ro := true
-		c.K8s.ContainerSecurity.ReadOnlyRootFilesystem = &ro
-		if err := c.Validate(K8s); err != nil {
-			t.Errorf("a block with no ids must validate: %v", err)
-		}
-	})
+}
+
+// TestReadOnlyRootFilesystemIsRefusedByName: the key was removed -- this tool does not
+// support a read-only root filesystem -- so it must still DECODE, which keeps the error
+// about the key rather than a bare unknown field, and must then fail Validate naming it
+// and the value. false is refused too: it is as much a decision the operator believes is
+// in effect. The ids beside it are unaffected.
+func TestReadOnlyRootFilesystemIsRefusedByName(t *testing.T) {
+	for _, v := range []string{"true", "false"} {
+		t.Run(v, func(t *testing.T) {
+			path := writeTempYAML(t, minimalK8s("  containerSecurity:\n    runAsUser: \"1000001\"\n"+
+				"    readOnlyRootFilesystem: "+v+"\n"))
+			_, err := Load(path, K8s)
+			if err == nil {
+				t.Fatal("the removed key must fail the load")
+			}
+			for _, want := range []string{"kubernetes.containerSecurity.readOnlyRootFilesystem was removed",
+				"(got: " + v + ")", "drop the key"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q should say %q", err, want)
+				}
+			}
+		})
+	}
+	ok := writeTempYAML(t, minimalK8s("  containerSecurity:\n    runAsUser: \"1000001\"\n    runAsGroup: \"1000002\"\n"))
+	if _, err := Load(ok, K8s); err != nil {
+		t.Errorf("containerSecurity without the removed key must load: %v", err)
+	}
 }
 
 // TestLoadSecurityIDsAsWritten pins that the check sees what the operator TYPED: YAML

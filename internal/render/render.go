@@ -272,9 +272,9 @@ func writeSecurity(b *strings.Builder, k config.K8sConfig) {
 		if cs.RunAsGroup != "" {
 			fmt.Fprintf(b, "    runAsGroup: %s\n", cs.RunAsGroup)
 		}
-		if cs.ReadOnlyRootFilesystem != nil {
-			fmt.Fprintf(b, "    readOnlyRootFilesystem: %s\n", boolStr(*cs.ReadOnlyRootFilesystem))
-		}
+		// Never readOnlyRootFilesystem: this tool does not support a read-only root
+		// on any platform (docs/container-security.md, rule 6), and the retained
+		// field exists only so Validate can refuse it by name.
 	}
 }
 
@@ -911,9 +911,15 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 	// same-named systemd key that would bind the podman process instead, and
 	// rootless podman needs its setuid newuidmap/newgidmap helpers.
 	// TestArtifactsStateTheirPrivilegePosture pins the section. Quadlet has no
-	// Privileged= key, so rule 1 has nothing to state here and is guarded by
-	// TestArtifactsCarryNoWideningTokens alone.
+	// Privileged= key, so rule 1's privileged half has nothing to state here and is
+	// guarded by TestArtifactsCarryNoWideningTokens alone.
 	fmt.Fprint(&b, "NoNewPrivileges=true\n")
+	// Drop every capability (rule 1). Quadlet, like `podman run`, drops nothing unless
+	// told to, so without this line the broker keeps podman's default set --
+	// DAC_OVERRIDE, SETUID, SETGID and the rest -- none of which a non-root broker
+	// binding only unprivileged ports uses. The Solace operator drops ALL for the same
+	// image on Kubernetes. Quadlet passes it on as --cap-drop=all.
+	fmt.Fprint(&b, "DropCapability=all\n")
 	// Both caps ride PodmanArgs -- the documented escape hatch for a podman run
 	// flag quadlet does not map. The cpuset has no quadlet key at all. Memory has
 	// one, but only from podman 5.5, and quadlet REFUSES a key it does not know, so
@@ -944,11 +950,12 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 	if mem != "" {
 		fmt.Fprintf(&b, "PodmanArgs=--memory=%s\n", mem)
 	}
-	// Constants, so unconditional (config.ContainerShmSize and friends).
+	// Constants, so unconditional (config.ContainerShmSize and friends). core is the
+	// one the operator may lower; CoreLimit is never empty.
 	fmt.Fprintf(&b, "ShmSize=%s\n", config.ContainerShmSize)
 	fmt.Fprintf(&b, "Ulimit=nofile=%s\n", config.ContainerNoFile())
 	fmt.Fprintf(&b, "Ulimit=memlock=%s\n", config.ContainerMemLock)
-	fmt.Fprintf(&b, "Ulimit=core=%s\n", config.ContainerCore)
+	fmt.Fprintf(&b, "Ulimit=core=%s\n", cb.CoreLimit())
 	if hc := cb.HealthCheck; hc.Enabled {
 		// Quadlet takes a command line rather than an argv, so the probe is joined;
 		// a token containing a space is not representable here (documented in the
@@ -964,6 +971,8 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 		fmt.Fprintf(&b, "HealthRetries=%d\n", hc.Retries)
 		fmt.Fprintf(&b, "HealthStartPeriod=%s\n", escapePercent(hc.StartPeriod))
 	}
+	// Host networking only when the operator asked for it (the default is bridge);
+	// bridge publishes network.ports as written, and nothing when the list is empty.
 	if net.Mode == "host" {
 		fmt.Fprint(&b, "Network=host\n")
 	} else {
@@ -995,7 +1004,7 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 	// container.checkLimits proves before deploying.
 	fmt.Fprintf(&b, "LimitNOFILE=%s\n", config.ContainerNoFile())
 	fmt.Fprintf(&b, "LimitMEMLOCK=%s\n", config.ContainerLimitMemLock)
-	fmt.Fprintf(&b, "LimitCORE=%s\n", config.ContainerLimitCore)
+	fmt.Fprintf(&b, "LimitCORE=%s\n", cb.SystemdCoreLimit())
 	fmt.Fprint(&b, "Restart=always\n")
 	fmt.Fprint(&b, "\n")
 	fmt.Fprint(&b, "[Install]\n")
@@ -1070,7 +1079,14 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 	// changes anything. The `=` separator, not `:`, because dockerd logs a
 	// deprecation warning for the `:` form on every create. privileged is a bare
 	// boolean: compose v1's schema rejects the quoted form.
+	//
+	// cap_drop: ALL removes docker's default capability set -- NET_RAW,
+	// DAC_OVERRIDE, SETUID and the rest -- none of which a non-root broker binding
+	// only unprivileged ports uses; the Solace operator drops ALL for the same image
+	// on Kubernetes. Not dropping them is the widening docker does by default.
 	fmt.Fprint(&b, "    privileged: false\n")
+	fmt.Fprint(&b, "    cap_drop:\n")
+	fmt.Fprint(&b, "      - ALL\n")
 	fmt.Fprint(&b, "    security_opt:\n")
 	fmt.Fprint(&b, "      - no-new-privileges=true\n")
 	// Service-level cpuset:/mem_limit: rather than deploy.resources.limits. For
@@ -1100,14 +1116,15 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 	if mem != "" {
 		fmt.Fprintf(&b, "    mem_limit: %s\n", mem)
 	}
-	// Constants from here down (config.ContainerShmSize and friends).
+	// Constants from here down (config.ContainerShmSize and friends), bar core,
+	// which the operator may lower and CoreLimit never leaves empty.
 	fmt.Fprintf(&b, "    shm_size: %s\n", config.ContainerShmSize)
 	fmt.Fprint(&b, "    ulimits:\n")
 	fmt.Fprint(&b, "      nofile:\n")
 	fmt.Fprintf(&b, "        soft: %d\n", config.ContainerNoFileSoft)
 	fmt.Fprintf(&b, "        hard: %d\n", config.ContainerNoFileHard)
 	fmt.Fprintf(&b, "      memlock: %s\n", config.ContainerMemLock)
-	fmt.Fprintf(&b, "      core: %s\n", config.ContainerCore)
+	fmt.Fprintf(&b, "      core: %s\n", cb.CoreLimit())
 	if hc := cb.HealthCheck; hc.Enabled {
 		fmt.Fprint(&b, "    healthcheck:\n")
 		fmt.Fprint(&b, "      test: [\"CMD\"")
@@ -1122,9 +1139,12 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 		fmt.Fprintf(&b, "      retries: %d\n", hc.Retries)
 		fmt.Fprintf(&b, "      start_period: %s\n", hc.StartPeriod)
 	}
+	// Host networking only when the operator asked for it (the default is bridge).
+	// Bridge publishes network.ports as written and nothing else; an empty list
+	// writes no ports: key at all, since a bare one is a null compose has to guess at.
 	if net.Mode == "host" {
 		fmt.Fprint(&b, "    network_mode: host\n")
-	} else {
+	} else if len(net.Ports) > 0 {
 		fmt.Fprint(&b, "    ports:\n")
 		for _, port := range net.Ports {
 			fmt.Fprintf(&b, "      - %q\n", port)
@@ -1267,7 +1287,7 @@ func parseToleration(s string) (key, value, effect string, equal bool) {
 // splitUser splits "uid:gid" into its parts; a bare "uid" yields an empty gid.
 func splitUser(u string) (uid, gid string) { return cut(u, ":") }
 
-// splitPair is gone with the ulimits schema block. It split
+// splitPair is gone with ulimits.nofile. It split
 // <docker|podman>.container.ulimits.nofile's "soft:hard" into compose's two nested
 // keys; the pair is two int constants now (config.ContainerNoFileSoft/Hard) that
 // the compose renderer writes directly. splitUser above is unrelated and stays.

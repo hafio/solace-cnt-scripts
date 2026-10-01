@@ -319,12 +319,18 @@ func TestConvertContainer(t *testing.T) {
 	}
 	// The retired keys must not be EMITTED: a file carrying one no longer loads, so
 	// writing it would produce a conversion that fails on the tool's own output.
-	if c.Docker.Container.Ulimits != (config.Ulimits{}) || c.Docker.Container.ShmSize != "" {
-		t.Errorf("retired keys were emitted: ulimits=%+v shmSize=%q",
-			c.Docker.Container.Ulimits, c.Docker.Container.ShmSize)
+	// ulimits.core is live, so SOLBK_ULIMIT_CORE carries over as written.
+	u := c.Docker.Container.Ulimits
+	if u.NoFile != "" || u.MemLock != "" || c.Docker.Container.ShmSize != "" {
+		t.Errorf("retired keys were emitted: ulimits=%+v shmSize=%q", u, c.Docker.Container.ShmSize)
 	}
-	if strings.Contains(string(res.YAML), "ulimits") || strings.Contains(string(res.YAML), "shmSize") {
-		t.Errorf("the YAML still names a retired key:\n%s", res.YAML)
+	for _, retired := range []string{"nofile", "memlock", "shmSize"} {
+		if strings.Contains(string(res.YAML), retired) {
+			t.Errorf("the YAML still names the retired key %s:\n%s", retired, res.YAML)
+		}
+	}
+	if u.Core != "-1" {
+		t.Errorf("docker.container.ulimits.core = %q, want -1 from SOLBK_ULIMIT_CORE", u.Core)
 	}
 	// Nothing in the bootstraps named a cpuset, so the conversion emits none and the
 	// scaling tier supplies it at load. strictDecode stops before ApplyDefaults, so
@@ -359,6 +365,8 @@ func TestConvertContainer(t *testing.T) {
 // TestConvertRetiredContainerLimitsAreDropped pins that each retired variable is
 // READ (so it counts as mapped and gets a reason) rather than falling through to
 // the generic unmapped list, and that the warning names the fixed value.
+// SOLBK_ULIMIT_CORE is not among them: it maps to the live ulimits.core
+// (TestConvertCarriesTheCoreLimit).
 func TestConvertRetiredContainerLimitsAreDropped(t *testing.T) {
 	for _, p := range []config.Platform{config.Docker, config.Podman} {
 		res := convertOK(t, ctrEnv, p)
@@ -366,7 +374,6 @@ func TestConvertRetiredContainerLimitsAreDropped(t *testing.T) {
 			{"SOLBK_SHM_SIZE", "container.shmSize", "2g"},
 			{"SOLBK_ULIMIT_NOFILE", "container.ulimits.nofile", "2448:1048576"},
 			{"SOLBK_ULIMIT_MEMLOCK", "container.ulimits.memlock", "-1"},
-			{"SOLBK_ULIMIT_CORE", "container.ulimits.core", "-1"},
 		} {
 			if !hasWarning(res.Warnings, tc.name+" is no longer supported") {
 				t.Errorf("%s: warnings = %v, want one naming %s", p, res.Warnings, tc.name)
@@ -381,6 +388,32 @@ func TestConvertRetiredContainerLimitsAreDropped(t *testing.T) {
 		// Mapped, not unmapped: a reason beats a bare "dropped" list.
 		if hasWarning(res.Warnings, "no YAML equivalent") {
 			t.Errorf("%s: a retired limit resurfaced in the unmapped list: %v", p, res.Warnings)
+		}
+	}
+}
+
+// TestConvertCarriesTheCoreLimit: SOLBK_ULIMIT_CORE maps to the live
+// <platform>.container.ulimits.core on both engines, as written, with no warning --
+// Load then holds the value to its grammar, naming the key. An unset variable
+// writes no ulimits block at all, so the default applies.
+func TestConvertCarriesTheCoreLimit(t *testing.T) {
+	for _, p := range []config.Platform{config.Docker, config.Podman} {
+		res := convertOK(t, strings.Replace(ctrEnv, `SOLBK_ULIMIT_CORE="-1"`, `SOLBK_ULIMIT_CORE="0"`, 1), p)
+		c := strictDecode(t, res.YAML)
+		b := c.Docker.Container
+		if p == config.Podman {
+			b = c.Podman.Container
+		}
+		if b.Ulimits.Core != "0" {
+			t.Errorf("%s: ulimits.core = %q, want 0 from SOLBK_ULIMIT_CORE", p, b.Ulimits.Core)
+		}
+		if hasWarning(res.Warnings, "SOLBK_ULIMIT_CORE") {
+			t.Errorf("%s: SOLBK_ULIMIT_CORE maps to a live key and must not be warned about: %v", p, res.Warnings)
+		}
+
+		unset := convertOK(t, strings.Replace(ctrEnv, "SOLBK_ULIMIT_CORE=\"-1\"\n", "", 1), p)
+		if strings.Contains(string(unset.YAML), "ulimits") {
+			t.Errorf("%s: no SOLBK_ULIMIT_CORE should write no ulimits block:\n%s", p, unset.YAML)
 		}
 	}
 }

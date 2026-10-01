@@ -22,8 +22,9 @@ import (
 
 // defaultSEMPPort is the broker's own plaintext SEMP port, the fallback used
 // only when no TLS port can be resolved (TLS is preferred; plaintext with a
-// warning is the last resort); host networking (the HA default) binds it
-// directly on the mate host's interface.
+// warning is the last resort); host networking -- an opt-in now that bridge is
+// the default, and what sempPort reads an empty mode in a hand-built Config as --
+// binds it directly on the mate host's interface.
 const defaultSEMPPort = 8080
 
 // defaultTLSSEMPPort is the broker's own TLS SEMP port. k8s already names this
@@ -75,10 +76,10 @@ func sempPort(cfg *config.Config, p config.Platform) (port int, tls bool, err er
 			"(TLS SEMP) but tls.cert/tls.certKey are not configured, so the broker serves no TLS listener there; "+
 			"either configure the server certificate or also map 8080 (plaintext SEMP)", string(p))
 	}
-	return 0, false, fmt.Errorf("cannot determine the mate's SEMP port: %s.network.mode is bridge but network.ports has "+
-		"no single-port entry mapping container port 1943 (TLS SEMP) or 8080 (plaintext SEMP); add one (e.g. "+
-		"\"1943:1943\") so the coordinated redundancy/leader steps can reach the mate over TLS -- a port RANGE "+
-		"covering either is not recognized here", string(p))
+	return 0, false, fmt.Errorf("cannot determine the mate's SEMP port: %s.network.mode is bridge (the default) but "+
+		"network.ports has no single-port entry mapping container port 1943 (TLS SEMP) or 8080 (plaintext SEMP); add "+
+		"one (e.g. \"1943:1943\") so the coordinated redundancy/leader steps can reach the mate over TLS, or set "+
+		"%s.network.mode: host -- a port RANGE covering either is not recognized here", string(p), string(p))
 }
 
 // bridgeHostPort returns the host-side port of the bridge-mode network.ports

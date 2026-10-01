@@ -158,10 +158,30 @@ func validHealthDuration(field, value string, zeroOK bool) error {
 	return nil
 }
 
+// coreLimitRE is ulimits.core: -1 for unlimited, or a byte count as a plain decimal
+// whole number with no sign, unit or leading zero.
+var coreLimitRE = regexp.MustCompile(`^(?:-1|0|[1-9][0-9]*)$`)
+
+// validCoreLimit checks ulimits.core against the one spelling docker, podman and
+// systemd's LimitCORE= all take -- the -1 is rewritten to infinity for systemd
+// (Container.SystemdCoreLimit) -- and that fits the int64 each of them parses it
+// into. Anything else -- `unlimited`, a unit suffix, a newline carrying a key of
+// its own -- is refused here rather than by the engine at deploy.
+func validCoreLimit(field, value string) error {
+	if coreLimitRE.MatchString(value) {
+		if _, err := strconv.ParseInt(value, 10, 64); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s %q is invalid: it must be -1 for unlimited core dumps (the default, and Solace's "+
+		"recommendation) or a size in bytes as a plain whole number, such as 0 to write none. It is written "+
+		"into the quadlet unit and the compose file as-is", field, value)
+}
+
 // validateContainerArtifactValues checks the container block's values that the
 // quadlet and compose renderers write as-is: every network.ports entry (checked
 // whether or not bridge mode is on, since a file switched to bridge later carries
-// the same list) and the three health-check timings.
+// the same list), the three health-check timings and the core-dump limit.
 func (c *Config) validateContainerArtifactValues(p Platform) error {
 	key := platformKey(p)
 	for i, entry := range c.NetworkBlock(p).Ports {
@@ -179,6 +199,13 @@ func (c *Config) validateContainerArtifactValues(p Platform) error {
 		{"startPeriod", hc.StartPeriod, true},
 	} {
 		if err := validHealthDuration(key+".container.healthCheck."+f.name, f.value, f.zeroOK); err != nil {
+			return err
+		}
+	}
+	// Empty is what a Config built in code carries; the renderers take ContainerCore
+	// for it (Container.CoreLimit).
+	if v := c.ContainerBlock(p).Ulimits.Core; v != "" {
+		if err := validCoreLimit(key+".container.ulimits.core", v); err != nil {
 			return err
 		}
 	}

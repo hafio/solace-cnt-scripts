@@ -499,17 +499,22 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 				d.kv("dataDir", v.s("SOLBK_DATA_DIR"))
 				// No cpuset: nothing in the bootstraps named one, so a converted file
 				// takes the scaling tier's default range.
+				//
+				// ulimits.core is the one limit still configurable, so it carries over
+				// as written; Load then holds it to -1 or a byte count, naming the key.
+				d.block("ulimits", func(d *doc) {
+					d.kv("core", v.s("SOLBK_ULIMIT_CORE"))
+				})
 			})
-			// shmSize and the three ulimits became fixed constants, so there is no key
-			// left to carry a value into -- emitting one would produce a file that
-			// fails to load naming a key this tool had just written. Each variable is
-			// still READ so it counts as mapped rather than resurfacing in the generic
-			// unmapped list, the same shape as DOCKER_MODE above.
+			// shmSize and the nofile and memlock ulimits became fixed constants, so
+			// there is no key left to carry a value into -- emitting one would produce
+			// a file that fails to load naming a key this tool had just written. Each
+			// variable is still READ so it counts as mapped rather than resurfacing in
+			// the generic unmapped list, the same shape as DOCKER_MODE above.
 			for _, r := range []struct{ name, key, fixed string }{
 				{"SOLBK_SHM_SIZE", "shmSize", config.ContainerShmSize},
 				{"SOLBK_ULIMIT_NOFILE", "ulimits.nofile", config.ContainerNoFile()},
 				{"SOLBK_ULIMIT_MEMLOCK", "ulimits.memlock", config.ContainerMemLock},
-				{"SOLBK_ULIMIT_CORE", "ulimits.core", config.ContainerCore},
 			} {
 				if got := v.s(r.name); got != "" {
 					warns = append(warns, fmt.Sprintf("%s is no longer supported: %s.container.%s was removed "+

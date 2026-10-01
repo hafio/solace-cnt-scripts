@@ -127,6 +127,16 @@ func healthCheckFixture() config.HealthCheck {
 // different image tag from every other one.
 const modernTag = "10.26.0.5"
 
+// goldenBridgePorts is what the two primary goldens publish: SEMP, SMF and the HA
+// redundancy ports, since a bridge-networked HA member reaches its mates through
+// nothing else. network.ports is passed through, so the list mixes the forms an entry
+// takes -- a range, an address-bound entry, a protocol suffix -- to pin that each
+// one reaches the artifact exactly as written.
+var goldenBridgePorts = []string{
+	"8080:8080", "1943:1943", "55555:55555", "55443:55443",
+	"8300-8302:8300-8302", "8741:8741", "127.0.0.1:2222:2222/tcp",
+}
+
 func envLines(pairs []EnvPair) []byte {
 	var b strings.Builder
 	for _, p := range pairs {
@@ -171,12 +181,7 @@ func TestGolden(t *testing.T) {
 				c := load(t, config.K8s)
 				c.Timezone = "Asia/Singapore"
 				c.K8s.SecurityContext = config.PodSecurity{RunAsUser: "1000001", FSGroup: "1000002"}
-				readOnly := false
-				c.K8s.ContainerSecurity = config.ContainerSecurity{
-					RunAsUser:              "1000001",
-					RunAsGroup:             "1000002",
-					ReadOnlyRootFilesystem: &readOnly,
-				}
+				c.K8s.ContainerSecurity = config.ContainerSecurity{RunAsUser: "1000001", RunAsGroup: "1000002"}
 				return BrokerCR(c)
 			},
 		},
@@ -254,10 +259,14 @@ func TestGolden(t *testing.T) {
 			},
 		},
 		{
+			// The sample leaves network commented, so every other container case
+			// renders the default: bridge with nothing published. The two primaries
+			// list ports, so bridge publishing is pinned on both engines as well.
 			name: "podman quadlet primary",
 			file: "podman_quadlet_primary.golden",
 			gen: func(t *testing.T) []byte {
 				c := load(t, config.Podman)
+				c.Podman.Network.Ports = goldenBridgePorts
 				return Quadlet(c, c.ResolveNode(config.Primary))
 			},
 		},
@@ -284,11 +293,12 @@ func TestGolden(t *testing.T) {
 		{
 			// The monitor's own footprint. No monitor-role container golden existed
 			// before this, so the whole artifact is pinned rather than only the two
-			// lines that differ.
+			// lines that differ. It also carries podman's host-networking opt-in.
 			name: "podman quadlet monitor",
 			file: "podman_quadlet_monitor.golden",
 			gen: func(t *testing.T) []byte {
 				c := load(t, config.Podman)
+				c.Podman.Network.Mode = "host"
 				return Quadlet(c, c.ResolveNode(config.Monitor))
 			},
 		},
@@ -297,6 +307,7 @@ func TestGolden(t *testing.T) {
 			file: "docker_compose_primary.golden",
 			gen: func(t *testing.T) []byte {
 				c := load(t, config.Docker)
+				c.Docker.Network.Ports = goldenBridgePorts
 				return Compose(c, c.ResolveNode(config.Primary))
 			},
 		},
@@ -324,12 +335,14 @@ func TestGolden(t *testing.T) {
 		},
 		{
 			// Standalone drops the whole redundancy block from the compose file,
-			// including its secret reference -- one secret instead of two.
+			// including its secret reference -- one secret instead of two. It also
+			// carries docker's host-networking opt-in.
 			name: "docker compose standalone",
 			file: "docker_compose_standalone.golden",
 			gen: func(t *testing.T) []byte {
 				c := load(t, config.Docker)
 				c.Redundancy.Enabled = "false"
+				c.Docker.Network.Mode = "host"
 				return Compose(c, c.ResolveNode(config.Primary))
 			},
 		},
@@ -1127,10 +1140,12 @@ type renderedArtifact struct {
 }
 
 // containerArtifacts renders every compose and quadlet shape the renderers produce
-// from the sample: each role, standalone, the opt-in health check, bridge networking,
-// and on podman rootless too. The privilege tests run over all of them, so a line
-// emitted on one branch and lost on another -- or a widening token added behind a
-// conditional -- cannot pass on the primary alone.
+// from the sample: each role, standalone, the opt-in health check, bridge networking
+// with ports published, the host-networking opt-in, and on podman rootless too. The
+// sample sets no network, so every shape but those two renders the default: bridge,
+// nothing published. The privilege tests run over all of them, so a line emitted on
+// one branch and lost on another -- or a widening token added behind a conditional
+// -- cannot pass on the primary alone.
 func containerArtifacts(t *testing.T) (compose, quadlet []renderedArtifact) {
 	t.Helper()
 	shapes := []struct {
@@ -1158,6 +1173,13 @@ func containerArtifacts(t *testing.T) (compose, quadlet []renderedArtifact) {
 			n.Mode = "bridge"
 			n.Ports = []string{"8080:8080", "1943:1943", "55555:55555"}
 		}},
+		{"host network", config.Primary, func(c *config.Config, p config.Platform) {
+			if p == config.Docker {
+				c.Docker.Network.Mode = "host"
+			} else {
+				c.Podman.Network.Mode = "host"
+			}
+		}},
 	}
 	for _, s := range shapes {
 		for _, p := range []config.Platform{config.Docker, config.Podman} {
@@ -1183,17 +1205,22 @@ func containerArtifacts(t *testing.T) (compose, quadlet []renderedArtifact) {
 // TestArtifactsStateTheirPrivilegePosture: rules 1 and 2 of docs/container-security.md,
 // emitted rather than inherited (rule 7). Docker's privileged default is already
 // false and is stated anyway so the artifact shows it; no_new_privs is OFF by default
-// on both engines, so these lines are what actually set it.
+// on both engines, and neither engine drops a single capability unless told to, so
+// these lines are what actually set them.
 //
-// The quadlet check is positional, not a substring: NoNewPrivileges= is ALSO a
+// The quadlet checks are positional, not a substring: NoNewPrivileges= is ALSO a
 // systemd [Service] key, where it would bind the podman process rather than the
-// container and break rootless podman's setuid id-mapping helpers. A unit carrying
-// the line in the wrong section would satisfy a plain Contains.
+// container and break rootless podman's setuid id-mapping helpers, and
+// DropCapability= means nothing outside [Container]. A unit carrying a line in the
+// wrong section would satisfy a plain Contains.
 func TestArtifactsStateTheirPrivilegePosture(t *testing.T) {
 	compose, quadlet := containerArtifacts(t)
 	for _, a := range compose {
 		if n := strings.Count(a.body, "    privileged: false\n"); n != 1 {
 			t.Errorf("%s compose file: want exactly one service-level `privileged: false`, got %d:\n%s", a.name, n, a.body)
+		}
+		if n := strings.Count(a.body, "    cap_drop:\n      - ALL\n"); n != 1 {
+			t.Errorf("%s compose file: want exactly one service-level `cap_drop:` listing ALL, got %d:\n%s", a.name, n, a.body)
 		}
 		if !strings.Contains(a.body, "    security_opt:\n      - no-new-privileges=true\n") {
 			t.Errorf("%s compose file: want `security_opt:` listing `no-new-privileges=true` at service level:\n%s", a.name, a.body)
@@ -1205,16 +1232,22 @@ func TestArtifactsStateTheirPrivilegePosture(t *testing.T) {
 		}
 	}
 	for _, a := range quadlet {
-		if n := strings.Count(a.body, "NoNewPrivileges=true\n"); n != 1 {
-			t.Errorf("%s quadlet: want exactly one `NoNewPrivileges=true`, got %d:\n%s", a.name, n, a.body)
-			continue
-		}
-		at := strings.Index(a.body, "NoNewPrivileges=true\n")
 		ctr := strings.Index(a.body, "[Container]\n")
 		svc := strings.Index(a.body, "[Service]\n")
-		if ctr < 0 || at < ctr || (svc >= 0 && at > svc) {
-			t.Errorf("%s quadlet: `NoNewPrivileges=true` must sit inside [Container] -- in [Service] it is systemd's "+
-				"own key, binds podman instead of the container, and breaks rootless podman:\n%s", a.name, a.body)
+		for _, line := range []struct{ text, why string }{
+			{"NoNewPrivileges=true\n", "in [Service] it is systemd's own key, binds podman instead of the " +
+				"container, and breaks rootless podman"},
+			{"DropCapability=all\n", "quadlet reads it nowhere else, so anywhere else the broker keeps " +
+				"podman's whole default capability set"},
+		} {
+			if n := strings.Count(a.body, line.text); n != 1 {
+				t.Errorf("%s quadlet: want exactly one %q, got %d:\n%s", a.name, line.text, n, a.body)
+				continue
+			}
+			at := strings.Index(a.body, line.text)
+			if ctr < 0 || at < ctr || (svc >= 0 && at > svc) {
+				t.Errorf("%s quadlet: %q must sit inside [Container] -- %s:\n%s", a.name, line.text, line.why, a.body)
+			}
 		}
 	}
 }
@@ -1225,6 +1258,9 @@ func TestArtifactsStateTheirPrivilegePosture(t *testing.T) {
 // relaxed SELinux or seccomp confinement, or the host's pid or ipc namespace. The
 // compose keys carry their colon so a word inside a value cannot trip them. The
 // document's audit greps use the same list; change both together.
+//
+// Host networking is the one widening NOT listed, because it is not forbidden: it is
+// an explicit opt-in (network.mode: host), which TestHostNetworkingIsOptIn pins.
 var wideningTokens = []string{
 	"privileged: true", "--privileged",
 	"cap_add", "AddCapability=",
@@ -1242,7 +1278,7 @@ var wideningTokens = []string{
 func TestArtifactsCarryNoWideningTokens(t *testing.T) {
 	compose, quadlet := containerArtifacts(t)
 	// Guards the guard: an empty render list would make every loop below pass.
-	if len(compose) < 6 || len(quadlet) < 7 {
+	if len(compose) < 7 || len(quadlet) < 8 {
 		t.Fatalf("expected every shape rendered, got %d compose files and %d quadlet units", len(compose), len(quadlet))
 	}
 	for kind, set := range map[string][]renderedArtifact{"compose file": compose, "quadlet": quadlet} {
@@ -1253,6 +1289,98 @@ func TestArtifactsCarryNoWideningTokens(t *testing.T) {
 						"(docs/container-security.md, rule 1). Remove it; if the broker genuinely needs it, "+
 						"change the rule first and say why:\n%s", a.name, kind, tok, a.body)
 				}
+			}
+		}
+	}
+}
+
+// hostNetworkTokens are host networking in each artifact's spelling. The document's
+// audit grep for it uses these two plus Kubernetes' `hostNetwork: true`, which nothing
+// here renders; change them together.
+var hostNetworkTokens = []string{"network_mode: host", "Network=host"}
+
+// TestHostNetworkingIsOptIn: host networking hands the broker the host's network
+// namespace -- every interface, loopback included -- so it is rule 1's one PERMITTED
+// widening, and only when asked for. Every shape that does not set network.mode
+// renders the default bridge and carries neither token; the shape that sets host
+// carries its own engine's token exactly once. That is the rule a changed default
+// would break without failing any golden that happened to pin host.
+func TestHostNetworkingIsOptIn(t *testing.T) {
+	compose, quadlet := containerArtifacts(t)
+	for kind, set := range map[string][]renderedArtifact{"compose file": compose, "quadlet": quadlet} {
+		want := hostNetworkTokens[0]
+		if kind == "quadlet" {
+			want = hostNetworkTokens[1]
+		}
+		for _, a := range set {
+			if a.name == "host network" {
+				if n := strings.Count(a.body, want); n != 1 {
+					t.Errorf("%s %s asked for host networking: want exactly one %q, got %d:\n%s",
+						a.name, kind, want, n, a.body)
+				}
+				continue
+			}
+			for _, tok := range hostNetworkTokens {
+				if strings.Contains(a.body, tok) {
+					t.Errorf("%s %s carries %q without asking for it: the default is bridge, and host "+
+						"networking is an opt-in widening (docs/container-security.md, rule 1):\n%s",
+						a.name, kind, tok, a.body)
+				}
+			}
+		}
+	}
+}
+
+// TestBridgePublishesOnlyTheListedPorts: network.ports is passed through, never
+// defaulted. With no list, bridge publishes nothing -- no PublishPort= line, and no
+// bare `ports:` key, which compose would read as a null -- and a listed entry reaches
+// the artifact exactly as written, range, address and protocol included.
+func TestBridgePublishesOnlyTheListedPorts(t *testing.T) {
+	d := load(t, config.Docker)
+	p := load(t, config.Podman)
+	compose := string(Compose(d, d.ResolveNode(config.Primary)))
+	unit := string(Quadlet(p, p.ResolveNode(config.Primary)))
+	if strings.Contains(compose, "    ports:") || strings.Contains(unit, "PublishPort=") {
+		t.Errorf("bridge with no network.ports must publish nothing:\n%s\n%s", compose, unit)
+	}
+
+	entries := []string{"8300-8302:8300-8302", "127.0.0.1:2222:2222/tcp"}
+	d.Docker.Network.Ports = entries
+	p.Podman.Network.Ports = entries
+	compose = string(Compose(d, d.ResolveNode(config.Primary)))
+	unit = string(Quadlet(p, p.ResolveNode(config.Primary)))
+	if want := "    ports:\n      - \"8300-8302:8300-8302\"\n      - \"127.0.0.1:2222:2222/tcp\"\n"; !strings.Contains(compose, want) {
+		t.Errorf("compose should publish the two entries as written, want %q in:\n%s", want, compose)
+	}
+	if want := "PublishPort=8300-8302:8300-8302\nPublishPort=127.0.0.1:2222:2222/tcp\n"; !strings.Contains(unit, want) {
+		t.Errorf("quadlet should publish the two entries as written, want %q in:\n%s", want, unit)
+	}
+}
+
+// TestReadOnlyRootFilesystemIsNeverRendered: this tool does not support a read-only
+// root filesystem (docs/container-security.md, rule 6). The Kubernetes field is
+// retained only so Validate can refuse it by name -- but a Config handed straight to
+// the renderer never went through Validate, so the CR must drop it on its own, and
+// on its own it must not open an empty brokerContainerSecurity block either. No
+// compose file or quadlet unit asks for one in any spelling.
+func TestReadOnlyRootFilesystemIsNeverRendered(t *testing.T) {
+	ro := true
+	c := load(t, config.K8s)
+	c.K8s.ContainerSecurity = config.ContainerSecurity{RunAsUser: "1000001", ReadOnlyRootFilesystem: &ro}
+	if cr := string(BrokerCR(c)); strings.Contains(cr, "readOnlyRootFilesystem") ||
+		!strings.Contains(cr, "  brokerContainerSecurity:\n    runAsUser: 1000001\n") {
+		t.Errorf("the CR must keep runAsUser and drop readOnlyRootFilesystem:\n%s", cr)
+	}
+	c.K8s.ContainerSecurity = config.ContainerSecurity{ReadOnlyRootFilesystem: &ro}
+	if cr := string(BrokerCR(c)); strings.Contains(cr, "brokerContainerSecurity") {
+		t.Errorf("the retired field alone must not open a brokerContainerSecurity block:\n%s", cr)
+	}
+
+	compose, quadlet := containerArtifacts(t)
+	for _, a := range append(compose, quadlet...) {
+		for _, tok := range []string{"read_only:", "ReadOnly=", "--read-only"} {
+			if strings.Contains(a.body, tok) {
+				t.Errorf("%s artifact carries %q: a read-only root is not supported:\n%s", a.name, tok, a.body)
 			}
 		}
 	}
@@ -1322,6 +1450,34 @@ func TestQuadletAsksTheServiceAndTheContainerForTheSameLimits(t *testing.T) {
 	} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("quadlet missing %q:\n%s", want, unit)
+		}
+	}
+}
+
+// TestCoreLimitReachesBothArtifacts: ulimits.core is the one limit the operator may
+// lower, so both engines render the configured value -- and a quadlet asks systemd
+// for the same number it asks podman for, since the service's LimitCORE= bounds the
+// container's Ulimit=core= when rootless. The default renders -1, which systemd
+// spells infinity, and so does a Config built in code whose value is still empty.
+func TestCoreLimitReachesBothArtifacts(t *testing.T) {
+	for _, tc := range []struct{ core, engine, systemd string }{
+		{"0", "0", "0"},
+		{"1073741824", "1073741824", "1073741824"},
+		{"-1", "-1", "infinity"},
+		{"", "-1", "infinity"},
+	} {
+		d := load(t, config.Docker)
+		d.Docker.Container.Ulimits.Core = tc.core
+		if compose := string(Compose(d, d.ResolveNode(config.Primary))); !strings.Contains(compose, "      core: "+tc.engine+"\n") {
+			t.Errorf("core %q: compose should ask for core %s:\n%s", tc.core, tc.engine, compose)
+		}
+		p := load(t, config.Podman)
+		p.Podman.Container.Ulimits.Core = tc.core
+		unit := string(Quadlet(p, p.ResolveNode(config.Primary)))
+		for _, want := range []string{"Ulimit=core=" + tc.engine + "\n", "LimitCORE=" + tc.systemd + "\n"} {
+			if !strings.Contains(unit, want) {
+				t.Errorf("core %q: quadlet missing %q:\n%s", tc.core, want, unit)
+			}
 		}
 	}
 }
@@ -1517,7 +1673,7 @@ var quadletKeysByRelease = []struct {
 	since string
 	keys  []string
 }{
-	{"4.4", []string{"Image", "ContainerName", "User", "Group", "NoNewPrivileges", "PodmanArgs",
+	{"4.4", []string{"Image", "ContainerName", "User", "Group", "NoNewPrivileges", "DropCapability", "PodmanArgs",
 		"Network", "PublishPort", "Volume", "Environment"}},
 	{"4.5", []string{"HealthCmd", "HealthInterval", "HealthTimeout", "HealthRetries", "HealthStartPeriod",
 		"Secret"}},
@@ -1547,9 +1703,10 @@ func versionAtMost(t *testing.T, a, b string) bool {
 // not know, so every [Container] key is a version floor, and a key newer than the
 // documented one fails a deploy on every older host -- the way Memory= (5.5) did
 // on 4.7-5.4. Every key the renderer emits, across the shapes that add keys
-// (health check, bridge ports, TLS, HA, rootless, the monitor), must be in the table
-// at or below quadletFloor. A key missing from the table fails too: add it with the
-// release that introduced it, and raise the documented floor if that is newer.
+// (health check, bridge ports, host networking, TLS, HA, rootless, the monitor), must
+// be in the table at or below quadletFloor. A key missing from the table fails too:
+// add it with the release that introduced it, and raise the documented floor if that
+// is newer.
 func TestQuadletKeysAreWithinTheFloor(t *testing.T) {
 	full := load(t, config.Podman)
 	full.Image.Tag = modernTag
@@ -1563,6 +1720,10 @@ func TestQuadletKeysAreWithinTheFloor(t *testing.T) {
 	rootless.Podman.Rootless = true
 	rootless.Podman.Container.RunUser = ""
 	rootless.ApplyDefaults(config.Podman)
+	// Host networking is no longer the default, so it needs a unit of its own for
+	// Network= to be checked at all.
+	hostNet := load(t, config.Podman)
+	hostNet.Podman.Network.Mode = "host"
 
 	quadletKeySince := map[string]string{}
 	for _, r := range quadletKeysByRelease {
@@ -1575,6 +1736,7 @@ func TestQuadletKeysAreWithinTheFloor(t *testing.T) {
 		Quadlet(full, full.ResolveNode(config.Primary)),
 		Quadlet(full, full.ResolveNode(config.Monitor)),
 		Quadlet(rootless, rootless.ResolveNode(config.Primary)),
+		Quadlet(hostNet, hostNet.ResolveNode(config.Primary)),
 	} {
 		section := ""
 		for _, line := range strings.Split(string(unit), "\n") {
@@ -1600,7 +1762,8 @@ func TestQuadletKeysAreWithinTheFloor(t *testing.T) {
 		}
 	}
 	// The fixture must actually reach the keys it exists to cover.
-	for _, key := range []string{"HostName", "ShmSize", "Ulimit", "Secret", "HealthCmd", "PublishPort", "PodmanArgs"} {
+	for _, key := range []string{"HostName", "ShmSize", "Ulimit", "Secret", "HealthCmd", "PublishPort", "PodmanArgs",
+		"Network", "DropCapability"} {
 		if !seen[key] {
 			t.Errorf("fixture problem: no rendered unit carried %s=, so its floor went unchecked", key)
 		}
@@ -1632,5 +1795,20 @@ func TestBrokerCRQuotesTheImageReference(t *testing.T) {
 	}
 	if got, ok := cr.Spec.Image.Repository.(string); !ok || got != "registry.example.com:5000/solace/solace-pubsub-standard" {
 		t.Errorf("spec.image.repository = %#v, want the registry-prefixed string", cr.Spec.Image.Repository)
+	}
+}
+
+// TestBrokerCRStatesRedundancyEitherWay: spec.redundancy is written on every CR, as a
+// bare YAML boolean, so a standalone broker says false rather than leaving the operator
+// to default it. The sample is HA, so every CR golden shows true; this is the only
+// rendering of a standalone CR.
+func TestBrokerCRStatesRedundancyEitherWay(t *testing.T) {
+	for _, tc := range []struct{ enabled, want string }{{"true", "true"}, {"false", "false"}} {
+		c := load(t, config.K8s)
+		c.Redundancy.Enabled = tc.enabled
+		cr := string(BrokerCR(c))
+		if !strings.Contains(cr, "  redundancy: "+tc.want+"\n") {
+			t.Errorf("redundancy.enabled %s: the CR should carry `redundancy: %s`:\n%s", tc.enabled, tc.want, cr)
+		}
 	}
 }

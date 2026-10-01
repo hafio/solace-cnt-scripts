@@ -89,7 +89,7 @@ of them at runtime**:
 | Component | Floor | What needs it | If older |
 | --- | --- | --- | --- |
 | Docker Compose | 2.23.1 | The `environment:` secret source in the generated compose file | `broker deploy` fails on the secret source. Loud. On a host with only the standalone v1 binary, set `docker.compose: docker-compose` |
-| podman | 4.7 | `ShmSize=` and `Ulimit=` in the quadlet unit. Below them: `HostName=` (4.6), `Secret=...,type=mount` with an absolute target and the `Health*=` keys (4.5), `NoNewPrivileges=` (4.4), and `secret create --label` for the certificate's change-detection label (4.3). The memory cap rides `PodmanArgs=--memory=` rather than quadlet's own `Memory=` key, which needs **5.5** | Quadlet refuses a unit carrying a key it does not know, so the unit fails to load at deploy time. Loud. `TestQuadletKeysAreWithinTheFloor` holds every key the unit emits to this floor |
+| podman | 4.7 | `ShmSize=` and `Ulimit=` in the quadlet unit. Below them: `HostName=` (4.6), `Secret=...,type=mount` with an absolute target and the `Health*=` keys (4.5), `NoNewPrivileges=` and `DropCapability=` (4.4), and `secret create --label` for the certificate's change-detection label (4.3). The memory cap rides `PodmanArgs=--memory=` rather than quadlet's own `Memory=` key, which needs **5.5** | Quadlet refuses a unit carrying a key it does not know, so the unit fails to load at deploy time. Loud. `TestQuadletKeysAreWithinTheFloor` holds every key the unit emits to this floor |
 | Solace broker image | 10.26 | The built-in readiness endpoint the opt-in health check uses with no `cmd` of its own | Refused at load: an older tag and an unidentifiable one are both rejected. This is the one floor that IS checked, because the tag is in the env file rather than on the host |
 | EventBroker operator | bundled 1.4.2 | The `PubSubPlusEventBroker` schema this tool renders | `operator deploy` installs the bundled version. An older operator already in the cluster prompts before a downgrade |
 | kubectl / oc | none | Namespace, Secret and the custom resource are all core API shapes plus the operator's own CRD | n/a |
@@ -407,10 +407,15 @@ Then run `broker perform redundancy-test` **once, on the primary host**: it conf
 the backup's SEMP service is reachable (before anything is disturbed), releases and
 un-releases activity so the backup takes over, then reverts the backup and waits for
 activity to come home. Backup and monitor hosts are rejected loud, and `broker perform assert-leader`
-runs only on the primary. Prerequisite: the backup's SEMP port (8080, or the mapped host
-port under `network.mode: bridge`) must be reachable from the primary host -- a working HA
-group only proves the redundancy ports (8300-8302, 8741, 55555) are open, so the
-preflight fails loud with the address it tried when SEMP is firewalled.
+runs only on the primary. Prerequisite: the backup's SEMP port must be reachable from the
+primary host. Under the default `network.mode: bridge` nothing is published unless it is
+listed, so every member's `network.ports` has to publish the redundancy ports (8300-8302,
+8741, 55555) for the group to form at all, and the backup's has to publish SEMP too -- 8080,
+or 1943 with TLS; the primary reaches it at the host side of that entry. Under
+`network.mode: host` it is 8080 or 1943 on the backup's own address. A working HA group only
+proves the redundancy ports are open, so the preflight fails loud with the address it tried
+when SEMP is firewalled, and refuses before anything is disturbed when the list maps no SEMP
+port at all.
 
 **If a `broker perform redundancy-test` run dies partway** (including Ctrl-C, which runs no cleanup), the
 group can be left released or failed over. Restore it with `no redundancy release-activity`
@@ -498,23 +503,39 @@ range.
 
 Both artifacts also deny the broker any privilege beyond that identity, following rules 1 and
 2 of [container-security.md](container-security.md). The compose file states
-`privileged: false` and lists `no-new-privileges=true` under `security_opt:`; the quadlet unit
-carries `NoNewPrivileges=true` in its `[Container]` section. Docker's `privileged` default is
+`privileged: false`, drops every capability with `cap_drop: [ALL]` and lists
+`no-new-privileges=true` under `security_opt:`; the quadlet unit carries `NoNewPrivileges=true`
+and `DropCapability=all` in its `[Container]` section. Docker's `privileged` default is
 already false and is written out so the artifact shows it. `no_new_privs` is off by default on
-both engines, so that line is what actually sets it. There is no key to turn either off.
+both engines, and neither engine drops a capability unless told to, so those lines are what
+actually set them. There is no key to turn any of them off.
 
 What it changes: no process inside the container can gain privileges through a setuid binary
 or file capabilities, so `su`, `sudo` and helpers like them stop working in there. Nothing this
 tool runs inside the container relies on them -- SEMP calls, CLI scripts and diagnostics all
 run as the container's own user -- but your own content might: a custom `healthCheck.cmd`, a
-`shell-script` body, or what you type at `broker shell`. Root inside the container is still
-reachable from the host with `<runtime> exec -u 0 <name> ...`, which sets the uid directly
-rather than escalating. The setting removes nothing the container starts with, on a rootful
-engine or a rootless one, and does not change who the broker runs as.
+`shell-script` body, or what you type at `broker shell`. With every capability dropped, no
+process in there can open a raw socket, change a file's owner, or override the permissions
+on a file it does not own -- none of which a non-root broker does. Root
+inside the container is still reachable from the host with `<runtime> exec -u 0 <name> ...`,
+which sets the uid directly rather than escalating, but it holds no capabilities either: fix
+ownership from the host side instead (`podman unshare chown` on rootless), or add
+`--privileged` to that one `exec`. The settings do not change who the broker runs as, on a
+rootful engine or a rootless one.
 
 The first `broker deploy` after upgrading to a build that emits these lines finds a changed
 artifact, so a running broker needs a restart to pick them up. It is asked for, as with any
 changed artifact -- see [Re-deploying is safe and explicit](#re-deploying-is-safe-and-explicit).
+
+**Networking moves in the same upgrade.** Earlier builds defaulted
+`<docker|podman>.network.mode` to `host`, and gave `mode: bridge` with no `ports` the 17
+Kubernetes default ports. Now an env file with no `network` block renders `bridge`, and
+`network.ports` is never defaulted, so nothing is published: approving that restart takes a
+host-networked broker off the network -- clients cannot connect, and an HA group cannot
+re-form -- and declining it still leaves the new artifact in place for the next restart to
+pick up. Before approving, keep the old behaviour with `<docker|podman>.network.mode: host`,
+or list in `network.ports` what must stay reachable: SMF (55555), SEMP (8080, or 1943 with
+TLS) and, on an HA member, the redundancy ports 8300-8302 and 8741.
 
 ### Rootless podman prerequisites
 
@@ -1545,10 +1566,11 @@ backup before the primary.
 
 ### The limits the container actually gets
 
-Both container artifacts ask the engine for a fixed `nofile` limit of `2448:1048576`, plus
-`memlock` and `core` unlimited and `2g` of `/dev/shm`. None of it is configurable -- it is
-what a Solace broker needs -- and `validate` and the first step of `broker deploy` check the
-host can grant it.
+Both container artifacts ask the engine for a fixed `nofile` limit of `2448:1048576`,
+`memlock` unlimited and `2g` of `/dev/shm` -- none of it configurable, since it is what a
+Solace broker needs -- plus `core` unlimited by default, the one limit
+`<docker|podman>.container.ulimits.core` can lower. `validate` and the first step of
+`broker deploy` check the host can grant them.
 
 `--ulimit` is only a REQUEST. What the engine may actually set depends on the privilege it
 holds:
@@ -1561,6 +1583,8 @@ holds:
 
 So `validate` and `broker deploy` read **`fs.nr_open` everywhere**, and on rootless podman
 two more: `user@<uid>.service`'s hard limits, and this login session's own `ulimit -Hn`.
+Of those hard limits, `LimitCORE` is held to what `ulimits.core` asks for -- `infinity` for
+the default, the byte count when lowered, so `0` needs nothing of the host.
 The unit drop-in is written under `user@<uid>.service.d`, not the `user@.service.d`
 template, so it raises the limits of the broker's account and no one else's. It also
 carries `Delegate=cpu cpuset io memory pids`, and the same row checks those controllers

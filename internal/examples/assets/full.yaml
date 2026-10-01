@@ -290,7 +290,6 @@ kubernetes:
   # containerSecurity:
   #   runAsUser: "1000001"
   #   runAsGroup: "1000002"
-  #   readOnlyRootFilesystem: false # broker 10.9+
   storage:                          # two ways to get a data volume. Naming both is
                                     # refused: `class` PROVISIONS one, customVolumeMount
                                     # mounts one that already exists
@@ -386,6 +385,11 @@ docker:
   #   monitorCpuset: 0              # WHICH cpu the HA monitor runs on, exactly one. It
                                     # arbitrates quorum and carries no spool, so it gets
                                     # a fixed 1 cpu and 2g whatever the tier
+  #   ulimits:
+  #     core: -1                    # core-dump size: -1 (unlimited, the default and
+                                    # Solace's recommendation) or bytes. A dump copies
+                                    # the broker's memory, secrets included, so 0 keeps
+                                    # none on disk. nofile and memlock are fixed
   #   healthCheck:                  # opt-in; off leaves the artifact unchanged
   #     enabled: true               # polls the broker's readiness endpoint. REQUIRES
                                     # broker 10.26+ AND a version-numbered image.tag to
@@ -399,13 +403,16 @@ docker:
   #     retries: 3
   #     startPeriod: 60s
   # network:
-  #   mode: host                    # host | bridge. host publishes nothing: every broker
-                                    # listener binds on this host's own interfaces, so
-                                    # the host firewall decides what reaches it
+  #   mode: bridge                  # bridge | host. bridge publishes network.ports and
+                                    # nothing else. host is an opt-in widening: the
+                                    # container shares this host's network, every
+                                    # listener binds on every interface, and only the
+                                    # host firewall decides what reaches it
   #   ports:                        # host:container, optionally [ip:] first and /tcp or
   #     - 8080:8080                 # /udp last; either side may be a lo-hi range.
-                                    # Omitted in bridge mode, the same 17 ports
-                                    # Kubernetes defaults to are published
+  #     - 55555:55555               # NEVER defaulted: omitted, nothing is published.
+  #     - 8300-8302:8300-8302       # An HA member also publishes 8300-8302 and 8741,
+  #     - 8741:8741                 # and SEMP (8080, or 1943 with TLS) for its mate
 
 podman:
   # command: podman                 # same rules as docker.command; only `podman`
@@ -437,9 +444,12 @@ podman:
                                     # must delegate the cpuset controller; deploy
                                     # refuses a host where it is missing
   #   monitorCpuset: 0              # same rules as docker.container.monitorCpuset
+  #   ulimits:
+  #     core: -1                    # same rules as docker.container.ulimits.core. Under
+                                    # rootless: true user@<uid>.service must grant it
   #   healthCheck:                  # same shape as docker.container.healthCheck
   #     enabled: true               # built-in readiness probe; needs broker 10.26+
-  # network:
-  #   mode: host
+  # network:                        # same rules as docker.network
+  #   mode: bridge
   #   ports:
   #     - 8080:8080

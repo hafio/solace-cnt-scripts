@@ -107,11 +107,12 @@ func TestValidContainerPort(t *testing.T) {
 	}
 }
 
-// TestValidateContainerArtifactValues covers both checks through Validate on both
-// engines: a bad port entry is refused by index even in host mode (a file switched
-// to bridge later carries the same list), and each health-check timing must be a
-// positive Go duration -- zero allowed only for startPeriod -- with injections
-// refused like any other malformed value. The defaults ApplyDefaults fills pass.
+// TestValidateContainerArtifactValues covers the three checks through Validate on
+// both engines: a bad port entry is refused by index even in host mode (a file
+// switched to bridge later carries the same list), each health-check timing must be
+// a positive Go duration -- zero allowed only for startPeriod -- and ulimits.core
+// must be -1 or a byte count that fits an int64, with injections refused like any
+// other malformed value. The defaults ApplyDefaults fills pass.
 func TestValidateContainerArtifactValues(t *testing.T) {
 	for _, p := range []Platform{Docker, Podman} {
 		key := platformKey(p)
@@ -160,6 +161,29 @@ func TestValidateContainerArtifactValues(t *testing.T) {
 				t.Errorf("%s = %q must be accepted: %v", field, tc.value, err)
 			case !tc.ok && (err == nil || !strings.Contains(err.Error(), field)):
 				t.Errorf("%s = %q: err = %v, want a refusal naming the field", field, tc.value, err)
+			}
+		}
+		field := key + ".container.ulimits.core"
+		for _, v := range []string{"-1", "0", "1073741824", "9223372036854775807"} {
+			c := validContainerConfig(p, "false")
+			c.Docker.Container.Ulimits.Core, c.Podman.Container.Ulimits.Core = v, v
+			if err := c.Validate(p); err != nil {
+				t.Errorf("%s = %q must be accepted: %v", field, v, err)
+			}
+		}
+		for _, v := range []string{"unlimited", "infinity", "-2", "+1", "007", "1k", "1G", "1 024", " 0", "0.5",
+			"9223372036854775808", "0\n[Service]\nExecStartPre=/bin/true", "-1\n    cap_add: [ALL]"} {
+			c := validContainerConfig(p, "false")
+			c.Docker.Container.Ulimits.Core, c.Podman.Container.Ulimits.Core = v, v
+			err := c.Validate(p)
+			if err == nil {
+				t.Errorf("%s = %q must be refused", field, v)
+				continue
+			}
+			for _, want := range []string{field, strconv.Quote(v), "-1"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q should name %s", err, want)
+				}
 			}
 		}
 	}

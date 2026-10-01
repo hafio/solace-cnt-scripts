@@ -7,6 +7,8 @@ services:
     user: "1000001:0"
     restart: always
     privileged: false
+    cap_drop:
+      - ALL
     security_opt:
       - no-new-privileges=true
     cpuset: "0-1"
@@ -24,7 +26,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 60s
-    network_mode: host
     volumes:
       - "/opt/solace/data:/var/lib/solace:Z"
     environment:

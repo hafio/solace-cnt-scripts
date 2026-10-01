@@ -69,9 +69,11 @@ func (m *Manager) rootlessPodman() bool {
 }
 
 // checkLimits proves this host can give the broker container the limits both
-// artifacts ask for. The ask is not configurable (config.ContainerNoFile* and
-// friends are constants the renderers emit verbatim), so there is no env-file
-// value to read and no "nothing configured" state to skip on.
+// artifacts ask for. The nofile and memlock asks are not configurable
+// (config.ContainerNoFile* and friends are constants the renderers emit
+// verbatim); core is the one configurable limit, <platform>.container.ulimits.core,
+// read in checkUserManagerLimits and never empty -- so there is still no "nothing
+// configured" state to skip on.
 //
 // Two facts, because two things bind:
 //   - fs.nr_open, on every platform. Docker and rootful podman run a privileged
@@ -196,6 +198,15 @@ func (m *Manager) checkUserManagerLimits(ctx context.Context, user string) error
 		return nil
 	}
 	props := parseUnitProps(out)
+	// core is the one limit the operator may lower, so its floor is what the unit
+	// will actually ask for (Container.CoreLimit): unbounded for the default -1, the
+	// byte count otherwise -- a host need not grant unlimited dumps to a broker set
+	// to write none. validCoreLimit has already held a loaded value to digits.
+	cb := m.Cfg.ContainerBlock(m.P)
+	coreMin := limitUnbounded
+	if n, err := strconv.Atoi(cb.CoreLimit()); err == nil && n >= 0 {
+		coreMin = n
+	}
 	var short []string
 	for _, want := range []struct {
 		prop string
@@ -203,7 +214,7 @@ func (m *Manager) checkUserManagerLimits(ctx context.Context, user string) error
 	}{
 		{"LimitNOFILE", config.ContainerNoFileHard},
 		{"LimitMEMLOCK", limitUnbounded},
-		{"LimitCORE", limitUnbounded},
+		{"LimitCORE", coreMin},
 	} {
 		raw, ok := props[want.prop]
 		if !ok {
@@ -250,7 +261,7 @@ func (m *Manager) checkUserManagerLimits(ctx context.Context, user string) error
 		"    %s soft memlock unlimited\n"+
 		"  Run: sudo systemctl daemon-reload",
 		unit, strings.Join(short, "; "), fmt.Sprintf(userUnitDropInFmt, m.Geteuid()), delegateSetting(),
-		config.ContainerNoFile(), config.ContainerLimitMemLock, config.ContainerLimitCore,
+		config.ContainerNoFile(), config.ContainerLimitMemLock, cb.SystemdCoreLimit(),
 		pamLimitsDropIn, user, config.ContainerNoFileHard, user, config.ContainerNoFileSoft,
 		user, user)
 }

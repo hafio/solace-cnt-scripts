@@ -31,7 +31,7 @@ func (c *Config) Validate(p Platform) error {
 		return err
 	}
 
-	// Four more keys were REMOVED rather than renamed: their values are constants
+	// Three more keys were REMOVED rather than renamed: their values are constants
 	// now. Checked on every platform, like the renames above, because a dead key is
 	// dead whichever section this run happens to read.
 	if err := c.validateRetiredContainerKeys(); err != nil {
@@ -196,9 +196,11 @@ func (c *Config) validateRenamedKeys() error {
 	return nil
 }
 
-// validateRetiredContainerKeys refuses the four <docker|podman>.container keys
-// whose value stopped being a choice: the shared-memory size and the three
-// ulimits are fixed constants the renderers emit on every target.
+// validateRetiredContainerKeys refuses the three <docker|podman>.container keys
+// whose value stopped being a choice: the shared-memory size and the nofile and
+// memlock ulimits are fixed constants the renderers emit on every target.
+// ulimits.core is not among them: it is live, and checked in
+// validateContainerArtifactValues.
 //
 // Refused rather than ignored, for the reason kubernetes.msgNode.cpu is: a stale
 // key is a decision the operator believes is in effect. Every field read here is
@@ -216,7 +218,6 @@ func (c *Config) validateRetiredContainerKeys() error {
 			{"shmSize", b.block.ShmSize, ContainerShmSize},
 			{"ulimits.nofile", b.block.Ulimits.NoFile, ContainerNoFile()},
 			{"ulimits.memlock", b.block.Ulimits.MemLock, ContainerMemLock},
-			{"ulimits.core", b.block.Ulimits.Core, ContainerCore},
 		} {
 			if f.value == "" {
 				continue
@@ -620,6 +621,14 @@ func (c *Config) validateK8s() error {
 		return fmt.Errorf("kubernetes.msgNode.cpu was removed; broker CPU is fixed by the scaling tier and "+
 			"derived from scaling.maxConnections (one of %s) -- drop the key. "+
 			"kubernetes.msgNode.mem is unaffected: it still overrides the tier's default memory", scalingTierList)
+	}
+	if ro := c.K8s.ContainerSecurity.ReadOnlyRootFilesystem; ro != nil {
+		// Removed the same way, and refused whatever its value: false is a decision
+		// the operator believes is in effect just as much as true is.
+		return fmt.Errorf("kubernetes.containerSecurity.readOnlyRootFilesystem was removed (got: %t): this tool "+
+			"does not support a read-only root filesystem and never sets it in the CR, so the broker's root "+
+			"filesystem stays writable -- drop the key. kubernetes.containerSecurity.runAsUser and runAsGroup "+
+			"are unaffected", *ro)
 	}
 	switch c.K8s.UpdateStrategy {
 	case "automatedRolling", "manualPodRestart":
@@ -1607,25 +1616,18 @@ func (c *Config) validateContainer(p Platform) error {
 		}
 	}
 
-	// The port list and the health-check timings are written into the quadlet and
-	// compose file as-is (artifactvalues.go).
+	// The port list, the health-check timings and the core-dump limit are written
+	// into the quadlet and compose file as-is (artifactvalues.go).
 	if err := c.validateContainerArtifactValues(p); err != nil {
 		return err
 	}
 
-	net := c.NetworkBlock(p)
-	switch net.Mode {
-	case "host":
-	case "bridge":
-		if len(net.Ports) == 0 {
-			// ApplyDefaults fills this list, so reaching here means Validate ran on
-			// its own (a hand-built config) -- say so rather than implying the user
-			// must always list ports.
-			return fmt.Errorf("%s.network.mode=bridge requires a non-empty ports list (host:container entries); "+
-				"config.Load fills the default set automatically", platformKey(p))
-		}
+	// An empty ports list is legal in either mode: bridge then publishes nothing,
+	// which is the operator's call to make (applyContainerDefaults).
+	switch net := c.NetworkBlock(p); net.Mode {
+	case "bridge", "host":
 	default:
-		return fmt.Errorf("%s.network.mode must be 'host' or 'bridge' (got: %q)", platformKey(p), net.Mode)
+		return fmt.Errorf("%s.network.mode must be 'bridge' or 'host' (got: %q)", platformKey(p), net.Mode)
 	}
 
 	return nil

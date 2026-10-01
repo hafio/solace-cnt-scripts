@@ -10,6 +10,7 @@ HostName=solace-primary
 User=1000001
 Group=0
 NoNewPrivileges=true
+DropCapability=all
 PodmanArgs=--cpuset-cpus=0-1
 PodmanArgs=--memory=6898m
 ShmSize=2g
@@ -21,7 +22,6 @@ HealthInterval=5s
 HealthTimeout=5s
 HealthRetries=3
 HealthStartPeriod=60s
-Network=host
 Volume=/opt/solace/data:/var/lib/solace:Z
 Environment="routername=solace-primary"
 Environment="nodetype=message_routing"

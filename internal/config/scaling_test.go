@@ -713,10 +713,11 @@ func TestValidateMaxPoolRemovedThroughLoad(t *testing.T) {
 	}
 }
 
-// TestRetiredContainerLimitKeysFailLoud pins the retired-key rule for the four
+// TestRetiredContainerLimitKeysFailLoud pins the retired-key rule for the three
 // container limits: the old key must still DECODE (that is what keeps the error
 // about the key rather than a bare unknown field) and must then fail Validate
-// naming the key and the value it is now fixed at.
+// naming the key and the value it is now fixed at. ulimits.core is live, and
+// TestContainerCoreLimitIsLive covers it.
 func TestRetiredContainerLimitKeysFailLoud(t *testing.T) {
 	cases := []struct {
 		name, doc string
@@ -730,16 +731,12 @@ func TestRetiredContainerLimitKeysFailLoud(t *testing.T) {
 			"docker.container.ulimits.nofile was removed", "2448:1048576"},
 		{"docker.memlock", "docker:\n  container:\n    ulimits:\n      memlock: \"-1\"\n", Docker,
 			"docker.container.ulimits.memlock was removed", "-1"},
-		{"docker.core", "docker:\n  container:\n    ulimits:\n      core: \"0\"\n", Docker,
-			"docker.container.ulimits.core was removed", "-1"},
 		{"podman.shmSize", "podman:\n  container:\n    shmSize: 1g\n", Podman,
 			"podman.container.shmSize was removed", "2g"},
 		{"podman.nofile", "podman:\n  container:\n    ulimits:\n      nofile: \"1024:1024\"\n", Podman,
 			"podman.container.ulimits.nofile was removed", "2448:1048576"},
 		{"podman.memlock", "podman:\n  container:\n    ulimits:\n      memlock: \"-1\"\n", Podman,
 			"podman.container.ulimits.memlock was removed", "-1"},
-		{"podman.core", "podman:\n  container:\n    ulimits:\n      core: \"0\"\n", Podman,
-			"podman.container.ulimits.core was removed", "-1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -766,7 +763,7 @@ func TestRetiredContainerLimitKeysFailLoud(t *testing.T) {
 
 	// The sentinel must not fire on every config: an empty ulimits block sets
 	// nothing, and a valid fixture still has to pass. This is what would catch a
-	// resurrected setDefault in applyContainerBlockDefaults.
+	// resurrected setDefault for a retired key in applyContainerBlockDefaults.
 	var empty Config
 	if err := decodeStrict("docker:\n  container:\n    ulimits: {}\n", &empty); err != nil {
 		t.Fatalf("an empty ulimits block must decode: %v", err)
@@ -775,6 +772,34 @@ func TestRetiredContainerLimitKeysFailLoud(t *testing.T) {
 		if err := validContainerConfig(p, "true").Validate(p); err != nil {
 			t.Errorf("%s: a valid config must not trip the removal error: %v", p, err)
 		}
+	}
+}
+
+// TestContainerCoreLimitIsLive: ulimits.core was un-retired, so it now decodes, loads
+// and reaches the config as written through the whole pipeline -- defaulting to
+// Solace's recommended unlimited when omitted -- instead of being refused by name.
+func TestContainerCoreLimitIsLive(t *testing.T) {
+	doc := func(core string) string {
+		return "image:\n  repo: solace/solace-pubsub-standard\n  tag: 10.10.1.35\nsemp:\n  adminPass: s3cret\n" +
+			"redundancy:\n  enabled: \"false\"\ndocker:\n  container:\n    dataDir: /opt/solace/data\n" + core
+	}
+	c, err := Load(writeTempYAML(t, doc("    ulimits:\n      core: 0\n")), Docker)
+	if err != nil {
+		t.Fatalf("ulimits.core must load now that it is live: %v", err)
+	}
+	if got := c.Docker.Container.Ulimits.Core; got != "0" {
+		t.Errorf("ulimits.core = %q, want 0 as written", got)
+	}
+	c, err = Load(writeTempYAML(t, doc("")), Docker)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := c.Docker.Container.Ulimits.Core; got != ContainerCore {
+		t.Errorf("omitted ulimits.core = %q, want the default %q", got, ContainerCore)
+	}
+	_, err = Load(writeTempYAML(t, doc("    ulimits:\n      core: unlimited\n")), Docker)
+	if err == nil || !strings.Contains(err.Error(), "docker.container.ulimits.core") {
+		t.Errorf("a malformed core limit must be refused naming the key, got: %v", err)
 	}
 }
 

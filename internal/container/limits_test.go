@@ -330,6 +330,51 @@ func TestCheckLimitsRootlessRefusesAShortUserManager(t *testing.T) {
 	}
 }
 
+// TestCheckLimitsRootlessCoreFloorFollowsTheConfiguredLimit: ulimits.core is the one
+// limit the operator may lower, so user@<uid>.service's LimitCORE is held to what the
+// unit will ask for rather than to unlimited. A broker set to write no dumps passes on
+// a host granting none; one asking for 1 GiB is refused below it and told to grant
+// exactly that; and the default -1 still needs an unbounded limit.
+func TestCheckLimitsRootlessCoreFloorFollowsTheConfiguredLimit(t *testing.T) {
+	noCoreDumps := func(healthy func(string, []string) []byte) func(string, []string) []byte {
+		return func(name string, args []string) []byte {
+			if name == "systemctl" && slices.Contains(args, "LimitCORE") {
+				return []byte("LimitNOFILE=1048576\nLimitNOFILESoft=1024\n" +
+					"LimitMEMLOCK=infinity\nLimitCORE=0\n" +
+					"DelegateControllers=cpu cpuset io memory pids\n")
+			}
+			return healthy(name, args)
+		}
+	}
+
+	m, rr, _ := limitsMgr(t, config.Podman, true, healthyNrOpen)
+	m.Cfg.Podman.Container.Ulimits.Core = "0"
+	rr.outFor = noCoreDumps(rr.outFor)
+	if err := m.checkLimits(context.Background(), true); err != nil {
+		t.Errorf("core 0 asks the user manager for nothing, got: %v", err)
+	}
+
+	m, rr, _ = limitsMgr(t, config.Podman, true, healthyNrOpen)
+	m.Cfg.Podman.Container.Ulimits.Core = "1073741824"
+	rr.outFor = noCoreDumps(rr.outFor)
+	err := m.checkLimits(context.Background(), true)
+	if err == nil {
+		t.Fatal("a user manager below the configured core limit must fail")
+	}
+	for _, want := range []string{"LimitCORE is 0, needs 1073741824", "LimitCORE=1073741824"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal should say %q, got: %v", want, err)
+		}
+	}
+
+	m, rr, _ = limitsMgr(t, config.Podman, true, healthyNrOpen)
+	rr.outFor = noCoreDumps(rr.outFor)
+	if err := m.checkLimits(context.Background(), true); err == nil ||
+		!strings.Contains(err.Error(), "LimitCORE is 0, needs infinity") || !strings.Contains(err.Error(), "LimitCORE=infinity") {
+		t.Errorf("the default core -1 needs an unbounded LimitCORE, got: %v", err)
+	}
+}
+
 // TestCheckLimitsRootlessRefusesUndelegatedControllers: the rootless quadlet now
 // carries a cpuset, and the cpuset controller is not delegated to a user slice by
 // default -- so an undelegated host would fail the container at start. It is the

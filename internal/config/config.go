@@ -780,17 +780,24 @@ type PodSecurity struct {
 func (s PodSecurity) Configured() bool { return s.RunAsUser != "" || s.FSGroup != "" }
 
 // ContainerSecurity is the broker container's own security settings. Same
-// optional-block rule as PodSecurity; ReadOnlyRootFilesystem is a pointer so an
-// explicit false is not mistaken for "not configured".
+// optional-block rule as PodSecurity.
 type ContainerSecurity struct {
-	RunAsUser              string `yaml:"runAsUser"`
-	RunAsGroup             string `yaml:"runAsGroup"`
-	ReadOnlyRootFilesystem *bool  `yaml:"readOnlyRootFilesystem"`
+	RunAsUser  string `yaml:"runAsUser"`
+	RunAsGroup string `yaml:"runAsGroup"`
+
+	// ReadOnlyRootFilesystem is retained only so an env file carrying the removed
+	// kubernetes.containerSecurity.readOnlyRootFilesystem is refused by name
+	// (validateK8s) rather than hitting a bare unknown-key error. This tool does not
+	// support a read-only root filesystem on any platform, so the field is never
+	// rendered and never defaulted -- a pointer, so an explicit false is refused too.
+	ReadOnlyRootFilesystem *bool `yaml:"readOnlyRootFilesystem"`
 }
 
-// Configured reports whether any field was set.
+// Configured reports whether any field was set. The retired ReadOnlyRootFilesystem
+// does not count: it never reaches the CR, so on its own it must not open an empty
+// brokerContainerSecurity block.
 func (s ContainerSecurity) Configured() bool {
-	return s.RunAsUser != "" || s.RunAsGroup != "" || s.ReadOnlyRootFilesystem != nil
+	return s.RunAsUser != "" || s.RunAsGroup != ""
 }
 
 // Placement controls broker pod scheduling (tolerations, node labels, anti-affinity).
@@ -1010,8 +1017,8 @@ type PodmanConfig struct {
 
 // Network is the container networking mode + published ports.
 type Network struct {
-	Mode  string   `yaml:"mode"`  // host|bridge (SOLBK_NETWORK_MODE)
-	Ports []string `yaml:"ports"` // SOLBK_PORTS host:container (required for bridge)
+	Mode  string   `yaml:"mode"`  // bridge|host (SOLBK_NETWORK_MODE); defaults to bridge
+	Ports []string `yaml:"ports"` // SOLBK_PORTS host:container; bridge publishes exactly these, and none when empty
 }
 
 // Container is the shared docker/podman container runtime settings.
@@ -1053,8 +1060,8 @@ type Container struct {
 	Mem     string `yaml:"mem"`
 	DataDir string `yaml:"dataDir"` // SOLBK_DATA_DIR (host bind mount)
 
-	// Ulimits is retained for the same reason ShmSize is: all three keys were
-	// removed and each is refused by name. NEVER defaulted.
+	// Ulimits holds the one live limit, core, and retains the two removed ones for
+	// the reason ShmSize is retained (see the Ulimits type).
 	Ulimits     Ulimits     `yaml:"ulimits"`
 	HealthCheck HealthCheck `yaml:"healthCheck"`
 }
@@ -1091,10 +1098,15 @@ const (
 	HealthCheckMinMinor = 26
 )
 
-// The container limits the broker needs. Fixed rather than configurable: there is
-// no value an env file could carry that would be right for one deployment and
-// wrong for another, so the renderers emit these and
+// The container limits the broker needs. Fixed rather than configurable -- bar
+// core -- because there is no value an env file could carry that would be right
+// for one deployment and wrong for another, so the renderers emit these and
 // validateRetiredContainerKeys refuses the keys they replaced.
+//
+// ContainerCore is the exception: it is the DEFAULT of the live
+// <docker|podman>.container.ulimits.core. Solace recommends unlimited core dumps,
+// which is what a crash report needs, but a dump is a copy of the broker's memory,
+// so an operator who would rather none lands on disk can lower it (Container.CoreLimit).
 //
 // They live here rather than in internal/render because validate.go's refusals
 // have to name the value each retired key is now fixed at, and config must never
@@ -1135,14 +1147,41 @@ func ContainerNoFile() string {
 	return fmt.Sprintf("%d:%d", ContainerNoFileSoft, ContainerNoFileHard)
 }
 
-// Ulimits is retained ONLY so the three removed
-// <docker|podman>.container.ulimits keys still decode and can be refused by name
-// (validateRetiredContainerKeys). The values are the constants above, and the
-// SOLBK_ULIMIT_* variables these fields used to name no longer map to anything.
+// Ulimits is <docker|podman>.container.ulimits.
+//
+// NoFile and MemLock are retained ONLY so the two removed keys still decode and
+// can be refused by name (validateRetiredContainerKeys). Their values are the
+// constants above, and SOLBK_ULIMIT_NOFILE/SOLBK_ULIMIT_MEMLOCK no longer map to
+// anything. NEVER defaulted, which is what makes a non-empty value the operator's.
+//
+// Core is live: the core-dump limit, "-1" for unlimited or a byte count. It
+// defaults to ContainerCore (applyContainerBlockDefaults) and is held to that
+// grammar at load (validCoreLimit), since it is written into the quadlet unit and
+// the compose file as-is. SOLBK_ULIMIT_CORE converts to it.
 type Ulimits struct {
 	NoFile  string `yaml:"nofile"`
 	MemLock string `yaml:"memlock"`
 	Core    string `yaml:"core"`
+}
+
+// CoreLimit is the core-dump limit the engines are asked for: ulimits.core, or
+// ContainerCore when it is empty. A Config built in code without ApplyDefaults --
+// which is what the executors are handed and several tests construct -- carries an
+// empty value, and `Ulimit=core=` or `core:` with nothing after it fails the unit.
+func (b Container) CoreLimit() string {
+	if b.Ulimits.Core == "" {
+		return ContainerCore
+	}
+	return b.Ulimits.Core
+}
+
+// SystemdCoreLimit is CoreLimit in systemd's LimitCORE= spelling: infinity for the
+// engines' -1, and the byte count as written otherwise.
+func (b Container) SystemdCoreLimit() string {
+	if v := b.CoreLimit(); v != "-1" {
+		return v
+	}
+	return ContainerLimitCore
 }
 
 // Redundancy is everything about the HA group: whether there is one, who is in it, and

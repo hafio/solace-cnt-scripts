@@ -113,14 +113,17 @@ func TestSempPortBridgeFallsBackToPlaintext(t *testing.T) {
 	}
 }
 
+// TestSempPortBridgeRefusesNoMapping: bridge is the default and publishes only what
+// network.ports lists, so an HA member that never listed its SEMP port lands here --
+// the refusal names both ways out: map the port, or opt into host networking.
 func TestSempPortBridgeRefusesNoMapping(t *testing.T) {
 	cfg := &config.Config{Docker: config.DockerConfig{Network: config.Network{
 		Mode:  "bridge",
 		Ports: []string{"55555:55555", "8080:8080/udp"}, // no tcp SEMP mapping either way
 	}}}
 	_, _, err := sempPort(cfg, config.Docker)
-	if err == nil || !strings.Contains(err.Error(), "network.ports") {
-		t.Errorf("sempPort err = %v, want a loud refusal naming network.ports", err)
+	if err == nil || !strings.Contains(err.Error(), "network.ports") || !strings.Contains(err.Error(), "docker.network.mode: host") {
+		t.Errorf("sempPort err = %v, want a loud refusal naming network.ports and the host-networking opt-in", err)
 	}
 }
 

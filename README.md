@@ -213,7 +213,10 @@ names an admin Secret that already exists, or you want the operator to generate 
 
 One container per host, no operator. At minimum set `image.repo`, `image.tag`, `semp.adminPass`,
 and a `docker: {}` or `podman: {}` section (write the empty section even when every setting
-under it defaults -- it is what marks the file's platform).
+under it defaults -- it is what marks the file's platform). The broker runs on bridge
+networking and publishes only what `network.ports` lists, which is nothing until you list it;
+an HA member lists its redundancy and SEMP ports too, or opts into `network.mode: host`
+([configuration.md](docs/configuration.md#the-keys)).
 
 1. Render the artifact this host would get -- a compose file on Docker, a systemd quadlet
    unit on Podman:

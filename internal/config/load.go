@@ -246,14 +246,13 @@ func (c *Config) applyContainerDefaults(p Platform) {
 	applyContainerBlockDefaults(&c.Docker.Container, ImageRunUser)
 	applyContainerBlockDefaults(&c.Podman.Container, podmanRunUser(c.Podman.Rootless))
 
-	setDefault(&c.Docker.Network.Mode, "host")
-	setDefault(&c.Podman.Network.Mode, "host")
-	// Bridge mode publishes nothing unless ports are listed, and an incomplete list
-	// silently hides protocols. Default it to the same set k8s uses, as host:container
-	// pairs, so bridge is usable without enumerating 17 ports by hand. Host mode is
-	// untouched -- there is nothing to publish there.
-	applyBridgePortDefaults(&c.Docker.Network)
-	applyBridgePortDefaults(&c.Podman.Network)
+	// Bridge, because host networking is a widening (docs/container-security.md,
+	// rule 1): the container would share this host's network namespace and bind every
+	// listener on every interface. network.ports is passed through as written and
+	// never defaulted, so an empty list publishes nothing -- which ports a broker
+	// exposes, and on which address, is the operator's decision, not this tool's.
+	setDefault(&c.Docker.Network.Mode, "bridge")
+	setDefault(&c.Podman.Network.Mode, "bridge")
 
 	c.applyScalingDefaults(1000, 100000)
 
@@ -322,10 +321,11 @@ func podmanRunUser(rootless bool) string {
 // deliberately absent: the timezone is optional on every platform, so an unset
 // value emits no TZ setting at all rather than silently pinning one.
 //
-// shmSize and the three ulimits are NOT here and must not be. They are retired
-// keys retained only so a file carrying one is refused by name, and that refusal
-// reads "non-empty" as "the operator set it" -- so defaulting either one here,
-// even to the constant the renderers emit, would fail every container load.
+// shmSize and the nofile and memlock ulimits are NOT here and must not be. They
+// are retired keys retained only so a file carrying one is refused by name, and
+// that refusal reads "non-empty" as "the operator set it" -- so defaulting any of
+// them here, even to the constant the renderers emit, would fail every container
+// load. ulimits.core is the live one, so it IS defaulted.
 //
 // cpuset is not here either, for the reason mem is not: its default is the
 // scaling tier's core count, settled only once maxConnections has been defaulted
@@ -333,6 +333,7 @@ func podmanRunUser(rootless bool) string {
 func applyContainerBlockDefaults(b *Container, defaultRunUser string) {
 	setDefault(&b.RunUser, defaultRunUser)
 	setDefault(&b.DataDir, "/opt/solace/data")
+	setDefault(&b.Ulimits.Core, ContainerCore)
 	// Not the tier path: the monitor's footprint is fixed (MonitorCPUs/MonitorMem),
 	// so only WHICH cpu it takes is defaulted, and it does not move with the tier.
 	setDefault(&b.MonitorCPUSet, "0")
@@ -397,26 +398,6 @@ func defaultK8sPorts() []string {
 		"tcp-mqtt=1883", "tls-mqtt=8883",
 		"tcp-mqttweb=8000", "tls-mqttweb=8443",
 	}
-}
-
-// applyBridgePortDefaults fills an empty bridge-mode port list.
-func applyBridgePortDefaults(n *Network) {
-	if n.Mode == "bridge" && len(n.Ports) == 0 {
-		n.Ports = defaultContainerPorts()
-	}
-}
-
-// defaultContainerPorts is the k8s default port set as container host:container
-// pairs. It is derived from defaultK8sPorts rather than duplicated, so the two
-// cannot drift.
-func defaultContainerPorts() []string {
-	k8sPorts := defaultK8sPorts()
-	out := make([]string, 0, len(k8sPorts))
-	for _, entry := range k8sPorts {
-		_, port, _ := strings.Cut(entry, "=")
-		out = append(out, port+":"+port)
-	}
-	return out
 }
 
 func setDefault(p *string, v string) {
