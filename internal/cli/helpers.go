@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"solace/internal/broker"
 	"solace/internal/config"
 )
 
@@ -73,6 +76,60 @@ func leaf(app *App, use, short string, fn opFunc) *cobra.Command {
 		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE:              func(*cobra.Command, []string) error { return fn(app) },
 	})
+}
+
+// resolveScriptPath is the one rule for the file operand of `broker perform cli-script`
+// and `shell-script` (verb is the leaf name), on every platform: the operand is a NAME,
+// the file lives in broker.cliScriptsDir, and nothing else is consulted -- not the
+// working directory, not a path the operator typed.
+//
+// Both used to be accepted, so `x.cli` meant the folder's file and `./x.cli` the working
+// directory's -- one script, two spellings, two different files -- and a name the folder
+// lacked surfaced as an opaque kubectl/docker/podman cp failure. Now a path of any shape
+// is refused, even one into the folder or a subfolder of it: the in-broker name is the
+// base name, so `a/x.cli` and `x.cli` would land on the same file. config.Load has made
+// the folder absolute against the env file's directory, so the join does not depend on
+// the working directory and the error names the exact path it looked at; an empty
+// folder (a Config that never went through Load) is refused rather than letting the join
+// fall back to the working directory.
+//
+// Every refusal is a usage error (exit 2): the operator chose the name, and running the
+// same command line again cannot fix it. The checks run here, before anything connects,
+// and not in broker.Ops or a Transport, whose tests hand them paths that were never
+// created. The file found is announced, since which file runs is the whole question.
+func resolveScriptPath(a *App, file, verb string) (string, error) {
+	who := "broker perform " + verb
+	dir := a.Cfg.Broker.CLIScriptsDir
+	if dir == "" {
+		return "", usagef("%s: broker.cliScriptsDir is empty, and scripts are read from nowhere else", who)
+	}
+	if file == "" {
+		return "", usagef("%s: a script file name is required -- it is read from broker.cliScriptsDir (%s)", who, dir)
+	}
+	if config.HasPathSeparator(file) {
+		return "", usagef("%s runs scripts from broker.cliScriptsDir (%s) only: give the script's file name, "+
+			"not a path (got %q) -- the current directory is never searched", who, dir, file)
+	}
+	p := filepath.Join(dir, file)
+	fi, err := os.Stat(p)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if _, derr := os.Stat(dir); errors.Is(derr, os.ErrNotExist) {
+			return "", usagef("%s: broker.cliScriptsDir (%s) does not exist -- create it and put %q there: %w",
+				who, dir, file, err)
+		}
+		return "", usagef("%s: %q is not in broker.cliScriptsDir (%s) -- put it there, or point "+
+			"broker.cliScriptsDir at the folder that holds it: %w", who, file, dir, err)
+	case err != nil:
+		return "", usagef("%s: cannot use %q from broker.cliScriptsDir: %w", who, file, err)
+	case !fi.Mode().IsRegular():
+		return "", usagef("%s: %s is not a regular file", who, p)
+	}
+	if err := broker.ValidScriptName(strings.TrimSuffix(verb, "-script"), file); err != nil {
+		return "", usagef("%s: %w", who, err)
+	}
+	step("script: %s", p)
+	return p, nil
 }
 
 // emitOrWrite sends body to stdout, or to app.out when --out named a file.

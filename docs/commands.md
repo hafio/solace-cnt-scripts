@@ -661,7 +661,7 @@ Run a one-shot action against the broker
 One-shot actions against a running broker; not settings the env file
 describes.
 
-  assert-leader        make this node the config-sync leader (HA)
+  assert-leader        assert the primary as config-sync leader (HA)
   redundancy-test      exercise a real failover and fail back (HA, INVASIVE)
   gather-diagnostics   collect a support bundle into broker.hostDiagnosticDir
   semp-login-check     prove the admin credentials work over SEMP
@@ -685,10 +685,10 @@ Also available as: pf
 
 Assert the config-sync leader (HA only)
 
-Asserts this node as the config-sync leader for the router and every
-message-VPN; a no-op, not an error, on a standalone deployment.
-
-Run this first on a fresh HA broker, before any `broker configure` step.
+Asserts this node as config-sync leader for the router and every message-VPN,
+overwriting the mate's configuration with its own; the node must report Local
+Active. Kubernetes uses the primary pod; on docker/podman a backup host asks
+first and the monitor is refused. A no-op on a standalone deployment.
 
 ```
 solace-util broker perform assert-leader [flags]
@@ -697,6 +697,7 @@ solace-util broker perform assert-leader [flags]
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask (docker/podman only) |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (docker/podman only) |
 
 
@@ -704,11 +705,10 @@ solace-util broker perform assert-leader [flags]
 
 Run a Solace CLI script in the broker
 
-Uploads a local Solace CLI script and runs it in the broker; a bare
-filename resolves under broker.cliScriptsDir.
+Uploads a Solace CLI script from broker.cliScriptsDir and runs it in the
+broker. Give the file's name, not a path; a name not in that folder fails.
 
-A rejected line does not stop the rest of the script, but the run is then
-reported as a failure.
+The broker stops at the first rejected line, which fails the run.
 
 ```
 solace-util broker perform cli-script <file> [flags]
@@ -858,11 +858,10 @@ solace-util broker perform semp-login-check [flags]
 
 Run a host shell script inside the broker
 
-Uploads a local shell script and runs it with bash inside the broker, as
-the broker's own user.
+Uploads a shell script from broker.cliScriptsDir and runs it with bash inside
+the broker, as the broker's own user. Give the file's name, not a path.
 
-Bash reports one exit status for the whole run, and the full output is
-shown.
+Bash reports one exit status for the whole run, and the full output is shown.
 
 ```
 solace-util broker perform shell-script <file> [flags]

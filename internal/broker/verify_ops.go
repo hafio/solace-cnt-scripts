@@ -11,9 +11,9 @@ import (
 )
 
 // Field labels and activity states parsed out of `show redundancy` output. They
-// are named once here so the leader/redundancy state machines compare against a
-// single source of truth -- a typo in a copied literal would silently break a
-// state check.
+// are named once here so assert-leader's check and the redundancy state machines
+// compare against a single source of truth -- a typo in a copied literal would
+// silently break a state check.
 const (
 	labelConfigStatus      = "Configuration Status"
 	labelRedundancyStatus  = "Redundancy Status"
@@ -63,39 +63,88 @@ func (o *Ops) Login(ctx context.Context, role config.Role, user, pass string) (b
 	return false, nil
 }
 
-// Leader restores redundancy and asserts the Primary as config-sync leader for
-// the router and all VPNs, porting 050. HA-only: it no-ops for standalone.
-func (o *Ops) Leader(ctx context.Context) error {
+// Leader asserts role's node as the config-sync leader for the router and every
+// message-VPN, porting 050's assert step: LeaderCheck, then LeaderAssert. It is
+// for a caller that asks nothing first -- Kubernetes, which always passes the
+// primary pod, and a container host that resolved itself as the primary.
+//
+// It checks ONCE and never moves activity. 050 sent `redundancy revert-activity`
+// to the backup and polled until the primary came back; the port of that made a
+// rejected revert, or a backup pod that was down, abort the assert, and on
+// docker/podman it reached the mate over SEMP rather than the CLI. Now nothing
+// but the node being asserted from is touched: a node that does not hold activity
+// fails at once, with the transcript and the way to put activity right.
+func (o *Ops) Leader(ctx context.Context, role config.Role) error {
+	ok, err := o.LeaderCheck(ctx, role)
+	if err != nil || !ok {
+		return err
+	}
+	return o.LeaderAssert(ctx, role)
+}
+
+// LeaderCheck is assert-leader's one read: it refuses unless role's node reports
+// Local Active. It returns false with no error when there is nothing to do -- a
+// standalone deployment, which it reports as a skip.
+//
+// It is separate from LeaderAssert for the reason ImportPlan is separate from
+// ImportApply: every confirmation lives in internal/cli (Ops has no Confirm seam),
+// so a container host that turns out to be the BACKUP is asked between this read
+// and the write, and is not asked at all when it could not assert anyway.
+//
+// The monitor is refused before anything is read. The role is otherwise the node
+// this reads on Kubernetes, and only a label on docker/podman, whose transport
+// talks to this host's one broker whatever the role says.
+func (o *Ops) LeaderCheck(ctx context.Context, role config.Role) (bool, error) {
 	if o.skipIfStandalone("assert-leader") {
-		return nil
+		return false, nil
 	}
-
-	// Revert any released activity on the Backup first (050 lines 23-31).
-	if _, err := o.RunCLI(ctx, config.Backup, "revert-activity", revertActivityScript()); err != nil {
-		return err
+	if role == config.Monitor {
+		return false, fmt.Errorf("`broker perform assert-leader` is an invalid operation on the monitor node; " +
+			"run it on the primary host")
 	}
-
-	o.logf("Waiting for redundancy state to be restored fully...")
-	err := o.poll(ctx, "redundancy to be restored on Primary", func(ctx context.Context) (bool, error) {
-		out, err := o.showRD(ctx, config.Primary)
-		if err != nil {
-			return false, err
-		}
-		return primaryRedundancyUp(out), nil
-	})
+	// showRD, not RunCLI: a read, for the reason showRD's own comment gives.
+	out, err := o.showRD(ctx, role)
 	if err != nil {
-		if detail, dErr := o.readCLI(ctx, config.Primary, "show-redundancy-detail", showRedundancyDetailScript()); dErr == nil {
-			o.show(detail)
-		}
-		return err
+		return false, err
 	}
+	// >= 1 rather than Redundancy's == 1: the question is whether this node holds
+	// activity at all, as cliMate.PrimaryActive asks it.
+	if activity(out, activityLocalActive) == 0 {
+		o.show([]byte(out))
+		return false, leaderNotActive(role)
+	}
+	return true, nil
+}
 
-	out, err := o.RunCLI(ctx, config.Primary, "assert-leader", assertLeaderScript())
+// LeaderAssert runs the assert-leader script on role's node and shows the tail of
+// what the broker printed (050's `| tail -12`). The caller has run LeaderCheck:
+// this does not read the node again.
+func (o *Ops) LeaderAssert(ctx context.Context, role config.Role) error {
+	o.logf("Asserting the config-sync leader from the %s node: the router, then every message-VPN...", role.Word())
+	out, err := o.RunCLI(ctx, role, "assert-leader", assertLeaderScript())
 	if err != nil {
 		return err
 	}
 	o.show([]byte(lastLines(string(out), 12)))
 	return nil
+}
+
+// leaderNotActive is LeaderCheck's refusal, worded for the node it read. Nothing
+// waited, so on a primary the likeliest cause right after a deploy is a group that
+// is still forming; the other is a backup that took activity, and reverting it is
+// the operator's call, typed in the backup's own CLI -- this command no longer
+// does it for them.
+func leaderNotActive(role config.Role) error {
+	if role == config.Backup {
+		return fmt.Errorf("this node does not hold activity (its Activity Status is not Local Active), " +
+			"so it will not assert the config-sync leader; run `broker perform assert-leader` on the node " +
+			"that does, normally the primary host")
+	}
+	return fmt.Errorf("the %s node does not hold activity (its Activity Status is not Local Active), so the "+
+		"config-sync leader was not asserted. If the redundancy group is still forming, wait and run this "+
+		"again; if the backup holds activity, revert it first -- `enable`, `admin`, `redundancy revert-activity` "+
+		"in the backup's Solace CLI (`broker cli --pod backup` on Kubernetes, `broker cli` on the backup host)",
+		role.Word())
 }
 
 // Redundancy exercises failover, porting 061: confirm the Primary is active,
@@ -198,14 +247,15 @@ func (o *Ops) revertToPrimary(ctx context.Context) error {
 
 // showRD runs `show redundancy` on role and returns its output as a string.
 //
-// runCLIRead, not RunCLI: this is a READ, and it is the poll condition of every
-// redundancy wait in this file and verify_local.go. RunCLI's stop-on-error
-// wrapper would add nothing (there is no later line a rejection could poison)
-// and its rejectionIn scan would turn a runtime-state word into a hard error --
-// failKeywords carries the bare word "busy", vetted against configuration-capture
-// text and never against `show redundancy`, so a mate reported busy mid-restore
-// would abort the whole verification instead of polling on. The field() and
-// countContains() scans below are also tuned against real unwrapped transcripts.
+// runCLIRead, not RunCLI: this is a READ -- the poll condition of every
+// redundancy wait in this file and verify_local.go, and the one read assert-leader
+// makes (LeaderCheck). RunCLI's stop-on-error wrapper would add nothing (there is
+// no later line a rejection could poison) and its rejectionIn scan would turn a
+// runtime-state word into a hard error -- failKeywords carries the bare word
+// "busy", vetted against configuration-capture text and never against `show
+// redundancy`, so a mate reported busy mid-restore would abort the whole
+// verification instead of polling on. The field() and countContains() scans below
+// are also tuned against real unwrapped transcripts.
 func (o *Ops) showRD(ctx context.Context, role config.Role) (string, error) {
 	out, err := o.readCLI(ctx, role, cliShowRD, showRedundancyScript())
 	return string(out), err

@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"solace/internal/broker"
 	"solace/internal/config"
@@ -18,11 +17,12 @@ import (
 // selects docker vs podman downstream. A test installs engine.Echo through
 // App.NewRunner, so every handler is exercisable without a real engine.
 //
-// The container transport is node-local (one broker per host), so every broker.Ops
-// call targets a single nominal role (config.Primary); the HA coordination that k8s
-// drives cross-pod runs from the primary host instead, reaching the backup over the
-// SEMP control channel (LeaderLocal/RedundancyCoordinated).
-// Container config/verify reuse the shared kubernetes.* fields (DomainCerts, ProductKeys,
+// The container transport is node-local (one broker per host) and ignores the role, so
+// a broker.Ops call names a nominal one (config.Primary) -- or, for assert-leader, the
+// role this host resolved to, which only words its messages and refuses the monitor.
+// The HA coordination that k8s drives cross-pod runs from the primary host instead,
+// reaching the backup over the SEMP control channel (RedundancyCoordinated).
+// Container config/verify reuse the shared broker.* fields (DomainCerts, ProductKeys,
 // HostDiagnosticDir, CLIScriptsDir) as the broker-ops config source -- no schema change.
 
 // ctrOps builds a broker.Ops over the node-local container exec transport. The
@@ -207,16 +207,67 @@ func opCtrConfigDefaultUsers(a *App) error {
 	return ctrOps(a).DisableDefaultUsers(bg(), config.Primary)
 }
 
-// opCtrConfigLeader asserts the config-sync leader from this host. It is primary-only and
-// HA-only; --pod (empty -> detect from the hostname) lets an operator override detection.
-// LeaderLocal fails loud on a backup or monitor host, and first reverts any released
-// activity on the mate over SEMP, matching the k8s Leader order -- an unreachable mate
-// downgrades that step to a warning, since this command's own job is local.
-func opCtrConfigLeader(a *App) error { return ctrOps(a).LeaderLocal(bg(), a.pod) }
+// opCtrConfigLeader asserts the config-sync leader from this host's broker. It touches
+// nothing else: the mate is never reached, and no activity is moved.
+//
+// Standalone is decided first, exactly as before, so --pod means nothing there. In HA the
+// role comes from detectContainerRole (--pod wins, but is cross-checked against the host).
+// The primary asserts as long as it reports Local Active (Ops.Leader), and the monitor is
+// refused inside Leader without a question. A host that is, or looks like, the BACKUP is
+// asked first -- asserting there makes the backup's configuration the one config-sync
+// pushes to the primary -- but only once its one `show redundancy` read has shown it holds
+// activity: a standby backup could not assert anyway, so it fails without being asked.
+// The question lives here because internal/broker has no Confirm seam; that is why Ops
+// splits the read (LeaderCheck) from the write (LeaderAssert). A declined or unanswered
+// question returns nil, as every other asker in this tree does.
+func opCtrConfigLeader(a *App) error {
+	o := ctrOps(a)
+	if !a.Cfg.RedundancyEnabled() {
+		return o.Leader(bg(), config.Primary) // reports the [SKIP]
+	}
+	role, err := detectContainerRole(a, a.pod, true, "broker perform assert-leader")
+	if err != nil {
+		return err
+	}
+	if !leaderAsksFirst(a, role) {
+		return o.Leader(bg(), role)
+	}
+	ok, err := o.LeaderCheck(bg(), role)
+	if err != nil || !ok {
+		return err
+	}
+	if !confirmAssertFromBackup(a) {
+		return nil
+	}
+	return o.LeaderAssert(bg(), role)
+}
 
-// opCtrExecCLI / opCtrExecShell upload and run a local script in the broker container.
-// A bare filename resolves under broker.cliScriptsDir; a path is used as given -- the
-// same rule as the k8s handlers, through the same helper.
+// leaderAsksFirst reports whether assert-leader asks before asserting from this host: it
+// resolved as the backup, or --pod named another role while the host itself looks like the
+// backup -- detectContainerRole has already warned about that disagreement, and the user's
+// rule is that a host detected as the backup is asked. An explicit --pod monitor is never
+// asked: Leader refuses it outright.
+func leaderAsksFirst(a *App, role config.Role) bool {
+	if role == config.Backup {
+		return true
+	}
+	if a.pod == "" || role == config.Monitor {
+		return false // no --pod: the role IS the detected one
+	}
+	detected, _, err := ctrOps(a).DetectRole()
+	return err == nil && detected == config.Backup
+}
+
+// confirmAssertFromBackup is assert-leader's question on a backup host. The warning comes
+// first, and is printed even under --no-prompt, so an unattended log still says whose
+// configuration won.
+func confirmAssertFromBackup(a *App) bool {
+	warn("this host is the backup node: asserting the config-sync leader here makes its router and " +
+		"message-VPN configuration the copy config-sync pushes to the primary, overwriting the primary's")
+	return confirmAction(a, "Assert the config-sync leader from", "assert the config-sync leader from",
+		"this backup node ("+containerWhat(a)+")")
+}
+
 // opCtrExportConfig captures this host's broker configuration.
 //
 // config.Primary is nominal: the container transport ignores the role, because
@@ -232,32 +283,25 @@ func opCtrImportConfig(a *App, file string) error {
 	return runImport(a, ctrOps(a), config.Primary, file)
 }
 
+// opCtrExecCLI uploads a Solace CLI script from broker.cliScriptsDir to this host's broker
+// container and runs it there. The argument is a file NAME, never a path
+// (resolveScriptPath, the same helper the k8s handlers use); there is one container per
+// host, so there is no pod to resolve.
 func opCtrExecCLI(a *App, file string) error {
-	localPath, err := resolveContainerScript(a, file, "CLI")
+	localPath, err := resolveScriptPath(a, file, "cli-script")
 	if err != nil {
 		return err
 	}
 	return ctrOps(a).ExecCLI(bg(), config.Primary, localPath)
 }
 
+// opCtrExecShell is opCtrExecCLI for a shell script, run with bash inside the container.
 func opCtrExecShell(a *App, file string) error {
-	localPath, err := resolveContainerScript(a, file, "shell")
+	localPath, err := resolveScriptPath(a, file, "shell-script")
 	if err != nil {
 		return err
 	}
 	return ctrOps(a).ExecShellScript(bg(), config.Primary, localPath)
-}
-
-// resolveContainerScript is resolveScript without the pod: there is one container per
-// host, so there is no role to resolve.
-func resolveContainerScript(a *App, file, kind string) (string, error) {
-	if file == "" {
-		return "", usagef("a %s script file is required", kind)
-	}
-	if config.HasPathSeparator(file) {
-		return file, nil
-	}
-	return filepath.Join(a.Cfg.Broker.CLIScriptsDir, file), nil
 }
 
 // check / smoke steps
@@ -388,11 +432,12 @@ func opCtrRemoveBroker(a *App) error {
 }
 
 // opCtrDeployHost carries the whole per-host bring-up: check, prep host, deploy. The
-// cross-host config-sync leader (HA, primary-only) is a separate explicit step.
+// config-sync leader (HA) is a separate explicit step, `broker perform assert-leader`.
 
 // containerRole resolves which node of a redundancy group THIS host is, for the
 // commands whose --pod is a node identity rather than a pod selector (broker deploy,
-// broker generate, and the two HA actions under broker perform).
+// broker generate and broker perform assert-leader, through detectContainerRole;
+// redundancy-test resolves its own in broker.RedundancyCoordinated).
 //
 // It exists because `config.ParseRole("")` returns Primary regardless of
 // redundancy, so omitting the role on an HA backup host silently rendered and
@@ -416,7 +461,7 @@ func opCtrRemoveBroker(a *App) error {
 // Standalone keeps ParseRole's default: there is one node, the role
 // argument means nothing, and demanding one would be noise.
 func containerRole(a *App) (config.Role, error) {
-	return detectContainerRole(a, a.pod, true)
+	return detectContainerRole(a, a.pod, true, "broker deploy")
 }
 
 // containerRenderRole is containerRole for `generate broker`, which RENDERS and
@@ -431,15 +476,16 @@ func containerRole(a *App) (config.Role, error) {
 // redundancy group breaks. So this warns and falls back to the primary, and only
 // the deploying paths fail loud.
 func containerRenderRole(a *App) (config.Role, error) {
-	return detectContainerRole(a, a.pod, false)
+	return detectContainerRole(a, a.pod, false, "broker generate")
 }
 
 // detectContainerRole is the shared body. mustDetect says whether an
-// undetectable hostname is fatal -- see the two wrappers for why that differs.
+// undetectable hostname is fatal -- see the two wrappers for why that differs --
+// and cmd is the command the way-out hint names.
 //
 // Standalone detects nothing and always answers primary: there is one node, it is
 // always this host, and its routername was settled at load (App.fillStandaloneNodeName).
-func detectContainerRole(a *App, arg string, mustDetect bool) (config.Role, error) {
+func detectContainerRole(a *App, arg string, mustDetect bool, cmd string) (config.Role, error) {
 	if !a.Cfg.RedundancyEnabled() {
 		role, err := config.ParseRole(arg)
 		return role, asUsage(err)
@@ -466,7 +512,7 @@ func detectContainerRole(a *App, arg string, mustDetect bool) (config.Role, erro
 			return config.Primary, nil
 		}
 		return "", fmt.Errorf("%w\n(this host must be one of the redundancy.* node entries, or name the role: "+
-			"`broker deploy --pod primary|backup|monitor`)", err)
+			"`%s --pod primary|backup|monitor`)", err, cmd)
 	}
 	step("node role detected: %s", roleWord(role))
 	return role, nil

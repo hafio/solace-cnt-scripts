@@ -66,7 +66,7 @@ Run the local gate with `scripts/dev.ps1 all scan` (or `./scripts/dev.sh all sca
 `<timestamp> | <task> | <duration>s | OK|FAILED` footer; coverage HTML in
 `coverage/coverage.html`.
 
-Current test coverage is 94.5% as of 2026-09-11, recorded in `scripts/logs/cov.log`. **The
+Current test coverage is 93.3% as of 2026-10-02, recorded in `scripts/logs/cov.log`. **The
 previous total is the local floor**: if a change lands lower, either add the missing tests or
 say in the change which number moved and why (deleting dead code or a weak test can
 legitimately lower it). This is a local mechanism -- a CI runner is a fresh checkout with no

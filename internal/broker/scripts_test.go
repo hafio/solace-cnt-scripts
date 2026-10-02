@@ -12,8 +12,6 @@ func TestFixedScripts(t *testing.T) {
 		want string
 	}{
 		{"show-redundancy", showRedundancyScript(), "show redundancy\n"},
-		{"show-redundancy-detail", showRedundancyDetailScript(), "no paging\nshow redundancy detail\n"},
-		{"revert-activity", revertActivityScript(), "home\nno paging\nenable\nadmin\nredundancy revert-activity\n"},
 		{"release-activity", releaseActivityScript(), "home\nno paging\nenable\nconfigure\nredundancy release-activity\n"},
 		{"no-release-activity", noReleaseActivityScript(), "home\nno paging\nenable\nconfigure\nno redundancy release-activity\n"},
 		{"show-vpn", showVPNScript(), "home\nno paging\nenable\nconfigure\nshow message-vpn *\n"},
@@ -27,14 +25,10 @@ func TestFixedScripts(t *testing.T) {
 }
 
 // The revert during a redundancy test preserves a trailing space after the
-// command (061); the leader-path revert does not (050). Guard both so a stray
-// gofmt/whitespace change is caught.
+// command (061). Guard it so a stray gofmt/whitespace change is caught.
 func TestRevertActivityTrailingSpace(t *testing.T) {
 	if got := revertActivityConfigureScript(); !strings.Contains(got, "redundancy revert-activity \n") {
 		t.Errorf("revertActivityConfigureScript lost its trailing space: %q", got)
-	}
-	if strings.Contains(revertActivityScript(), "revert-activity \n") {
-		t.Error("revertActivityScript should not have a trailing space after the command")
 	}
 }
 
@@ -297,7 +291,6 @@ func TestZipConfigsScript(t *testing.T) {
 func TestEveryScriptTurnsPagingOffAfterHome(t *testing.T) {
 	scripts := map[string]string{
 		"assertLeader":            assertLeaderScript(),
-		"revertActivity":          revertActivityScript(),
 		"releaseActivity":         releaseActivityScript(),
 		"noReleaseActivity":       noReleaseActivityScript(),
 		"revertActivityConfigure": revertActivityConfigureScript(),

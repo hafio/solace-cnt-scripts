@@ -185,7 +185,8 @@ names an admin Secret that already exists, or you want the operator to generate 
    labels under `kubernetes.placement`. This tool never labels your nodes -- it only writes
    the selectors into the broker resource.
 
-4. Prove it works, and inspect. On HA, assert the config-sync leader once the pods are up:
+4. Prove it works, and inspect. On HA, assert the config-sync leader once the pods are up and
+   the primary pod is the active one:
 
    ```
    solace-util broker perform semp-login-check -e dev.yaml
@@ -245,7 +246,8 @@ an HA member lists its redundancy and SEMP ports too, or opts into `network.mode
    ```
 
 3. In an HA group, assert the config-sync leader and exercise a real failover -- both from
-   the **primary host only**, which drives the whole group:
+   the **primary host** (a backup host is asked before it asserts; the failover drives the
+   whole group):
 
    ```
    solace-util broker perform assert-leader -e prod.yaml
@@ -345,7 +347,7 @@ the `generate` tree, where nothing executes. See
 [The command fields are executable content](docs/configuration.md#the-command-fields-are-executable-content).
 
 There is no global `--yes` and no `--dry-run`. Confirmation is per-command: only the
-commands that destroy something ask, and `--no-prompt` silences that one command's
+commands that destroy or overwrite something ask, and `--no-prompt` silences that one command's
 questions -- see
 [Removing a broker](docs/operations.md#removing-a-broker-what-stays-what-goes). To preview
 an artifact instead of applying it, use `generate <target>`.

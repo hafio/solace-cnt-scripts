@@ -65,6 +65,12 @@ func TestExitCodeContract(t *testing.T) {
 		{"kubernetes-only flag on a container platform",
 			[]string{"broker", "logs", "--previous", "--env", writeCtrStandaloneEnv(t), "--platform", "docker"}, exitUsage},
 		{"unknown example platform", []string{"examples", "--platform", "bogus"}, exitUsage},
+		// A script is a NAME in broker.cliScriptsDir: a path, or a name that folder does
+		// not hold, is a command line to fix, not a broker to retry.
+		{"cli script named by a path", k8sEnv("broker", "perform", "cli-script", "./setup.cli"), exitUsage},
+		{"shell script named by a path", k8sEnv("broker", "perform", "shell-script", "scripts/run.sh"), exitUsage},
+		{"script whose scripts folder does not exist",
+			[]string{"broker", "perform", "cli-script", "setup.cli", "--env", k8sOnly}, exitUsage},
 		{"a noun run bare prints help", k8sEnv("broker"), exitOK},
 		{"--help", []string{"broker", "status", "--help"}, exitOK},
 		{"mistyped top-level command (documented gap)", []string{"depoy", "broker"}, exitFailure},

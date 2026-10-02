@@ -26,15 +26,12 @@ import (
 // this fix came to be missing it (operator-confirmed).
 const cliHome = "home\nno paging\n"
 
-// showRedundancyScript is the one-line probe used by leader/redundancy polling
-// (050 line 34, 061 line 25).
+// showRedundancyScript is the one-line probe behind assert-leader's single check
+// and the redundancy polls (050 line 34, 061 line 25).
 func showRedundancyScript() string { return "show redundancy\n" }
 
-// showRedundancyDetailScript is the timeout diagnostic dumped by 050 (lines 66-67).
-func showRedundancyDetailScript() string { return "no paging\nshow redundancy detail\n" }
-
-// assertLeaderScript restores the Primary as config-sync leader for the router
-// and all VPNs (050 lines 38-45).
+// assertLeaderScript asserts the node it runs on as config-sync leader for the
+// router and all VPNs (050 lines 38-45).
 func assertLeaderScript() string {
 	return cliHome + `enable
 admin
@@ -42,11 +39,6 @@ config-sync assert-leader router
 config-sync assert-leader message-vpn *
 show config-sync database
 `
-}
-
-// revertActivityScript reverts activity back to the local node (050 lines 23-27).
-func revertActivityScript() string {
-	return cliHome + "enable\nadmin\nredundancy revert-activity\n"
 }
 
 // releaseActivityScript releases activity from the Primary (061 lines 30-34).

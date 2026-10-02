@@ -302,9 +302,10 @@ func TestTransportEchoHidesUploadBody(t *testing.T) {
 // TestTransportEchoHidesSEMPConfig mirrors TestTransportEchoHidesUploadBody for
 // the mate SEMP channel: the curl config carrying the admin credentials rides
 // OutputInput's stdin, so an echoed command must show a byte count, never the
-// password. LeaderLocal is the exported path that reaches the channel; its
-// error (Echo's empty output satisfies neither the preflight nor the health
-// poll) is expected -- by then the request has been echoed, which is the point.
+// password. BackupSEMPPreflight is the exported path that reaches the channel
+// (redundancy-test is its production caller); its error (Echo's empty output
+// carries no 2xx) is expected -- by then the request has been echoed, which is
+// the point.
 func TestTransportEchoHidesSEMPConfig(t *testing.T) {
 	buf := &bytes.Buffer{}
 	cfg := podmanCfg()
@@ -313,11 +314,9 @@ func TestTransportEchoHidesSEMPConfig(t *testing.T) {
 	cfg.Redundancy.Backup.Addr = "10.0.0.12"
 	tr := NewTransport(engine.Echo{W: buf}, cfg, config.Podman)
 	o := broker.New(tr, cfg, nil)
-	o.PollAttempts = 1
-	o.PollInterval = 0
 
-	if err := o.LeaderLocal(context.Background(), "primary"); err == nil {
-		t.Fatal("LeaderLocal over Echo should fail (empty output is never healthy)")
+	if err := o.BackupSEMPPreflight(context.Background()); err == nil {
+		t.Fatal("BackupSEMPPreflight over Echo should fail (empty output carries no 2xx)")
 	}
 	out := buf.String()
 	if !strings.Contains(out, "curl") || !strings.Contains(out, "bytes on stdin") {

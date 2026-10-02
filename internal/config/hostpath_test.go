@@ -250,9 +250,10 @@ func TestBaseNameSplitsOnBothSeparators(t *testing.T) {
 	}
 }
 
-// TestHasPathSeparator pins the name-or-path question a bare CLI/shell script
-// argument rests on (opK8sExecCLI/opCtrExecCLI and their shell-script siblings):
-// a bare name resolves under broker.cliScriptsDir, a path is used as given.
+// TestHasPathSeparator pins the name-or-path question a CLI/shell script argument
+// rests on (resolveScriptPath, behind opK8sExecCLI/opCtrExecCLI and their
+// shell-script siblings): a bare name resolves under broker.cliScriptsDir, and a
+// separator of either kind marks a path, which those commands refuse.
 func TestHasPathSeparator(t *testing.T) {
 	for _, p := range []string{"a/b", `a\b`, "/abs", `C:\x`, "./x"} {
 		if !HasPathSeparator(p) {
@@ -353,6 +354,9 @@ func TestRebaseResolvesAgainstTheEnvFileDirectory(t *testing.T) {
 	c.TLS.CertKey = filepath.FromSlash("/abs/tls.key") // already absolute
 	c.TLS.CAs = []string{"certs/ca.pem", filepath.FromSlash("/abs/ca2.pem")}
 	c.Broker.HostDiagnosticDir = "diag-configs"
+	// The script commands read ONLY from here, so where a relative value lands is the
+	// whole rule for which file they run.
+	c.Broker.CLIScriptsDir = "cli"
 	c.Broker.DomainCerts.Dirs = []CertDir{{Path: "prod-cas"}, {Path: filepath.FromSlash("/abs/partner-cas")}}
 	c.Broker.DomainCerts.Files = map[string]string{"my-ca": "certs/my-ca.pem"}
 	c.Docker.ComposeFile = "docker-compose.yml"
@@ -365,6 +369,7 @@ func TestRebaseResolvesAgainstTheEnvFileDirectory(t *testing.T) {
 		"tls.cas[0]":                 filepath.Join("/srv/solace/env", "certs/ca.pem"),
 		"tls.cas[1]":                 filepath.FromSlash("/abs/ca2.pem"),
 		"broker.hostDiagnosticDir":   filepath.Join("/srv/solace/env", "diag-configs"),
+		"broker.cliScriptsDir":       filepath.Join("/srv/solace/env", "cli"),
 		"docker.composeFile":         filepath.Join("/srv/solace/env", "docker-compose.yml"),
 		"broker.domainCerts.dirs[0]": filepath.Join("/srv/solace/env", "prod-cas"),
 		"broker.domainCerts.dirs[1]": filepath.FromSlash("/abs/partner-cas"),
@@ -376,6 +381,7 @@ func TestRebaseResolvesAgainstTheEnvFileDirectory(t *testing.T) {
 		"tls.cas[0]":                 c.TLS.CAs[0],
 		"tls.cas[1]":                 c.TLS.CAs[1],
 		"broker.hostDiagnosticDir":   c.Broker.HostDiagnosticDir,
+		"broker.cliScriptsDir":       c.Broker.CLIScriptsDir,
 		"docker.composeFile":         c.Docker.ComposeFile,
 		"broker.domainCerts.dirs[0]": c.Broker.DomainCerts.Dirs[0].Path,
 		"broker.domainCerts.dirs[1]": c.Broker.DomainCerts.Dirs[1].Path,

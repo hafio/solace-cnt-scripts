@@ -341,6 +341,11 @@ func TestSwitchPreflightRequiresThePrimaryActive(t *testing.T) {
 	if !strings.Contains(err.Error(), "revert-activity") {
 		t.Errorf("the error must say how to fix it, got: %v", err)
 	}
+	// assert-leader no longer reverts activity -- it refuses a primary that does not hold
+	// it -- so pointing at it here would send the operator round in a circle.
+	if strings.Contains(err.Error(), "assert-leader") {
+		t.Errorf("the error must not offer assert-leader as the fix, got: %v", err)
+	}
 }
 
 // TestSwitchPreflightStandalonePasses proves a broker with no HA group is not refused for

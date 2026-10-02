@@ -470,7 +470,7 @@ func newConfigureDefaultUsersCmd(app *App) *cobra.Command {
 
 const brokerPerformLong = "One-shot actions against a running broker; not settings the env file\n" +
 	"describes.\n\n" +
-	"  assert-leader        make this node the config-sync leader (HA)\n" +
+	"  assert-leader        assert the primary as config-sync leader (HA)\n" +
 	"  redundancy-test      exercise a real failover and fail back (HA, INVASIVE)\n" +
 	"  gather-diagnostics   collect a support bundle into broker.hostDiagnosticDir\n" +
 	"  semp-login-check     prove the admin credentials work over SEMP\n" +
@@ -514,14 +514,20 @@ func newPerformDataReplicationCmd(app *App) *cobra.Command {
 	return c
 }
 
-const performAssertLeaderLong = "Asserts this node as the config-sync leader for the router and every\n" +
-	"message-VPN; a no-op, not an error, on a standalone deployment.\n\n" +
-	"Run this first on a fresh HA broker, before any `broker configure` step."
+const performAssertLeaderLong = "Asserts this node as config-sync leader for the router and every message-VPN,\n" +
+	"overwriting the mate's configuration with its own; the node must report Local\n" +
+	"Active. Kubernetes uses the primary pod; on docker/podman a backup host asks\n" +
+	"first and the monitor is refused. A no-op on a standalone deployment."
 
 func newPerformAssertLeaderCmd(app *App) *cobra.Command {
 	c := withLong(rolePositionalTeachesPod(dispatchLeaf(app, "assert-leader",
 		"Assert the config-sync leader (HA only)",
 		platformOps(opK8sConfigLeader, opCtrConfigLeader))), performAssertLeaderLong)
+	// The silencer for the backup-host question, scoped like --pod: Kubernetes always acts
+	// on the primary pod and asks nothing, and an accepted-and-ignored flag there would be
+	// worse than a refused one. flagOnlyOn needs the flag declared first.
+	addRemoveFlags(c, app, nil)
+	flagOnlyOn(c, "no-prompt", config.Docker, config.Podman)
 	addPodFlag(c, app, config.Docker, config.Podman)
 	return c
 }
@@ -603,17 +609,21 @@ func newPerformImportConfigCmd(app *App) *cobra.Command {
 	return c
 }
 
-const performCLIScriptLong = "Uploads a local Solace CLI script and runs it in the broker; a bare\n" +
-	"filename resolves under broker.cliScriptsDir.\n\n" +
-	"A rejected line does not stop the rest of the script, but the run is then\n" +
-	"reported as a failure."
+const performCLIScriptLong = "Uploads a Solace CLI script from broker.cliScriptsDir and runs it in the\n" +
+	"broker. Give the file's name, not a path; a name not in that folder fails.\n\n" +
+	"The broker stops at the first rejected line, which fails the run."
 
+// newPerformCLIScriptCmd and newPerformShellScriptCmd offer no completions. The only
+// useful candidates are the contents of broker.cliScriptsDir, which only the env file
+// knows and completion never loads; cobra's fallback would list the working directory,
+// whose names these commands do not look in.
 func newPerformCLIScriptCmd(app *App) *cobra.Command {
 	c := wireExec(app, &cobra.Command{
-		Use:   "cli-script <file>",
-		Short: "Run a Solace CLI script in the broker",
-		Long:  performCLIScriptLong,
-		Args:  cobra.ExactArgs(1),
+		Use:               "cli-script <file>",
+		Short:             "Run a Solace CLI script in the broker",
+		Long:              performCLIScriptLong,
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE: func(_ *cobra.Command, args []string) error {
 			return dispatch(platformOps(
 				func(a *App) error { return opK8sExecCLI(a, args[0]) },
@@ -624,17 +634,17 @@ func newPerformCLIScriptCmd(app *App) *cobra.Command {
 	return c
 }
 
-const performShellScriptLong = "Uploads a local shell script and runs it with bash inside the broker, as\n" +
-	"the broker's own user.\n\n" +
-	"Bash reports one exit status for the whole run, and the full output is\n" +
-	"shown."
+const performShellScriptLong = "Uploads a shell script from broker.cliScriptsDir and runs it with bash inside\n" +
+	"the broker, as the broker's own user. Give the file's name, not a path.\n\n" +
+	"Bash reports one exit status for the whole run, and the full output is shown."
 
 func newPerformShellScriptCmd(app *App) *cobra.Command {
 	c := wireExec(app, &cobra.Command{
-		Use:   "shell-script <file>",
-		Short: "Run a host shell script inside the broker",
-		Long:  performShellScriptLong,
-		Args:  cobra.ExactArgs(1),
+		Use:               "shell-script <file>",
+		Short:             "Run a host shell script inside the broker",
+		Long:              performShellScriptLong,
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE: func(_ *cobra.Command, args []string) error {
 			return dispatch(platformOps(
 				func(a *App) error { return opK8sExecShell(a, args[0]) },

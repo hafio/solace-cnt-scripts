@@ -354,26 +354,71 @@ func TestDiagnosticsRunError(t *testing.T) {
 
 // --- Leader / Redundancy error paths ---------------------------------------
 
-func TestLeaderPollCondError(t *testing.T) {
-	// revert-activity succeeds, but every `show redundancy` errors, so the poll
-	// condition propagates the error (and the timeout detail dump still runs).
-	sawDetail := false
+// TestLeaderReadError: a failing `show redundancy` read is returned as it is -- there
+// is no poll to retry it and no detail dump -- and nothing is asserted or shown.
+func TestLeaderReadError(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
-		switch {
-		case matchCLI(argv, "show-rd"):
+		if matchCLI(argv, "show-rd") {
 			return nil, errors.New("show boom")
-		case matchCLI(argv, "show-redundancy-detail"):
-			sawDetail = true
-			return []byte("detail\n"), nil
 		}
 		return nil, nil
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
-	if err := o.Leader(context.Background()); err == nil {
-		t.Error("Leader should return the poll condition error")
+	o, buf := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
+	if err := o.Leader(context.Background(), config.Primary); err == nil || !strings.Contains(err.Error(), "show boom") {
+		t.Errorf("Leader err = %v, want the read error", err)
 	}
-	if !sawDetail {
-		t.Error("Leader should still dump show-redundancy-detail after the error")
+	if hasCall(ft, "assert-leader") {
+		t.Error("Leader must not assert after the read failed")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("Leader must show nothing when the read fails, got %q", buf.String())
+	}
+}
+
+// TestLeaderNotLocalActive pins "check once": a node that does not report Local Active
+// is refused after ONE read -- PollAttempts is 3, so a polling implementation would read
+// again -- with the transcript shown and a remedy worded for the node it read, and the
+// assert never runs.
+func TestLeaderNotLocalActive(t *testing.T) {
+	noActivity := "Configuration Status : Enabled\nRedundancy Status : Up\nActive-Standby Role : Primary\n"
+	cases := []struct {
+		name  string
+		role  config.Role
+		shown string
+		want  []string
+	}{
+		{"primary standing by", config.Primary, rd("Primary", "Enabled", "Up", "Mate Active"),
+			[]string{"primary node does not hold activity", "still forming", "redundancy revert-activity", "broker cli --pod backup"}},
+		{"primary with no activity line", config.Primary, noActivity,
+			[]string{"primary node does not hold activity", "redundancy revert-activity"}},
+		{"backup standing by", config.Backup, rd("Backup", "Enabled", "Up", "Mate Active"),
+			[]string{"this node does not hold activity", "normally the primary host"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
+				if matchCLI(argv, "show-rd") {
+					return []byte(tc.shown), nil
+				}
+				return nil, nil
+			}}
+			o, buf := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
+			err := o.Leader(context.Background(), tc.role)
+			if err == nil {
+				t.Fatal("Leader must refuse a node that is not Local Active")
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("err = %q, want it to contain %q", err, w)
+				}
+			}
+			if got := leaderCalls(t, ft, tc.role); got != "show-rd" {
+				t.Errorf("calls = %s, want exactly one show-rd read and no assert", got)
+			}
+			if buf.String() != tc.shown {
+				t.Errorf("shown = %q, want the transcript it refused on", buf.String())
+			}
+		})
 	}
 }
 
@@ -737,44 +782,22 @@ func TestLoginTransportError(t *testing.T) {
 
 // --- Leader RunCLI error boundaries -------------------------------------------
 
-// TestLeaderRevertActivityError closes Leader's initial Backup-revert error
-// branch: if the revert fails, Leader must never attempt the redundancy poll
-// at all.
-func TestLeaderRevertActivityError(t *testing.T) {
-	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
-		if matchCLI(argv, "revert-activity") {
-			return nil, errors.New("revert boom")
-		}
-		return nil, nil
-	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
-	if err := o.Leader(context.Background()); err == nil {
-		t.Error("Leader should return the revert-activity error")
-	}
-	for _, out := range ft.outputs {
-		if matchCLI(out.argv, "show-rd") {
-			t.Error("Leader must not poll show-rd after the initial revert-activity fails")
-		}
-	}
-}
-
 // TestLeaderAssertLeaderError closes Leader's final assert-leader error
-// branch: after a healthy poll, a failing assert-leader exec must stop the
+// branch: after a Local Active read, a failing assert-leader exec must stop the
 // function and never call o.show (no partial/misleading output shown to the
 // operator).
 func TestLeaderAssertLeaderError(t *testing.T) {
-	healthy := "Configuration Status : Enabled\nRedundancy Status : Up\nActive-Standby Role : Primary\nADB Link To Mate : Up\nADB Hello To Mate : Up\n"
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		switch {
 		case matchCLI(argv, "show-rd"):
-			return []byte(healthy), nil
+			return []byte(rd("Primary", "Enabled", "Up", "Local Active")), nil
 		case matchCLI(argv, "assert-leader"):
 			return nil, errors.New("assert boom")
 		}
 		return nil, nil
 	}}
 	o, buf := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
-	if err := o.Leader(context.Background()); err == nil {
+	if err := o.Leader(context.Background(), config.Primary); err == nil {
 		t.Error("Leader should return the assert-leader error")
 	}
 	if buf.Len() != 0 {

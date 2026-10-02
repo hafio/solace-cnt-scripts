@@ -279,6 +279,11 @@ func TestScopedFlagFailsLoud(t *testing.T) {
 		{config.Docker, []string{"broker", "cli", "--pod", "primary"}, "pod"},
 		{config.Docker, []string{"broker", "logs", "--previous"}, "previous"},
 		{config.Podman, []string{"broker", "logs", "--previous"}, "previous"},
+		// Kubernetes assert-leader always acts on the primary pod and never asks, so
+		// neither the pod selector nor the silencer for the backup-host question means
+		// anything there.
+		{config.K8s, []string{"broker", "perform", "assert-leader", "--no-prompt"}, "no-prompt"},
+		{config.K8s, []string{"broker", "perform", "assert-leader", "--pod", "primary"}, "pod"},
 		// --all is deliberately NOT here: it applies on every platform. On
 		// Kubernetes it surveys the cluster, on a container host every Solace
 		// container found by image -- the same question, asked of what that

@@ -41,7 +41,7 @@ func TestSempPortHostMode(t *testing.T) {
 // HA group that works today. Preferring TLS is only correct when the broker
 // actually serves it: without tls.cert/tls.certKey the 1943 listener never comes
 // up, so aiming the mate channel at it would fail every coordinated redundancy
-// and leader step on a plaintext deployment that was working fine.
+// step on a plaintext deployment that was working fine.
 func TestSempPortWithoutCertificateStaysPlaintext(t *testing.T) {
 	t.Run("host mode", func(t *testing.T) {
 		cfg := &config.Config{Docker: config.DockerConfig{Network: config.Network{Mode: "host"}}}

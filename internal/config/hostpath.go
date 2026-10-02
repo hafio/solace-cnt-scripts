@@ -164,8 +164,9 @@ func BaseName(p string) string {
 
 // HasPathSeparator reports whether p carries a directory component under either
 // separator. It is the question "did the operator give me a name or a path?",
-// which decides whether a value is resolved under a configured folder or used as
-// typed, and it must answer the same way on both operating systems for the same
+// which `broker perform cli-script` and `shell-script` answer by refusing a path
+// outright -- a name, resolved under broker.cliScriptsDir, is the only form they
+// take -- and it must answer the same way on both operating systems for the same
 // env file.
 func HasPathSeparator(p string) bool {
 	return strings.ContainsAny(p, pathSeparators)

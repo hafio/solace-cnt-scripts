@@ -11,16 +11,19 @@ import (
 	"solace/internal/config"
 )
 
-// This file holds the HA operations the container platforms drive from the
-// primary host, where the transport talks only to the single broker on THIS
-// host. What k8s does by addressing either pod from one kubectl context
-// (verify_ops.go's Leader/Redundancy, showRDPair), these do from one host: every
-// read is the local `show redundancy` -- whose Mate Active / ADB fields already
-// report the backup as this node sees it -- and the one command that must land
-// on the backup, `redundancy revert-activity`, rides the SEMP control channel
-// (semp.go). They reuse the package's unexported helpers (showRD, activity,
-// field, rdEnabledUp, primaryRedundancyUp, poll, RunCLI) and script builders
-// unchanged.
+// This file holds node-local role detection (LocalRole/DetectRole) and the one HA
+// operation the container platforms drive from the primary host, the redundancy
+// test, where the transport talks only to the single broker on THIS host. What
+// k8s does by addressing either pod from one kubectl context (verify_ops.go's
+// Redundancy, showRDPair), RedundancyCoordinated does from one host: every read
+// is the local `show redundancy` -- whose Mate Active / ADB fields already report
+// the backup as this node sees it -- and the one command that must land on the
+// backup, `redundancy revert-activity`, rides the SEMP control channel (semp.go).
+// It reuses the package's unexported helpers (showRD, activity, field,
+// rdEnabledUp, primaryRedundancyUp, poll, RunCLI) and script builders unchanged.
+//
+// assert-leader is not here: it touches only the node it asserts from, the same
+// way on every platform (verify_ops.go's Leader).
 
 // LocalRole resolves which redundancy role THIS host plays. An explicit roleArg
 // (primary|backup|monitor or p|b|m) wins; otherwise it detects the role in two
@@ -142,55 +145,6 @@ func defaultLocalAddrs() (map[string]bool, error) {
 	return out, nil
 }
 
-// LeaderLocal asserts the config-sync leader from THIS host, which must be the
-// primary (the user's spec: "assert leader should always be executed in the
-// primary node"). HA-only. It fails loud on the backup/monitor rather than
-// running, waits for local redundancy to be healthy, then runs assert-leader.
-func (o *Ops) LeaderLocal(ctx context.Context, roleArg string) error {
-	if o.skipIfStandalone("assert-leader") {
-		return nil
-	}
-	role, err := o.LocalRole(roleArg)
-	if err != nil {
-		return err
-	}
-	if role != config.Primary {
-		return fmt.Errorf("`broker perform assert-leader` must run on the primary node; this host is the %s node", role.Word())
-	}
-
-	// Parity with the k8s Leader: revert any released activity on the mate FIRST
-	// (050 lines 23-31), now possible over the SEMP channel. An unreachable mate
-	// downgrades to a warning -- the leader assertion itself is local, and a
-	// backup still holding activity surfaces in the poll below -- but a reachable
-	// mate refusing the RPC is a real error, not a skip.
-	if err := o.BackupSEMPPreflight(ctx); err != nil {
-		o.progress().Warn("cannot reach the mate's SEMP service; skipping the revert-activity step: %v", err)
-	} else if err := o.BackupRevertActivity(ctx); err != nil {
-		return err
-	}
-
-	o.logf("Waiting for redundancy state to be restored fully...")
-	if err := o.poll(ctx, "redundancy to be restored on Primary", func(ctx context.Context) (bool, error) {
-		out, err := o.showRD(ctx, role)
-		if err != nil {
-			return false, err
-		}
-		return primaryRedundancyUp(out), nil
-	}); err != nil {
-		if detail, dErr := o.readCLI(ctx, role, "show-redundancy-detail", showRedundancyDetailScript()); dErr == nil {
-			o.show(detail)
-		}
-		return err
-	}
-
-	out, err := o.RunCLI(ctx, role, "assert-leader", assertLeaderScript())
-	if err != nil {
-		return err
-	}
-	o.show([]byte(lastLines(string(out), 12)))
-	return nil
-}
-
 // RedundancyCoordinated exercises a real failover and fail-back for the whole
 // redundancy group from ONE invocation on the primary host, mirroring the k8s
 // Redundancy op (verify_ops.go) step for step: confirm the primary healthy,
@@ -201,7 +155,7 @@ func (o *Ops) LeaderLocal(ctx context.Context, roleArg string) error {
 // independent backup reads, in all three confirm polls alike), and its one
 // mutation, revert-activity, goes over the SEMP channel (semp.go). HA-only;
 // backup and monitor hosts are rejected loud. roleArg (empty -> detect from
-// hostname) is self-identification only, as in LeaderLocal.
+// hostname) is self-identification only: the transport ignores it.
 func (o *Ops) RedundancyCoordinated(ctx context.Context, roleArg string) error {
 	if o.skipIfStandalone("redundancy-test") {
 		return nil

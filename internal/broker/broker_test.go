@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -960,63 +961,122 @@ func TestLoginNoResponse(t *testing.T) {
 	}
 }
 
+// TestLeaderStandaloneSkips: a standalone deployment has no config-sync group, so
+// assert-leader touches nothing for ANY role -- the skip comes before the monitor
+// refusal, as it came before the old primary-only guard.
 func TestLeaderStandaloneSkips(t *testing.T) {
-	ft := &fakeTransport{}
-	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "false"}}, ft)
-	if err := o.Leader(context.Background()); err != nil {
-		t.Fatalf("Leader standalone error: %v", err)
-	}
-	if len(ft.outputs) != 0 || len(ft.uploads) != 0 || len(ft.runs) != 0 {
-		t.Error("Leader must make no calls in standalone mode")
+	for _, role := range []config.Role{config.Primary, config.Backup, config.Monitor} {
+		ft := &fakeTransport{}
+		o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "false"}}, ft)
+		if err := o.Leader(context.Background(), role); err != nil {
+			t.Fatalf("Leader(%s) standalone error: %v", role.Word(), err)
+		}
+		if len(ft.outputs) != 0 || len(ft.uploads) != 0 || len(ft.runs) != 0 {
+			t.Errorf("Leader(%s) must make no calls in standalone mode", role.Word())
+		}
 	}
 }
 
+// leaderCalls names, in order, the CLI calls Leader made -- "show-rd" for its one
+// read and "assert-leader" for the assert -- and fails on any call aimed at a node
+// other than role, or on any other call at all (a revert-activity, a SEMP curl).
+func leaderCalls(t *testing.T, ft *fakeTransport, role config.Role) string {
+	t.Helper()
+	var calls []string
+	for _, out := range ft.outputs {
+		switch {
+		case out.role != role:
+			t.Errorf("Leader(%s) touched the %s node: %v", role.Word(), out.role.Word(), out.argv)
+		case matchCLI(out.argv, "show-rd"):
+			calls = append(calls, "show-rd")
+		case matchCLI(out.argv, "assert-leader"):
+			calls = append(calls, "assert-leader")
+		default:
+			t.Errorf("Leader(%s) made an unexpected call: %v", role.Word(), out.argv)
+		}
+	}
+	for _, u := range ft.uploads {
+		if u.role != role {
+			t.Errorf("Leader(%s) uploaded to the %s node: %s", role.Word(), u.role.Word(), u.dest)
+		}
+	}
+	for _, r := range ft.runs {
+		if r.role != role {
+			t.Errorf("Leader(%s) ran on the %s node: %v", role.Word(), r.role.Word(), r.argv)
+		}
+	}
+	return strings.Join(calls, ",")
+}
+
+// TestLeaderSuccess pins assert-leader on the primary: exactly ONE show-rd read, then
+// the assert, both on the primary, and nothing else -- no revert-activity sent to the
+// backup, no SEMP. The transcript is Local Active with redundancy DOWN: the old health
+// gate (primaryRedundancyUp) would have polled on that until it timed out, so this is
+// also what pins that the gate is gone. Only the last 12 lines of the assert are shown.
 func TestLeaderSuccess(t *testing.T) {
-	healthy := "Configuration Status : Enabled\nRedundancy Status : Up\nActive-Standby Role : Primary\nADB Link To Mate : Up\nADB Hello To Mate : Up\n"
+	var assert strings.Builder
+	for i := 1; i <= 15; i++ {
+		fmt.Fprintf(&assert, "transcript line %02d\n", i)
+	}
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 		switch {
 		case matchCLI(argv, "show-rd"):
-			return []byte(healthy), nil
+			return []byte(rd("Primary", "Enabled", "Down", "Local Active")), nil
 		case matchCLI(argv, "assert-leader"):
-			return []byte("l1\nl2\nSync Complete\n"), nil
+			return []byte(assert.String()), nil
 		}
 		return nil, nil
 	}}
 	o, buf := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
-	if err := o.Leader(context.Background()); err != nil {
+	if err := o.Leader(context.Background(), config.Primary); err != nil {
 		t.Fatalf("Leader error: %v", err)
 	}
-	// revert-activity is run against the Backup, assert-leader against the Primary.
-	// Both now go through RunCLI's wrapped call rather than a plain Upload, so
-	// outputForRole (which recognises either CLI shape) is what checks them.
-	if !outputForRole(ft, config.Backup, "revert-activity") {
-		t.Error("Leader should revert activity on the Backup")
+	if got := leaderCalls(t, ft, config.Primary); got != "show-rd,assert-leader" {
+		t.Errorf("calls = %s, want exactly one show-rd read, then the assert", got)
 	}
-	if !outputForRole(ft, config.Primary, "assert-leader") {
-		t.Error("Leader should assert leadership on the Primary")
-	}
-	if !strings.Contains(buf.String(), "Sync Complete") {
-		t.Errorf("Leader output = %q", buf.String())
+	got := buf.String()
+	if strings.Contains(got, "transcript line 03") || !strings.Contains(got, "transcript line 04") ||
+		!strings.Contains(got, "transcript line 15") {
+		t.Errorf("Leader output = %q, want only the last 12 lines of the assert transcript", got)
 	}
 }
 
-func TestLeaderTimeout(t *testing.T) {
-	down := "Configuration Status : Enabled\nRedundancy Status : Down\nActive-Standby Role : Primary\nADB Link To Mate : Up\nADB Hello To Mate : Up\n"
-	sawDetail := false
+// TestLeaderSuccessOnBackup: a backup that holds activity asserts too (the docker/podman
+// command has already asked by then). Both calls carry the backup role -- on Kubernetes
+// that is the backup pod, on a container host just this host's broker.
+func TestLeaderSuccessOnBackup(t *testing.T) {
 	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
-		if matchCLI(argv, "show-redundancy-detail") {
-			sawDetail = true
-			return []byte("detail dump\n"), nil
+		switch {
+		case matchCLI(argv, "show-rd"):
+			return []byte(rd("Backup", "Enabled", "Up", "Local Active")), nil
+		case matchCLI(argv, "assert-leader"):
+			return []byte("Sync Complete\n"), nil
 		}
-		return []byte(down), nil
+		return nil, nil
 	}}
-	o, _ := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
-	o.PollAttempts = 2
-	if err := o.Leader(context.Background()); err == nil {
-		t.Error("Leader should time out when redundancy never recovers")
+	o, buf := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
+	if err := o.Leader(context.Background(), config.Backup); err != nil {
+		t.Fatalf("Leader(backup) error: %v", err)
 	}
-	if !sawDetail {
-		t.Error("Leader should dump show-redundancy-detail on timeout")
+	if got := leaderCalls(t, ft, config.Backup); got != "show-rd,assert-leader" {
+		t.Errorf("calls = %s, want exactly one show-rd read, then the assert", got)
+	}
+	if !strings.Contains(buf.String(), "Sync Complete") {
+		t.Errorf("Leader(backup) output = %q", buf.String())
+	}
+}
+
+// TestLeaderRefusesTheMonitor: assert-leader is an invalid operation on the monitor,
+// and it says so before reading or uploading anything.
+func TestLeaderRefusesTheMonitor(t *testing.T) {
+	ft := &fakeTransport{}
+	o, buf := newTestOps(t, &config.Config{Redundancy: config.Redundancy{Enabled: "true"}}, ft)
+	err := o.Leader(context.Background(), config.Monitor)
+	if err == nil || !strings.Contains(err.Error(), "invalid operation") || !strings.Contains(err.Error(), "monitor") {
+		t.Fatalf("Leader(monitor) err = %v, want the invalid-operation refusal", err)
+	}
+	if len(ft.outputs) != 0 || len(ft.uploads) != 0 || len(ft.runs) != 0 || buf.Len() != 0 {
+		t.Error("Leader(monitor) must refuse before any transport call")
 	}
 }
 

@@ -155,8 +155,9 @@ func requirePrimaryActive(ctx context.Context, chans map[string]MateChannel) err
 	return fmt.Errorf("refusing to switch: the primary HA node is not active at %s. A replication "+
 		"switch runs only when each site is on its own primary -- a site running on its backup has "+
 		"already had something go wrong, and stacking a DR role change on top of a local failover "+
-		"makes both harder to undo. Revert activity to the primary (`broker perform assert-leader`, "+
-		"or `redundancy revert-activity` on the backup), then run this again",
+		"makes both harder to undo. Revert activity to the primary -- `redundancy revert-activity` in the "+
+		"backup's Solace CLI (`broker cli --pod backup` on Kubernetes, `broker cli` on the backup host) -- "+
+		"then run this again",
 		strings.Join(notActive, " and "))
 }
 

@@ -494,6 +494,28 @@ func TestNoArgsLeafOffersNoFiles(t *testing.T) {
 	}
 }
 
+// TestScriptCommandsOfferNoFiles: cli-script and shell-script take the NAME of a file in
+// broker.cliScriptsDir, which only the env file knows and completion never loads
+// (TestCompletionNeverReadsTheEnvFile). Cobra's fallback is the shell's listing of the
+// working directory -- names these commands will usually not find, since they never look
+// there -- so they offer nothing rather than coach the refused form.
+func TestScriptCommandsOfferNoFiles(t *testing.T) {
+	for _, path := range [][]string{
+		{"broker", "perform", "cli-script"},
+		{"broker", "perform", "shell-script"},
+	} {
+		t.Run(strings.Join(path, " "), func(t *testing.T) {
+			got, directive := runComplete(t, append(append([]string{}, path...), "")...)
+			if len(got) != 0 {
+				t.Errorf("completions = %v, want none", got)
+			}
+			if directive != wantDirective(cobra.ShellCompDirectiveNoFileComp) {
+				t.Errorf("directive = %s, want no-file-completion", directive)
+			}
+		})
+	}
+}
+
 // TestAllowCommandOffersNoFiles: --allow-command takes a bare binary name, never a
 // path. Offering files would coach the mistake its own help text warns against.
 // wireExec wires the flag the same way on every command that carries it, so one

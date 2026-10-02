@@ -30,8 +30,8 @@ const reportKeyWidth = 15
 // Manager deploys and operates the single broker container on THIS host -- the
 // container analog of k8s.Cluster. Where k8s.Cluster drives every pod in a
 // namespace from one control point, a container host runs one broker, so the
-// Manager's operations are node-local and the HA coordination (leader,
-// redundancy) is a per-host handshake handled in package broker. Every mutating
+// Manager's operations are node-local and the HA coordination (the redundancy
+// test) is a per-host handshake handled in package broker. Every mutating
 // command routes through the engine.Runner, so the Echo runner records without running.
 type Manager struct {
 	R   engine.EnvRunner

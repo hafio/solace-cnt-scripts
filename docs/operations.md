@@ -43,8 +43,10 @@ An env file that cannot be found, cannot be parsed, fails validation, declares n
 section or declares several without `--platform` is therefore **2**, not 1 -- you chose that
 file, and no amount of waiting fixes it. So is a command or flag that does not apply to the
 platform the file selected, a bad `--pod`/`--platform`/`--since` value,
-`--allow-command` on a command that renders without executing, and a `podman.rootless`
-that disagrees with the account you ran as -- `true` under `sudo`, or `false` without it.
+`--allow-command` on a command that renders without executing, a `podman.rootless`
+that disagrees with the account you ran as -- `true` under `sudo`, or `false` without it --
+and a `cli-script`/`shell-script` argument that is a path, or names no file in
+`broker.cliScriptsDir`.
 
 **One documented exception:** a mistyped *top-level* command exits **1**, not 2
 (`solace-util depoy broker`). Cobra produces that error before this tool can classify it,
@@ -142,7 +144,7 @@ solace-util operator deploy -e dev.yaml                  # once per cluster
 solace-util validate -e dev.yaml                         # cluster, StorageClass, operator
 solace-util broker deploy -e dev.yaml                    # namespace -> secrets -> CR
 solace-util broker perform semp-login-check -e dev.yaml  # prove it answers
-solace-util broker perform assert-leader -e dev.yaml     # HA only, once the pods are up
+solace-util broker perform assert-leader -e dev.yaml     # HA only, once the primary is Local Active
 ```
 
 On Kubernetes, `broker deploy` reads the CR back after applying it, since `kubectl apply`
@@ -177,8 +179,8 @@ run these in order.
 They are not uniformly re-runnable, so the order lives here rather than in a
 run-everything command that would stop partway through a second run. On a fresh broker:
 
-1. `broker perform assert-leader` (HA only; on containers, run it on the primary -- it also reverts the
-   backup over SEMP first, so `redundancy.backup.addr` should be reachable)
+1. `broker perform assert-leader` (HA only; the primary must already hold activity. On containers run
+   it on the primary host -- a backup host asks first, and the monitor is refused)
 2. `broker configure server-certs` (when TLS is configured)
 3. `broker configure domain-certs` (when any `broker.domainCerts.dirs` or `.files` are listed)
 4. `broker configure default-vpn`
@@ -254,10 +256,20 @@ accepted, and less of the script runs after one. Check any pipeline that runs th
 commands before relying on the new exit code.
 
 A few of the other `broker perform` steps have their own operational details. `assert-leader`
-in HA first reverts activity to the primary and waits for redundancy to report Up with the
-primary active before asserting leadership; on docker/podman it runs only on the primary host
-and fails loud on a backup or monitor host, and it reverts the mate over SEMP first but
-downgrades an unreachable mate to a warning, since its own job is local. `semp-login-check`
+in HA reads `show redundancy` ONCE on the node it acts on, and asserts the config-sync leader
+for the router and every message-VPN -- which overwrites the mate's configuration with that
+node's -- only if the node reports Local Active. Otherwise it fails at once, prints what it
+read, and says how to put activity right: on a primary, wait if the group is still forming,
+or run `redundancy revert-activity` in the backup's CLI; on a standby backup, run it on the
+node that holds activity instead. It never moves activity, never waits and
+never reaches the mate, so it needs no SEMP and no `redundancy.backup.addr`; this is a change
+from earlier releases, which reverted the backup first and waited for the primary. On
+Kubernetes it always acts on the primary pod and asks nothing, so `--pod` and `--no-prompt`
+are refused there. On docker/podman it acts on this host's broker, with the role detected as
+for `broker deploy`: a host that is -- or, despite `--pod`, looks like -- the backup is asked
+before it asserts, once its read has shown it holds activity (a standby backup fails without
+a question); `--no-prompt` answers yes, and declining asserts nothing and exits 0. The
+monitor is refused as an invalid operation before anything is read. `semp-login-check`
 passes credentials on stdin as a curl config file so the password never reaches an argv,
 process list or log, and a failed login is reported as a failure of the login itself -- the
 request was made and answered, and the answer was no. On Kubernetes without `semp.adminPass`
@@ -269,9 +281,14 @@ helper scripts it uploads on every path out, and the in-broker archive once it i
 downloaded; a cleanup failure only warns rather than failing the collection, but a failed
 DOWNLOAD fails the command and leaves the bundle on the broker, naming the path to fetch it
 from -- deleting it there would destroy the only copy of what was asked for. `--pod` narrows
-collection to one node. `cli-script`'s in-broker name is the file's own base name
-(split on both path separators), so one env file cannot name two different files depending on
-which host drove it. `shell-script` deletes the script it uploaded once the run finishes,
+collection to one node. `cli-script` and `shell-script` take the script's bare file name and
+read it from `broker.cliScriptsDir` only -- the current directory is never searched, so
+`setup.cli` and `./setup.cli` cannot mean two different files. Any path is refused, even one
+into that folder or a subfolder of it: the in-broker name is the base name, so `a/x.cli` and
+`x.cli` would land on the same file. A name that is not a regular file in the folder fails
+before anything connects, naming the path it looked at (or saying the folder itself is
+missing), and TAB offers no file names for either command, since completion never reads the
+env file that says where the folder is. `shell-script` deletes the script it uploaded once the run finishes,
 even when it failed, and a script that echoes a secret prints it in the output; neither
 `shell-script` nor `broker shell` validates or reports on what runs beyond that -- they are
 the escape hatch for what this tool does not model. On every platform both run under the
@@ -385,8 +402,9 @@ error.
 
 **HA verification runs from the primary.** The transport is node-local, so exec reaches
 only this host's broker -- but the broker itself is a control channel: the primary's own
-`show redundancy` already reports the mate's activity, and the one command that must land
-on the backup (`redundancy revert-activity`) is sent over SEMP to `redundancy.backup.addr`. Bring
+`show redundancy` already reports the mate's activity, and the one command
+`redundancy-test` needs on the backup, `redundancy revert-activity`, is sent over SEMP to
+`redundancy.backup.addr`. Bring
 the group up by running `broker deploy --pod <role>` on each host with its own role -- or
 omit `--pod` and the role is detected in two passes, announced on stderr: this host's
 hostname against `redundancy.*.name` (case-insensitively, tolerating an FQDN on either
@@ -397,8 +415,10 @@ OS hostname are legitimately unrelated and the address is the only thing both en
 on. Matching neither fails loud, and matching more than one role fails loud too, naming
 every role it matched and how. An explicit role always wins over detection, which is the
 escape hatch for a host that matches nothing -- but it is CHECKED against what the host
-looks like, and a disagreement WARNS and proceeds. It never prompts: the operator said
-which node this is, and a deploy scripted across three hosts must not stop to ask.
+looks like, and a disagreement WARNS and proceeds. A deploy never prompts over it: the
+operator said which node this is, and a deploy scripted across three hosts must not stop to
+ask. (`broker perform assert-leader` is the one exception, because what it would do from a
+backup is overwrite the primary's configuration -- it asks, `--no-prompt` aside.)
 `broker generate` detects the same way but does NOT fail on an unrecognised host: it renders
 the primary's artifact with a warning, because it changes nothing and the artifact names the
 node it is for, so the fallback is visible in the output you are about to read. Refusing there
@@ -406,9 +426,10 @@ would make reviewing another node's artifact from a laptop impossible.
 Then run `broker perform redundancy-test` **once, on the primary host**: it confirms the primary healthy, checks
 the backup's SEMP service is reachable (before anything is disturbed), releases and
 un-releases activity so the backup takes over, then reverts the backup and waits for
-activity to come home. Backup and monitor hosts are rejected loud, and `broker perform assert-leader`
-runs only on the primary. Prerequisite: the backup's SEMP port must be reachable from the
-primary host. Under the default `network.mode: bridge` nothing is published unless it is
+activity to come home. Backup and monitor hosts are rejected loud. `broker perform
+assert-leader` needs none of this: it acts on this host's own broker, asks first on a backup
+host and refuses the monitor. Prerequisite for `redundancy-test`: the backup's SEMP port must
+be reachable from the primary host. Under the default `network.mode: bridge` nothing is published unless it is
 listed, so every member's `network.ports` has to publish the redundancy ports (8300-8302,
 8741, 55555) for the group to form at all, and the backup's has to publish SEMP too -- 8080,
 or 1943 with TLS; the primary reaches it at the host side of that entry. Under
@@ -428,7 +449,7 @@ Example (HA -- run each line on the matching host; `prod.yaml` is a podman env f
 solace-util broker deploy --pod primary -e prod.yaml   # on the primary host
 solace-util broker deploy --pod backup  -e prod.yaml   # on the backup host
 solace-util broker deploy --pod monitor -e prod.yaml   # on the monitor host
-solace-util broker perform assert-leader -e prod.yaml        # on the primary only
+solace-util broker perform assert-leader -e prod.yaml        # on the primary (a backup host asks first)
 solace-util broker perform redundancy-test -e prod.yaml     # on the primary only -- drives the whole group
 ```
 
@@ -793,8 +814,9 @@ names that as the way to apply one.
 `broker.productKeys`, `broker.hostDiagnosticDir`, `broker.cliScriptsDir` -- shared verbatim with
 Kubernetes, plus `tls.cert`/`tls.certKey` (server certificate) and `semp.adminPass`
 (SEMP login); the `redundancy.*` names drive role detection for `broker perform assert-leader` /
-`broker perform redundancy-test`, and `redundancy.backup.addr` is also read at verify time -- it is where those
-two commands reach the backup's SEMP service from the primary. The rest of the `redundancy.*`
+`broker perform redundancy-test`, and `redundancy.backup.addr` is also read at verify time -- it is where
+`redundancy-test` reaches the backup's SEMP service from the primary (`assert-leader` never reaches the
+mate). The rest of the `redundancy.*`
 table and `redundancy.psk` are consumed earlier, by `broker deploy`, which externalizes the
 key as a secret -- it does not create it, and no command here writes to an env file.
 Container-only knobs live under `docker.*` /
@@ -1034,7 +1056,11 @@ StatefulSet recreates them, and bounces the container on Docker/Podman). So do
 `broker configure default-vpn` and `broker configure default-users` when disabling (never
 when enabling: bringing something back up needs no gate), since each drops client
 connections that depend on it, and `broker configure domain-certs --remove`, since it
-deletes certificate authorities already configured on the broker. An interactive terminal is
+deletes certificate authorities already configured on the broker. So does
+`broker perform assert-leader` on a docker/podman host that is, or looks like, the backup --
+asserting there makes that node's router and message-VPN configuration the copy config-sync
+pushes to the primary -- though only once its read has shown it holds activity; it never asks
+on Kubernetes or on the primary. An interactive terminal is
 asked `[y/N]`; a session that does not answer, and was not given `--no-prompt`, refuses
 loudly rather than destroying anything unattended.
 
@@ -1447,7 +1473,8 @@ Everything that can refuse does so before the first write:
   reachable.
 - **Both sites must be on their primary HA node.** A site running on its backup has already
   had something go wrong, and stacking a DR role change on a local failover makes both harder
-  to undo. The refusal names the site and points at `broker perform assert-leader`. A
+  to undo. The refusal names the site and says to revert activity to its primary
+  (`redundancy revert-activity` in the backup's Solace CLI). A
   standalone broker has no HA group and always passes.
 - **The brokers and the file must agree about which pair this is.** Each broker's own
   `show replication` must report the OTHER site's declared `virtualRouterName` as its mate. A
@@ -1712,8 +1739,8 @@ recovery procedure -- there is no separate resume step.
 
 `broker perform data-replication` runs a series of checks before its first write, and each
 refusal names what to do. **Not on the primary HA node** means that site is running on its
-backup: revert activity first (`broker perform assert-leader`, or `redundancy revert-activity`
-on the backup). **The brokers and the env file disagree about which pair this is** means a
+backup: revert activity first -- `redundancy revert-activity` in the backup's Solace CLI
+(`broker cli --pod backup` on Kubernetes, `broker cli` on the backup host). **The brokers and the env file disagree about which pair this is** means a
 broker's `show replication` does not name the other site's `virtualRouterName` as its mate:
 run `broker configure data-replication` at each site, which is what writes it. **Listed VPNs
 do not exist or have replication shut down** is the same answer -- `configure` is what creates

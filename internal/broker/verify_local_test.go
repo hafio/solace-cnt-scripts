@@ -11,12 +11,13 @@ import (
 	"solace/internal/config"
 )
 
-// These tests exercise the primary-host HA operations (LocalRole, LeaderLocal,
-// RedundancyCoordinated) over the shared fakeTransport from broker_test.go. The
-// transport is node-local, so a scripted `show redundancy` sequence stands in
-// for this host's view across successive poll iterations, and the mate SEMP
-// channel is answered by the responder's curl branch. PollInterval is 0
-// (newTestOps leaves it at its zero value), so nothing sleeps.
+// These tests exercise node-local role detection (LocalRole, DetectRole) and the
+// primary-host redundancy test (RedundancyCoordinated) over the shared fakeTransport
+// from broker_test.go. The transport is node-local, so a scripted `show redundancy`
+// sequence stands in for this host's view across successive poll iterations, and the
+// mate SEMP channel is answered by the responder's curl branch. PollInterval is 0
+// (newTestOps leaves it at its zero value), so nothing sleeps. assert-leader's tests
+// live beside the other Leader tests in broker_test.go and coverage_test.go.
 
 // localCfg is a redundancy-group config with a named node table for role
 // detection, the mate addresses the SEMP channel needs, and admin credentials.
@@ -289,183 +290,6 @@ func TestLocalAddrsFallsBackToTheDefault(t *testing.T) {
 	o.LocalAddrs = nil
 	if _, err := o.localAddrs(); err != nil {
 		t.Skipf("interface enumeration unavailable here: %v", err)
-	}
-}
-
-// --- LeaderLocal -----------------------------------------------------------
-
-func TestLeaderLocalStandaloneSkips(t *testing.T) {
-	ft := &fakeTransport{}
-	o, _ := newLocalOps(t, "false", "pri-host", ft)
-	if err := o.LeaderLocal(context.Background(), ""); err != nil {
-		t.Fatalf("LeaderLocal standalone error: %v", err)
-	}
-	if len(ft.outputs) != 0 || len(ft.uploads) != 0 {
-		t.Error("LeaderLocal must make no calls in standalone mode")
-	}
-}
-
-func TestLeaderLocalRejectsNonPrimary(t *testing.T) {
-	for _, host := range []string{"bkp-host", "mon-host"} {
-		ft := &fakeTransport{}
-		o, _ := newLocalOps(t, "true", host, ft)
-		if err := o.LeaderLocal(context.Background(), ""); err == nil {
-			t.Errorf("LeaderLocal on %q should fail loud", host)
-		}
-		if len(ft.uploads) != 0 {
-			t.Errorf("LeaderLocal on %q must not upload before the guard", host)
-		}
-	}
-	// Explicit backup arg is rejected the same way.
-	ft := &fakeTransport{}
-	o, _ := newLocalOps(t, "true", "pri-host", ft)
-	if err := o.LeaderLocal(context.Background(), "backup"); err == nil {
-		t.Error("LeaderLocal with explicit backup arg should fail loud")
-	}
-}
-
-func TestLeaderLocalSuccess(t *testing.T) {
-	healthy := rd("Primary", "Enabled", "Up", "Local Active")
-	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
-		switch {
-		case isCurl(argv):
-			return []byte(sempOK), nil
-		case matchCLI(argv, "show-rd"):
-			return []byte(healthy), nil
-		case matchCLI(argv, "assert-leader"):
-			return []byte("l1\nl2\nSync Complete\n"), nil
-		}
-		return nil, nil
-	}}
-	o, buf := newLocalOps(t, "true", "pri-host", ft)
-	if err := o.LeaderLocal(context.Background(), ""); err != nil {
-		t.Fatalf("LeaderLocal error: %v", err)
-	}
-	if !uploadedForRole(ft, config.Primary, cliScriptPath("assert-leader")) {
-		t.Error("LeaderLocal should assert leadership on the primary")
-	}
-	if !strings.Contains(buf.String(), "Sync Complete") {
-		t.Errorf("LeaderLocal output = %q", buf.String())
-	}
-	if got := len(curlCalls(ft)); got != 2 {
-		t.Errorf("LeaderLocal made %d mate SEMP calls, want 2 (preflight + revert-activity)", got)
-	}
-}
-
-// TestLeaderLocalRevertsMateFirst pins the k8s Leader order: the mate
-// revert-activity POST (the curl carrying a data line) happens before the
-// first show-rd poll read, so a backup still holding activity is told to hand
-// it back before the primary is polled for health.
-func TestLeaderLocalRevertsMateFirst(t *testing.T) {
-	healthy := rd("Primary", "Enabled", "Up", "Local Active")
-	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
-		switch {
-		case isCurl(argv):
-			return []byte(sempOK), nil
-		case matchCLI(argv, "show-rd"):
-			return []byte(healthy), nil
-		case matchCLI(argv, "assert-leader"):
-			return []byte("Sync Complete\n"), nil
-		}
-		return nil, nil
-	}}
-	o, _ := newLocalOps(t, "true", "pri-host", ft)
-	if err := o.LeaderLocal(context.Background(), ""); err != nil {
-		t.Fatalf("LeaderLocal error: %v", err)
-	}
-	postIdx, showIdx := -1, -1
-	for i, out := range ft.outputs {
-		if postIdx == -1 && isCurl(out.argv) && strings.Contains(out.stdin, "data = ") {
-			postIdx = i
-		}
-		if showIdx == -1 && matchCLI(out.argv, "show-rd") {
-			showIdx = i
-		}
-	}
-	if postIdx == -1 || showIdx == -1 || postIdx > showIdx {
-		t.Errorf("mate revert POST at call %d, first show-rd at call %d; want the POST first", postIdx, showIdx)
-	}
-}
-
-// TestLeaderLocalMateUnreachableWarnsAndContinues pins the deliberate
-// downgrade: an unreachable mate SEMP service skips the revert-activity step
-// with a warning -- the leader assertion itself is local -- instead of failing
-// the whole command.
-func TestLeaderLocalMateUnreachableWarnsAndContinues(t *testing.T) {
-	healthy := rd("Primary", "Enabled", "Up", "Local Active")
-	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
-		switch {
-		case isCurl(argv):
-			return nil, errors.New("no route to host")
-		case matchCLI(argv, "show-rd"):
-			return []byte(healthy), nil
-		case matchCLI(argv, "assert-leader"):
-			return []byte("Sync Complete\n"), nil
-		}
-		return nil, nil
-	}}
-	o, _ := newLocalOps(t, "true", "pri-host", ft)
-	var logs []string
-	o.Log = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
-	if err := o.LeaderLocal(context.Background(), ""); err != nil {
-		t.Fatalf("LeaderLocal with unreachable mate error: %v, want warn-and-continue", err)
-	}
-	if !strings.Contains(strings.Join(logs, "\n"), "skipping the revert-activity step") {
-		t.Errorf("LeaderLocal logs = %q, want the skip warning", logs)
-	}
-	for _, out := range curlCalls(ft) {
-		if strings.Contains(out.stdin, "data = ") {
-			t.Error("LeaderLocal must not POST revert-activity after the preflight failed")
-		}
-	}
-}
-
-// TestLeaderLocalMateRPCErrorFails is the other side of the downgrade: a
-// REACHABLE mate refusing the revert-activity RPC is a real error, not a skip,
-// and stops LeaderLocal before any local poll.
-func TestLeaderLocalMateRPCErrorFails(t *testing.T) {
-	rejected := "HTTP/1.1 200 OK\r\n\r\n<rpc-reply><execute-result code=\"fail\" reason=\"denied\"/></rpc-reply>"
-	ft := &fakeTransport{responder: func(_ config.Role, argv []string, in []byte) ([]byte, error) {
-		switch {
-		case isCurl(argv) && strings.Contains(string(in), "data = "):
-			return []byte(rejected), nil
-		case isCurl(argv):
-			return []byte(sempOK), nil
-		}
-		return nil, nil
-	}}
-	o, _ := newLocalOps(t, "true", "pri-host", ft)
-	err := o.LeaderLocal(context.Background(), "")
-	if err == nil || !strings.Contains(err.Error(), "rejected the revert-activity") {
-		t.Errorf("LeaderLocal mate-RPC-fail err = %v, want the rejected-RPC error", err)
-	}
-	for _, out := range ft.outputs {
-		if matchCLI(out.argv, "show-rd") {
-			t.Error("LeaderLocal must not poll after the mate rejected the RPC")
-		}
-	}
-}
-
-func TestLeaderLocalTimeoutDumpsDetail(t *testing.T) {
-	down := rd("Primary", "Enabled", "Down", "Local Active")
-	sawDetail := false
-	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
-		switch {
-		case isCurl(argv):
-			return []byte(sempOK), nil
-		case matchCLI(argv, "show-redundancy-detail"):
-			sawDetail = true
-			return []byte("detail dump\n"), nil
-		}
-		return []byte(down), nil
-	}}
-	o, _ := newLocalOps(t, "true", "pri-host", ft)
-	o.PollAttempts = 2
-	if err := o.LeaderLocal(context.Background(), ""); err == nil {
-		t.Error("LeaderLocal should time out when redundancy never recovers")
-	}
-	if !sawDetail {
-		t.Error("LeaderLocal should dump show-redundancy-detail on timeout")
 	}
 }
 
@@ -858,74 +682,6 @@ func TestLocalRoleHostnameError(t *testing.T) {
 	_, err := o.LocalRole("")
 	if err == nil || !strings.Contains(err.Error(), "detect node role") {
 		t.Errorf("LocalRole hostname error = %v, want wrapped %q", err, "detect node role")
-	}
-}
-
-// --- LeaderLocal error branches -----------------------------------------------
-
-// TestLeaderLocalBadRoleArg mirrors TestRedundancyCoordinatedBadRoleArg: an
-// invalid explicit role arg must stop LeaderLocal before the primary-only guard
-// even runs.
-func TestLeaderLocalBadRoleArg(t *testing.T) {
-	ft := &fakeTransport{}
-	o, _ := newLocalOps(t, "true", "pri-host", ft)
-	if err := o.LeaderLocal(context.Background(), "nonsense"); err == nil {
-		t.Error("LeaderLocal should propagate a bad explicit role arg")
-	}
-	if len(ft.outputs) != 0 || len(ft.uploads) != 0 {
-		t.Error("LeaderLocal must make no transport calls on a bad role arg")
-	}
-}
-
-// TestLeaderLocalPollCondError mirrors the k8s TestLeaderPollCondError,
-// closing an asymmetry between the two implementations: a transport error
-// mid-poll must abort immediately (the detail dump still runs), not be
-// silently retried as "not yet healthy".
-func TestLeaderLocalPollCondError(t *testing.T) {
-	sawDetail := false
-	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
-		switch {
-		case isCurl(argv):
-			return []byte(sempOK), nil
-		case matchCLI(argv, "show-rd"):
-			return nil, errors.New("show boom")
-		case matchCLI(argv, "show-redundancy-detail"):
-			sawDetail = true
-			return []byte("detail\n"), nil
-		}
-		return nil, nil
-	}}
-	o, _ := newLocalOps(t, "true", "pri-host", ft)
-	if err := o.LeaderLocal(context.Background(), ""); err == nil {
-		t.Error("LeaderLocal should return the poll condition error")
-	}
-	if !sawDetail {
-		t.Error("LeaderLocal should still dump show-redundancy-detail after the error")
-	}
-}
-
-// TestLeaderLocalAssertLeaderError closes LeaderLocal's final assert-leader
-// error branch: after a healthy poll, a failing assert-leader exec must stop
-// the function and never call o.show.
-func TestLeaderLocalAssertLeaderError(t *testing.T) {
-	healthy := rd("Primary", "Enabled", "Up", "Local Active")
-	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
-		switch {
-		case isCurl(argv):
-			return []byte(sempOK), nil
-		case matchCLI(argv, "show-rd"):
-			return []byte(healthy), nil
-		case matchCLI(argv, "assert-leader"):
-			return nil, errors.New("assert boom")
-		}
-		return nil, nil
-	}}
-	o, buf := newLocalOps(t, "true", "pri-host", ft)
-	if err := o.LeaderLocal(context.Background(), ""); err == nil {
-		t.Error("LeaderLocal should return the assert-leader error")
-	}
-	if buf.Len() != 0 {
-		t.Errorf("LeaderLocal must not show output when assert-leader fails, got %q", buf.String())
 	}
 }
 

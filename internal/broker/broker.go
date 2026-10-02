@@ -29,7 +29,7 @@ type Ops struct {
 	Log func(format string, args ...any)
 	Out io.Writer // user-facing command output; nil -> os.Stdout
 
-	// Polling knobs for the HA state machines (leader, redundancy). New sets
+	// Polling knobs for the HA state machines (the redundancy tests). New sets
 	// sensible defaults; tests set PollInterval to 0 to avoid sleeping.
 	PollInterval time.Duration
 	PollAttempts int
@@ -338,6 +338,14 @@ func countContains(output, label, needle string) int {
 // (cli script names, domain CA names, uploaded filenames) to a safe character
 // set. It is the boundary validation this port owns; the bash scripts had none.
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// ValidScriptName exposes validName to the CLI layer for the file operand of `broker
+// perform cli-script` and `shell-script` (kind is "cli" or "shell"), for the reason
+// ValidVPNName is exported: a name ExecCLI or ExecShellScript would refuse is the
+// operator's to fix, so the command refuses it as a USAGE error (exit 2) before anything
+// is uploaded. Both still validate the name themselves -- this is the operand's own gate,
+// not a replacement for theirs.
+func ValidScriptName(kind, name string) error { return validName(kind+" script filename", name) }
 
 func validName(kind, s string) error {
 	if s == "" || strings.Contains(s, "..") || !nameRE.MatchString(s) {

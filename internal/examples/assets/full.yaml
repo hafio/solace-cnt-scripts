@@ -114,7 +114,6 @@ redundancy:
   backup:
     name: solace-backup             # mandatory on containers in HA
     addr: 10.0.0.12                 # also reached from the primary at verify time by
-                                    # `broker perform assert-leader` and
                                     # `broker perform redundancy-test`
   monitor:
     name: solace-monitor            # mandatory on containers in HA
@@ -134,7 +133,8 @@ redundancy:
 
 # broker: platform-neutral post-deployment settings, applied over the broker CLI.
 # broker:
-#   cliScriptsDir: cli               # local folder holding .cli scripts
+#   cliScriptsDir: cli               # the only folder cli-script/shell-script read; a
+#                                    # relative one resolves against THIS FILE's directory
 #   hostDiagnosticDir: diag-configs  # local folder for gathered diagnostics
 #   productKeys: []                  # `broker configure product-keys`
 #   domainCerts:                     # HOST paths. A relative one resolves against THIS

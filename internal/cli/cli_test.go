@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -351,14 +352,43 @@ func failDisableDefaultUsersUpload(c opCall) error {
 	return nil
 }
 
-// healthyShowRD is a canned `show redundancy` transcript satisfying
-// primaryRedundancyUp (internal/broker/verify_ops.go), so a direct-call test can
-// drive Leader's poll to succeed on the first check.
+// healthyShowRD is a canned `show redundancy` transcript of a healthy primary that
+// holds activity: it satisfies primaryRedundancyUp (internal/broker/verify_ops.go)
+// and reports Local Active, which is the one thing assert-leader's single read
+// (Ops.LeaderCheck) asks.
 const healthyShowRD = "Configuration Status: Enabled\n" +
 	"Redundancy Status: Up\n" +
 	"Active-Standby Role: Primary\n" +
 	"ADB Link To Mate: Up\n" +
-	"ADB Hello To Mate: Up\n"
+	"ADB Hello To Mate: Up\n" +
+	"Activity Status: Local Active\n"
+
+// standbyShowRD is the same healthy node standing by: its mate holds activity, so
+// assert-leader refuses it.
+const standbyShowRD = "Configuration Status: Enabled\n" +
+	"Redundancy Status: Up\n" +
+	"Active-Standby Role: Primary\n" +
+	"ADB Link To Mate: Up\n" +
+	"ADB Hello To Mate: Up\n" +
+	"Activity Status: Mate Active\n"
+
+// writeCLIScript puts a script named name in the folder broker.cliScriptsDir resolves
+// to for the env file at envPath, and returns its path. That folder is the default,
+// `cli`, which config.Load rebases onto the env file's own directory, so for an env
+// file from writeStandaloneEnv or writeCtrStandaloneEnv it is <that temp dir>/cli. The
+// script commands read from nowhere else, and the repo's env/ has no cli/ to borrow.
+func writeCLIScript(t *testing.T, envPath, name string) string {
+	t.Helper()
+	dir := filepath.Join(filepath.Dir(envPath), "cli")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("make the scripts folder: %v", err)
+	}
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte("home\n"), 0o644); err != nil {
+		t.Fatalf("write script %s: %v", name, err)
+	}
+	return p
+}
 
 // capture redirects the given standard stream (os.Stdout or os.Stderr) through a
 // pipe for the duration of fn and returns everything written.
@@ -696,6 +726,8 @@ func TestFlagsRegistered(t *testing.T) {
 		{[]string{"broker", "remove"}, []string{"delete-data", "no-prompt"}},
 		{[]string{"operator", "remove"}, []string{"delete-crd", "no-prompt"}},
 		{[]string{"broker", "perform", "gather-diagnostics"}, []string{"days"}},
+		// A backup host is asked before it asserts, so the silencer rides beside --pod.
+		{[]string{"broker", "perform", "assert-leader"}, []string{"pod", "no-prompt"}},
 		{[]string{"broker", "cli"}, []string{"pod"}},
 		{[]string{"broker", "perform", "cli-script"}, []string{"pod"}},
 		{[]string{"broker", "perform", "shell-script"}, []string{"pod"}},
@@ -807,9 +839,10 @@ func TestGenerateEmitsSecretsBeforeTheCR(t *testing.T) {
 // TestCtrWiredDryRun drives every container command that is safe to run against
 // the HA sample env over the echo seam: each reaches its real handler and returns
 // no error, with the expected "+ <runtime> ..." (or systemctl/mkdir/chown) echo
-// landing on stdout. Poll-driven steps (config leader / smoke redundancy, which
-// fail over or wait) and secret-bearing prep are covered by the guard, standalone,
-// and error tests instead, so nothing here blocks on a poll loop. The sample is
+// landing on stdout. The HA steps (assert-leader, which needs a Local Active
+// transcript Echo cannot give, and redundancy-test, which fails over and polls) and
+// secret-bearing prep are covered by the guard, standalone, prompt and error tests
+// instead, so nothing here blocks on a poll loop. The sample is
 // docker compose mode and rootful podman, so status/remove take the compose path
 // and podman systemctl carries no --user.
 func TestCtrWiredDryRun(t *testing.T) {
@@ -852,11 +885,13 @@ func TestCtrWiredDryRun(t *testing.T) {
 	}
 }
 
-// TestCtrRoleGuards covers the fail-loud / self-skip role guards on the two
-// primary-driven HA operations (config leader, smoke redundancy). None reach a
+// TestCtrRoleGuards covers the fail-loud / self-skip role guards on the two HA
+// operations under broker perform (assert-leader, redundancy-test). None reach a
 // poll loop or the mate SEMP channel: the HA cases are rejected before anything
 // runs (wrong node, unknown host, or bad role) and the standalone cases return
 // nil via skipIfStandalone, so every case resolves immediately over the echo seam.
+// assert-leader on a BACKUP is not a guard any more -- it asks -- and is covered by
+// TestAssertLeaderAsksBeforeActingFromABackup.
 func TestCtrRoleGuards(t *testing.T) {
 	ha := sampleEnv
 	standalone := writeCtrStandaloneEnv(t)
@@ -866,8 +901,7 @@ func TestCtrRoleGuards(t *testing.T) {
 		args    []string
 		wantErr string // "" -> expect nil (self-skip path)
 	}{
-		{"assert-leader on monitor", ha, []string{"broker", "perform", "assert-leader", "--pod", "monitor", "--platform", "docker"}, "must run on the primary node"},
-		{"assert-leader on backup", ha, []string{"broker", "perform", "assert-leader", "--pod", "backup", "--platform", "podman"}, "this host is the backup node"},
+		{"assert-leader on monitor", ha, []string{"broker", "perform", "assert-leader", "--pod", "monitor", "--platform", "docker"}, "invalid operation on the monitor node"},
 		{"redundancy-test on monitor", ha, []string{"broker", "perform", "redundancy-test", "--pod", "monitor", "--platform", "docker"}, "this host is the monitor node"},
 		{"redundancy-test on backup", ha, []string{"broker", "perform", "redundancy-test", "--pod", "backup", "--platform", "podman"}, "this host is the backup node"},
 		{"redundancy-test unknown host", ha, []string{"broker", "perform", "redundancy-test", "--platform", "docker"}, "cannot determine node role"},
@@ -895,12 +929,13 @@ func TestCtrRoleGuards(t *testing.T) {
 }
 
 // TestCtrConfigDryRun covers the post-deploy config steps that run cleanly on a
-// container-standalone env over the echo seam: the VPN/user hardening and cli
-// --input echo their exec commands, while the cert/key-gated steps self-skip
-// (none configured). config leader is excluded -- it is HA-only and covered by
-// TestCtrRoleGuards. None of these steps polls.
+// container-standalone env over the echo seam: the VPN/user hardening and
+// cli-script echo their exec commands, while the cert/key-gated steps self-skip
+// (none configured). assert-leader is excluded -- it is HA-only and covered by
+// TestCtrRoleGuards and the assert-leader tests. None of these steps polls.
 func TestCtrConfigDryRun(t *testing.T) {
 	path := writeCtrStandaloneEnv(t)
+	writeCLIScript(t, path, "setup.cli") // the only folder cli-script reads from
 	cases := []struct {
 		name string
 		args []string
@@ -920,16 +955,6 @@ func TestCtrConfigDryRun(t *testing.T) {
 				t.Fatalf("%s (container-standalone) err = %v, want nil", tc.name, err)
 			}
 		})
-	}
-}
-
-// TestCtrExecCLIPathSeparator covers opCtrExecCLI's used-as-is branch: a file
-// argument containing a path separator is not joined under the cliScripts folder.
-// The bare-filename (join) branch is covered by TestCtrConfigDryRun.
-func TestCtrExecCLIPathSeparator(t *testing.T) {
-	path := writeCtrStandaloneEnv(t)
-	if _, err := runCtr(t, path, "broker", "perform", "cli-script", "sub/dir/x.cli", "--platform", "docker"); err != nil {
-		t.Fatalf("perform cli-script with a path arg err = %v, want nil", err)
 	}
 }
 
@@ -1019,9 +1044,11 @@ func TestCtrRoleHelp(t *testing.T) {
 // error. wantEcho commands shell out to kubectl (so a `+ kubectl ...` line lands
 // on stdout); the skip-path commands (no configured labels / domain certs) return
 // cleanly without touching the runner. Steps that need a live cluster to make
-// sense on the HA sample (config leader -> redundancy poll, smoke redundancy ->
-// failover, server-cert/secrets -> absent cert files) are exercised in the
-// standalone and error tests instead.
+// sense on the HA sample (assert-leader -> a Local Active primary, redundancy-test
+// -> failover, server-cert/secrets -> absent cert files) are exercised in the
+// standalone, assert-leader and error tests instead, and cli-script, which needs a
+// real file in broker.cliScriptsDir (the sample's env/cli does not exist), in
+// TestCLICommand and TestScriptCommandsUploadFromTheScriptsDir.
 func TestK8sWiredDryRun(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -1056,7 +1083,6 @@ func TestK8sWiredDryRun(t *testing.T) {
 		{"config disable default-vpn", []string{"broker", "configure", "default-vpn", "--no-prompt"}, true},
 		{"config disable default-users", []string{"broker", "configure", "default-users", "--no-prompt"}, true},
 		{"config apply domain-certs", []string{"broker", "configure", "domain-certs"}, false}, // none configured
-		{"perform cli-script --pod", []string{"broker", "perform", "cli-script", "setup.cli", "--pod", "p"}, true},
 		{"copy from", []string{"broker", "copy", "from", "somefile", "--pod", "p"}, true},
 		{"copy into", []string{"broker", "copy", "into", "somefile", "--pod", "p"}, true},
 		{"config delete domain-certs", []string{"broker", "configure", "domain-certs", "--remove", "--no-prompt"}, false}, // none configured
@@ -1238,9 +1264,10 @@ func TestStartStopRestartBroker(t *testing.T) {
 	})
 }
 
-// TestCLICommand covers `cli`'s two shapes: bare, it opens an interactive session;
-// with --input, it uploads and runs a script instead. Both are the same command
-// now, distinguished by a flag rather than by being separate subcommands.
+// TestCLICommand covers the two ways into the broker's CLI: `broker cli` opens an
+// interactive session, and `broker perform cli-script` uploads and runs a script
+// instead -- one command each, where they used to be one command distinguished by a
+// retired --input flag.
 func TestCLICommand(t *testing.T) {
 	t.Run("bare cli opens a session", func(t *testing.T) {
 		out, err := runRootWith(t, append(withEnv("broker", "cli"), "--platform", "kubernetes"), echoRunner)
@@ -1251,8 +1278,12 @@ func TestCLICommand(t *testing.T) {
 			t.Errorf("cli stdout = %q, want a kubectl exec echo", out)
 		}
 	})
-	t.Run("--input runs a script", func(t *testing.T) {
-		out, err := runRootWith(t, append(withEnv("broker", "perform", "cli-script", "setup.cli"), "--platform", "kubernetes"), echoRunner)
+	// The script runs from broker.cliScriptsDir, which for the repo's env/sample.yaml is a
+	// env/cli that does not exist -- so these two run against a temp env holding the file.
+	t.Run("cli-script runs a script from the scripts folder", func(t *testing.T) {
+		env := writeStandaloneEnv(t)
+		writeCLIScript(t, env, "setup.cli")
+		out, err := runStandalone(t, env, "broker", "perform", "cli-script", "setup.cli")
 		if err != nil {
 			t.Fatalf("perform cli-script err = %v, want nil", err)
 		}
@@ -1265,11 +1296,12 @@ func TestCLICommand(t *testing.T) {
 	// script on the PRIMARY pod: the positional was ignored once --input was set, and --pod
 	// was unset. Running a script is its own command now, which removes the branch that
 	// caused it -- but the property still has to hold, because both commands resolve their
-	// target through the same podRole. env/sample.yaml names the broker "dev-broker", so its
-	// pods are dev-broker-pubsubplus-<p|b|m>-0.
-	t.Run("--input --pod targets the named pod, not the primary", func(t *testing.T) {
-		out, err := runRootWith(t, append(withEnv("broker", "perform", "cli-script", "setup.cli", "--pod", "backup"),
-			"--platform", "kubernetes"), echoRunner)
+	// target through the same podRole. writeStandaloneEnv names the broker "dev-broker", as
+	// env/sample.yaml does, so its pods are dev-broker-pubsubplus-<p|b|m>-0.
+	t.Run("cli-script --pod targets the named pod, not the primary", func(t *testing.T) {
+		env := writeStandaloneEnv(t)
+		writeCLIScript(t, env, "setup.cli")
+		out, err := runStandalone(t, env, "broker", "perform", "cli-script", "setup.cli", "--pod", "backup")
 		if err != nil {
 			t.Fatalf("perform cli-script --pod backup err = %v, want nil", err)
 		}
@@ -1292,6 +1324,206 @@ func TestCLICommand(t *testing.T) {
 			t.Errorf("cli --pod backup stdout = %q, want no primary-pod session", out)
 		}
 	})
+}
+
+// TestResolveScriptPath pins the one rule behind both script commands, called directly:
+// the operand is a bare file name in broker.cliScriptsDir and nothing else. Every refusal
+// is a usage error naming the command it came from, and the working directory is never
+// searched -- not for a bare name, and not when the folder is unset.
+func TestResolveScriptPath(t *testing.T) {
+	dir := t.TempDir()
+	setupPath := filepath.Join(dir, "setup.cli")
+	for _, f := range []string{setupPath, filepath.Join(dir, "my script.cli")} {
+		if err := os.WriteFile(f, []byte("home\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	appFor := func(dir string) *App { return &App{Cfg: &config.Config{Broker: config.Broker{CLIScriptsDir: dir}}} }
+	verbs := []string{"cli-script", "shell-script"}
+
+	for _, verb := range verbs {
+		var got string
+		var err error
+		stderr := captureStderr(t, func() { got, err = resolveScriptPath(appFor(dir), "setup.cli", verb) })
+		if err != nil || got != setupPath {
+			t.Errorf("%s: resolveScriptPath(setup.cli) = %q, %v; want %q", verb, got, err, setupPath)
+		}
+		if !strings.Contains(stderr, "script: "+setupPath) {
+			t.Errorf("%s: stderr = %q, want the file it found announced", verb, stderr)
+		}
+	}
+
+	cases := []struct {
+		name, dir, file, want string
+		notExist              bool
+	}{
+		{"empty", dir, "", "file name is required", false},
+		{"dot slash", dir, "./setup.cli", "not a path", false},
+		{"subfolder", dir, "sub/setup.cli", "not a path", false},
+		{"parent", dir, "../setup.cli", "not a path", false},
+		{"absolute path of a file the folder holds", dir, setupPath, "not a path", false},
+		{"windows separator", dir, `.\setup.cli`, "not a path", false},
+		{"windows drive path", dir, `C:\setup.cli`, "not a path", false},
+		{"a name the folder lacks", dir, "missing.cli", `"missing.cli" is not in broker.cliScriptsDir`, true},
+		{"a folder that does not exist", filepath.Join(dir, "no-such-folder"), "setup.cli", "does not exist -- create it", true},
+		{"dot", dir, ".", "not a regular file", false},
+		{"dot dot", dir, "..", "not a regular file", false},
+		{"a folder", dir, "sub", "not a regular file", false},
+		{"a name the broker would refuse", dir, "my script.cli", "invalid", false},
+		{"stat fails for another reason", dir, "bad\x00name", "cannot use", false},
+		{"no folder at all", "", "setup.cli", "broker.cliScriptsDir is empty", false},
+	}
+	for _, verb := range verbs {
+		for _, tc := range cases {
+			t.Run(verb+"/"+tc.name, func(t *testing.T) {
+				_, err := resolveScriptPath(appFor(tc.dir), tc.file, verb)
+				if err == nil || ExitCode(err) != exitUsage {
+					t.Fatalf("err = %v (exit %d), want a usage refusal", err, ExitCode(err))
+				}
+				if !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "broker perform "+verb) {
+					t.Errorf("err = %q, want it to contain %q and the command's own name", err, tc.want)
+				}
+				if got := errors.Is(err, os.ErrNotExist); got != tc.notExist {
+					t.Errorf("errors.Is(err, os.ErrNotExist) = %v, want %v", got, tc.notExist)
+				}
+			})
+		}
+	}
+
+	t.Run("the working directory is never searched", func(t *testing.T) {
+		cwd := t.TempDir()
+		if err := os.WriteFile(filepath.Join(cwd, "here.cli"), []byte("home\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(cwd)
+		for _, a := range []*App{appFor(dir), appFor("")} {
+			for _, file := range []string{"here.cli", "./here.cli"} {
+				if got, err := resolveScriptPath(a, file, "cli-script"); err == nil {
+					t.Errorf("resolveScriptPath(%q) with broker.cliScriptsDir %q = %q, want a refusal: the file is "+
+						"in the working directory, not the scripts folder", file, a.Cfg.Broker.CLIScriptsDir, got)
+				}
+			}
+		}
+	})
+}
+
+// TestScriptCommandsUploadFromTheScriptsDir drives both script commands through cobra on a
+// Kubernetes pod and a container host, over the echo seam, and pins the exact file that
+// reaches `cp`: the one in broker.cliScriptsDir. It is also the first test to run
+// shell-script end to end on any platform.
+func TestScriptCommandsUploadFromTheScriptsDir(t *testing.T) {
+	const p0, b0 = "dev-broker-pubsubplus-p-0", "dev-broker-pubsubplus-b-0"
+	k8sCP := func(pod string) func(string) string {
+		return func(local string) string {
+			return "+ " + engine.Quote("kubectl", "cp", "-n", "solace", local) + " " + pod + ":"
+		}
+	}
+	dockerCP := func(local string) string { return "+ " + engine.Quote("docker", "cp", local) + " solace:" }
+	cases := []struct {
+		name, verb, file string
+		env              func(*testing.T) string
+		args             []string
+		cp               func(string) string
+		exec, notWant    string
+	}{
+		{"kubernetes cli-script", "cli-script", "setup.cli", writeStandaloneEnv, nil, k8sCP(p0), p0 + " -- sh -c", ""},
+		{"kubernetes cli-script --pod backup", "cli-script", "setup.cli", writeStandaloneEnv,
+			[]string{"--pod", "backup"}, k8sCP(b0), b0 + " -- sh -c", p0},
+		{"kubernetes shell-script", "shell-script", "run.sh", writeStandaloneEnv, nil, k8sCP(p0),
+			p0 + " -- bash /usr/sw/jail/.run.sh", ""},
+		{"docker cli-script", "cli-script", "setup.cli", writeCtrStandaloneEnv,
+			[]string{"--platform", "docker"}, dockerCP, "docker exec solace sh -c", ""},
+		{"docker shell-script", "shell-script", "run.sh", writeCtrStandaloneEnv,
+			[]string{"--platform", "docker"}, dockerCP, "docker exec solace bash /usr/sw/jail/.run.sh", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := tc.env(t)
+			local := writeCLIScript(t, env, tc.file)
+			args := append([]string{"broker", "perform", tc.verb, tc.file}, tc.args...)
+			out, err := runStandalone(t, env, args...)
+			if err != nil {
+				t.Fatalf("%v err = %v, want nil", args, err)
+			}
+			if !strings.Contains(out, tc.cp(local)) {
+				t.Errorf("stdout = %q, want the upload of %s: %q", out, local, tc.cp(local))
+			}
+			if !strings.Contains(out, tc.exec) {
+				t.Errorf("stdout = %q, want the run to follow: %q", out, tc.exec)
+			}
+			if tc.notWant != "" && strings.Contains(out, tc.notWant) {
+				t.Errorf("stdout = %q, want nothing aimed at %s", out, tc.notWant)
+			}
+		})
+	}
+}
+
+// TestScriptCommandsRefuseBeforeAnythingRuns: every way of naming a script that is not a
+// file in broker.cliScriptsDir is refused through the real command -- a usage error, exit
+// 2 -- before anything reaches the runner (stdout stays empty under Echo). That includes a
+// file that exists only in the working directory, and ./name of a file the folder really
+// holds: the folder is the only place looked in, and only by name.
+func TestScriptCommandsRefuseBeforeAnythingRuns(t *testing.T) {
+	type refusal struct {
+		name, file, want string
+		extra            []string
+	}
+	targets := []struct {
+		name string
+		env  func(*testing.T) string
+		args []string
+		k8s  bool
+	}{
+		{"kubernetes", writeStandaloneEnv, nil, true},
+		{"docker", writeCtrStandaloneEnv, []string{"--platform", "docker"}, false},
+	}
+	for _, tg := range targets {
+		for _, verb := range []string{"cli-script", "shell-script"} {
+			t.Run(tg.name+"/"+verb, func(t *testing.T) {
+				env := tg.env(t)
+				present := writeCLIScript(t, env, "present.cli")
+				folder := filepath.Dir(present)
+				cwd := t.TempDir()
+				if err := os.WriteFile(filepath.Join(cwd, "here.cli"), []byte("home\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				t.Chdir(cwd) // env is an absolute path, so it survives the move
+				cases := []refusal{
+					{"a path", "sub/dir/x.cli", "not a path", nil},
+					{"dot slash on a file the folder holds", "./present.cli", "not a path", nil},
+					{"windows separator", `.\present.cli`, "not a path", nil},
+					{"the absolute path of a file the folder holds", present, "not a path", nil},
+					{"a name only the working directory holds", "here.cli",
+						`"here.cli" is not in broker.cliScriptsDir (` + folder + ")", nil},
+					{"a name the folder lacks", "missing.cli", `"missing.cli" is not in broker.cliScriptsDir`, nil},
+					{"an empty name", "", "file name is required", nil},
+				}
+				if tg.k8s {
+					// --pod picks a pod only on Kubernetes; elsewhere the flag is refused earlier.
+					cases = append(cases, refusal{"an unknown --pod", "present.cli", "invalid node role", []string{"--pod", "bogus"}})
+				}
+				for _, tc := range cases {
+					t.Run(tc.name, func(t *testing.T) {
+						args := append([]string{"broker", "perform", verb, tc.file}, tc.extra...)
+						args = append(append(args, tg.args...), "--env", env)
+						out, err := runRootWith(t, args, echoRunner)
+						if err == nil || ExitCode(err) != exitUsage {
+							t.Fatalf("err = %v (exit %d), want a usage refusal (exit %d)", err, ExitCode(err), exitUsage)
+						}
+						if !strings.Contains(err.Error(), tc.want) {
+							t.Errorf("err = %q, want it to contain %q", err, tc.want)
+						}
+						if out != "" {
+							t.Errorf("a refused script reached the runner: stdout = %q", out)
+						}
+					})
+				}
+			})
+		}
+	}
 }
 
 // TestStatusBrokerFlags covers how --all and --detail compose on `status broker`:
@@ -1827,8 +2059,9 @@ func writeK8sDeployAllEnv(t *testing.T, redundancy string) *config.Config {
 // k8s.Cluster.isEcho() is a concrete type assertion on engine.Echo, so a fake
 // Runner takes CheckStorageClass's real validation branch (unlike engine.Echo,
 // which skips it) -- it needs a WaitForFirstConsumer/true StorageClass answer to
-// pass, and Leader (HA only) needs a healthy `show redundancy` transcript to
-// avoid its real poll budget.
+// pass. The `show redundancy` answer is a Local Active primary, so that a deploy
+// which regressed into asserting the leader would get all the way to the assert and
+// trip TestDeployDoesNotAssertLeader's check, rather than stop at Leader's refusal.
 func k8sDeployAllOutputHook(c opCall) []byte {
 	switch {
 	case opArgvMatch(c, "volumeBindingMode"):
@@ -1845,9 +2078,10 @@ func k8sDeployAllOutputHook(c opCall) []byte {
 // TestDeployDoesNotAssertLeader is the inverse of the test that used to live here.
 //
 // `deploy all` asserted the config-sync leader as its final step. `broker deploy` must NOT:
-// asserting the leader reverts activity on the mate, which changes redundancy state, and a
-// deploy has no business making that change unasked. It is `broker perform assert-leader`
-// now, and the deploy's Long text names it as the next step on HA.
+// asserting the leader overwrites the mate's router and message-VPN configuration with this
+// node's, and a deploy has no business making that change unasked. It is `broker perform
+// assert-leader` now, the first step `broker configure`'s Long and docs/operations.md
+// ("Post-deployment configuration order") put after a deploy on HA.
 func TestDeployDoesNotAssertLeader(t *testing.T) {
 	cfg := writeK8sDeployAllEnv(t, "true")
 	rr := &opRunner{output: k8sDeployAllOutputHook}
@@ -1858,8 +2092,8 @@ func TestDeployDoesNotAssertLeader(t *testing.T) {
 		t.Fatalf("opK8sDeploy (HA) err = %v, want nil", deployErr)
 	}
 	if rr.hasCall("assert-leader") {
-		t.Error("broker deploy asserted the config-sync leader; that reverts activity on the mate " +
-			"and belongs to `broker perform assert-leader`")
+		t.Error("broker deploy asserted the config-sync leader; that overwrites the mate's " +
+			"configuration and belongs to `broker perform assert-leader`")
 	}
 }
 
@@ -2313,6 +2547,299 @@ func TestOpCtrVerifyRedundancyRunsCoordinated(t *testing.T) {
 	}
 }
 
+// --- broker perform assert-leader ----------------------------------------------
+
+// leaderRun is one `broker perform assert-leader` driven for real through cobra over
+// env/sample.yaml, whose nodes are solace-primary / solace-backup / solace-monitor. The
+// runner is an opRunner, not Echo: Echo's `show redundancy` is empty, which is never
+// Local Active, so it could never reach the assert.
+type leaderRun struct {
+	stdout, stderr string
+	err            error
+	reads          int // reads of the prompt source: 0 means the question was never asked
+	rr             *opRunner
+}
+
+// runLeader runs it on platform as the host named host, whose broker answers `show
+// redundancy` with showRD. answer is what stdin holds if the question is asked; "" is
+// EOF, the unattended case.
+func runLeader(t *testing.T, platform config.Platform, host, showRD, answer string, extra ...string) leaderRun {
+	t.Helper()
+	res := leaderRun{rr: &opRunner{output: func(c opCall) []byte {
+		switch {
+		case opArgvMatch(c, ".show-rd.cli"):
+			return []byte(showRD)
+		case opArgvMatch(c, "solace-util-cli-assert-leader"):
+			return []byte("Sync Complete\n")
+		}
+		return nil
+	}}}
+	args := append([]string{"broker", "perform", "assert-leader", "--env", sampleEnv,
+		"--platform", string(platform)}, extra...)
+	res.stderr = captureStderr(t, func() {
+		res.stdout, res.err = runRootWith(t, args, func(a *App) {
+			a.NewRunner = func(*App) engine.EnvRunner { return res.rr }
+			a.Hostname = func() (string, error) { return host, nil }
+			// No interface addresses, so detection rests on the name alone and not on how
+			// the machine running the suite is numbered.
+			a.LocalAddrs = func() (map[string]bool, error) { return nil, nil }
+			// podman's euid guard is not what these tests are about; -1 skips it, as on
+			// Windows, instead of letting the account running the suite decide.
+			a.Geteuid = func() int { return -1 }
+			a.Interactive = func() bool { return true }
+			a.PromptIn = exportconfigReadCounter{Reader: strings.NewReader(answer), n: &res.reads}
+		})
+	})
+	return res
+}
+
+// showRDReads counts the `show redundancy` reads: the exec of the uploaded probe, not
+// its upload or its removal.
+func (r leaderRun) showRDReads() int {
+	n := 0
+	for _, c := range r.rr.calls {
+		if c.method == "Output" && opArgvMatch(c, ".show-rd.cli") {
+			n++
+		}
+	}
+	return n
+}
+
+// asserted reports whether the assert-leader script ran.
+func (r leaderRun) asserted() bool { return r.rr.hasCall("solace-util-cli-assert-leader") }
+
+// backupActiveShowRD / backupStandbyShowRD are the backup's own view: holding activity
+// after a failover, and standing by while the primary holds it.
+var (
+	backupActiveShowRD  = strings.Replace(healthyShowRD, "Role: Primary", "Role: Backup", 1)
+	backupStandbyShowRD = strings.Replace(standbyShowRD, "Role: Primary", "Role: Backup", 1)
+)
+
+// TestAssertLeaderAsksBeforeActingFromABackup is the docker/podman question: asserting
+// from a backup makes ITS configuration the copy config-sync pushes to the primary, so a
+// host that is, or looks like, the backup is asked first -- after the one `show
+// redundancy` read, and only if that read shows it holds activity. A standby backup
+// could not assert anyway, so it fails without a question.
+func TestAssertLeaderAsksBeforeActingFromABackup(t *testing.T) {
+	const question = "Assert the config-sync leader from this backup node"
+	cases := []struct {
+		name, host, showRD, answer string
+		extra                      []string
+		asked, asserted            bool
+		wantErr                    string // "" -> nil
+		wantStderr                 []string
+		noStderr                   []string
+	}{
+		{name: "yes asserts", host: "solace-backup", showRD: backupActiveShowRD, answer: "y\n",
+			asked: true, asserted: true,
+			wantStderr: []string{"node role detected: backup", "this host is the backup node", question}},
+		{name: "no declines without a word", host: "solace-backup", showRD: backupActiveShowRD, answer: "n\n",
+			asked: true, wantStderr: []string{question}, noStderr: []string{"refusing"}},
+		{name: "no answer refuses and names the silencer", host: "solace-backup", showRD: backupActiveShowRD,
+			asked: true, wantStderr: []string{"refusing to assert the config-sync leader", "--no-prompt"}},
+		{name: "--no-prompt asserts without asking", host: "solace-backup", showRD: backupActiveShowRD,
+			answer: "y\n", extra: []string{"--no-prompt"}, asserted: true,
+			wantStderr: []string{"this host is the backup node"}, noStderr: []string{question}},
+		{name: "a standby backup fails without a question", host: "solace-backup", showRD: backupStandbyShowRD,
+			answer: "y\n", wantErr: "normally the primary host", noStderr: []string{question}},
+		{name: "--pod primary on the backup host still asks", host: "solace-backup", showRD: backupActiveShowRD,
+			answer: "y\n", extra: []string{"--pod", "primary"}, asked: true, asserted: true,
+			wantStderr: []string{"this host looks like the backup node", question}},
+		{name: "--pod backup on the primary host asks", host: "solace-primary", showRD: backupActiveShowRD,
+			answer: "y\n", extra: []string{"--pod", "backup"}, asked: true, asserted: true,
+			wantStderr: []string{question}},
+	}
+	for _, platform := range []config.Platform{config.Docker, config.Podman} {
+		for _, tc := range cases {
+			t.Run(string(platform)+"/"+tc.name, func(t *testing.T) {
+				r := runLeader(t, platform, tc.host, tc.showRD, tc.answer, tc.extra...)
+				if tc.wantErr == "" && r.err != nil {
+					t.Fatalf("err = %v, want nil\nstderr:\n%s", r.err, r.stderr)
+				}
+				if tc.wantErr != "" && (r.err == nil || !strings.Contains(r.err.Error(), tc.wantErr)) {
+					t.Fatalf("err = %v, want it to contain %q", r.err, tc.wantErr)
+				}
+				if asked := r.reads > 0; asked != tc.asked {
+					t.Errorf("asked = %v (%d reads), want %v\nstderr:\n%s", asked, r.reads, tc.asked, r.stderr)
+				}
+				if r.asserted() != tc.asserted {
+					t.Errorf("asserted = %v, want %v\ncalls:\n%s", r.asserted(), tc.asserted, r.rr.dump())
+				}
+				if got := r.showRDReads(); got != 1 {
+					t.Errorf("show redundancy was read %d times, want exactly once", got)
+				}
+				for _, w := range tc.wantStderr {
+					if !strings.Contains(r.stderr, w) {
+						t.Errorf("stderr = %q, want it to contain %q", r.stderr, w)
+					}
+				}
+				for _, w := range tc.noStderr {
+					if strings.Contains(r.stderr, w) {
+						t.Errorf("stderr = %q, want no %q", r.stderr, w)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestAssertLeaderPrimaryAndMonitorNeverAsk: the primary asserts, or refuses, without a
+// question; the monitor -- by name or by --pod -- is an invalid operation, refused before
+// anything reaches the runner; and a host that matches no node says which command line
+// gets out of it.
+func TestAssertLeaderPrimaryAndMonitorNeverAsk(t *testing.T) {
+	for _, platform := range []config.Platform{config.Docker, config.Podman} {
+		t.Run(string(platform)+"/the primary asserts", func(t *testing.T) {
+			r := runLeader(t, platform, "solace-primary", healthyShowRD, "y\n")
+			if r.err != nil {
+				t.Fatalf("err = %v, want nil", r.err)
+			}
+			if !r.asserted() || r.showRDReads() != 1 || r.reads != 0 {
+				t.Errorf("asserted=%v reads of show redundancy=%d prompt reads=%d, want true/1/0\ncalls:\n%s",
+					r.asserted(), r.showRDReads(), r.reads, r.rr.dump())
+			}
+			if !strings.Contains(r.stdout, "Sync Complete") {
+				t.Errorf("stdout = %q, want the assert's own output", r.stdout)
+			}
+		})
+		t.Run(string(platform)+"/a standby primary is refused with the way out", func(t *testing.T) {
+			r := runLeader(t, platform, "solace-primary", standbyShowRD, "y\n")
+			if r.err == nil || ExitCode(r.err) != exitFailure {
+				t.Fatalf("err = %v (exit %d), want a failure (exit %d)", r.err, ExitCode(r.err), exitFailure)
+			}
+			for _, w := range []string{"primary node does not hold activity", "redundancy revert-activity", "broker cli"} {
+				if !strings.Contains(r.err.Error(), w) {
+					t.Errorf("err = %q, want it to contain %q", r.err, w)
+				}
+			}
+			if r.asserted() || r.reads != 0 || r.showRDReads() != 1 {
+				t.Errorf("asserted=%v prompt reads=%d reads of show redundancy=%d, want false/0/1",
+					r.asserted(), r.reads, r.showRDReads())
+			}
+			if !strings.Contains(r.stdout, "Mate Active") {
+				t.Errorf("stdout = %q, want the transcript it refused on", r.stdout)
+			}
+		})
+		for _, mon := range []struct {
+			name, host string
+			extra      []string
+		}{
+			{"the monitor host", "solace-monitor", nil},
+			{"--pod monitor on the backup host", "solace-backup", []string{"--pod", "monitor"}},
+		} {
+			t.Run(string(platform)+"/"+mon.name+" is an invalid operation", func(t *testing.T) {
+				r := runLeader(t, platform, mon.host, healthyShowRD, "y\n", mon.extra...)
+				if r.err == nil || !strings.Contains(r.err.Error(), "invalid operation on the monitor node") {
+					t.Fatalf("err = %v, want the invalid-operation refusal", r.err)
+				}
+				if len(r.rr.calls) != 0 || r.reads != 0 {
+					t.Errorf("the monitor refusal reached the runner or the prompt (prompt reads %d):\n%s",
+						r.reads, r.rr.dump())
+				}
+			})
+		}
+		t.Run(string(platform)+"/an unrecognised host names the way out", func(t *testing.T) {
+			r := runLeader(t, platform, "somewhere-else", healthyShowRD, "y\n")
+			if r.err == nil || !strings.Contains(r.err.Error(), "cannot determine node role") ||
+				!strings.Contains(r.err.Error(), "`broker perform assert-leader --pod primary|backup|monitor`") {
+				t.Fatalf("err = %v, want the detection failure and this command's --pod hint", r.err)
+			}
+			if len(r.rr.calls) != 0 || r.reads != 0 {
+				t.Errorf("an undetectable host reached the runner or the prompt:\n%s", r.rr.dump())
+			}
+		})
+	}
+}
+
+// TestAssertLeaderStandaloneSkipsBeforeAnyPrompt: standalone is decided before --pod is
+// even parsed, as it was, so neither a backup role nor a word that is no role at all
+// reaches a question or the runner.
+func TestAssertLeaderStandaloneSkipsBeforeAnyPrompt(t *testing.T) {
+	env := writeCtrStandaloneEnv(t)
+	for _, pod := range []string{"backup", "bogus"} {
+		t.Run("--pod "+pod, func(t *testing.T) {
+			rr := &opRunner{}
+			reads := 0
+			var err error
+			stderr := captureStderr(t, func() {
+				_, err = runRootWith(t, []string{"broker", "perform", "assert-leader", "--pod", pod,
+					"--env", env, "--platform", "docker"}, func(a *App) {
+					a.NewRunner = func(*App) engine.EnvRunner { return rr }
+					a.Interactive = func() bool { return true }
+					a.PromptIn = exportconfigReadCounter{Reader: strings.NewReader("y\n"), n: &reads}
+				})
+			})
+			if err != nil {
+				t.Fatalf("err = %v, want the standalone skip", err)
+			}
+			if !strings.Contains(stderr, "[SKIP] assert-leader is HA-only") {
+				t.Errorf("stderr = %q, want the skip line", stderr)
+			}
+			if len(rr.calls) != 0 || reads != 0 {
+				t.Errorf("standalone reached the runner or the prompt (reads %d):\n%s", reads, rr.dump())
+			}
+		})
+	}
+}
+
+// TestAssertLeaderOnKubernetesTouchesOnlyThePrimaryPod: on Kubernetes the target is not a
+// choice. Whether it asserts or refuses, every call goes to the primary pod, the backup
+// and the monitor are never touched -- no revert-activity, no SEMP -- and nothing asks.
+func TestAssertLeaderOnKubernetesTouchesOnlyThePrimaryPod(t *testing.T) {
+	for _, tc := range []struct {
+		name, showRD string
+		wantErr      bool
+	}{
+		{"active primary", healthyShowRD, false},
+		{"standby primary", standbyShowRD, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := &opRunner{output: func(c opCall) []byte {
+				switch {
+				case opArgvMatch(c, ".show-rd.cli"):
+					return []byte(tc.showRD)
+				case opArgvMatch(c, "solace-util-cli-assert-leader"):
+					return []byte("Sync Complete\n")
+				}
+				return nil
+			}}
+			reads := 0
+			_, err := runRootWith(t, withEnv("broker", "perform", "assert-leader", "--platform", "kubernetes"),
+				func(a *App) {
+					a.NewRunner = func(*App) engine.EnvRunner { return rr }
+					a.Interactive = func() bool { return true }
+					a.PromptIn = exportconfigReadCounter{Reader: strings.NewReader("y\n"), n: &reads}
+				})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tc.wantErr)
+			}
+			if got := rr.callCount("dev-broker-pubsubplus-p-0"); got == 0 || got != len(rr.calls) {
+				t.Errorf("%d of %d calls named the primary pod, want all of them:\n%s", got, len(rr.calls), rr.dump())
+			}
+			for _, never := range []string{"pubsubplus-b-0", "pubsubplus-m-0", "revert-activity", "curl"} {
+				if rr.hasCall(never) {
+					t.Errorf("a call carried %q:\n%s", never, rr.dump())
+				}
+			}
+			showReads := 0
+			for _, c := range rr.calls {
+				if c.method == "Output" && opArgvMatch(c, ".show-rd.cli") {
+					showReads++
+				}
+			}
+			if showReads != 1 {
+				t.Errorf("show redundancy was read %d times, want exactly once", showReads)
+			}
+			if got := rr.hasCall("solace-util-cli-assert-leader"); got == tc.wantErr {
+				t.Errorf("asserted = %v, want %v", got, !tc.wantErr)
+			}
+			if reads != 0 {
+				t.Errorf("Kubernetes read the prompt source %d times; it never asks", reads)
+			}
+		})
+	}
+}
+
 // TestContainerRoleDetectsFromHostname covers M1. `config.ParseRole("")` returns
 // Primary whatever the redundancy setting is, so omitting the role on an HA
 // BACKUP host used to deploy a second PRIMARY into the group -- silently, and
@@ -2421,6 +2948,19 @@ func TestContainerRoleDetectsFromHostname(t *testing.T) {
 			t.Fatal("a hostname matching no configured node must not silently deploy a second primary")
 		} else if !strings.Contains(err.Error(), "primary|backup|monitor") {
 			t.Errorf("error = %v, want it to name the roles that can be passed instead", err)
+		}
+	})
+
+	t.Run("the way out names the command that was run", func(t *testing.T) {
+		// The hint is the next command line to type, so it has to be THIS command's: a
+		// deploy hint on assert-leader would send the operator off to re-deploy.
+		a := appOn(t, ha, "somewhere-else")
+		_, err := detectContainerRole(a, "", true, "broker perform assert-leader")
+		if err == nil || !strings.Contains(err.Error(), "`broker perform assert-leader --pod primary|backup|monitor`") {
+			t.Fatalf("error = %v, want the hint to name `broker perform assert-leader --pod ...`", err)
+		}
+		if strings.Contains(err.Error(), "broker deploy") {
+			t.Errorf("error = %v, want no deploy hint on another command", err)
 		}
 	})
 

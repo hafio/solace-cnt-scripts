@@ -67,7 +67,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-87 test files, 1460 test functions. Three of those are not tests. Two are os/exec
+87 test files, 1458 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -79,8 +79,8 @@ launched from.
 | Package | Files | Tests |
 | --- | --- | --- |
 | internal/k8s | 20 | 231 |
-| internal/broker | 22 | 430 |
-| internal/cli | 12 | 203 |
+| internal/broker | 22 | 421 |
+| internal/cli | 12 | 210 |
 | internal/config | 16 | 240 |
 | internal/container | 8 | 196 |
 | internal/convert | 1 | 40 |
@@ -90,14 +90,25 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **87** | **1460** |
+| **Total** | **87** | **1458** |
 
 
 ## Coverage
 
-Last recorded run, from `scripts/logs/cov.log` (2026-09-28), total **93.1%**. Re-run `cov`
+Last recorded run, from `scripts/logs/cov.log` (2026-10-02), total **93.3%**. Re-run `cov`
 after any change; these figures go stale the moment tests move, and the previous total is
 the floor the next run has to hold.
+
+**93.1% -> 93.3%, and `internal/cli` 83.6% -> 85.3%, from assert-leader's backup question
+and the script-name rule.** Every new branch arrived with its test: the backup-host prompt
+in each of its answers, the standby backup that fails without a question, the monitor
+refusal, the way-out hint naming the command, and every refusal of `resolveScriptPath` --
+which also gave `shell-script` its first coverage on any platform. `internal/broker`
+92.2% -> 92.1% is a deletion rather than a regression: `LeaderLocal`, the old Leader's
+revert-and-poll path, `revertActivityScript` and `showRedundancyDetailScript` were fully
+covered and went with their tests, and the new `ValidScriptName` is reached only from the
+cli tests, as `ValidVPNName` is. Three commits landed between the 2026-09-28 record and this
+run without refreshing it, so not every 0.1 point is this change's.
 
 **92.9% held when `cov` stopped racing.** `cov` now runs without `-race` and with
 `-covermode=count` instead of `atomic`, and every per-package figure came out identical,
@@ -274,8 +285,8 @@ path that actually runs.
 | internal/config | 96.7% |
 | internal/container | 95.6% |
 | internal/k8s | 93.3% |
-| internal/broker | 92.2% |
-| internal/cli | 83.6% |
+| internal/broker | 92.1% |
+| internal/cli | 85.3% |
 | internal/examples | 90.0% |
 | internal/engine | see below |
 
@@ -593,10 +604,10 @@ and the keys deliberately exempt from it.
 | `TestExpandTilde` | `expandTilde` directly, over an injected home-directory func: bare `~`, `~/...`, `~\...`, a non-tilde value left untouched, an embedded tilde (8.3 short name) left untouched, `~user/...` refused by name, an unresolvable home directory refused, and an expanded value containing whitespace refused (the real-world `C:\Users\John Smith` case) |
 | `TestIsAbsHostPath` | The question asked for both operating systems at once, which is the point -- `filepath.IsAbs` alone answers only for the machine running the test, so one env file would be judged differently depending on where it was loaded |
 | `TestBaseNameSplitsOnBothSeparators` | The cross-platform agreement test. The value becomes an in-broker filename AND a Secret data key, so two answers for one env-file name two different objects rather than differing cosmetically |
-| `TestHasPathSeparator` | The name-or-path question a bare CLI/shell script argument rests on: a bare name resolves under `broker.cliScriptsDir`, a path is used as given |
+| `TestHasPathSeparator` | The name-or-path question a CLI/shell script argument rests on: a bare name resolves under `broker.cliScriptsDir`, and a separator of either kind marks a path, which `cli-script`/`shell-script` refuse |
 | `TestValidateHostPathsChecksEveryPlatformsFields` | The gate fires for every field it covers, on every platform. It uses a character the path charset refuses (`$`) so a failure can only have come from `CheckHostPath`, and sets one field at a time so a message naming the wrong field is caught rather than masked by a neighbour. Covers `broker.domainCerts.dirs[0]` and `.files[ca]` alongside the renamed `cliScriptsDir`/`hostDiagnosticDir` |
 | `TestValidateHostPathsMatchesTheRebaseList` | The drift test between the two halves of the host-path story: a rebased field must also be gated. The reverse is allowed and deliberate -- `podman.quadletDir` is gated but never rebased, because the unit has to live where systemd scans |
-| `TestRebaseResolvesAgainstTheEnvFileDirectory` | The join itself: relative values move, absolute ones do not. Covers `broker.domainCerts.dirs[].path` and `.files{}` (a map, so its own write-back loop) alongside the renamed folder fields |
+| `TestRebaseResolvesAgainstTheEnvFileDirectory` | The join itself: relative values move, absolute ones do not. Covers `broker.domainCerts.dirs[].path` and `.files{}` (a map, so its own write-back loop) alongside the renamed folder fields, including `broker.cliScriptsDir` -- the only folder the script commands read, so where a relative value lands is their whole rule |
 | `TestRebaseIsANoOpWithoutABaseDir` | The property `internal/convert` and every hand-built `Config` depend on -- `ApplyDefaults` and `Validate` are called directly, with no path to derive a base from, and those paths behave exactly as before |
 | `TestQuadletDirAndDataDirAreNotRebased` | The two deliberate exclusions, each for its own reason: the unit must live where systemd scans, and the data dir is what a recursive delete points at |
 | `TestPodmanBaseDirIsOptionalButAbsolute` | `podman.baseDir` no longer receives anything -- the certificate rides podman's secret store -- so an unset value validates. A SET one is still refused when relative, naming the key and why: deploy and remove delete the legacy bundle under it, and a relative value would aim that delete at the working directory. Docker never polices it |
@@ -740,7 +751,7 @@ without a live broker;
 fixtures stand in for a captured `show current-config` transcript; and
 `exportconfigReadCounter` wraps `App.PromptIn` to prove a confirmation prompt was never
 actually read, not merely that the command did not block.
-203 tests across 12 files.
+210 tests across 12 files.
 
 Because the platform is a flag rather than the first word of a command, the
 invocations here name it explicitly (`--platform docker`) rather than relying on
@@ -761,13 +772,12 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 | `TestTreeStructure` | A representative set of command paths exists in the one unified tree, covering a top-level leaf, a group's child, and each applicability class |
 | `TestEveryRunnableCommandIsWired` | The wiring that replaced the two `PersistentPreRunE` hooks: every command with a `RunE` (bar `convert`, `examples`, `version`, `completion`) carries the shared pre-run and the `--allow-command` flag. Missing either is invisible until that one command is run, so it is checked structurally |
 | `TestGroupCommandsPrintHelpAndDoNothing` | The no-implicit-actions rule: a verb that owns objects (`check`, `smoke`, `prepare`, `deploy`, `config`, `start`, `stop`, `restart`, `status`, `logs`, `copy`, `generate`, `remove`, and `config`'s own `apply`/`delete`/`disable`) carries no `RunE`, so running it bare prints its own help and touches nothing -- proven by succeeding with no `--env` at all, since a runnable leaf would instead fail resolving the missing default env file |
-| `TestFlagsRegistered` | Per-command flags are registered where expected: `--restart` and `--pod` on `broker deploy`; `--delete-data`/`--no-prompt` on `broker remove`; `--delete-crd`/`--no-prompt` on `operator remove`; `--days` on `broker perform gather-diagnostics`; `--pod` on `broker cli`, `broker perform cli-script` and `broker perform shell-script`; `--pod` on `broker copy from`; `--pod`/`--dir` on `broker copy into`; `--all`/`--detail`/`--pod` on `broker status`; `--detail` on `operator status`; `--out`/`--no-prompt` on `examples`, `broker generate`, `operator generate` and `convert` -- every command whose output is an artifact you keep takes the same pair; `--apply`/`--remove`/`--no-prompt` on `broker configure server-certs` and `broker configure product-keys`, the two `configure` leaves with an outage on the other side of their removal (TLS down, and an unlicensed broker) and therefore the two that ask |
+| `TestFlagsRegistered` | Per-command flags are registered where expected: `--restart` and `--pod` on `broker deploy`; `--delete-data`/`--no-prompt` on `broker remove`; `--delete-crd`/`--no-prompt` on `operator remove`; `--days` on `broker perform gather-diagnostics`; `--pod`/`--no-prompt` on `broker perform assert-leader` (the silencer for the backup-host question); `--pod` on `broker cli`, `broker perform cli-script` and `broker perform shell-script`; `--pod` on `broker copy from`; `--pod`/`--dir` on `broker copy into`; `--all`/`--detail`/`--pod` on `broker status`; `--detail` on `operator status`; `--out`/`--no-prompt` on `examples`, `broker generate`, `operator generate` and `convert` -- every command whose output is an artifact you keep takes the same pair; `--apply`/`--remove`/`--no-prompt` on `broker configure server-certs` and `broker configure product-keys`, the two `configure` leaves with an outage on the other side of their removal (TLS down, and an unlicensed broker) and therefore the two that ask |
 | `TestHelpNoConfig` | `--help` short-circuits before config load, so no env file is needed |
 | `TestGenerateWired` | `generate`'s leaves, none of which contact the cluster or the container engine: `broker generate` renders what `broker deploy` would apply on EITHER family (the CR's `apiVersion:` on kubernetes, `services:`/`[Unit]` on docker/podman), plus `broker generate` on both and `operator generate` on kubernetes. A plain `runRoot` with no echo seam is enough since nothing here executes |
 | `TestCtrWiredDryRun` | Every container command safe to run against the HA sample drives clean over the echo seam, echoing the expected runtime/systemctl/mkdir command |
-| `TestCtrRoleGuards` | Primary-only HA guards: leader and redundancy both reject backup and monitor hosts, bad roles error, and standalone self-skips -- all before any poll or SEMP call |
-| `TestCtrConfigDryRun` | Container config steps run clean on a standalone env; cert/product-key-gated steps self-skip |
-| `TestCtrExecCLIPathSeparator` | `opCtrExecCLI`'s used-as-is branch: a `cli --input` file argument containing a path separator is used as-is, not joined under the CLI scripts folder |
+| `TestCtrRoleGuards` | The HA guards under `broker perform`: redundancy-test rejects backup and monitor hosts, assert-leader refuses the monitor as an invalid operation (a backup host is asked instead -- see `TestAssertLeaderAsksBeforeActingFromABackup`), bad roles error, and standalone self-skips -- all before any poll or SEMP call |
+| `TestCtrConfigDryRun` | Container config steps run clean on a standalone env; cert/product-key-gated steps self-skip. The cli-script row's file is written into the env's own `cli` folder first (`writeCLIScript`), the only place the command reads |
 | `TestRemoveServerCertsOverTheCLI` | The direction that was a loud placeholder until `no ssl server-certificate` was confirmed. Three properties, each one a reason it was held back: `--no-prompt` runs the confirmed form; an interactive `n` changes nothing; and a run with no terminal and no `--no-prompt` keeps the certificate rather than failing. It asks at all because removing the certificate a broker is presenting takes TLS down immediately |
 | `TestRemoveProductKeysOverTheCLI` | The last direction that was a placeholder. `--no-prompt` revokes every configured key; an interactive `n` issues nothing; and an env file with no `broker.productKeys` is refused rather than reported as done. It asks at all because revoking every key can leave the broker UNLICENSED -- an outage whose cause points nowhere near the command |
 | `TestRemoveServerCertsRefusedOnASecretManagedDeployment` | With `kubernetes.tlsServerSecret` set the operator mounts the certificate and would reconcile it straight back, so a CLI removal would report success over a broker that still presents it. The refusal names the Secret, the key to clear and the reconcile that would undo it -- "not supported here" would leave an operator with no next move. It must NOT tell the operator to delete that Secret by hand: it is not this env file's |
@@ -777,14 +787,17 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 | `TestCtrDiagnosticsDryRun` | Container `diagnostics` echoes its node-local gather/download sequence over the echo seam (isolated because it creates a diag dir) |
 | `TestCtrRoleArgCount` | Role-taking commands reject a second positional argument |
 | `TestCtrRoleHelp` | Role-taking commands expose `--help` without loading an env |
-| `TestK8sWiredDryRun` | Every k8s command safe to run against the HA sample drives clean over the echo seam, with `+ kubectl` echoed on the acting paths and absent on the skip paths |
+| `TestK8sWiredDryRun` | Every k8s command safe to run against the HA sample drives clean over the echo seam, with `+ kubectl` echoed on the acting paths and absent on the skip paths. cli-script is not here: the sample's `env/cli` does not exist, so its wiring lives in `TestCLICommand` and `TestScriptCommandsUploadFromTheScriptsDir` |
 | `TestK8sStandaloneDryRun` | Redundancy-branching commands on a standalone env: the HA-only `broker perform assert-leader`/`broker perform redundancy-test` self-skip, while `broker deploy` runs clean |
 | `TestDeployBrokerDoesNotApplyOperator` | `broker deploy` never installs the operator: it is cluster-scoped and shared, so one env file reaching for it would silently re-apply a controller other namespaces depend on |
-| `TestDeployDoesNotAssertLeader` | The inverse of a property `deploy all` had. Asserting the config-sync leader reverts activity on the mate, which changes redundancy state, and a deploy has no business making that change unasked -- it is `broker perform assert-leader` now |
+| `TestDeployDoesNotAssertLeader` | The inverse of a property `deploy all` had. Asserting the config-sync leader overwrites the mate's router and message-VPN configuration with this node's, and a deploy has no business making that change unasked -- it is `broker perform assert-leader` now. The canned `show redundancy` is a Local Active primary, so a deploy that regressed into asserting would reach the assert and trip the check rather than stop at Leader's refusal |
 | `TestDeployNeverLabelsNodes` | A deploy touches no node. It used to be true because `deploy all` deliberately left the interactive picker out; it is now true because nothing in the tool labels nodes at all. The terminal is made interactive on purpose here, since that is what the old bug looked like |
 | `TestCheckDeployWarnsWhenOperatorAbsent` | `opK8sCheck`'s operator probe: `validate` is read-only, so a missing operator is reported as a stderr warning rather than failing the check itself |
 | `TestStartStopRestartBroker` | The day-2 `start`/`stop`/`broker restart` verbs on both platform families: Kubernetes scales the statefulset(s) via a kubectl echo, containers start/stop/restart the container in place via a docker echo |
-| `TestCLICommand` | `cli` has two shapes distinguished by a flag: bare, it opens an interactive session; with `--input`, it uploads and runs a script instead. Two H2 regression subtests pin `--pod` steering EITHER shape onto the named pod: `--input --pod backup` must not fall back to the primary (the old bug, where `[role]` and `--pod` were two disconnected branches), and bare `--pod backup` opens the session against that pod |
+| `TestCLICommand` | The two ways into the broker's CLI: `broker cli` opens an interactive session, `broker perform cli-script` uploads and runs a script (once one command distinguished by a retired `--input` flag). Two H2 regression subtests pin `--pod` steering EITHER onto the named pod: `cli-script --pod backup` must not fall back to the primary (the old bug, where `[role]` and `--pod` were two disconnected branches), and bare `--pod backup` opens the session against that pod. The script subtests run against a temp env holding the file in its `cli` folder |
+| `TestResolveScriptPath` | The one rule behind both script commands, called directly for each verb: the operand is a bare file name in `broker.cliScriptsDir` and nothing else, and the file found is announced. Refused, each as a usage error naming the command: an empty name, every path shape (`./x`, `sub/x`, `../x`, an absolute path to the very file, `.\x`, `C:\x`), a name the folder lacks (naming it, and `errors.Is` `os.ErrNotExist`), a missing folder (said as such), `.`, `..` and a directory, a name `broker.ValidScriptName` refuses, a stat that fails for another reason, and an empty `broker.cliScriptsDir`. A file present only in the working directory is never found, with the folder set or unset |
+| `TestScriptCommandsUploadFromTheScriptsDir` | Both script commands through cobra on a Kubernetes pod (including `--pod backup`) and a docker host, over the echo seam: the exact `cp` argv uploads the file from `broker.cliScriptsDir`, and the run follows on the right pod. The first end-to-end coverage `shell-script` has had on any platform |
+| `TestScriptCommandsRefuseBeforeAnythingRuns` | Both script commands on Kubernetes and docker refuse, as exit 2 with empty stdout (nothing reached the runner): a path, `./name` and `.\name` of a file the folder holds, its absolute path, a name only the working directory holds (naming the folder it looked in), a name the folder lacks, an empty name, and on Kubernetes an unknown `--pod` |
 | `TestStatusBrokerFlags` | How `--all` and `--detail` compose on `broker status`: they widen the report along independent axes (every broker in the cluster vs. this env file's one; the static description vs. the running inspection) rather than one replacing the other, on both kubernetes and a container platform |
 | `TestRemoveBrokerLayerContract` | The retained-layer contract on `broker remove`: persistent data is kept by default, `--no-prompt` proceeds while still keeping it, `--delete-data` deletes it, and a non-interactive run keeps it. Losing data always takes an explicit `--delete-data`, whatever else is on the command line |
 | `TestRemoveOperatorLayerContract` | Mirrors `TestRemoveBrokerLayerContract` for the operator's CRDs: kept by default, since deleting them cascades to every broker in the cluster, and deleted only when `--delete-crd` names them |
@@ -839,7 +852,11 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 | `TestDeployRefusesAnOperatorPasswordOverKeptData` | The deploy guard runs FIRST: with no admin Secret named and an earlier broker's data PVC present, `broker deploy` is refused naming the PVC and nothing is applied |
 | `TestRemoveBrokerSaysWhereAnOperatorPasswordLives` | With no admin Secret named, `broker remove` warns that the password is only in `<kubernetes.name>-pubsubplus-admin-creds`, with the configured cluster command to print it and `semp.adminPass` as where to put it; when the live CR still names an admin Secret the env file dropped, the warning names that Secret and how to keep using it instead; with a Secret this tool built there is no warning |
 | `TestOpCtrVerifyRedundancyRunsCoordinated` | When this host is the primary, `opCtrVerifyRedundancy` actually calls `RedundancyCoordinated` instead of only ever hitting the skip/reject arms `TestCtrRoleGuards` already covers -- driven over a fake Runner seeded with an active-but-unhealthy `show redundancy` transcript so the health check fails immediately, before any poll loop or mate SEMP call |
-| `TestContainerRoleDetectsFromHostname` | `containerRole` (how `broker deploy` and `broker generate` resolve which node THIS host is) over the injected `App.Hostname` seam. An omitted `--pod` in HA is detected from the hostname against `redundancy.*` and announced on stderr; an explicit `--pod` still wins; an unrecognised hostname fails loud naming `primary\|backup\|monitor` as the way out (closing the old silent-second-primary bug, since `config.ParseRole("")` alone always returned Primary); standalone keeps defaulting to primary with no detection announced. An explicit `--pod` is also CHECKED against what the host looks like: disagreement WARNS and proceeds (never prompts -- a three-host scripted deploy must not stall), agreement and an undetectable host both stay silent, since undetectable is the very case `--pod` exists for |
+| `TestAssertLeaderAsksBeforeActingFromABackup` | The docker/podman question, on both platforms through `runLeader`. On a backup host that holds activity: `y` asserts, `n` declines silently, no answer refuses naming `--no-prompt`, and `--no-prompt` asserts without reading stdin (the warning still prints). A standby backup fails WITHOUT a question; `--pod primary` on a host that looks like the backup still asks, as does `--pod backup` on the primary host. Every case reads `show redundancy` exactly once |
+| `TestAssertLeaderPrimaryAndMonitorNeverAsk` | On both container platforms: the primary asserts without reading stdin; a standby primary fails (exit 1) with the revert-activity remedy and the transcript on stdout; the monitor host, and `--pod monitor` on the backup host, are an invalid operation with zero runner calls; an unrecognised host names `broker perform assert-leader --pod ...` as the way out |
+| `TestAssertLeaderStandaloneSkipsBeforeAnyPrompt` | Standalone is decided before `--pod` is parsed: `--pod backup` and `--pod bogus` both just skip, with no runner call and no prompt read |
+| `TestAssertLeaderOnKubernetesTouchesOnlyThePrimaryPod` | On Kubernetes, asserting or refusing, every call names the primary pod -- never the backup or monitor pod, never a revert-activity or SEMP call -- `show redundancy` is read once, and nothing reads the prompt |
+| `TestContainerRoleDetectsFromHostname` | `containerRole` (how `broker deploy` and `broker generate` resolve which node THIS host is) over the injected `App.Hostname` seam. An omitted `--pod` in HA is detected from the hostname against `redundancy.*` and announced on stderr; an explicit `--pod` still wins; an unrecognised hostname fails loud naming `primary\|backup\|monitor` as the way out (closing the old silent-second-primary bug, since `config.ParseRole("")` alone always returned Primary); standalone keeps defaulting to primary with no detection announced; the way-out hint names the command that was run (`broker perform assert-leader --pod ...`, not `broker deploy`). An explicit `--pod` is also CHECKED against what the host looks like: disagreement WARNS and proceeds (never prompts -- a three-host scripted deploy must not stall), agreement and an undetectable host both stay silent, since undetectable is the very case `--pod` exists for |
 | `TestStandaloneRouternameFallsBackToTheHost` | The load-time fill (`App.fillStandaloneNodeName`) end to end: a standalone container env file naming no routername renders an artifact whose `hostname` AND `routername` are the HOST's name, announced on stderr. Through the real command, because the point of filling at load is that every reader agrees -- the artifact here, the check report and the DNS check elsewhere, all off one value |
 | `TestConfiguredRouternameSurvivesTheFallback` | The other half: a configured routername is never overwritten by the host's name |
 | `TestK8sSmokeRedundancyUnhealthy` | `broker perform redundancy-test` fails on its first check rather than polling: over the echo seam, `engine.Echo`'s empty `show redundancy` output makes `primaryRedundancyUp` false, so `opK8sVerifyRedundancy` returns the redundancy-unhealthy error before any SEMP login |
@@ -918,7 +935,7 @@ the destructive-confirmation tests use.
 | `TestPlatformFlagRejectsUndeclaredSection` | Naming a platform the file does not describe is refused, naming both what was asked for and what the file declares -- the alternative is deploying from defaults nobody wrote down |
 | `TestPlatformFlagRejectsUnknownValue` | Keeps `k8s` and `k8` out, along with other near-misses (`swarm`) |
 | `TestUnsupportedCommandFailsLoud` | The other half of the one-tree decision: since the tree shows every command everywhere, the refusal is what tells an operator a command does not apply -- and it names where it does apply, so the message is not a dead end. Covers both directions (kubernetes-only commands on docker, container-only on kubernetes) |
-| `TestScopedFlagFailsLoud` | `--pod` and `--previous` are refused where they mean nothing rather than accepted and ignored -- a `--previous` that did nothing would read as "no earlier run". `--restart` left the table when it came to mean something on Kubernetes too (`TestK8sDeployRestartsForARenewedCertificate`) |
+| `TestScopedFlagFailsLoud` | `--pod` and `--previous` are refused where they mean nothing rather than accepted and ignored -- a `--previous` that did nothing would read as "no earlier run" -- and so are `--pod` and `--no-prompt` on Kubernetes `assert-leader`, which always acts on the primary pod and never asks. `--restart` left the table when it came to mean something on Kubernetes too (`TestK8sDeployRestartsForARenewedCertificate`) |
 | `TestUnusableRoleFailsLoud` | A role that was TYPED must never be silently dropped. No command takes a `[role]` positional any more, so every case is the one migration error (`noRolePositional`), on both platforms -- `broker logs backup`, `broker cli backup`, `broker shell monitor`, `broker status backup`, `broker restart backup`, `broker deploy backup`. The two refusal kinds collapsed into one when `rejectRole` went with the positional; the platform half of the guard is now `--pod` being scoped per command, which `TestScopedFlagFailsLoud` covers |
 | `TestRolePositionalTeachesPodFlag` | The likelier half of the H2 migration: an operator on KUBERNETES typing the OLD documented spelling (`shell backup`, `broker logs monitor`, `cli primary`, `broker status backup`, `broker restart backup`, `broker perform semp-login-check backup`) gets an error naming both `--pod` and the role typed, rather than cobra's bare "unknown command" hiding the fact that it merely moved. A `shell typo` subtest pins the other side: a word that is not a role keeps cobra's own wording and never offers the `--pod` hint, since a typo is not a migration |
 | `TestPlatformIsAnnouncedInThePreamble` | The platform is inferred rather than typed by the operator, so it is stated in the preamble -- otherwise the one fact the operator does not type themselves would also be the one they cannot see |
@@ -985,7 +1002,8 @@ still runs them.
 | `TestPodFlagCompletesRoles` | The role completer, now the only one: `--pod` offers `primary`/`backup`/`monitor` and not filenames, table-driven over every command that takes it -- `copy from`/`copy into` (which always did), plus the six the flag moved onto: `cli`, `shell`, `broker logs`, `broker perform semp-login-check`, `broker status`, `broker restart`. `TestRoleArgsComplete` is gone with the positional it completed: one flag, one completer, registered next to where the flag is declared |
 | `TestPlatformFlagCompletes` | The root `--platform` flag, and `convert` inheriting the same one, offer exactly the three canonical platform names. The empty detect value is left out (omitting the flag is how you ask for it); so are `kube`/`dk`/`pm` -- the abbreviations save typing something you already know, which is what a completion does anyway, and offering both would put two names for one platform in front of the user -- and so are `k8s` and `k8` |
 | `TestDirFlagCompletesDirectories` | `--dir` asks the shell to filter to directories |
-| `TestNoArgsLeafOffersNoFiles` | A command built by `leaf` offers nothing, stopping cobra's filename fallback across the tree. The file-path commands (`broker copy from`/`into`, `broker perform cli-script`/`shell-script`, `convert`) are excluded, since a path is exactly what they take |
+| `TestNoArgsLeafOffersNoFiles` | A command built by `leaf` offers nothing, stopping cobra's filename fallback across the tree. The file-path commands (`broker copy from`/`into`, `convert`) are excluded, since a path is exactly what they take; `cli-script`/`shell-script` take a name and have their own test (`TestScriptCommandsOfferNoFiles`) |
+| `TestScriptCommandsOfferNoFiles` | `broker perform cli-script` and `shell-script` offer nothing and the no-file directive: their operand is a name in `broker.cliScriptsDir`, which completion cannot read, and the shell's working-directory listing would coach the refused form |
 | `TestAllowCommandOffersNoFiles` | `--allow-command` offers no files: the value is a bare binary name, and paths are what its own help text warns against |
 | `TestFlagCompletionsRegistered` | The drift gate: every flag that should have a completion function still has one, since a renamed flag silently reverts to filename completion at a TAB press and no other test would notice |
 | `TestCompletionHelpKeepsTheLoadingInstructions` | The one thing this command exists to tell you, which has gone missing before: a completion script is useless without the line that loads it, and that line differs per shell in a way nobody remembers. Pins that each shell shows BOTH the current-shell one-liner and the permanent form, that each actually shows a command rather than just promising one (the powershell help said "source it from your profile" for a while without giving the line), and that the parent lists the permanent form for all four so one help screen is enough. No other completion test would notice: they drive the generator and check the SCRIPT, which is unaffected by the help around it |
@@ -1089,7 +1107,7 @@ hand: the test binary re-executes itself and exits with the status the environme
 
 | Test | What it covers |
 | --- | --- |
-| `TestExitCodeContract` | Real invocations through the tree, each asserting the code it produces. Classifying an error handed straight to `ExitCode` would prove only that the switch works; these prove the markers are in the paths an operator reaches. The documented gap is pinned too, deliberately: a mistyped TOP-LEVEL command exits 1 because cobra produces that error before any interception point, so the day someone finds a clean fix, this is the case that says the fix worked |
+| `TestExitCodeContract` | Real invocations through the tree, each asserting the code it produces. Classifying an error handed straight to `ExitCode` would prove only that the switch works; these prove the markers are in the paths an operator reaches. The documented gap is pinned too, deliberately: a mistyped TOP-LEVEL command exits 1 because cobra produces that error before any interception point, so the day someone finds a clean fix, this is the case that says the fix worked. A script named by a path, or one `broker.cliScriptsDir` does not hold, is 2 |
 | `TestEveryArgValidatorIsAUsageError` | The drift guard behind `markUsageArgs`. The `Args` declarations are spread across four files, so this walks the BUILT tree rather than trusting the next one added was remembered. Each validator is offered nothing and then far too much; whichever it refuses must be a usage error, and one that accepts both is reported -- not because the command is wrong, but because the test has stopped saying anything about it |
 | `TestRootKeepsCobrasUnknownCommandError` | The reason for the documented gap. Cobra produces its unknown-command error inside `Find` only while `root.Args` is nil; give root a validator and the error is never produced, and a non-runnable root with no error prints help and exits 0 -- so a mistyped command would report success |
 | `TestChildExitStatusIsScopedToInteractiveSessions` | The property that matters about the passthrough: one child error carrying one status becomes this tool's exit code from `broker shell` and does NOT from `broker logs`. Without the scoping every command would start reporting whatever kubectl or the engine exited with, which is neither documentable nor scriptable |
@@ -1158,7 +1176,7 @@ Broker CLI operations over an injected transport: script generation, config step
 state machines, the primary-driven container HA variants, the SEMP mate channel, and the
 config-export/import feature's block parser, marker layer, section classification, shutdown
 injection, verification diff, replay transformations and the generated apply
-driver, and the replication mate renderers and readers. 430 tests across 22 files.
+driver, and the replication mate renderers and readers. 421 tests across 22 files.
 
 `blocks_test.go`, `sections_test.go`, `inject_test.go`, `diff_test.go`, `annotate_test.go`
 and `importops_test.go` share one fixture: `testdata/currentconfig_sample.cli`, a
@@ -1280,14 +1298,15 @@ fixture itself.
 | `TestRemoveProductKeysScansTheOutput` | The property that matters most: revoking a key the broker does not hold is the kind of thing a CLI reports in prose and returns zero for, so without the `error`/`fail` scan the command would report success while the entitlement is still there |
 | `TestExecCLI` | A local script is uploaded under its base name and cleaned up afterwards |
 | `TestExecCLIRejectsBadName` | A base name of `..` is rejected before upload |
-| `TestExecCLIReportsRejectedLines` | L2: a script line the broker rejects does not stop the rest -- the whole script still runs, its output is still shown, and the uploaded script is still removed -- but ExecCLI now returns an error naming how many lines were rejected, without quoting the rejected line itself since a CLI transcript can carry passwords |
+| `TestExecCLIReportsRejectedLines` | L2: a script line the broker rejects fails the run -- under stop-on-error the broker stops at that line, which the transcript tail scan catches -- while the full output is still shown and the uploaded script still removed (the skeleton's cleanup trap). The error never quotes the rejected line, since a CLI transcript can carry passwords |
 | `TestLogin` | A 2xx SEMP response succeeds, and the password rides stdin, never the argv |
 | `TestLoginRefusesALineBreak` | The password may come from a cluster Secret that skipped config's checks, and a line break in a curl -K value starts a new directive: refused before anything is sent |
 | `TestLoginFailure` | A 401 reports failure without erroring |
 | `TestLoginNoResponse` | Empty output is reported as "no HTTP response" |
-| `TestLeaderStandaloneSkips` | Leader makes no calls in standalone mode |
-| `TestLeaderSuccess` | Activity is reverted on the backup, leadership asserted on the primary, sync reported |
-| `TestLeaderTimeout` | Redundancy that never recovers times out and dumps `show redundancy detail` |
+| `TestLeaderStandaloneSkips` | Leader makes no calls in standalone mode, for any role -- the skip comes before the monitor refusal |
+| `TestLeaderSuccess` | Exactly ONE `show redundancy` read, then the assert, both on the primary and nothing else (no revert-activity, no SEMP); the transcript is Local Active with redundancy DOWN, which the old health gate would have polled on, and only the last 12 lines of the assert are shown |
+| `TestLeaderSuccessOnBackup` | A backup that holds activity asserts too, with both calls on the backup (the docker/podman command has asked by then) |
+| `TestLeaderRefusesTheMonitor` | The monitor is an invalid operation, refused before any transport call |
 | `TestRedundancySuccess` | The full failover handshake walks its scripted primary and backup sequences to completion |
 | `TestRedundancyStandaloneSkips` | Redundancy makes no calls in standalone mode |
 | `TestDiagnostics` | The dest dir is created, the gather script matches, and both the configs zip and the diagnostics bundle are downloaded under their expected names |
@@ -1313,14 +1332,15 @@ Branch coverage for the paths the happy-path tests in `broker_test.go` cannot re
 | `TestRemoveCLIWarnsOnFailure` | Failed cleanup warns instead of erroring, and still issues `rm -f` for every path |
 | `TestFieldLabelWithoutColon` | A label line with no colon-space separator yields empty |
 | `TestLastLinesEqualCount` | `lastLines` when n equals the line count |
-| `TestExecCLIFailsOnErrorOutput` | L2: a rejected line fails the run once the script has finished, and the error wraps `ErrCLIRejected` exactly as `RunCLI`'s does -- both detect the same failure with the same scan, so `errors.Is` must not answer differently depending on the entry point. The separate `[WARN] errors detected` line went with it: the transcript is now shown and the error says more |
+| `TestExecCLIFailsOnErrorOutput` | L2: a rejected line fails the run, and the error wraps `ErrCLIRejected` exactly as `RunCLI`'s does -- both detect the same failure with the same scan, so `errors.Is` must not answer differently depending on the entry point. The separate `[WARN] errors detected` line went with it: the transcript is now shown and the error says more |
 | `TestExecCLIRunError` | A failed run errors, and cleanup is still attempted |
 | `TestServerCertBundleReadError` | Unreadable cert/key files error |
 | `TestServerCertCAReadError` | An unreadable CA file errors |
 | `TestDomainCertsAcceptsAPathWithSpaces` | The certificate value is a full host path, not an in-broker filename and not a CLI operand, so a path with a space (already gated by `config.CheckHostPath` at load) must be ACCEPTED here, not rejected |
 | `TestDiagnosticsTwoRolesNoBundle` | Output with no "Diagnostics saved" line pulls only the configs zip, once per role |
 | `TestDiagnosticsRunError` | A transport `Run` failure surfaces |
-| `TestLeaderPollCondError` | A failing `show redundancy` propagates, and the detail dump still runs |
+| `TestLeaderReadError` | A failing `show redundancy` read is returned as is -- no poll retries it, nothing is asserted or shown |
+| `TestLeaderNotLocalActive` | "Check once": a node that is not Local Active (a standby primary, a primary with no Activity line, a standby backup) is refused after ONE read, with the transcript shown and a remedy worded for that node, and nothing is asserted |
 | `TestRedundancyShowRDError` | The initial `show redundancy` error surfaces |
 | `TestRedundancyUnhealthyPrimary` | An unhealthy primary fails and its output is shown |
 | `TestRedundancyNeitherActive` | Neither node locally active is a loud failure |
@@ -1338,8 +1358,7 @@ Branch coverage for the paths the happy-path tests in `broker_test.go` cannot re
 | `TestExecCLIUploadFileError` | ExecCLI reports a failed upload by the script's basename and skips exec/cleanup entirely |
 | `TestRemoveDomainCertsRunCLIError` | RemoveDomainCerts fails loud on a rejected removal and skips the cleanup rm |
 | `TestLoginTransportError` | Login returns a wrapped transport error instead of writing a `[FAIL] Login` outcome as if it got an HTTP response |
-| `TestLeaderRevertActivityError` | Leader aborts before polling redundancy when the initial Backup revert-activity fails |
-| `TestLeaderAssertLeaderError` | Leader returns the assert-leader error after a healthy poll without showing partial output |
+| `TestLeaderAssertLeaderError` | Leader returns the assert-leader error after a Local Active read without showing partial output |
 | `TestRedundancyReleaseError` | Redundancy aborts immediately when releasing activity to the Backup fails, never querying the Backup |
 | `TestRedundancyBackupShowError` | Redundancy aborts when its own post-release Backup show-rd read fails, after releaseToBackup already succeeded |
 | `TestRedundancyRevertToPrimaryError` | Redundancy surfaces a revertToPrimary failure rather than declaring the drill successful |
@@ -1561,8 +1580,8 @@ Pins the generated broker CLI script text -- these strings are what the broker e
 
 | Test | What it covers |
 | --- | --- |
-| `TestFixedScripts` | The seven fixed scripts (show redundancy, detail, revert, release, no-release, show vpn, show vpn bare) match byte for byte |
-| `TestRevertActivityTrailingSpace` | The redundancy-test revert keeps its trailing space; the leader-path revert does not |
+| `TestFixedScripts` | The five fixed scripts (show redundancy, release, no-release, show vpn, show vpn bare) match byte for byte |
+| `TestRevertActivityTrailingSpace` | The redundancy-test revert keeps its trailing space |
 | `TestAssertLeaderScript` | Asserts leader for router and all VPNs, ending with the config-sync database show |
 | `TestServerCertScript` | The cert filename format plus the script's prefix, load line, and closing show |
 | `TestDomainCertsScriptSorted` | The caller's order is emitted as given (no internal sort any more), with the right prefix/suffix, and the `certificate file` operand is the CA NAME itself -- the upload destination is `certPath(name)`, so the name IS the in-broker filename the operand resolves against |
@@ -1672,7 +1691,7 @@ group working unchanged.
 | `TestBuildSwitchPlanRefusesAnUnknownActiveAt` | An `activeAt` naming neither site is caught here as well as at config load -- the plan is built from two site states a caller supplies, which could disagree with the file |
 | `TestBuildSwitchPlanRefusesOneSiteTwice` | Both sides reporting the same site is refused, since every "the other site" decision would otherwise be meaningless |
 | `TestSwitchPreflightHealthyPair` | The gate passes on a pair where both primaries hold activity and each broker names the other |
-| `TestSwitchPreflightRequiresThePrimaryActive` | A switch runs only when each site is on its own PRIMARY HA node. The replication role is config-synced, so this is not about where a write lands -- it is about not stacking a cross-site role change on top of a local failover, and it is the honest failure for the case that actually bites: when the backup is active BECAUSE the primary is down, the primary is the node this tool addresses, so the run would fail anyway |
+| `TestSwitchPreflightRequiresThePrimaryActive` | A switch runs only when each site is on its own PRIMARY HA node. The replication role is config-synced, so this is not about where a write lands -- it is about not stacking a cross-site role change on top of a local failover, and it is the honest failure for the case that actually bites: when the backup is active BECAUSE the primary is down, the primary is the node this tool addresses, so the run would fail anyway. The remedy names `redundancy revert-activity` and NOT `assert-leader`, which no longer reverts activity |
 | `TestSwitchPreflightStandalonePasses` | A broker with no HA group is not refused for failing to hold activity it cannot hold -- it is its own only node |
 | `TestSwitchPreflightRequiresMatchingVirtualRouterNames` | Each broker must name the OTHER site's declared `virtualRouterName` as its replication mate. A mismatch means the file names a site the broker has never heard of, `configure data-replication` has not been run since the block changed, or the tool is talking to a node whose virtual router is not the one the pair was built around |
 | `TestSwitchPreflightRunsBeforeAnyWrite` | Every refusal happens with the pair untouched, which is the whole reason these are a preflight rather than a step |
@@ -1701,9 +1720,11 @@ target's banner; `testdata/currentconfig_remove_default.cli` is a real, credenti
 
 ### verify_local_test.go
 
-The primary-driven HA operations the container platforms use: LocalRole detection,
-LeaderLocal (with its mate revert step), and RedundancyCoordinated -- the one-invocation
-failover exercise whose only cross-host touch is the SEMP revert-activity.
+Node-local role detection (LocalRole, DetectRole) and the primary-driven redundancy test the
+container platforms use, RedundancyCoordinated -- the one-invocation failover exercise whose
+only cross-host touch is the SEMP revert-activity. assert-leader touches only the node it
+asserts from on every platform, so its tests sit with the other Leader tests in broker_test.go
+and coverage_test.go.
 
 | Test | What it covers |
 | --- | --- |
@@ -1718,13 +1739,6 @@ failover exercise whose only cross-host touch is the SEMP revert-activity.
 | `TestDetectRoleAddrsError` | A failed interface read surfaces as its own error carrying the cause and the hostname, not as a bare "no match" that sends the operator to the node table |
 | `TestDefaultLocalAddrs` | The unseamed path returns BARE addresses: `net.InterfaceAddrs` yields CIDRs, and leaving the `/24` on would make every `addr` match fail silently |
 | `TestLocalAddrsFallsBackToTheDefault` | The seam's nil branch -- an `Ops` built without one reads the real machine, which is the production path |
-| `TestLeaderLocalStandaloneSkips` | No calls in standalone mode |
-| `TestLeaderLocalRejectsNonPrimary` | Backup and monitor hosts, and an explicit backup arg, are rejected before any upload |
-| `TestLeaderLocalSuccess` | On the primary, the mate is preflighted and reverted (two SEMP calls), leadership is asserted and sync reported |
-| `TestLeaderLocalRevertsMateFirst` | k8s Leader order: the mate revert POST precedes the first show-rd poll read |
-| `TestLeaderLocalMateUnreachableWarnsAndContinues` | An unreachable mate SEMP downgrades to a warning and skips the POST; assert-leader still runs |
-| `TestLeaderLocalMateRPCErrorFails` | A reachable mate rejecting the RPC is a real error, stopping before any poll |
-| `TestLeaderLocalTimeoutDumpsDetail` | Unrecovered redundancy times out and dumps the detail |
 | `TestRedundancyCoordinatedStandaloneSkips` | No calls in standalone mode |
 | `TestRedundancyCoordinatedRejectsNonPrimary` | Backup and monitor hosts, and an explicit backup arg, are rejected before any call |
 | `TestRedundancyCoordinatedBadRoleArg` | A bad explicit role argument propagates |
@@ -1744,9 +1758,6 @@ failover exercise whose only cross-host touch is the SEMP revert-activity.
 | `TestRedundancyCoordinatedUnreleasedTimeout` | An un-release that never converges times out without reverting the mate |
 | `TestLocalRoleDefaultHostname` | With the seam unset, the real `os.Hostname` is used and an off-table host fails loud |
 | `TestLocalRoleHostnameError` | LocalRole wraps and returns a Hostname read failure instead of matching a garbage host against the node table |
-| `TestLeaderLocalBadRoleArg` | LeaderLocal propagates an invalid explicit role arg before the primary-only guard runs, making no transport calls |
-| `TestLeaderLocalPollCondError` | LeaderLocal aborts on a mid-poll transport error while still dumping show-redundancy-detail, closing an asymmetry with the k8s Leader |
-| `TestLeaderLocalAssertLeaderError` | LeaderLocal returns the assert-leader error after a healthy poll without showing output |
 | `TestBackupActivityStateReadsTheMateColumn` | `backupActivityState` reads the `Activity Status` line for exactly "Mate Active"; local-active, standby, empty output, and the phrase appearing under an unrelated label all read false |
 | `TestShowRedundancyIsReadOnly` | The `showRD` read issues exactly one `show redundancy` CLI script on the named role and nothing else, since a probe calls it to decide whether a mutation is safe |
 
@@ -2443,7 +2454,7 @@ hard limits can bind.
 | `TestTransportUploadQuotesDest` | Single-quote escaping stops a metacharacter in a path breaking out of the redirect |
 | `TestTransportCopy` | `<runtime> cp` argv in both directions, container-name prefixed |
 | `TestTransportEchoHidesUploadBody` | End to end over Echo: the body shows as a byte count, never in the traced line, and the exec carries no `--` and names this script's own broker-side files. Not reached by `regen` (which runs six packages, not this one), so its k8s twin failed alone when the argv shape changed |
-| `TestTransportEchoHidesSEMPConfig` | End to end over Echo via LeaderLocal: the mate SEMP curl is echoed with its stdin as a byte count, never the admin password |
+| `TestTransportEchoHidesSEMPConfig` | End to end over Echo via `BackupSEMPPreflight` (redundancy-test's mate channel): the mate SEMP curl is echoed with its stdin as a byte count, never the admin password |
 
 ### inspect_test.go
 
@@ -2749,7 +2760,9 @@ new fake.
   so a fixture change is an edit to that asset followed by `regen`, never an edit here.
 - Tests needing a clean single-broker pass write their own minimal env to a temp file:
   `writeStandaloneEnv` (k8s-shaped) and `writeCtrStandaloneEnv` (container-shaped, needs a
-  `redundancy:` block) in `internal/cli/cli_test.go`. `writeRuntimeEnv`
+  `redundancy:` block) in `internal/cli/cli_test.go`. `writeCLIScript` puts a script in the
+  `cli` folder beside such an env file -- where Load rebases the default `broker.cliScriptsDir`
+  -- since the script commands read from nowhere else and the repo's `env/` has no `cli/`. `writeRuntimeEnv`
   (`internal/cli/allowcommand_test.go`) is the same idea parameterized by `kubernetes.command`, for
   driving one hostile or wrapped command through the whole CLI.
 - **`guardConfig`** (`internal/config/execguard_test.go`) is a config that validates cleanly
@@ -2796,7 +2809,8 @@ new fake.
 | internal/cli | `runRoot`, `capture`/`captureStdout`/`captureStderr` (cli_test.go) | Builds a fresh command tree per call and captures a standard stream through a pipe |
 | internal/cli | `runRootWith` (cli_test.go) | `runRoot` with a hook to configure the `App` before `Execute` -- how the confirm-prompt branches are driven deterministically instead of depending on the test process's own stdin. `runRoot` delegates to it with a nil hook, so it is unchanged for every existing test |
 | internal/cli | `opRunner` / `opCall` / `opFailOn` / `opFailOnCount` (cli_test.go) | A fake `engine.Runner` whose failure is targeted by argv substring (or by the Nth matching occurrence, for the repeated identical `apply`/`delete` calls in `broker deploy` and `broker remove`). Ported from internal/container's `capRunner`/`failOn`; this is what makes the orchestration-abort tests possible -- assert step N fails and step N+1 never ran. `Output` answers the k8s `auth can-i` preflight "yes" unless a test supplies its own `output`/`fail` for that call, so the op-level tests stay about the work they were written for |
-| internal/cli | `loadDirect`, `healthyShowRD` (cli_test.go) | Loads a config from an inline YAML body for tests that build an `App` directly with a non-Echo runner, and a canned `show redundancy` transcript that satisfies `broker.primaryRedundancyUp` so a poll succeeds on the first read |
+| internal/cli | `loadDirect`, `healthyShowRD`, `standbyShowRD` (cli_test.go) | Loads a config from an inline YAML body for tests that build an `App` directly with a non-Echo runner; `healthyShowRD` is a canned `show redundancy` of a healthy primary that holds activity (it satisfies `broker.primaryRedundancyUp` and reports Local Active), `standbyShowRD` the same node with its mate holding activity |
+| internal/cli | `runLeader` / `leaderRun` (cli_test.go) | Drives `broker perform assert-leader` through cobra over env/sample.yaml with an `opRunner` (Echo's empty `show redundancy` is never Local Active, so it cannot reach the assert), the `App.Hostname`/`LocalAddrs`/`Geteuid`/`Interactive`/`PromptIn` seams, and `exportconfigReadCounter` so a case can prove the question was never asked |
 | internal/cli | `writeK8sTLSEnv`, `tlsSecretDigest`, `isGetPod`/`isDeletePod` (cli_test.go) | A k8s env with a certificate pair on disk (the derived `dev-broker-tls` Secret), the digest the rendered Secret carries (read off `k8s.TLSSecret`, not recomputed), and the two pod calls a certificate restart turns on |
 | internal/cli | `bashEnv`, `writeBashEnv` (cli_test.go) | Minimal legacy env file for the convert command tests |
 | internal/cli | `replEnv`, `replApp`, `siteNamed` (replication_test.go) | A DR pair whose two sites are reached DIFFERENTLY -- one over its own cluster CLI, one over SEMP -- so a dispatch that ignored `via` fails on one site rather than passing on both |
@@ -2830,8 +2844,8 @@ Override them on the struct after construction:
 | `os.Stdin` (package `TestMain`) | an already-closed pipe | internal/cli -- set for the whole package so a test that reaches a prompt without `App.PromptIn` gets EOF instead of blocking on the console the suite was launched from. Tests needing a real answer swap `os.Stdin` themselves |
 | `App.kubeContext` | `""` (unresolved) | internal/cli -- the kubeconfig context `announceKubeContext` resolved at load, repeated by every destructive Kubernetes prompt (`k8sWhat`/`k8sContext`). A test sets it directly the same way it sets `Interactive`/`PromptIn`, since a test-supplied runner skips the real `config current-context` lookup |
 | `Ops.LocalAddrs` | `defaultLocalAddrs` (`net.InterfaceAddrs`) | internal/broker -- the address pass of `DetectRole`. `newTestOps` defaults it to an EMPTY set, so no test's "this host matches nothing" case depends on how the machine running the suite is numbered |
-| `App.LocalAddrs` | `nil` (`ctrOps` then leaves `Ops.LocalAddrs` at its own default) | internal/cli -- the same injection one level up, for the container role detection behind `broker deploy` and `broker generate` |
-| `App.Hostname` | `nil` (`ctrOps` then leaves `Ops.Hostname` at its own default, `os.Hostname`) | internal/cli -- same shape as `NewRunner`/`Interactive`/`PromptIn`: a test injects a fixed hostname so `containerRole` (the role detection behind `broker deploy` and `broker generate` on docker/podman) is testable without depending on the suite's own host being named after a broker node |
+| `App.LocalAddrs` | `nil` (`ctrOps` then leaves `Ops.LocalAddrs` at its own default) | internal/cli -- the same injection one level up, for the container role detection behind `broker deploy`, `broker generate` and `broker perform assert-leader` |
+| `App.Hostname` | `nil` (`ctrOps` then leaves `Ops.Hostname` at its own default, `os.Hostname`) | internal/cli -- same shape as `NewRunner`/`Interactive`/`PromptIn`: a test injects a fixed hostname so `containerRole` (the role detection behind `broker deploy`, `broker generate` and `broker perform assert-leader` on docker/podman) is testable without depending on the suite's own host being named after a broker node |
 | `engine.Runner` | `engine.Exec` | Everywhere -- swapped for `engine.Echo` (dry-run) or a capturing fake |
 | `Cluster.Log` / `Manager.Log` / `Ops.Log` | nil (discards) | The RAW progress line sink. It takes an already-formatted line and emits it verbatim: the `==> ` and `[TAG ] ` prefixes are added by the `internal/output` Sink the callee builds over it (`progress()`), so a test that captures this field sees exactly the line a terminal would. The CLI passes `lineSink()`; nil discards |
 | `Cluster.Out` / `Manager.Out` / `Ops.Out` | `os.Stdout` | The report sink -- sections, key/value blocks, tables and per-item outcome lines. Wrapped by `report()` |

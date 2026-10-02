@@ -3,9 +3,9 @@
 // deploys and operates one broker container per host (the analog of k8s.Cluster).
 // It ports the docker-podman/*.sh script family. Unlike k8s -- where one control
 // point drives every pod in a namespace -- a container host runs a single broker,
-// so the transport is node-local and ignores the role argument; the HA
-// coordination (leader, redundancy) runs from the primary host and reaches the
-// backup over SEMP instead (see broker's LeaderLocal/RedundancyCoordinated).
+// so the transport is node-local and ignores the role argument; the one HA
+// coordination that needs the backup, the redundancy test, runs from the primary
+// host and reaches it over SEMP instead (see broker's RedundancyCoordinated).
 package container
 
 import (

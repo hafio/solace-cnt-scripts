@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -314,9 +313,11 @@ func opK8sConfigDefaultUsers(a *App) error {
 	return k8sOps(a).DisableDefaultUsers(bg(), role)
 }
 
-// opK8sConfigLeader asserts the config-sync leader. It drives the whole redundancy group,
-// so it takes no --pod.
-func opK8sConfigLeader(a *App) error { return k8sOps(a).Leader(bg()) }
+// opK8sConfigLeader asserts the config-sync leader from the PRIMARY pod, always: the pod is
+// not a choice (--pod is refused on Kubernetes), and Ops.Leader refuses unless that pod
+// reports Local Active. The backup and the monitor are never touched, and nothing here asks
+// a question -- which is why --no-prompt is refused here too.
+func opK8sConfigLeader(a *App) error { return k8sOps(a).Leader(bg(), config.Primary) }
 
 // `config apply additional-users` is gone, and so is the broker-CLI op behind it.
 // admin.additionalUsers is applied declaratively now: k8s.AdditionalUsersSecret builds a
@@ -324,9 +325,6 @@ func opK8sConfigLeader(a *App) error { return k8sOps(a).Leader(bg()) }
 // the broker's first boot rather than being created afterwards by a command that was not
 // re-runnable. There is nothing left to wire here.
 
-// opK8sExecCLI uploads and runs a local Solace CLI script in the target pod. A bare
-// filename (no path separator) is resolved under the configured cliScripts folder; a
-// path is used as-is. The interactive file-picker menu of the bash 059 is not ported.
 // opK8sExportConfig captures the broker's configuration from the target pod.
 //
 // It takes a role rather than resolving one itself because it is wired through
@@ -340,8 +338,8 @@ func opK8sExportConfig(a *App, role config.Role) error {
 
 // opK8sImportConfig applies a captured configuration to the target pod.
 //
-// Unlike opK8sExecCLI the path is used exactly as given, with no
-// broker.cliScriptsDir resolution. cliScriptsDir holds scripts an operator
+// Unlike opK8sExecCLI, which takes only a name from broker.cliScriptsDir, the
+// path is used exactly as given. cliScriptsDir holds scripts an operator
 // maintains; this file is an artifact export-config just wrote, so resolving it
 // somewhere else would look for it where it is not.
 func opK8sImportConfig(a *App, file string) error {
@@ -352,44 +350,43 @@ func opK8sImportConfig(a *App, file string) error {
 	return runImport(a, k8sOps(a), role, file)
 }
 
+// opK8sExecCLI uploads a Solace CLI script from broker.cliScriptsDir to the target pod
+// and runs it there. The argument is a file NAME, never a path (resolveScriptPath). The
+// interactive file-picker menu of the bash 059 is not ported.
 func opK8sExecCLI(a *App, file string) error {
-	role, localPath, err := resolveScript(a, file, "CLI")
+	role, localPath, err := resolveScript(a, file, "cli-script")
 	if err != nil {
 		return err
 	}
 	return k8sOps(a).ExecCLI(bg(), role, localPath)
 }
 
-// opK8sExecShell uploads and runs a local shell script inside the target pod.
+// opK8sExecShell uploads a shell script from broker.cliScriptsDir to the target pod and
+// runs it there with bash.
 //
-// It resolves its filename exactly like opK8sExecCLI -- a bare name under
-// broker.cliScriptsDir, a path as given -- so an operator who keeps both kinds of
-// script in one place does not have to remember which command treats the folder
-// differently. What it runs is arbitrary code inside the broker container; the command's
-// help says so, and says that the output is shown in full.
+// It resolves its file exactly like opK8sExecCLI -- one folder, one rule, one helper --
+// so an operator who keeps both kinds of script in one place does not have to remember
+// which command treats the folder differently. What it runs is arbitrary code inside the
+// broker container; the command's help says so, and says that the output is shown in full.
 func opK8sExecShell(a *App, file string) error {
-	role, localPath, err := resolveScript(a, file, "shell")
+	role, localPath, err := resolveScript(a, file, "shell-script")
 	if err != nil {
 		return err
 	}
 	return k8sOps(a).ExecShellScript(bg(), role, localPath)
 }
 
-// resolveScript is the filename-and-role resolution both script runners share: a bare
-// filename resolves under broker.cliScriptsFolder, a path is used as given, and the pod
-// comes from --pod. One definition, so the two runners cannot resolve the same argument
-// to two different files.
-func resolveScript(a *App, file, kind string) (config.Role, string, error) {
-	if file == "" {
-		return config.Primary, "", usagef("a %s script file is required", kind)
-	}
+// resolveScript is what both Kubernetes script runners share: the pod --pod names, and
+// the file resolveScriptPath finds in broker.cliScriptsDir. One definition, so the two
+// runners cannot resolve the same argument to two different files.
+func resolveScript(a *App, file, verb string) (config.Role, string, error) {
 	role, err := podRole(a)
 	if err != nil {
 		return config.Primary, "", err
 	}
-	localPath := file
-	if !config.HasPathSeparator(file) {
-		localPath = filepath.Join(a.Cfg.Broker.CLIScriptsDir, file)
+	localPath, err := resolveScriptPath(a, file, verb)
+	if err != nil {
+		return config.Primary, "", err
 	}
 	return role, localPath, nil
 }

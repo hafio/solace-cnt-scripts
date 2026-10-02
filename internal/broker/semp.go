@@ -78,7 +78,7 @@ func sempPort(cfg *config.Config, p config.Platform) (port int, tls bool, err er
 	}
 	return 0, false, fmt.Errorf("cannot determine the mate's SEMP port: %s.network.mode is bridge (the default) but "+
 		"network.ports has no single-port entry mapping container port 1943 (TLS SEMP) or 8080 (plaintext SEMP); add "+
-		"one (e.g. \"1943:1943\") so the coordinated redundancy/leader steps can reach the mate over TLS, or set "+
+		"one (e.g. \"1943:1943\") so the coordinated redundancy test can reach the mate over TLS, or set "+
 		"%s.network.mode: host -- a port RANGE covering either is not recognized here", string(p), string(p))
 }
 
@@ -187,7 +187,7 @@ type backupTarget struct {
 func (o *Ops) backupSEMPTarget() (backupTarget, error) {
 	ip := o.Cfg.Redundancy.Backup.Addr
 	if ip == "" {
-		return backupTarget{}, fmt.Errorf("redundancy.backup.addr is not set; the coordinated redundancy/leader steps need it to reach " +
+		return backupTarget{}, fmt.Errorf("redundancy.backup.addr is not set; the coordinated redundancy test needs it to reach " +
 			"the mate's SEMP service (see env/sample.yaml)")
 	}
 	port, tls, err := sempPort(o.Cfg, o.Platform)
