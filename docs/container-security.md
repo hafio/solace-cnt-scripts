@@ -35,7 +35,7 @@ only own the first, which is what this document is about.
 | 1 | Deny extended privileges | `privileged: false`, `cap_drop: [ALL]`, bridge networking unless host is asked for | `DropCapability=all`, the engine's private network (bridge rootful, pasta or slirp4netns rootless) unless host is asked for; there is no `Privileged=` key, so never widen | operator's job | audit greps 2 and 3 find the negatives, 4 finds nothing, 5 finds only asked-for host networking |
 | 2 | Deny privilege escalation | `security_opt: no-new-privileges=true` | `NoNewPrivileges=true` | operator's job (`allowPrivilegeEscalation: false` in a raw pod spec) | grep 1 finds it in every container artifact |
 | 3 | Run as a non-root identity | `user:` always emitted | `User=` always emitted, `Group=` whenever the run user carries a gid | non-zero `runAsUser`/`runAsGroup`/`fsGroup`, or unset where the operator or an SCC assigns them | grep 7 finds an identity in every artifact, never uid 0 on a privileged engine, and grep 10 finds SCC handling where OpenShift is a target |
-| 4 | Bind only non-root ports | published ports are the operator's own list, passed through | same | Service ports name 8008/1443/1943 | grep 8 finds none of 80, 443 or 843 |
+| 4 | Bind only non-root ports | published ports are the operator's own list, passed through | same | `kubernetes.ports` passed through, or the operator's default Service ports (8008/1443/1943 among them) when unset | grep 8 finds none of 80, 443 or 843 |
 | 5 | Hand secrets over as files | engine secret, absolute target | engine secret, absolute target | Kubernetes Secrets | grep 9 finds a `*filepath` for every sensitive setting |
 | 6 | Narrow the filesystem | private key as a secret, never a bind mount; read-only root not supported | same | read-only root not supported (`readOnlyRootFilesystem` is refused) | grep 6 finds nothing |
 | 7 | State the setting, do not inherit it | emit it, pin it with a golden | same | emit what the CR carries and pin it; document the operator's hardcodes and pin the operator version | a golden per emitted setting, and a test forbidding every widening token |
@@ -159,8 +159,10 @@ non-root container is only possible if nothing asks for the old numbers:
 
 Plaintext SEMP is 8080 and needs no change. A tool does not usually choose these -- the
 broker image does -- so the tool's job is to make sure every port list it emits (a published
-list in bridge mode, a Kubernetes Service, a health check, its own SEMP client) names the
-same set, and that 80, 443 and 843 appear nowhere. Under host networking nothing is published
+list in bridge mode, a Kubernetes Service list the env file sets, a health check, its own
+SEMP client) names the same set, and that 80, 443 and 843 appear nowhere. With
+`kubernetes.ports` unset the CR carries no list at all and the operator's own default names
+the Service ports. Under host networking nothing is published
 at all and the image's listeners bind directly on the host, which is worth saying out loud in
 the documentation, because it means the port rule is satisfied by the image and not by you --
 one more reason host networking is an opt-in (rule 1) rather than a default. Under bridge

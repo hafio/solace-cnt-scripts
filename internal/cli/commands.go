@@ -680,8 +680,8 @@ func newOperatorCmd(app *App) *cobra.Command {
 	return c
 }
 
-const operatorValidateLong = "Reports the operator's install state, running version versus this env\n" +
-	"file's, and the namespaces it watches.\n\n" +
+const operatorValidateLong = "Says whether an operator install is required for this env file's broker\n" +
+	"namespace, and compares the running version with this env file's.\n\n" +
 	"Every value is read live from the cluster, since the operator is shared\n" +
 	"and may already watch namespaces this env file never named."
 

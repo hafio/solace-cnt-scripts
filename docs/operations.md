@@ -118,23 +118,41 @@ solace-util operator deploy -e dev.yaml
 After that, any number of env files can each `broker deploy` their own broker against the
 same cluster. Running `operator deploy` again from a second env file does not replace the
 watch list -- it UNIONS the namespaces, so the operator keeps reconciling the brokers that
-were already there. `validate` warns rather than fails when the operator or its CRD looks
-missing, so that warning is what tells you this step was skipped -- `broker deploy` then
+were already there. `validate` warns rather than fails when an operator install is
+required, so that warning is what tells you this step was skipped -- `broker deploy` then
 fails once it tries to apply a custom resource the cluster does not know how to reconcile.
 
 `validate`'s report opens with a **Config** section, ahead of Deployment: it states that
 the env file was already accepted -- `config.Load` validates before this report can even
 start building, so reaching the report means it passed; this is not a fresh check running --
 then lists the resolved `kubernetes.ports` as `name=port` pairs behind a leading count (e.g.
-`ports (17)` for the default set), so what will actually render into the broker CR is visible
+`ports (3)`) -- or, when the env file sets none, says the CR omits them and the operator's
+default applies -- so what will actually render into the broker CR is visible
 without deploying or running `broker generate`. Every row in this section is informational
 and can never fail the check.
 
 The rest of the report only runs once the cluster answers: an unreachable cluster marks
 everything after it `[SKIP]` rather than reporting checks it never made. From there it
-checks permission to create the broker resource, reads the installed operator to see
-whether it actually watches this broker's namespace, and checks the target StorageClass's
-volume-binding mode and whether it allows volume expansion. On docker and podman there is
+checks permission to create the broker resource, gives the **operator install** verdict, and
+checks the target StorageClass's volume-binding mode and whether it allows volume expansion.
+
+The verdict reads the operator that is running -- its `WATCH_NAMESPACE` against this env
+file's `kubernetes.namespace` -- and says `required` or `not required`, with what to do:
+
+- **required** when no operator is installed, or the one running does not watch this
+  namespace (`solace-util operator deploy` installs it, or adds the namespace to its watch
+  list).
+- The advice changes when `operator deploy` alone would not help: with `watchBrokerNs: false`
+  and the namespace missing from `kubernetes.operator.watchNamespaces` it says to add it
+  there first, and when the operator runs in a namespace other than the one
+  `kubernetes.operator.namespace` resolves to it says to set that key, since a deploy would
+  otherwise install a second operator.
+- **not required** is a `[WARN]` rather than `[ OK ]` when the operator is stopped
+  (`operator start`) or lives in that other namespace.
+
+It is never a `[FAIL]`: `validate` is also what you run before installing anything. All
+three views show it once -- `validate` and `operator validate` in the Operator section,
+`broker validate` at the foot of Deployment. On docker and podman there is
 no operator, so that section of the report is omitted rather than failed.
 
 End to end, a first run against a brand-new cluster looks like:

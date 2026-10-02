@@ -5,10 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"solace/internal/config"
+	"solace/internal/examples"
 )
 
 func boolPtr(b bool) *bool { return &b }
@@ -734,58 +738,6 @@ func TestOperatorRestart(t *testing.T) {
 	}
 }
 
-// TestOperatorInstalled covers the read-only probe: it reports true only when
-// BOTH the CRD and the controller Deployment are visible, and it stops after the
-// first failing get rather than probing the second for nothing -- and, per its
-// signature, never returns an error: an absent operator and an unreachable
-// cluster are both just "false" to the caller.
-func TestOperatorInstalled(t *testing.T) {
-	t.Run("both gets succeed", func(t *testing.T) {
-		cfg := loadK8s(t)
-		cfg.K8s.Operator.Namespace = "op-ns"
-		rr := &recRunner{}
-		c := NewCluster(rr, cfg, nil, nil)
-		if !c.OperatorInstalled(context.Background()) {
-			t.Error("OperatorInstalled should report true when both gets succeed")
-		}
-		if len(rr.calls) != 2 {
-			t.Fatalf("OperatorInstalled made %d calls, want 2 (crd, then deployment)", len(rr.calls))
-		}
-		wantCRD := []string{"get", "crd", brokerResource}
-		if got := rr.calls[0]; got.method != "Output" || !eqArgs(got.args, wantCRD) {
-			t.Errorf("crd get argv = %+v, want Output kubectl %v", got, wantCRD)
-		}
-		wantDeploy := []string{"get", "deployment", operatorDeployment, "-n", "op-ns"}
-		if got := rr.calls[1]; got.method != "Output" || !eqArgs(got.args, wantDeploy) {
-			t.Errorf("deployment get argv = %+v, want Output kubectl %v", got, wantDeploy)
-		}
-	})
-	t.Run("CRD missing", func(t *testing.T) {
-		cfg := loadK8s(t)
-		cfg.K8s.Operator.Namespace = "op-ns"
-		rr := &recRunner{outErr: errFake}
-		c := NewCluster(rr, cfg, nil, nil)
-		if c.OperatorInstalled(context.Background()) {
-			t.Error("OperatorInstalled should report false when the crd get fails")
-		}
-		if len(rr.calls) != 1 {
-			t.Errorf("OperatorInstalled should stop after the failing crd get; got %d calls", len(rr.calls))
-		}
-	})
-	t.Run("deployment missing", func(t *testing.T) {
-		cfg := loadK8s(t)
-		cfg.K8s.Operator.Namespace = "op-ns"
-		rr := &recRunner{outErrQueue: []error{nil, errFake}}
-		c := NewCluster(rr, cfg, nil, nil)
-		if c.OperatorInstalled(context.Background()) {
-			t.Error("OperatorInstalled should report false when the deployment get fails")
-		}
-		if len(rr.calls) != 2 {
-			t.Errorf("OperatorInstalled should still probe the deployment after a successful crd get; got %d calls", len(rr.calls))
-		}
-	})
-}
-
 func mustContain(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if !strings.Contains(haystack, needle) {
@@ -938,3 +890,120 @@ func TestOperatorRestartProbesTheOperatorNamespace(t *testing.T) {
 // meant the two halves had to be applied in the right order by hand, and the ordering
 // is the part that is easy to get wrong: the Secret is namespaced and its namespace
 // only exists inside the bundle.
+
+// TestFullExampleListsTheOperatorsDefaultPorts keeps the commented kubernetes.ports list
+// in the annotated example equal to the bundled operator's own default. The CLI carries
+// no copy of that list any more -- an unset kubernetes.ports leaves spec.service.ports to
+// the CRD -- so the example is where an operator reads which ports the default exposes,
+// and a bundle bump must not leave it describing the previous operator's list.
+func TestFullExampleListsTheOperatorsDefaultPorts(t *testing.T) {
+	want := bundledDefaultPorts(t)
+	if len(want) == 0 {
+		t.Fatal("the bundled CRD carries no spec.service.ports default; the example's commented list " +
+			"and the docs saying the operator's default applies are both wrong now")
+	}
+	got := commentedExamplePorts(t)
+	if !slices.Equal(got, want) {
+		t.Errorf("full.yaml's commented kubernetes.ports does not match the bundled operator's default\n"+
+			" example: %v\n     CRD: %v", got, want)
+	}
+}
+
+// bundledDefaultPorts reads spec.service.ports' default out of the CRD document in
+// operatorBundle, rendered as kubernetes.ports entries. The CRD carries no template
+// action, so its document is parsed as written.
+func bundledDefaultPorts(t *testing.T) []string {
+	t.Helper()
+	for _, doc := range strings.Split(operatorBundle, "\n---\n") {
+		if !strings.Contains(doc, "kind: CustomResourceDefinition") ||
+			!strings.Contains(doc, "name: pubsubpluseventbrokers.pubsubplus.solace.com") {
+			continue
+		}
+		var crd struct {
+			Spec struct {
+				Versions []struct {
+					Storage bool `yaml:"storage"`
+					Schema  struct {
+						OpenAPIV3Schema struct {
+							Properties struct {
+								Spec struct {
+									Properties struct {
+										Service struct {
+											Properties struct {
+												Ports struct {
+													Default []struct {
+														ContainerPort int    `yaml:"containerPort"`
+														Name          string `yaml:"name"`
+														Protocol      string `yaml:"protocol"`
+														ServicePort   int    `yaml:"servicePort"`
+													} `yaml:"default"`
+												} `yaml:"ports"`
+											} `yaml:"properties"`
+										} `yaml:"service"`
+									} `yaml:"properties"`
+								} `yaml:"spec"`
+							} `yaml:"properties"`
+						} `yaml:"openAPIV3Schema"`
+					} `yaml:"schema"`
+				} `yaml:"versions"`
+			} `yaml:"spec"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &crd); err != nil {
+			t.Fatalf("parse the bundled PubSubPlusEventBroker CRD: %v", err)
+		}
+		for _, v := range crd.Spec.Versions {
+			if !v.Storage {
+				continue
+			}
+			var out []string
+			for _, p := range v.Schema.OpenAPIV3Schema.Properties.Spec.Properties.Service.Properties.Ports.Default {
+				e := fmt.Sprintf("%s=%d", p.Name, p.ContainerPort)
+				if p.ServicePort != p.ContainerPort {
+					e += fmt.Sprintf(":%d", p.ServicePort)
+				}
+				if p.Protocol != "" && p.Protocol != "TCP" {
+					e += "/" + p.Protocol
+				}
+				out = append(out, e)
+			}
+			return out
+		}
+		t.Fatal("the bundled PubSubPlusEventBroker CRD has no storage version")
+	}
+	t.Fatal("operatorBundle holds no PubSubPlusEventBroker CRD document")
+	return nil
+}
+
+// commentedExamplePorts reads the `  #  - name=port` lines under the commented
+// kubernetes.ports key of the annotated example, skipping the key's own wrapped
+// comment lines.
+func commentedExamplePorts(t *testing.T) []string {
+	t.Helper()
+	full, err := examples.Get(examples.FullName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(full.Body), "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.HasPrefix(l, "  # ports:") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatal("the annotated example has no commented kubernetes.ports key")
+	}
+	var out []string
+	for _, l := range lines[start+1:] {
+		if item, ok := strings.CutPrefix(l, "  #  - "); ok {
+			out = append(out, item)
+			continue
+		}
+		if len(out) == 0 && strings.HasPrefix(strings.TrimSpace(l), "#") && strings.HasPrefix(l, "        ") {
+			continue // the key's own comment, wrapped onto the comment column
+		}
+		break
+	}
+	return out
+}

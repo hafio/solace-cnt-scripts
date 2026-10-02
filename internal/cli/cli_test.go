@@ -1162,17 +1162,18 @@ func TestDeployBrokerDoesNotApplyOperator(t *testing.T) {
 	}
 }
 
-// TestCheckDeployWarnsWhenOperatorAbsent covers the operator probe inside the
-// check report: `check deploy` is read-only, so a missing operator is a [WARN]
+// TestCheckDeployWarnsWhenOperatorAbsent covers the operator-install verdict inside
+// the check report: `check deploy` is read-only, so a missing operator is a [WARN]
 // row rather than a failure of the check itself -- a cluster where the operator
 // is not installed YET is a reasonable thing to be checking, and installing it is
 // the next command. The row stands in for the operator install `deploy all` no
 // longer performs.
 //
-// It cannot go through the echo seam: Echo's Output never returns an error, so the
-// probe would always read as "installed". This drives opK8sValidate directly with the
-// fault-injecting opRunner instead, failing exactly the CRD lookup and canning the
-// StorageClass answers the check needs to get that far.
+// It cannot go through the echo seam: under Echo the report skips every cluster
+// check. This drives opK8sValidate directly with the opRunner instead, whose empty
+// answer to `get deployment --all-namespaces` is a cluster with no operator, and
+// cans the StorageClass answers the check needs to get that far. The verdict is
+// read off that one Deployment list: it makes no `get crd` read of its own.
 func TestCheckDeployWarnsWhenOperatorAbsent(t *testing.T) {
 	cfg := loadDirect(t, "redundancy:\n  enabled: false\n"+
 		"image:\n  repo: solace-pubsub-standard\n  tag: \"10.10.1.128\"\n"+
@@ -1180,21 +1181,7 @@ func TestCheckDeployWarnsWhenOperatorAbsent(t *testing.T) {
 		"kubernetes:\n  name: dev-broker\n  namespace: solace\n"+
 		"  storage:\n    class: standard\n    msgNodeSize: 30Gi\n", config.K8s)
 
-	isCRDLookup := func(c opCall) bool {
-		for i, a := range c.args {
-			if a == "crd" && i+1 < len(c.args) {
-				return true
-			}
-		}
-		return false
-	}
 	rr := &opRunner{
-		fail: func(c opCall) error {
-			if isCRDLookup(c) {
-				return fmt.Errorf("the server doesn't have a resource type \"crd\"")
-			}
-			return nil
-		},
 		output: func(c opCall) []byte {
 			// The StorageClass probe reads one custom column at a time; answer both
 			// with the values CheckStorageClass demands so it passes and the run
@@ -1219,11 +1206,14 @@ func TestCheckDeployWarnsWhenOperatorAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("check deploy err = %v, want nil: a missing operator warns, it does not fail the check", err)
 	}
-	if !strings.Contains(out, "[WARN] installed") {
-		t.Errorf("check deploy report = %q, want a WARN row for the missing operator", out)
+	if !strings.Contains(out, "[WARN] operator install") || !strings.Contains(out, "required -- no operator is installed") {
+		t.Errorf("check deploy report = %q, want a WARN verdict saying an operator install is required", out)
 	}
-	if !strings.Contains(out, "deploy operator") {
-		t.Errorf("the row should name the command that installs it:\n%s", out)
+	if !strings.Contains(out, "`solace-util operator deploy` installs it") {
+		t.Errorf("the verdict should name the command that installs it:\n%s", out)
+	}
+	if rr.hasCall("crd") {
+		t.Errorf("the verdict reads the operator Deployment, never the CRD:\n%s", rr.dump())
 	}
 }
 

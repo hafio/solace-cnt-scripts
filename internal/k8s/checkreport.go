@@ -69,6 +69,19 @@ type checkReport struct {
 	broker      []checkRow
 	credentials []checkRow
 	placement   []checkRow
+
+	// install is the operator-install verdict (operatorInstallRow), the one row every
+	// view shows. setInstall puts it in the Operator section, and `broker validate`, which
+	// renders no Operator section, closes its Deployment section with this copy instead --
+	// so each view carries it exactly once.
+	install *checkRow
+}
+
+// setInstall records the operator-install verdict: in the Operator section, and as the
+// copy `broker validate` shows (sections).
+func (rep *checkReport) setInstall(row checkRow) {
+	rep.operator = append(rep.operator, row)
+	rep.install = &row
 }
 
 // validateScope selects which halves of the report render.
@@ -86,10 +99,10 @@ const (
 	scopeOperator                      // `operator validate`
 )
 
-// wantsBroker and wantsOperator say which sections a scope renders. The
-// operator-COVERAGE row (does the installed operator watch this broker's namespace?)
-// belongs to the broker half, not the operator one: it is a precondition for deploying
-// this broker, which is the question `broker validate` is asked.
+// wantsBroker and wantsOperator say which sections a scope renders. The operator-install
+// verdict (is an `operator deploy` needed before this broker can be reconciled?) belongs
+// to both halves -- it is a fact about the operator and a precondition for deploying the
+// broker -- so sections() gives it to whichever half renders, once.
 func (s validateScope) wantsBroker() bool   { return s != scopeOperator }
 func (s validateScope) wantsOperator() bool { return s != scopeBroker }
 
@@ -106,7 +119,11 @@ func (rep *checkReport) sections(scope validateScope) []struct {
 	}
 	var out []section
 	if scope.wantsBroker() {
-		out = append(out, section{"Config", rep.config}, section{"Deployment", rep.deployment})
+		deployment := rep.deployment
+		if !scope.wantsOperator() && rep.install != nil {
+			deployment = append(append([]checkRow{}, rep.deployment...), *rep.install)
+		}
+		out = append(out, section{"Config", rep.config}, section{"Deployment", deployment})
 	}
 	if scope.wantsOperator() {
 		out = append(out, section{"Operator", rep.operator})
@@ -156,15 +173,16 @@ func (c *Cluster) Validate(ctx context.Context) error {
 	return c.validate(ctx, scopeAll)
 }
 
-// ValidateBroker is `broker validate`: everything about this broker, plus whether the
-// installed operator actually covers its namespace -- which is a precondition for
-// deploying it, not an operator detail.
+// ValidateBroker is `broker validate`: everything about this broker, plus the
+// operator-install verdict -- whether the running operator covers its namespace is a
+// precondition for deploying it.
 func (c *Cluster) ValidateBroker(ctx context.Context) error {
 	return c.validate(ctx, scopeBroker)
 }
 
-// ValidateOperator is `operator validate`: the operator's install state, version and
-// watch scope, and nothing about this broker.
+// ValidateOperator is `operator validate`: the operator's install state -- the verdict,
+// read off the running operator's WATCH_NAMESPACE against this env file's broker
+// namespace -- its version and its configured watch scope.
 func (c *Cluster) ValidateOperator(ctx context.Context) error {
 	return c.validate(ctx, scopeOperator)
 }
@@ -188,9 +206,8 @@ func (c *Cluster) validate(ctx context.Context, scope validateScope) error {
 		_, _ = c.resolveStorageClass(ctx)
 		rep.deployment = append(rep.deployment,
 			skipRow("api server", "skipped (preview)"),
-			skipRow("permission", "skipped (preview)"),
-			skipRow("operator watch", "skipped (preview)"))
-		rep.operator = append(rep.operator, skipRow("installed", "skipped (preview)"))
+			skipRow("permission", "skipped (preview)"))
+		rep.setInstall(skipRow(installKey, "skipped (preview)"))
 		rep.broker = append(rep.broker, skipRow("storage class", "skipped (preview)"))
 		rep.render(c.report(), scope)
 		return nil
@@ -210,8 +227,9 @@ func (c *Cluster) validate(ctx context.Context, scope validateScope) error {
 // building, so a malformed kubernetes.ports entry (or any other invalid field)
 // would have failed loudly right there, before this report ever runs. These rows
 // say so plainly instead of leaving an operator to infer it, and report what
-// Validate actually leaves resolved: cfg.K8s.Ports, already filled by
-// ApplyDefaults when the env file left kubernetes.ports unset. That is real,
+// Validate actually leaves resolved: cfg.K8s.Ports as the CR will carry it -- or,
+// when the env file left it unset, that the CR carries none and the operator's own
+// default applies. That is real,
 // already-checked information -- not merely echoed -- so unlike configRows below
 // these are [ OK ], and deliberately can never be [FAIL]: `check deploy` is
 // read-only and must not fail just for having ports to show.
@@ -222,15 +240,14 @@ func (c *Cluster) validationRows(rep *checkReport) {
 }
 
 // portsPerRow groups the ports row into fixed-width chunks rather than one row
-// per port. kubernetes.ports defaults to 17 entries (defaultK8sPorts); one row
+// per port. A full kubernetes.ports list runs to 17 entries or more; one row
 // each would make this section alone longer than every other section in the
 // report combined, and one unwrapped line would run far past what every other
 // row in this report reads as (KVRowAt's tag plus the checkKeyWidth key column
 // already costs 27 columns before the value even starts). Four
 // "name=port" pairs (~18 characters apiece with the ", " separator) keeps each
 // wrapped line under 100 columns, matching the width the rest of the report
-// settles at, while still fitting the default 17 onto five lines instead of
-// seventeen.
+// settles at, while still fitting 17 onto five lines instead of seventeen.
 const portsPerRow = 4
 
 // portRows renders ports as a leading count row plus its pairs wrapped across
@@ -238,9 +255,13 @@ const portsPerRow = 4
 // the exact "name=port[:service][/proto]" form render.parsePort decodes, so
 // they are printed verbatim -- reformatting them here would risk the report
 // showing something other than what actually gets rendered into the broker CR.
+//
+// An empty list says the operator's default applies, never "none": the CR then
+// carries no spec.service.ports and the installed CRD fills its own list in. No count
+// is given, since which list that is belongs to the operator version, not this file.
 func portRows(ports []string) []checkRow {
 	if len(ports) == 0 {
-		return []checkRow{okRow("ports", "(none configured)")}
+		return []checkRow{okRow("ports", "not set -- the CR omits them and the operator's default applies")}
 	}
 	rows := make([]checkRow, 0, len(ports)/portsPerRow+1)
 	for i := 0; i < len(ports); i += portsPerRow {
@@ -285,7 +306,7 @@ func (c *Cluster) configRows(rep *checkReport) {
 		info("mem", "%s", orNone(cfg.K8s.Operator.Mem)),
 		// What THIS env file asks for, which is not necessarily what is running: the
 		// operator is shared, so a deploy applies the union of this list and the
-		// installed one. watchCoverageRow reports what the cluster actually says.
+		// installed one. operatorInstallRow reports what the cluster actually says.
 		//
 		// An empty list does not mean "the broker namespace" -- it means every
 		// namespace in the cluster, the widest scope the operator has and the one
@@ -374,10 +395,8 @@ func (c *Cluster) verifyRows(ctx context.Context, rep *checkReport) {
 	if err := c.Reachable(ctx); err != nil {
 		rep.deployment = append(rep.deployment, failRow("api server", "%v", err))
 		const why = "skipped (cluster unreachable)"
-		rep.deployment = append(rep.deployment,
-			skipRow("permission", why),
-			skipRow("operator watch", why))
-		rep.operator = append(rep.operator, skipRow("installed", why))
+		rep.deployment = append(rep.deployment, skipRow("permission", why))
+		rep.setInstall(skipRow(installKey, why))
 		rep.broker = append(rep.broker, skipRow("storage class", why))
 		return
 	}
@@ -389,52 +408,88 @@ func (c *Cluster) verifyRows(ctx context.Context, rep *checkReport) {
 		rep.deployment = append(rep.deployment, okRow("permission", "create %s", brokerResource))
 	}
 
-	// ONE cluster-wide `get deployment --all-namespaces`, read twice. The watch row
-	// wants its WATCH_NAMESPACE and the operator rows want its running image, both off
+	// ONE cluster-wide `get deployment --all-namespaces`, read twice. The install
+	// verdict wants its WATCH_NAMESPACE and the version row its running image, both off
 	// the same object -- and each used to fetch it for itself, so every healthy
 	// `validate` and `check deploy` paid for a full cluster-wide list twice. The error
 	// is threaded rather than swallowed, because "could not be read" and "no operator
-	// installed" are different answers and the watch row already says so.
+	// installed" are different answers and the verdict says which.
 	dep, depErr := c.findOperatorDeployment(ctx)
-	c.watchCoverageRow(rep, dep, depErr)
-	c.operatorRows(ctx, rep, dep)
+	c.operatorRows(ctx, rep, dep, depErr)
 	c.storageRows(ctx, rep)
 }
 
-// watchCoverageRow answers the question this report exists to answer about the operator:
-// will the operator that is RUNNING reconcile this broker?
+// installKey is the operator-install verdict's key.
+const installKey = "operator install"
+
+// operatorInstallRow answers the question this report exists to answer about the
+// operator: is an `operator deploy` required before this broker will be reconciled? It
+// reads the operator that is RUNNING -- its WATCH_NAMESPACE against this env file's
+// broker namespace -- never the config.
 //
-// It is in the Deployment section, not the Operator one, because it is a precondition for
-// deploying this broker rather than a fact about the operator -- so `broker validate`
-// shows it and `operator validate` does not.
+// It replaces two rows that asked that two ways and could disagree: `installed` looked for
+// the Deployment (and the CRD) in the resolved operator namespace only, while `operator
+// watch` searched every namespace, so an operator installed elsewhere read as covering
+// this broker AND as not installed. Now the one Deployment findOperatorDeployment resolves
+// decides it, and the advice is what would actually fix it -- `operator deploy` alone
+// cannot add the broker namespace when this env file leaves it out of the watch list
+// (watchBrokerNs: false), and it installs a SECOND operator when the running one lives in
+// another namespace.
 //
-// The value is read from the cluster, never rendered from config. The old report had a
-// config-only "watch scope" row that stated what this env file WOULD apply, which is
-// exactly the value that can silently differ from what is running once a second env file
-// has deployed the operator. Every verdict here is a [WARN] rather than a [FAIL]: an
-// operator that does not yet cover this namespace is fixed by `operator deploy`, and this
-// command is also what you run before installing anything.
-func (c *Cluster) watchCoverageRow(rep *checkReport, dep *deploymentItem, err error) {
+// Every verdict is [ OK ] or [WARN], never [FAIL]: an operator that does not cover this
+// namespace yet is fixed by the next command, and `validate` is also what you run before
+// installing anything.
+func (c *Cluster) operatorInstallRow(opNS string, dep *deploymentItem, depErr error) checkRow {
 	ns := c.ns()
-	installed, allNS, found := watchFromDeployment(dep)
-	switch {
-	case err != nil:
-		rep.deployment = append(rep.deployment, warnRow("operator watch",
-			"could not be read: %v", err))
-	case !found:
-		rep.deployment = append(rep.deployment, warnRow("operator watch",
-			"no operator is installed -- run `solace-util operator deploy`"))
-	case allNS:
-		rep.deployment = append(rep.deployment, okRow("operator watch",
-			"ALL namespaces, so %q is covered", ns))
-	case containsString(installed, ns):
-		rep.deployment = append(rep.deployment, okRow("operator watch",
-			"%s (%d namespace(s)) -- %q is covered", strings.Join(installed, ","), len(installed), ns))
-	default:
-		rep.deployment = append(rep.deployment, warnRow("operator watch",
-			"the operator watches %s and NOT %q, so this broker would not be reconciled -- "+
-				"`solace-util operator deploy` adds it", strings.Join(installed, ","), ns))
+	if depErr != nil {
+		return warnRow(installKey, "unknown -- the operator Deployment could not be read: %v", depErr)
 	}
+	elsewhere := dep != nil && dep.Metadata.Namespace != opNS
+	// What has to change before `operator deploy` covers this namespace, in order.
+	var fixes []string
+	if elsewhere {
+		fixes = append(fixes, fmt.Sprintf("set kubernetes.operator.namespace: %s", dep.Metadata.Namespace))
+	}
+	if desired := desiredWatch(c.Cfg); len(desired) > 0 && !containsString(desired, ns) {
+		fixes = append(fixes, fmt.Sprintf("add %q to kubernetes.operator.watchNamespaces (watchBrokerNs is false)", ns))
+	}
+	if dep == nil {
+		return warnRow(installKey, "required -- no operator is installed; %s", installSteps(fixes, "installs it"))
+	}
+	list, allNS, _ := watchFromDeployment(dep)
+	scope := "ALL namespaces"
+	if !allNS {
+		scope = strings.Join(list, ",")
+	}
+	if !allNS && !containsString(list, ns) {
+		return warnRow(installKey, "required -- the operator in %s watches %s and NOT %q, so this broker would "+
+			"not be reconciled; %s", dep.Metadata.Namespace, scope, ns, installSteps(fixes, "adds it"))
+	}
+	// The namespace first: `operator start` acts on the namespace the env file resolves, so
+	// for an operator running elsewhere it only works once that is set.
+	var but []string
+	if elsewhere {
+		but = append(but, fmt.Sprintf("kubernetes.operator.namespace resolves to %s, so `solace-util operator "+
+			"deploy` would install a second operator there -- set it to %s", opNS, dep.Metadata.Namespace))
+	}
+	if dep.Spec.Replicas != nil && *dep.Spec.Replicas == 0 {
+		but = append(but, "it is STOPPED (0 replicas), so nothing is reconciled until `solace-util operator start`")
+	}
+	if len(but) == 0 {
+		return okRow(installKey, "not required -- the operator in %s watches %s, %q included",
+			dep.Metadata.Namespace, scope, ns)
+	}
+	return warnRow(installKey, "not required -- the operator in %s watches %s, %q included; but %s",
+		dep.Metadata.Namespace, scope, ns, strings.Join(but, "; and "))
+}
+
+// installSteps renders the fixes, then the deploy that applies them. With nothing to fix
+// first, the deploy is the whole answer and says what it does.
+func installSteps(fixes []string, what string) string {
+	if len(fixes) == 0 {
+		return "`solace-util operator deploy` " + what
+	}
+	return strings.Join(fixes, ", then ") + ", then run `solace-util operator deploy`"
 }
 
 // containsString is a membership test over a small slice. A loop rather than a map: these
@@ -480,23 +535,14 @@ func storageInfoRows(cfg *config.Config) []checkRow {
 }
 
 // operatorRows takes the already-fetched operator Deployment rather than looking it up:
-// verifyRows reads it once for both this and the watch row. It still takes a ctx,
-// because the namespace origin and the CRD check are separate reads of their own.
-func (c *Cluster) operatorRows(ctx context.Context, rep *checkReport, dep *deploymentItem) {
+// verifyRows reads it once for both the install verdict and the version row.
+func (c *Cluster) operatorRows(ctx context.Context, rep *checkReport, dep *deploymentItem, depErr error) {
 	ns, origin := c.operatorNSOrigin(ctx)
 	rep.operator = append(rep.operator, okRow("namespace", "%s (%s)", ns, origin))
-
-	if !c.OperatorInstalled(ctx) {
-		// A WARNING, not a failure, and deliberately so: `check deploy` is
-		// read-only, and a cluster where the operator is not installed YET is a
-		// perfectly reasonable thing to be checking -- installing it is the next
-		// command. So this reports the gap without failing the check itself. The
-		// row is prominent where the old trailing warning was easy to miss.
-		rep.operator = append(rep.operator, warnRow("installed",
-			"not found -- `deploy operator` installs it, and `deploy broker` will not work without it"))
+	rep.setInstall(c.operatorInstallRow(ns, dep, depErr))
+	if depErr != nil || dep == nil {
 		return
 	}
-	rep.operator = append(rep.operator, okRow("installed", "yes"))
 
 	running := imageFromDeployment(dep)
 	if running == "" {
@@ -508,13 +554,13 @@ func (c *Cluster) operatorRows(ctx context.Context, rep *checkReport, dep *deplo
 	case !ok || cmp == 0:
 		rep.operator = append(rep.operator, okRow("running version", "%s", orNone(runningTag)))
 	case cmp > 0:
-		// The cluster is ahead. `deploy operator` would roll it back, which is
+		// The cluster is ahead. `operator deploy` would roll it back, which is
 		// what the downgrade prompt guards -- worth knowing here too.
 		rep.operator = append(rep.operator, warnRow("running version",
-			"%s, NEWER than the configured %s -- `deploy operator` would downgrade it", runningTag, wantTag))
+			"%s, NEWER than the configured %s -- `solace-util operator deploy` would downgrade it", runningTag, wantTag))
 	default:
 		rep.operator = append(rep.operator, warnRow("running version",
-			"%s, older than the configured %s -- `deploy operator` would upgrade it", runningTag, wantTag))
+			"%s, older than the configured %s -- `solace-util operator deploy` would upgrade it", runningTag, wantTag))
 	}
 }
 

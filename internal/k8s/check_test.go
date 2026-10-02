@@ -50,7 +50,7 @@ func TestCheckStopsProbingWhenUnreachable(t *testing.T) {
 	}
 	// The checks that need the cluster say they were skipped, rather than being
 	// omitted (which would read as a pass) or repeating the same failure.
-	for _, want := range []string{"[SKIP] permission", "[SKIP] installed", "[SKIP] storage class"} {
+	for _, want := range []string{"[SKIP] permission", "[SKIP] operator install", "[SKIP] storage class"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report missing %q:\n%s", want, out)
 		}

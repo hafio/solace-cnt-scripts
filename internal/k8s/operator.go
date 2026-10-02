@@ -520,20 +520,6 @@ func (c *Cluster) OperatorScale(ctx context.Context, replicas int) error {
 		"--timeout="+rolloutTimeout)
 }
 
-// OperatorInstalled reports whether the operator's CRD and controller Deployment are
-// both present. It returns a plain bool rather than an error: every way of failing to
-// find them -- absent, wrong namespace, cluster unreachable -- leads to the same
-// advice, and the only caller uses this to decide whether to warn before a deploy
-// that would otherwise fail confusingly. A false here is never fatal on its own.
-func (c *Cluster) OperatorInstalled(ctx context.Context) bool {
-	if _, err := c.kubectlOutput(ctx, "get", "crd", brokerResource); err != nil {
-		return false
-	}
-	opNS := c.operatorNS(ctx)
-	_, err := c.kubectlOutput(ctx, "get", "deployment", operatorDeployment, "-n", opNS)
-	return err == nil
-}
-
 // OperatorStatus prints the operator Deployment and its controller pods in the
 // operator namespace.
 func (c *Cluster) OperatorStatus(ctx context.Context) error {

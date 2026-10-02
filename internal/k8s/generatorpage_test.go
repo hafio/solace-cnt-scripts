@@ -73,7 +73,6 @@ type genDefaults struct {
 	OperatorMem           string             `json:"operatorMem"`
 	UpdateStrategy        string             `json:"updateStrategy"`
 	MonNodeSize           string             `json:"monNodeSize"`
-	KubernetesPorts       []string           `json:"kubernetesPorts"`
 	KubernetesCommand     string             `json:"kubernetesCommand"`
 	CLIScriptsDir         string             `json:"cliScriptsDir"`
 	HostDiagnosticDir     string             `json:"hostDiagnosticDir"`
@@ -145,7 +144,6 @@ func generatorDefaults(t *testing.T) genDefaults {
 		OperatorMem:           k.K8s.Operator.Mem,
 		UpdateStrategy:        k.K8s.UpdateStrategy,
 		MonNodeSize:           k.K8s.Storage.MonNodeSize,
-		KubernetesPorts:       k.K8s.Ports,
 		KubernetesCommand:     k.K8s.Command.String(),
 		CLIScriptsDir:         k.Broker.CLIScriptsDir,
 		HostDiagnosticDir:     k.Broker.HostDiagnosticDir,

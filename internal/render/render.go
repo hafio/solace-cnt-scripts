@@ -206,13 +206,18 @@ func BrokerCR(c *config.Config) []byte {
 	fmt.Fprint(&b, "  service:\n")
 	fmt.Fprint(&b, "    type: LoadBalancer\n")
 	writeLBAnnotations(&b, c.K8s.LoadBalancer)
-	fmt.Fprint(&b, "    ports:\n")
-	for _, entry := range c.K8s.Ports {
-		p := parsePort(entry)
-		fmt.Fprintf(&b, "    - containerPort: %s\n", p.container)
-		fmt.Fprintf(&b, "      name: %s\n", p.name)
-		fmt.Fprintf(&b, "      protocol: %s\n", p.proto)
-		fmt.Fprintf(&b, "      servicePort: %s\n", p.service)
+	// Omitted entirely when kubernetes.ports is unset, so the CRD's default for
+	// spec.service.ports -- the operator's own list -- applies; a bare `ports:` would be a
+	// null left for the apiserver to interpret. A list that IS set replaces that default whole.
+	if len(c.K8s.Ports) > 0 {
+		fmt.Fprint(&b, "    ports:\n")
+		for _, entry := range c.K8s.Ports {
+			p := parsePort(entry)
+			fmt.Fprintf(&b, "    - containerPort: %s\n", p.container)
+			fmt.Fprintf(&b, "      name: %s\n", p.name)
+			fmt.Fprintf(&b, "      protocol: %s\n", p.proto)
+			fmt.Fprintf(&b, "      servicePort: %s\n", p.service)
+		}
 	}
 
 	return []byte(b.String())

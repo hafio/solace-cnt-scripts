@@ -225,9 +225,11 @@ func (c *Config) applyK8sDefaults() {
 		setDefaultInt(&c.K8s.Placement.AntiAffinityWeight, 100)
 	}
 
-	if len(c.K8s.Ports) == 0 {
-		c.K8s.Ports = defaultK8sPorts()
-	}
+	// kubernetes.ports is deliberately NOT defaulted either. Unset, the CR carries no
+	// spec.service.ports and the operator's CRD default applies (the bundled 1.4.2 list is
+	// in internal/k8s/assets/operator-1.4.2.yaml.tmpl and, commented out, in
+	// internal/examples/assets/full.yaml). Keeping a copy here meant two lists to keep in
+	// step, and a cluster running another operator version got this one regardless.
 
 	// tls.cert/tls.certKey are deliberately NOT defaulted from kubernetes.tlsServerSecret.
 	// The two answer different questions -- what the Secret is CALLED, and what it is built
@@ -383,21 +385,6 @@ func xdgConfigHome() string {
 		home = "~"
 	}
 	return filepath.Join(home, ".config")
-}
-
-func defaultK8sPorts() []string {
-	return []string{
-		// The operator's own service.ports default leads with tcp-ssh; without it a
-		// deployment that never sets kubernetes.ports silently loses CLI-over-SSH access.
-		"tcp-ssh=2222",
-		"tcp-semp=8080", "tls-semp=1943",
-		"tcp-smf=55555", "tcp-smfcomp=55003", "tls-smf=55443", "tcp-smfroute=55556",
-		"tcp-web=8008", "tls-web=1443",
-		"tcp-rest=9000", "tls-rest=9443",
-		"tcp-amqp=5672", "tls-amqp=5671",
-		"tcp-mqtt=1883", "tls-mqtt=8883",
-		"tcp-mqttweb=8000", "tls-mqttweb=8443",
-	}
 }
 
 func setDefault(p *string, v string) {

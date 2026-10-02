@@ -67,7 +67,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-87 test files, 1458 test functions. Three of those are not tests. Two are os/exec
+87 test files, 1460 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -78,26 +78,34 @@ launched from.
 
 | Package | Files | Tests |
 | --- | --- | --- |
-| internal/k8s | 20 | 231 |
+| internal/k8s | 20 | 233 |
 | internal/broker | 22 | 421 |
 | internal/cli | 12 | 210 |
-| internal/config | 16 | 240 |
+| internal/config | 16 | 239 |
 | internal/container | 8 | 196 |
 | internal/convert | 1 | 40 |
-| internal/render | 2 | 50 |
+| internal/render | 2 | 51 |
 | internal/engine | 2 | 27 |
 | internal/output | 1 | 16 |
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **87** | **1458** |
+| **Total** | **87** | **1460** |
 
 
 ## Coverage
 
-Last recorded run, from `scripts/logs/cov.log` (2026-10-02), total **93.3%**. Re-run `cov`
+Last recorded run, from `scripts/logs/cov.log` (2026-10-02), total **93.4%**. Re-run `cov`
 after any change; these figures go stale the moment tests move, and the previous total is
 the floor the next run has to hold.
+
+**93.3% -> 93.4%, and `internal/k8s` 93.3% -> 94.0%, from the operator-install verdict.**
+`validate`'s single `operator install` row replaced the `installed` and `operator watch`
+rows, and every answer it gives -- unknown, required with each kind of advice, not required,
+stopped, installed in another namespace -- is table-tested, where the old coverage row had no
+test of its own. Deleting the built-in Kubernetes port list removed covered code
+(`defaultK8sPorts` and its test) while the new omit-the-ports branch of `render.BrokerCR`
+arrived tested both ways, so `internal/config` and `internal/render` held.
 
 **93.1% -> 93.3%, and `internal/cli` 83.6% -> 85.3%, from assert-leader's backup question
 and the script-name rule.** Every new branch arrived with its test: the backup-host prompt
@@ -284,7 +292,7 @@ path that actually runs.
 | internal/convert | 97.4% |
 | internal/config | 96.7% |
 | internal/container | 95.6% |
-| internal/k8s | 93.3% |
+| internal/k8s | 94.0% |
 | internal/broker | 92.1% |
 | internal/cli | 85.3% |
 | internal/examples | 90.0% |
@@ -338,7 +346,7 @@ type behind the platform CLI overrides and the execution guard that decides what
 `Command` may be, the scaling block that sizes the broker on every platform, and the
 platform vocabulary the CLI resolves against, the host-path rules every file-valued
 key is held to, the grammar every value written as-is into an artifact is held to, and
-the two storage stories a Kubernetes deployment may tell. 240 tests across 16 files.
+the two storage stories a Kubernetes deployment may tell. 239 tests across 16 files.
 
 ### command_test.go
 
@@ -402,7 +410,7 @@ validator and every executor enforce it from one definition.
 | `TestContainerRuntime` | Runtime command comes from the platform's block, leading args included; k8s has none |
 | `TestContainerBlock` | Podman reads its own container block; everything else falls through to docker's |
 | `TestNetworkBlock` | Network block is selected per platform |
-| `TestApplyDefaultsK8s` | Every k8s default lands: redundancy, update strategy, diag dir, CLI folder, storage, operator image/resources, scaling, ports, anti-affinity -- and `kubernetes.adminSecret` is NOT defaulted, since its default depends on whether a password is there to build it from (`AdminSecretName`, `adminsecret_test.go`). Broker resources now come from the scaling tier instead: `msgNode.cpu` stays empty (it is the removal sentinel, not a value), `msgNode.mem` is the tier-100 default and `Scaling.CPU` its cores |
+| `TestApplyDefaultsK8s` | Every k8s default lands: redundancy, update strategy, diag dir, CLI folder, storage, operator image/resources, scaling, anti-affinity -- and `kubernetes.adminSecret` is NOT defaulted, since its default depends on whether a password is there to build it from (`AdminSecretName`, `adminsecret_test.go`). Nor is `kubernetes.ports`: it stays empty, so the CR leaves `spec.service.ports` to the operator's CRD default. Broker resources now come from the scaling tier instead: `msgNode.cpu` stays empty (it is the removal sentinel, not a value), `msgNode.mem` is the tier-100 default and `Scaling.CPU` its cores |
 | `TestApplyDefaultsDocker` | Docker defaults (runtime, compose mode, the compose command derived from the runtime, bridge network -- host is an opt-in widening, never the default -- admin user, container name) plus the shared `kubernetes.*` fields containers reuse. Through `assertContainerBlockDefaults`, also the container block's: `ulimits.core` takes the default `-1`, while the retired `shmSize`, `ulimits.nofile` and `ulimits.memlock` stay empty, since their refusal reads any value as the operator's own |
 | `TestApplyDefaultsPodmanRootful` | Rootful podman gets bridge networking, the system quadlet dir, no `--user`, `multi-user.target` |
 | `TestApplyDefaultsPodmanRootlessXDG` | Rootless quadlet dir derives from `XDG_CONFIG_HOME`, with `--user` and `default.target` |
@@ -425,9 +433,8 @@ validator and every executor enforce it from one definition.
 | `TestValidateK8sDNSLabels` | The two DNS-1123 shapes Kubernetes really enforces: `kubernetes.namespace`/`name`/`operator.namespace` must be a single LABEL (no dot, 63-char cap), while the three secret-name fields (`adminSecret`/`tlsServerSecret`/`imagePullSecret`) get the looser SUBDOMAIN rule (dots allowed, 253-char cap) that lets `prod.solace-admin-secret` -- accepted by kubectl today -- keep validating; a shared bad-case set (uppercase, leading hyphen, an embedded YAML document separator, colon, space) is rejected by both |
 | `TestValidateK8sOptionalSecretNamesStayOptional` | The regression the DNS-1123 hardening could have introduced: the three secret-name fields and `operator.namespace` were never mandatory, so leaving one blank must still validate exactly as before |
 | `TestValidatePlacementAffinity` | The additive affinity blocks: unknown operator, missing key, In without values, and a pod term with no topologyKey each fail naming the field; a full valid set passes |
-| `TestDefaultK8sPortsMatchesOperator` | The built-in port list is the operator's own 17 entries, including the tcp-ssh entry, with no duplicate names |
 | `TestValidateK8sPorts` | `kubernetes.ports` entry shapes `parsePort` accepts (name=container, an explicit service port, an explicit protocol) all validate; the "name:port" typo with no `=`, port 0, port 65536, a non-numeric port, a bad protocol, an over-length port name, a duplicate name, a duplicate container port, and a duplicate SERVICE port each fail naming the offending entry. The last was promised by the function's own doc comment and not checked, so two entries publishing one service port reached the CR and collapsed to one |
-| `TestBridgePortsArePassThrough` | The container port list is never defaulted, unlike `kubernetes.ports`: on both engines the default bridge mode with no list publishes nothing, an explicit list -- an address-bound entry and a protocol suffix included -- is kept exactly as written, and an explicit host mode is kept with nothing published |
+| `TestBridgePortsArePassThrough` | The container port list is never defaulted (nor is `kubernetes.ports`, where the operator's own default fills in): on both engines the default bridge mode with no list publishes nothing, an explicit list -- an address-bound entry and a protocol suffix included -- is kept exactly as written, and an explicit host mode is kept with nothing published |
 | `TestContainerCoreLimitSpellings` | `Container.CoreLimit` and `SystemdCoreLimit`: the one configured `ulimits.core` in the engines' spelling and in systemd's (`-1` becomes `infinity`, a byte count stays as written), and an empty value -- a Config built in code without `ApplyDefaults` -- falling back to the default rather than rendering an empty `Ulimit=core=` |
 | `TestImageTagVersion` | Tag parsing behind the health-check gate: dotted versions, a `-rc1` suffix, and a two-part tag parse; `latest`, empty, a bare major and a non-numeric tag report *unknown* rather than guessing; `AtLeast` compares major before minor |
 | `TestValidateHealthCheck` | The opt-in probe: with no cmd it uses the built-in readiness endpoint, so 10.26+ is accepted while an older tag and an unidentifiable one are both refused (naming the explicit-cmd escape hatch); an explicit cmd skips the version gate but keeps the exec-boundary check; disabled stays legal on any tag |
@@ -792,7 +799,7 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 | `TestDeployBrokerDoesNotApplyOperator` | `broker deploy` never installs the operator: it is cluster-scoped and shared, so one env file reaching for it would silently re-apply a controller other namespaces depend on |
 | `TestDeployDoesNotAssertLeader` | The inverse of a property `deploy all` had. Asserting the config-sync leader overwrites the mate's router and message-VPN configuration with this node's, and a deploy has no business making that change unasked -- it is `broker perform assert-leader` now. The canned `show redundancy` is a Local Active primary, so a deploy that regressed into asserting would reach the assert and trip the check rather than stop at Leader's refusal |
 | `TestDeployNeverLabelsNodes` | A deploy touches no node. It used to be true because `deploy all` deliberately left the interactive picker out; it is now true because nothing in the tool labels nodes at all. The terminal is made interactive on purpose here, since that is what the old bug looked like |
-| `TestCheckDeployWarnsWhenOperatorAbsent` | `opK8sCheck`'s operator probe: `validate` is read-only, so a missing operator is reported as a stderr warning rather than failing the check itself |
+| `TestCheckDeployWarnsWhenOperatorAbsent` | `opK8sValidate`'s operator-install verdict: `validate` is read-only, so a cluster with no operator (an empty `get deployment --all-namespaces`) gets a `[WARN] operator install` saying an install is required and naming `solace-util operator deploy`, rather than failing the check itself |
 | `TestStartStopRestartBroker` | The day-2 `start`/`stop`/`broker restart` verbs on both platform families: Kubernetes scales the statefulset(s) via a kubectl echo, containers start/stop/restart the container in place via a docker echo |
 | `TestCLICommand` | The two ways into the broker's CLI: `broker cli` opens an interactive session, `broker perform cli-script` uploads and runs a script (once one command distinguished by a retired `--input` flag). Two H2 regression subtests pin `--pod` steering EITHER onto the named pod: `cli-script --pod backup` must not fall back to the primary (the old bug, where `[role]` and `--pod` were two disconnected branches), and bare `--pod backup` opens the session against that pod. The script subtests run against a temp env holding the file in its `cli` folder |
 | `TestResolveScriptPath` | The one rule behind both script commands, called directly for each verb: the operand is a bare file name in `broker.cliScriptsDir` and nothing else, and the file found is announced. Refused, each as a usage error naming the command: an empty name, every path shape (`./x`, `sub/x`, `../x`, an absolute path to the very file, `.\x`, `C:\x`), a name the folder lacks (naming it, and `errors.Is` `os.ErrNotExist`), a missing folder (said as such), `.`, `..` and a directory, a name `broker.ValidScriptName` refuses, a stat that fails for another reason, and an empty `broker.cliScriptsDir`. A file present only in the working directory is never found, with the folder set or unset |
@@ -1836,7 +1843,7 @@ operator, day-2 ops, secrets, and the pod transport, plus the operator's watch-l
 algebra and the namespace occupancy gate, plus the mate channel that reaches a
 replication site in another cluster, and the Secret read that supplies a mate's
 password -- or this broker's own admin password, when the env file does not carry it.
-231 tests across 20 files.
+233 tests across 20 files.
 
 ### adminsecret_test.go
 
@@ -1964,16 +1971,18 @@ instead of the first.
 | Test | What it covers |
 | --- | --- |
 | `TestValidateNeverPrintsASecret` | The admin, monitor and registry passwords never reach the report, which shows only `admin=set`/`monitor=set` |
-| `TestValidateReadsDeploymentsOnce` | The fetch-once rule: the watch row and the operator rows want two different facts about the SAME operator Deployment, and each used to issue its own cluster-wide `get deployment --all-namespaces`, so every healthy `validate` paid for a full list twice. It asserts EXACTLY one, not at most one -- at most would also pass if the fetch stopped happening, so a report that silently skipped both rows would read as a successful optimisation. The verdict is ignored on purpose: against a fake that answers nothing some rows legitimately come back failed, and the call count is the same either way |
+| `TestValidateReadsDeploymentsOnce` | The fetch-once rule: the operator-install verdict and the version row want two different facts about the SAME operator Deployment, and each used to issue its own cluster-wide `get deployment --all-namespaces`, so every healthy `validate` paid for a full list twice. It asserts EXACTLY one, not at most one -- at most would also pass if the fetch stopped happening, so a report that silently skipped both rows would read as a successful optimisation. The verdict is ignored on purpose: against a fake that answers nothing some rows legitimately come back failed, and the call count is the same either way |
 | `TestValidateGroupsAndOrdersSections` | Pins the layout: sections render in the agreed order (Deployment, Operator, Broker, Credentials, Placement), the four leading rows (namespace, name, image, image pull) lead in order, and cpu/mem are never crammed into one compound row |
 | `TestValidateTagsEchoedConfigAsINFO` | Successor to `TestCheckDryRun`: config read back from the env file is tagged `[INFO]`, never `[ OK ]` (a report that tagged unverified config as OK would claim verification nobody did), and a preview reports every cluster-dependent check as `[SKIP]` |
+| `TestOperatorInstallVerdict` | Every answer of the operator-install verdict, read off a constructed operator Deployment: an unreadable Deployment is `unknown`; no operator, or one whose `WATCH_NAMESPACE` lacks the broker namespace, is `required` with `solace-util operator deploy`; with `watchBrokerNs: false` and the namespace missing from `watchNamespaces` the advice adds it there first; an operator in a namespace other than the resolved one says to set `kubernetes.operator.namespace` (a deploy would install a second operator); covered is `[ OK ] not required`, or `[WARN]` when the operator is stopped or lives elsewhere |
+| `TestOperatorInstallVerdictShowsOnceInEveryView` | The verdict is in the Operator section of `validate` and `operator validate` and closes the Deployment section of `broker validate`, exactly once in each -- by the sections each scope renders, and end to end through the three entry points |
 | `TestValidateSparseConfigExplainsItself` | Successor to `TestCheckEnvSparseConfig`: an empty watch list explains itself as "watches ALL namespaces" rather than the reassuring opposite, unset TLS reads `(not configured)`, and an unset admin password with a named Secret reads as referenced, not missing |
 | `TestValidateReportsEveryFailureInOneRun` | The behaviour change worth having: a refused permission is the first failure, but the run continues and still renders every section after it, and the returned error counts the failures rather than wrapping only the first |
 | `TestCheckReportFailedCounts` | `checkReport.failed()` sums the FAIL rows across every section; an empty report counts zero |
 | `TestStorageRows` | Exercises the `Cluster.storageRows` section builder directly: a suitable configured class is OK with no default lookup; Immediate binding or no expansion is FAIL; missing attributes report `<none>` and FAIL; the actionable message names the fix; and every read failure along the way (default resolution, the first attribute column, the second after the first succeeds) surfaces its own FAIL row rather than being swallowed |
 | `TestValidateReportsResolvedPorts` | M11: an explicit `kubernetes.ports` resolves into the new leading Config section as a `ports (N)` count plus the `name=port` pairs, readable straight off the report with no need to deploy or run `broker generate` |
-| `TestValidateReportsDefaultPorts` | M11: leaving `kubernetes.ports` unset is not "no ports configured" -- `ApplyDefaults`'s 17-entry default is what actually renders into the broker CR, so the Config section shows `ports (17)` and both the first and last default port; a precondition assertion fails loud if defaulting itself ever stopped happening, rather than passing vacuously on an empty list |
-| `TestPortRowsNeverFail` | M11: `portRows` produces only `[ OK ]` rows at every wrap boundary (0, 1, a full chunk, one over, and the 17-port default) -- `validate` is read-only and must never stop a deploy over how many ports there are to print |
+| `TestValidateReportsUnsetPorts` | M11: leaving `kubernetes.ports` unset is not "no ports" -- the CR then carries no `spec.service.ports` and the operator's own CRD default applies, so the Config section says exactly that, with no count and no list (which list it is belongs to the operator version); a precondition assertion fails loud if something started filling a default in again |
+| `TestPortRowsNeverFail` | M11: `portRows` produces only `[ OK ]` rows at every wrap boundary (0 -- the unset list -- 1, a full chunk, one over, and a 17-entry list) -- `validate` is read-only and must never stop a deploy over how many ports there are to print |
 | `TestValidateConfigSectionNeverFails` | M11: the report-level companion to `TestPortRowsNeverFail` -- `validationRows` alone must never move `checkReport.failed()` off zero |
 | `TestValidateReportsThePreSharedKeyChoice` | On Kubernetes an empty pre-shared key is a legitimate deployment rather than a gap -- the operator generates and distributes one -- so the report has to say WHICH of the two keys the group will end up using; nothing else shows it, since neither the CR nor the Secret exists until deploy. A configured key is reported by naming the Secret entry it becomes and never the value itself, and a standalone broker gets no row at all |
 | `TestValidateSaysWhoOwnsTheTLSSecret` | Naming a Secret and supplying the files it is built from are separate decisions, and the report is the only place the difference shows before a deploy: read as "this tool will create it" in the case where it will not, a missing Secret is first discovered by a pod that will not mount. Covers both origins and a derived name, which the row shows and calls derived -- the one place it is visible before something mounts it -- plus the `tls.certPassphrase` warning -- the CRD's `spec.tls` has no passphrase field, so an encrypted key cannot be used on this platform -- and that the passphrase itself never reaches the output |
@@ -2070,7 +2079,6 @@ instead of the first.
 | `TestOperatorDeleteRefusesCRDWhenListingFails` | M3: the RBAC/API-error branch -- being unable to see what the CRD deletion would destroy is not permission to destroy it, so a failed broker-CR listing refuses the CRD layer too, preserving the cause via `%w` |
 | `TestSplitOperatorBundle` | The column-0 anchoring behind that split: a ConfigMap with an indented `kind: CustomResourceDefinition` line buried in an example snippet is not misclassified as a CRD, while a real unindented CRD document still is; plus empty input, no-CRD input, and CRD-only input all hand back the nil/populated halves `OperatorDelete` expects |
 | `TestOperatorRestart` | `rollout restart deployment` targets the operator deployment in its resolved namespace, behind the `patch deployments` permission probe |
-| `TestOperatorInstalled` | Reports true only when both the CRD and the controller Deployment gets succeed, stops after the first failing get without probing the second, and its bool-only signature means an absent operator and an unreachable cluster are indistinguishable to the caller |
 | `TestOperatorLogsArgs` | Log passthrough targets the operator deployment |
 | `TestOperatorStatus` | OperatorStatus issues the deployment-wide get then the controller-pods get in order, and stops after the first if it fails |
 | `TestOperatorDescribe` | OperatorDescribe issues `describe deployment/<name> -n <opNS>` against the resolved operator namespace |
@@ -2079,6 +2087,7 @@ instead of the first.
 | `TestOperatorDeleteOmitsRegcredWithoutCredentials` | The delete-side counterpart to `TestOperatorApplyNoCredentialsSkipsRegcred` and `TestOperatorApplyNamedPullSecretWithoutCredentials`. Unlike apply, the regcred rides the SAME delete call as the rest of the bundle rather than one of its own, so there is no separate call to assert absent -- only that the one call never mentions it, and the `secrets` permission is never probed, whether or not a name is configured (both "no name, no credentials" and "name set, bring-your-own" subtests) |
 | `TestOperatorProbesEveryKindItTouches` | The fix for a check that passed and then failed halfway through the work: probing only the CRD meant an identity allowed to create CustomResourceDefinitions but not ClusterRoleBindings got past the preflight and died mid-apply -- the exact state `Preflight` exists to prevent |
 | `TestOperatorRestartProbesTheOperatorNamespace` | A silent defect pinned: the restart happens in the operator's namespace while its permission check asked about the broker's, so an identity permitted in one and not the other passed and then failed |
+| `TestFullExampleListsTheOperatorsDefaultPorts` | The commented `kubernetes.ports` list in the annotated example equals the bundled CRD's `spec.service.ports` default, entry for entry and in order. The CLI carries no copy of that list any more, so the example is where an operator reads which ports the default exposes, and a bundle bump must not leave it describing the previous operator's list |
 
 ### operatorversion_test.go
 
@@ -2214,7 +2223,7 @@ AGE column is reproducible.
 
 | Test | What it covers |
 | --- | --- |
-| `TestGeneratorPageEmbedsTheCLI` | Pins `solace-yaml-generator.html` to the CLI it previews. Its `GEN` block must hold the embedded operator bundle -- compared by decompressed text, so a gzip change between Go releases is not a diff -- and every default the page shows, each derived here from `config.ApplyDefaults` (operator image, namespace and resources, update strategy, monitor storage size, the Kubernetes ports, both scaling defaults, each tier's cpu and memory, the engine commands, run users, container name, data dir, monitor cpuset, core limit, network mode, health-check timings); a mismatch names the field, and `-update` rewrites only the block. Fails too when the bundle uses a template action outside `pageOperatorActions`, the ones the page's renderer implements -- a JavaScript change regen cannot make |
+| `TestGeneratorPageEmbedsTheCLI` | Pins `solace-yaml-generator.html` to the CLI it previews. Its `GEN` block must hold the embedded operator bundle -- compared by decompressed text, so a gzip change between Go releases is not a diff -- and every default the page shows, each derived here from `config.ApplyDefaults` (operator image, namespace and resources, update strategy, monitor storage size, both scaling defaults, each tier's cpu and memory, the engine commands, run users, container name, data dir, monitor cpuset, core limit, network mode, health-check timings); a mismatch names the field, and `-update` rewrites only the block. Fails too when the bundle uses a template action outside `pageOperatorActions`, the ones the page's renderer implements -- a JavaScript change regen cannot make |
 
 ---
 
@@ -2570,13 +2579,14 @@ variable, so what a run prints is decided by the CLI, in one place.
 ## internal/render
 
 Manifest and unit-file rendering, guarded by committed goldens, plus the server
-certificate's delivery on both engines. 50 tests across 2 files.
+certificate's delivery on both engines. 51 tests across 2 files.
 
 ### render_test.go
 
 | Test | What it covers |
 | --- | --- |
-| `TestGolden` | Fifteen renderings from the sample env match their goldens: the k8s broker CR (the sample omits `kubernetes.ports`, `timezone` and both security blocks, so this covers the default ports and the omitted branches), the same CR with an explicit port list (a container port differing from the service port, and an explicit protocol), the same CR with timezone and both security blocks set, the podman quadlet for a messaging node (carrying the tier's cpuset), the same unit for the MONITOR role (one cpu and 2g instead of the tier, and the host-networking opt-in where the primary publishes a port list, everything else identical -- the first monitor-role container golden), and the same unit rootless (`User=1000`, `WantedBy=default.target`, the cpuset and every cap unchanged), docker compose in HA and standalone (standalone drops the redundancy block and its PSK secret reference), container env pairs for HA (no `timezone`, so no TZ pair) and standalone (`timezone` set, so the TZ pair is present), the quadlet and compose forms of the opt-in health check, the CR with an explicit pullPolicy plus podAnnotations/podLabels, the CR with node and pod affinity alongside the legacy anti-affinity term, and the CR with loadBalancer annotations, node labels and tolerations (values carrying a colon and a URL, which survive only because both halves are quoted). The sample sets no `network`, so the container goldens render the default -- bridge, nothing published -- except the two primaries, which publish `goldenBridgePorts` (SEMP, SMF and the redundancy ports, with a range, an address-bound entry and a `/tcp` suffix among them, passed through as written), and the docker standalone and podman monitor goldens, which carry the host-networking opt-in. The two secret-script goldens went with `render.SecretScript`: no container artifact carries a secret value any more |
+| `TestGolden` | Fifteen renderings from the sample env match their goldens: the k8s broker CR (the sample omits `kubernetes.ports`, `timezone` and both security blocks, so this covers the omitted branches, the CR carrying no `ports:` under `service:` among them), the same CR with an explicit port list (a container port differing from the service port, and an explicit protocol), the same CR with timezone and both security blocks set, the podman quadlet for a messaging node (carrying the tier's cpuset), the same unit for the MONITOR role (one cpu and 2g instead of the tier, and the host-networking opt-in where the primary publishes a port list, everything else identical -- the first monitor-role container golden), and the same unit rootless (`User=1000`, `WantedBy=default.target`, the cpuset and every cap unchanged), docker compose in HA and standalone (standalone drops the redundancy block and its PSK secret reference), container env pairs for HA (no `timezone`, so no TZ pair) and standalone (`timezone` set, so the TZ pair is present), the quadlet and compose forms of the opt-in health check, the CR with an explicit pullPolicy plus podAnnotations/podLabels, the CR with node and pod affinity alongside the legacy anti-affinity term, and the CR with loadBalancer annotations, node labels and tolerations (values carrying a colon and a URL, which survive only because both halves are quoted). The sample sets no `network`, so the container goldens render the default -- bridge, nothing published -- except the two primaries, which publish `goldenBridgePorts` (SEMP, SMF and the redundancy ports, with a range, an address-bound entry and a `/tcp` suffix among them, passed through as written), and the docker standalone and podman monitor goldens, which carry the host-networking opt-in. The two secret-script goldens went with `render.SecretScript`: no container artifact carries a secret value any more |
+| `TestUnsetPortsLeaveTheServicePortsToTheOperator` | With `kubernetes.ports` unset the CR carries no `ports:` key at all -- not an empty one, which is a null -- while `service:`/`type: LoadBalancer` stays, since the CRD's port default fires only inside it; a list that is set renders whole |
 | `TestArtifactsCarryNoSecrets` | The externalization guard: with distinctive values in `semp.adminPass`, `redundancy.psk` and an additional user's password, no deployment artifact on any platform (broker CR, quadlet, compose file) contains any of them -- each references the secret by name and `broker deploy` supplies the value |
 | `TestContainerSecretsRedundancy` | HA lists the admin password and PSK in a fixed order, with the fixture's server certificate last, the expected broker settings, `FilePathKey`/`MountPath` derive the file form both engines use (the mount is named after the setting, not the host-side secret), and standalone drops the PSK (no mate link). An encrypted server-certificate key adds one more secret reaching the broker as `tls_servercertificate_passphrasefilepath`, and only when the passphrase is actually set |
 | `TestContainerSecretNamesAreHostScoped` | The de-confliction: the host-side name is `<container.name>-<suffix>` (the default name keeps the historical `solace-admin-password`), the in-container target and path never carry that prefix, and `EnvVar` maps `.`/`-` to `_` and prefixes a leading digit so the name stays exportable. Podman's certificate secret, which holds the private key, follows the same scheme: one name on every render of one file, and distinct names for two container names on one host |

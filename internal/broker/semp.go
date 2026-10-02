@@ -27,10 +27,9 @@ import (
 // binds it directly on the mate host's interface.
 const defaultSEMPPort = 8080
 
-// defaultTLSSEMPPort is the broker's own TLS SEMP port. k8s already names this
-// same 1943 in an unexported table (config.defaultK8sPorts's "tls-semp=1943"),
-// but that function is internal to package config, so this is its own named
-// constant rather than a second, unrelated import boundary for one integer.
+// defaultTLSSEMPPort is the broker's own TLS SEMP port. The operator's default
+// Service ports name the same 1943 (tls-semp), but that list lives in its CRD, so
+// this is its own named constant rather than an import boundary for one integer.
 const defaultTLSSEMPPort = 1943
 
 // sempPort resolves the port the mate's SEMP service listens on as seen from

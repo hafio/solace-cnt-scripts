@@ -336,8 +336,11 @@ func TestApplyDefaultsK8s(t *testing.T) {
 		c.Scaling.MaxSubscriptions != 50000 || c.Scaling.MaxGuaranteedMsgMB != 10 {
 		t.Errorf("Scaling defaults = %+v", c.Scaling)
 	}
-	if len(c.K8s.Ports) == 0 {
-		t.Errorf("K8s.Ports should be non-empty by default")
+	// kubernetes.ports is NOT defaulted: unset, the CR carries no spec.service.ports and
+	// the operator's own CRD default applies, so filling a copy here would pin one
+	// operator version's list onto every cluster.
+	if len(c.K8s.Ports) != 0 {
+		t.Errorf("K8s.Ports = %v, want it left empty for the operator's default", c.K8s.Ports)
 	}
 	// Anti-affinity defaults to the broker namespace with weight 100.
 	if len(c.K8s.Placement.AntiAffinityNS) != 1 || c.K8s.Placement.AntiAffinityNS[0] != "sol-ns" {
@@ -686,8 +689,8 @@ func TestValidateContainerMissingMandatory(t *testing.T) {
 	}
 }
 
-// TestBridgePortsArePassThrough: the container port list is never defaulted, unlike
-// kubernetes.ports. Which ports a broker exposes, and on which address, is the
+// TestBridgePortsArePassThrough: the container port list is never defaulted (nor is
+// kubernetes.ports, where the operator's own default fills in). Which ports a broker exposes, and on which address, is the
 // operator's decision, so the default bridge mode with no list publishes nothing, an
 // explicit list is kept exactly as written, and host mode is left alone too.
 func TestBridgePortsArePassThrough(t *testing.T) {
@@ -1218,26 +1221,6 @@ func TestValidatePlacementAffinity(t *testing.T) {
 	c.K8s.Placement.PodAntiAffinity = []PodAffinityTerm{{TopologyKey: "topology.kubernetes.io/zone"}}
 	if err := c.Validate(K8s); err != nil {
 		t.Errorf("a valid affinity set must be accepted: %v", err)
-	}
-}
-
-// TestDefaultK8sPortsMatchesOperator pins the built-in port list against the
-// operator's own default, whose leading entry (tcp-ssh) this tool used to omit.
-func TestDefaultK8sPortsMatchesOperator(t *testing.T) {
-	ports := defaultK8sPorts()
-	if len(ports) != 17 {
-		t.Errorf("defaultK8sPorts has %d entries, want 17 (the operator's own default)", len(ports))
-	}
-	if ports[0] != "tcp-ssh=2222" {
-		t.Errorf("defaultK8sPorts[0] = %q, want tcp-ssh=2222 (the operator lists it first)", ports[0])
-	}
-	seen := map[string]bool{}
-	for _, p := range ports {
-		name, _, _ := strings.Cut(p, "=")
-		if seen[name] {
-			t.Errorf("duplicate port name %q in defaultK8sPorts", name)
-		}
-		seen[name] = true
 	}
 }
 

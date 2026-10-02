@@ -3,6 +3,7 @@ package k8s
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -104,7 +105,7 @@ func TestValidateTagsEchoedConfigAsINFO(t *testing.T) {
 	}
 	// And a preview claims nothing about the cluster.
 	out := buf.String()
-	for _, want := range []string{"[SKIP] api server", "[SKIP] permission", "[SKIP] installed", "[SKIP] storage class"} {
+	for _, want := range []string{"[SKIP] api server", "[SKIP] permission", "[SKIP] operator install", "[SKIP] storage class"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("a preview must report its cluster checks as skipped, missing %q:\n%s", want, out)
 		}
@@ -402,17 +403,17 @@ func TestValidateReportsResolvedPorts(t *testing.T) {
 	}
 }
 
-// TestValidateReportsDefaultPorts covers the other half of M11: an env file
-// that leaves kubernetes.ports unset is not "no ports configured" -- ApplyDefaults
-// already filled in the operator's own 17-entry default before Validate ever ran,
-// and that is what will actually render into the broker CR. The precondition
-// assertion is the "confirm that is true before asserting it" the task calls
-// for: if defaulting ever stopped happening here, this test should fail on the
-// precondition, not silently pass on an empty list.
-func TestValidateReportsDefaultPorts(t *testing.T) {
+// TestValidateReportsUnsetPorts covers the other half of M11: an env file that
+// leaves kubernetes.ports unset is not "no ports" -- the CR then carries no
+// spec.service.ports and the operator's own CRD default applies, so the report
+// says exactly that, with no count and no list, since which list it is belongs to
+// the operator version. The precondition is the "confirm that is true before
+// asserting it" the task calls for: if something started filling a default in
+// again, this test fails on the precondition rather than on the wording.
+func TestValidateReportsUnsetPorts(t *testing.T) {
 	cfg := loadK8s(t) // sample.yaml leaves kubernetes.ports commented out
-	if len(cfg.K8s.Ports) != 17 {
-		t.Fatalf("precondition: ApplyDefaults should fill 17 ports when kubernetes.ports is unset, got %d", len(cfg.K8s.Ports))
+	if len(cfg.K8s.Ports) != 0 {
+		t.Fatalf("precondition: kubernetes.ports should stay empty when unset, got %v", cfg.K8s.Ports)
 	}
 
 	buf := &bytes.Buffer{}
@@ -421,14 +422,12 @@ func TestValidateReportsDefaultPorts(t *testing.T) {
 		t.Fatalf("Validate: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "ports (17)") {
-		t.Errorf("report should show the default port count, missing \"ports (17)\":\n%s", out)
+	if !strings.Contains(out, "the operator's default applies") {
+		t.Errorf("report should say the operator's default ports apply:\n%s", out)
 	}
-	// One from the head of the default list and one from the tail, so a bug
-	// that only wrapped the first chunk would still be caught.
-	for _, want := range []string{"tcp-ssh=2222", "tls-mqttweb=8443"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("report missing default port %q:\n%s", want, out)
+	for _, never := range []string{"ports (", "tcp-ssh=2222", "none configured"} {
+		if strings.Contains(out, never) {
+			t.Errorf("report shows %q for an unset kubernetes.ports:\n%s", never, out)
 		}
 	}
 }
@@ -718,7 +717,136 @@ func TestValidateReadsDeploymentsOnce(t *testing.T) {
 	// happening at all -- a report that silently skipped both rows would look like a
 	// successful optimisation.
 	if n != 1 {
-		t.Errorf("`get deployment --all-namespaces` ran %d times, want exactly 1 -- the watch row and "+
-			"the operator rows read the same object and must share one fetch, and neither may skip it", n)
+		t.Errorf("`get deployment --all-namespaces` ran %d times, want exactly 1 -- the install verdict and "+
+			"the version row read the same object and must share one fetch, and neither may skip it", n)
+	}
+}
+
+// TestOperatorInstallVerdict pins every answer of the operator-install verdict, the one
+// row that says whether an `operator deploy` is needed before this broker is reconciled.
+// It replaced two rows that read the cluster two ways and could disagree, so the cases
+// that used to split them -- an operator installed in another namespace above all -- are
+// here, and so is the advice for the two states `operator deploy` alone cannot fix.
+func TestOperatorInstallVerdict(t *testing.T) {
+	const opNS = "pubsubplus-operator-system"
+	operator := func(ns, watch string, replicas *int) *deploymentItem {
+		d := &deploymentItem{}
+		d.Metadata.Name = operatorDeployment
+		d.Metadata.Namespace = ns
+		d.Spec.Replicas = replicas
+		ctr := containerSpec{Image: "solace/pubsubplus-eventbroker-operator:1.4.2"}
+		if watch != "(absent)" {
+			ctr.Env = []envVar{{Name: watchEnvVar, Value: watch}}
+		}
+		d.Spec.Template.Spec.Containers = []containerSpec{ctr}
+		return d
+	}
+	zero := 0
+	for _, tc := range []struct {
+		name      string
+		dep       *deploymentItem
+		depErr    error
+		cfgWatch  string // kubernetes.operator.watchNamespaces
+		brokerNs  *bool  // kubernetes.operator.watchBrokerNs (nil = the default, true)
+		wantLevel output.Level
+		want      []string
+	}{
+		{name: "the Deployment could not be read", depErr: errors.New("deployments is forbidden"),
+			wantLevel: output.LevelWarn, want: []string{"unknown", "deployments is forbidden"}},
+		{name: "no operator", wantLevel: output.LevelWarn,
+			want: []string{"required -- no operator is installed; `solace-util operator deploy` installs it"}},
+		{name: "no operator, and the env file leaves this namespace out", cfgWatch: "team-a", brokerNs: boolPtr(false),
+			wantLevel: output.LevelWarn, want: []string{"required -- no operator is installed",
+				`add "solace" to kubernetes.operator.watchNamespaces`, "then run `solace-util operator deploy`"}},
+		{name: "no operator, and the env file asks for every namespace", brokerNs: boolPtr(false),
+			wantLevel: output.LevelWarn, want: []string{"`solace-util operator deploy` installs it"}},
+		{name: "watches every namespace", dep: operator(opNS, "(absent)", nil),
+			wantLevel: output.LevelOK, want: []string{"not required", "watches ALL namespaces", `"solace" included`}},
+		{name: "watches a list including this namespace", dep: operator(opNS, "team-a,solace", nil),
+			wantLevel: output.LevelOK, want: []string{"not required", "watches team-a,solace"}},
+		{name: "watches a list without this namespace", dep: operator(opNS, "team-a", nil),
+			wantLevel: output.LevelWarn, want: []string{"required -- the operator in " + opNS + " watches team-a and NOT \"solace\"",
+				"`solace-util operator deploy` adds it"}},
+		{name: "without this namespace, and the env file leaves it out too", dep: operator(opNS, "team-a", nil),
+			cfgWatch: "team-b", brokerNs: boolPtr(false), wantLevel: output.LevelWarn,
+			want: []string{"required", `add "solace" to kubernetes.operator.watchNamespaces`, "then run `solace-util operator deploy`"}},
+		{name: "covered but stopped", dep: operator(opNS, "solace", &zero), wantLevel: output.LevelWarn,
+			want: []string{"not required", "STOPPED (0 replicas)", "`solace-util operator start`"}},
+		{name: "covered by an operator in another namespace", dep: operator("ops-team", "solace", nil),
+			wantLevel: output.LevelWarn, want: []string{"not required -- the operator in ops-team",
+				"would install a second operator there -- set it to ops-team"}},
+		{name: "not covered by an operator in another namespace", dep: operator("ops-team", "team-a", nil),
+			wantLevel: output.LevelWarn, want: []string{"required -- the operator in ops-team watches team-a",
+				"set kubernetes.operator.namespace: ops-team, then run `solace-util operator deploy`"}},
+		{name: "elsewhere, and the env file leaves this namespace out", dep: operator("ops-team", "team-a", nil),
+			cfgWatch: "team-b", brokerNs: boolPtr(false), wantLevel: output.LevelWarn,
+			want: []string{"set kubernetes.operator.namespace: ops-team, then add \"solace\" to " +
+				"kubernetes.operator.watchNamespaces (watchBrokerNs is false), then run `solace-util operator deploy`"}},
+		// The namespace is named before `operator start`, which acts on the resolved
+		// namespace and so only works once that is set.
+		{name: "stopped, in another namespace", dep: operator("ops-team", "solace", &zero), wantLevel: output.LevelWarn,
+			want: []string{"set it to ops-team; and it is STOPPED"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.K8s.Command = config.Command{"kubectl"}
+			cfg.K8s.Namespace = "solace"
+			cfg.K8s.Operator.WatchNamespaces = tc.cfgWatch
+			cfg.K8s.Operator.WatchBrokerNS = tc.brokerNs
+			c := NewCluster(&recRunner{}, cfg, nil, &bytes.Buffer{})
+			row := c.operatorInstallRow(opNS, tc.dep, tc.depErr)
+			if row.Key != installKey {
+				t.Errorf("key = %q, want %q", row.Key, installKey)
+			}
+			if row.Level != tc.wantLevel {
+				t.Errorf("level = %v, want %v: %s", row.Level, tc.wantLevel, row.Value)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(row.Value, w) {
+					t.Errorf("verdict = %q, want it to contain %q", row.Value, w)
+				}
+			}
+		})
+	}
+}
+
+// TestOperatorInstallVerdictShowsOnceInEveryView: the verdict is the one row all three
+// views carry -- in the Operator section where that section renders (`validate`,
+// `operator validate`), and closing the Deployment section in `broker validate`, which has
+// no Operator section -- and no view shows it twice.
+func TestOperatorInstallVerdictShowsOnceInEveryView(t *testing.T) {
+	rep := &checkReport{deployment: []checkRow{info("namespace", "solace")}}
+	rep.operator = append(rep.operator, okRow("namespace", "pubsubplus-operator-system"))
+	rep.setInstall(warnRow(installKey, "required -- no operator is installed"))
+	for _, tc := range []struct {
+		scope validateScope
+		where string
+	}{{scopeAll, "Operator"}, {scopeBroker, "Deployment"}, {scopeOperator, "Operator"}} {
+		n, where := 0, ""
+		for _, section := range rep.sections(tc.scope) {
+			for _, row := range section.rows {
+				if row.Key == installKey {
+					n++
+					where = section.title
+				}
+			}
+		}
+		if n != 1 || where != tc.where {
+			t.Errorf("scope %d shows the verdict %d time(s), in %q; want once, in %q", tc.scope, n, where, tc.where)
+		}
+	}
+
+	// And end to end, through the three real entry points (a preview skips the read).
+	for name, run := range map[string]func(*Cluster, context.Context) error{
+		"validate": (*Cluster).Validate, "broker validate": (*Cluster).ValidateBroker,
+		"operator validate": (*Cluster).ValidateOperator,
+	} {
+		buf := &bytes.Buffer{}
+		if err := run(NewCluster(engine.Echo{W: buf}, loadK8s(t), nil, buf), context.Background()); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := strings.Count(buf.String(), "[SKIP] "+installKey); got != 1 {
+			t.Errorf("%s shows the verdict %d time(s), want once:\n%s", name, got, buf.String())
+		}
 	}
 }

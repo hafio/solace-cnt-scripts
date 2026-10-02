@@ -1294,8 +1294,8 @@ Applies to: kubernetes. On any other platform this command fails rather than doi
 
 Check the operator's install state and watch scope (kubernetes only)
 
-Reports the operator's install state, running version versus this env
-file's, and the namespaces it watches.
+Says whether an operator install is required for this env file's broker
+namespace, and compares the running version with this env file's.
 
 Every value is read live from the cluster, since the operator is shared
 and may already watch namespaces this env file never named.

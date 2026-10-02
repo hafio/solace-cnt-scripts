@@ -66,7 +66,7 @@ Run the local gate with `scripts/dev.ps1 all scan` (or `./scripts/dev.sh all sca
 `<timestamp> | <task> | <duration>s | OK|FAILED` footer; coverage HTML in
 `coverage/coverage.html`.
 
-Current test coverage is 93.3% as of 2026-10-02, recorded in `scripts/logs/cov.log`. **The
+Current test coverage is 93.4% as of 2026-10-02, recorded in `scripts/logs/cov.log`. **The
 previous total is the local floor**: if a change lands lower, either add the missing tests or
 say in the change which number moved and why (deleting dead code or a weak test can
 legitimately lower it). This is a local mechanism -- a CI runner is a fresh checkout with no
@@ -134,7 +134,9 @@ solace-util broker generate -e env.yaml --platform docker    # or podman: must l
 ```
 
 Both diffs must be empty, using literal secrets and the certificate files picked in the TLS
-section. Run it for the form's defaults; HA with TLS files, registry credentials, additional
+section. Run it for the form's defaults (no service ports, so neither CR carries `ports:`); an
+explicit port list with a service port that differs from its container port and a `/UDP`
+entry; HA with TLS files, registry credentials, additional
 users, a monitor password and a PSK; existing claims with pod metadata and node and pod
 affinity; replication with each kind of `via`; and a rootless podman file.
 

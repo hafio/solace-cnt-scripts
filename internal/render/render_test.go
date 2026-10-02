@@ -158,11 +158,11 @@ func TestGolden(t *testing.T) {
 			gen:  func(t *testing.T) []byte { return BrokerCR(load(t, config.K8s)) },
 		},
 		{
-			// The sample leaves kubernetes.ports commented, so the case above renders the
-			// 16 defaults. An explicit list here covers the other branch of
-			// ApplyDefaults' port handling, and with it the two forms only a custom
-			// list uses: a container port differing from the service port, and an
-			// explicit protocol.
+			// The sample leaves kubernetes.ports commented, so the case above renders no
+			// ports at all -- the operator's own default applies. An explicit list here
+			// covers the other branch of BrokerCR's port handling, and with it the two
+			// forms only a custom list uses: a container port differing from the service
+			// port, and an explicit protocol.
 			name: "k8s broker CR with custom ports",
 			file: "k8s_broker_cr_ports.golden",
 			gen: func(t *testing.T) []byte {
@@ -659,6 +659,27 @@ func TestCustomVolumeMountRendersTheCRArray(t *testing.T) {
 	}
 	if strings.Contains(got, "useStorageClass") {
 		t.Error("a custom-mounted deployment must not also name a StorageClass")
+	}
+}
+
+// TestUnsetPortsLeaveTheServicePortsToTheOperator: with kubernetes.ports unset the CR
+// carries no ports key at all -- not an empty one, which is a null -- so the CRD's own
+// default list applies, while the service block itself stays (the default only fires
+// inside it). A list that is set is rendered whole, and replaces that default.
+func TestUnsetPortsLeaveTheServicePortsToTheOperator(t *testing.T) {
+	c := load(t, config.K8s) // the sample leaves kubernetes.ports commented out
+	got := string(BrokerCR(c))
+	if strings.Contains(got, "ports:") {
+		t.Errorf("an unset kubernetes.ports must leave the key out of the CR:\n%s", got)
+	}
+	if !strings.Contains(got, "  service:\n    type: LoadBalancer\n") {
+		t.Errorf("the service block must stay, since the operator's port default lives inside it:\n%s", got)
+	}
+
+	c.K8s.Ports = []string{"tcp-semp=8080"}
+	want := "    ports:\n    - containerPort: 8080\n      name: tcp-semp\n      protocol: TCP\n      servicePort: 8080\n"
+	if got := string(BrokerCR(c)); !strings.Contains(got, want) {
+		t.Errorf("a set kubernetes.ports must render as written:\n%s", got)
 	}
 }
 

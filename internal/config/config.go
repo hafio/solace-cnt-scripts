@@ -678,7 +678,7 @@ type K8sConfig struct {
 	PodLabels         map[string]string `yaml:"podLabels"`         // -> spec.podLabels
 	Placement         Placement         `yaml:"placement"`
 	LoadBalancer      LoadBalancer      `yaml:"loadBalancer"`
-	Ports             []string          `yaml:"ports"` // SOLBK_PORTS "name=port[/proto]"
+	Ports             []string          `yaml:"ports"` // SOLBK_PORTS "name=containerPort[:servicePort][/proto]"; empty -> no spec.service.ports, the operator's default applies
 
 	// Runtime is retained so an env file carrying the removed kubernetes.runtime
 	// fails with an actionable rename error (validateRenamedKeys) instead of a

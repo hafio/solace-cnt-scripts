@@ -321,10 +321,27 @@ kubernetes:
   #   ipPool: sample-ip-pool        # MetalLB address-pool name
   #   annotations:                  # extra service annotations, "key: value"
   #     - "external-dns.alpha.kubernetes.io/hostname: broker.example.com"
-  # ports:                          # name=containerPort[:servicePort][/proto]
+  # ports:                          # name=containerPort[:servicePort][/proto]. Unset,
+                                    # the CR carries no service.ports and the operator's
+                                    # own default applies -- for the bundled operator,
+                                    # exactly the list below. Set, your list REPLACES it.
+  #  - tcp-ssh=2222
   #  - tcp-semp=8080
-  #  - tcp-smf=55555:55556
-  #  - tls-smf=55443/TCP
+  #  - tls-semp=1943
+  #  - tcp-smf=55555
+  #  - tcp-smfcomp=55003
+  #  - tls-smf=55443
+  #  - tcp-smfroute=55556
+  #  - tcp-web=8008
+  #  - tls-web=1443
+  #  - tcp-rest=9000
+  #  - tls-rest=9443
+  #  - tcp-amqp=5672
+  #  - tls-amqp=5671
+  #  - tcp-mqtt=1883
+  #  - tls-mqtt=8883
+  #  - tcp-mqttweb=8000
+  #  - tls-mqttweb=8443
   # podAnnotations:                 # key and value are quoted for you
   #   prometheus.io/scrape: "true"
   # podLabels:

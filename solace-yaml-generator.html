@@ -378,8 +378,8 @@ body{font-family:'Inter',system-ui,sans-serif;font-size:.88rem;color:var(--tp);b
   <div class="sec plat-k8s" id="s-ports"><h3>Kubernetes: service ports</h3>
     <div id="ports-list"></div>
     <button type="button" class="p-add" onclick="addPort();gen()">+ Add port</button>
-    <button type="button" class="p-add" onclick="resetPorts();gen()">Reset to the defaults</button>
-    <div class="h" style="margin-top:.5rem">Name (a DNS label, at most 15 characters), container port, service port, protocol. Left as the defaults, the env file omits the list.</div>
+    <button type="button" class="p-add" onclick="clearPorts();gen()">Clear</button>
+    <div class="h" style="margin-top:.5rem">Name (a DNS label, at most 15 characters), container port, service port, protocol. Left empty, the CR carries no ports and the operator's own default list applies (shown, commented out, by <code>solace-util examples</code>); a list you add replaces that default whole.</div>
   </div>
 
   <!-- ======== DOCKER / PODMAN ======== -->
@@ -468,25 +468,6 @@ const GEN = {
     "operatorMem": "512Mi",
     "updateStrategy": "automatedRolling",
     "monNodeSize": "5Gi",
-    "kubernetesPorts": [
-      "tcp-ssh=2222",
-      "tcp-semp=8080",
-      "tls-semp=1943",
-      "tcp-smf=55555",
-      "tcp-smfcomp=55003",
-      "tls-smf=55443",
-      "tcp-smfroute=55556",
-      "tcp-web=8008",
-      "tls-web=1443",
-      "tcp-rest=9000",
-      "tls-rest=9443",
-      "tcp-amqp=5672",
-      "tls-amqp=5671",
-      "tcp-mqtt=1883",
-      "tls-mqtt=8883",
-      "tcp-mqttweb=8000",
-      "tls-mqttweb=8443"
-    ],
     "kubernetesCommand": "kubectl",
     "cliScriptsDir": "cli",
     "hostDiagnosticDir": "diag-configs",
@@ -742,9 +723,8 @@ function parsePort(entry) {
   if (k >= 0) { container = rest.slice(0, k); service = rest.slice(k + 1); }
   return { name, container, service, proto };
 }
-function resetPorts() {
+function clearPorts() {
   $('ports-list').innerHTML = '';
-  GEN.defaults.kubernetesPorts.forEach(e => { const p = parsePort(e); addPort(p.name, p.container, p.service, p.proto); });
 }
 function portEntries() {
   return rowsOf('ports-list').map(r => {
@@ -843,7 +823,6 @@ function readModel() {
   };
 }
 
-const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 const isCtr = M => M.plat.docker || M.plat.podman;
 const platCount = M => [M.plat.k8s, M.plat.docker, M.plat.podman].filter(Boolean).length;
 
@@ -923,7 +902,7 @@ function emitEnv(M) {
       klist('antiAffinityNamespaces', k.antiNS, S(4)) + knum('antiAffinityWeight', k.antiW, S(4)) +
       blk('nodeAffinity', nodeAffinity, S(4)) + seq('podAffinity', k.podAff.map(term), S(4)) + seq('podAntiAffinity', k.podAnti.map(term), S(4)), S(2));
     b += blk('loadBalancer', kv('ip', k.lb.ip, S(4)) + kv('ipPool', k.lb.pool, S(4)) + klist('annotations', k.lb.annotations, S(4)), S(2));
-    if (!sameList(k.ports, GEN.defaults.kubernetesPorts)) b += k.ports.length ? klist('ports', k.ports, S(2)) : '';
+    if (k.ports.length) b += klist('ports', k.ports, S(2));
     y += '\nkubernetes:' + (b ? '\n' + b : ' {}\n');
   }
 
@@ -1300,7 +1279,7 @@ function k8sConfig(M) {
     podAnnotations: k.podAnnotations.filter(([a]) => a), podLabels: k.podLabels.filter(([a]) => a),
     pl: { tolP: k.tolP, tolB: k.tolB, tolM: k.tolM, lblP: k.lblP, lblB: k.lblB, lblM: k.lblM, antiNS, antiW,
       nodePref: k.nodePref, nodeReq: k.nodeReq, podAff: k.podAff, podAnti: k.podAnti },
-    lb: k.lb, ports: k.ports.length ? k.ports : D.kubernetesPorts.slice(),
+    lb: k.lb, ports: k.ports,
     op: { image: k.op.image || D.operatorImage, namespace: k.op.namespace, cpu: k.op.cpu || D.operatorCpu, mem: k.op.mem || D.operatorMem,
       watch: k.op.watch, watchBrokerNs: k.op.watchBrokerNs },
   };
@@ -1512,7 +1491,8 @@ function brokerCR(C) {
     if (lb.pool) b += `      metallb.universe.tf/address-pool: ${lb.pool}\n      metallb.io/address-pool: ${lb.pool}\n`;
     b += lb.annotations.map(a => keyValueEntry('      ', a)).join('');
   }
-  b += '    ports:\n' + C.ports.map(e => {
+  // render.BrokerCR leaves ports out when none are set, so the operator's CRD default applies.
+  if (C.ports.length) b += '    ports:\n' + C.ports.map(e => {
     const p = parsePort(e);
     return `    - containerPort: ${p.container}\n      name: ${p.name}\n      protocol: ${p.proto}\n      servicePort: ${p.service}\n`;
   }).join('');
@@ -1659,7 +1639,6 @@ function init() {
     ['i-hcto', D.healthCheck.timeout], ['i-hcret', String(D.healthCheck.retries)], ['i-hcsp', D.healthCheck.startPeriod]].forEach(([id, v]) => { $(id).placeholder = v; });
   $('i-kupd').options[0].textContent = `default (${D.updateStrategy})`;
   $('i-netmode').options[0].textContent = `default (${D.networkMode})`;
-  resetPorts();
   buildSites();
   addEndpoint('s1-eps'); addEndpoint('s2-eps');
   togPlat(); togHA();
