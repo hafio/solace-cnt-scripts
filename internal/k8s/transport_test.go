@@ -38,6 +38,11 @@ type recRunner struct {
 	// refusal sets canI="no"; one that exercises an unreachable server sets canIErr.
 	canI    string
 	canIErr error
+	// canIByVerb answers the probes for one verb differently from the rest, keyed on the
+	// verb `auth can-i` is asked about: the escalation preflight needs `create` answered
+	// yes and `escalate` answered no in the same run. A verb it does not name falls back
+	// to canI.
+	canIByVerb map[string]string
 }
 
 // isCanI reports whether an argv is the Preflight probe. Matched on the token
@@ -53,11 +58,26 @@ func isCanI(args []string) bool {
 }
 
 // canIAnswer is the scripted Preflight reply, defaulting to the permitted case.
-func (r *recRunner) canIAnswer() ([]byte, error) {
-	if r.canI == "" {
+func (r *recRunner) canIAnswer(args []string) ([]byte, error) {
+	answer := r.canI
+	if v, ok := r.canIByVerb[canIVerb(args)]; ok {
+		answer = v
+	}
+	if answer == "" {
 		return []byte("yes\n"), r.canIErr
 	}
-	return []byte(r.canI + "\n"), r.canIErr
+	return []byte(answer + "\n"), r.canIErr
+}
+
+// canIVerb is the verb an `auth can-i` argv asks about: the token after can-i, found by
+// token rather than position for the same reason isCanI is.
+func canIVerb(args []string) string {
+	for i, a := range args {
+		if a == "can-i" && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // nextOut returns the next queued Output body, falling back to out once the queue
@@ -119,7 +139,7 @@ func (r *recRunner) RunInteractive(_ context.Context, name string, args ...strin
 func (r *recRunner) Output(_ context.Context, name string, args ...string) ([]byte, error) {
 	r.calls = append(r.calls, rrCall{"Output", name, args, ""})
 	if isCanI(args) {
-		return r.canIAnswer()
+		return r.canIAnswer(args)
 	}
 	return r.nextOut(), r.nextOutErr()
 }
@@ -351,9 +371,10 @@ func (r *recRunner) afterPreflights(t *testing.T, want ...probe) []rrCall {
 		t.Fatal("no leading `auth can-i` probe: every mutating operation must ask before it acts")
 	}
 	for _, p := range want {
-		if !got[p.verb+" "+p.resource] {
+		// target, not resource: a named probe's argv carries `resource/name`.
+		if !got[p.verb+" "+p.target()] {
 			t.Errorf("no probe for %q %q -- an operation must ask about every kind it touches, or it passes "+
-				"the check and fails halfway through the work", p.verb, p.resource)
+				"the check and fails halfway through the work", p.verb, p.target())
 		}
 	}
 	return r.calls[i:]

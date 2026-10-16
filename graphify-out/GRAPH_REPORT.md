@@ -1,17 +1,17 @@
-# Graph Report - solace-cnt-scripts  (2026-10-02)
+# Graph Report - solace-cnt-scripts  (2026-10-16)
 
 ## Corpus Check
-- 197 files · ~629,454 words
+- 200 files · ~682,594 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 23 file(s) not represented in the graph (top: .golden 17, (none) 2, .cli 2)
 
 ## Summary
-- 3848 nodes · 16230 edges · 150 communities (134 shown, 16 thin omitted)
-- Extraction: 86% EXTRACTED · 14% INFERRED · 0% AMBIGUOUS · INFERRED: 2218 edges (avg confidence: 0.85)
+- 4071 nodes · 17402 edges · 150 communities (134 shown, 16 thin omitted)
+- Extraction: 85% EXTRACTED · 15% INFERRED · 0% AMBIGUOUS · INFERRED: 2532 edges (avg confidence: 0.85)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `cbc89b48`
+- Built from commit: `50cf51a3`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -27,25 +27,25 @@
 - K8sConfig
 - runRootWith
 - CheckCommand
-- captureStdout
+- opArgvMatch
 - NewCluster
 - ParseBlocks
 - convert_test.go
 - transform_test.go
 - manager_test.go
-- github.com/spf13/cobra.Command
+- commands.go
 - GenSecrets
 - Bash Dev Script
-- parse
+- coverage_test.go
 - PowerShell Dev Script
 - Abbreviation Sets
-- BuildSwitchPlan
+- MateChannel
 - newLocalOps
 - runner_test.go
-- renderDriver
-- eqArgs
+- planSections
+- Compose
 - ImportPlan
-- desiredWatch
+- deploymentItem
 - Solace Module Root
 - Config
 - Docs and Legacy Scripts
@@ -54,131 +54,131 @@
 - Role
 - App
 - recRunner
-- annotate_test.go
+- parseBody
 - completion_test.go
 - diff_test.go
-- runPlatform
+- ContainerSecret
 - inject_test.go
 - Ops
 - exportconfig_test.go
 - Echo
-- k8s/inspect.go
-- replicationVPNLines
+- eqArgs
+- shellScriptPath
 - localCfg
 - config_test.go
-- BrokerType
+- haCfg
 - newRootCmd
-- ExitCode
+- .Run
 - Container Security Guidelines
 - Operations
 - Test catalogue
 - Cluster
-- MateChannel
+- replNewRig
 - Ops
-- .BackupRevertActivity
+- .rpc
 - confirm.go
 - .configRows
 - rootless_test.go
 - strings.Builder
 - output_test.go
 - Configuration Guide
-- confirmAction
-- Mate Channel Tests
+- parseKV
+- newTestMate
 - Command Reference Doc
 - Developer guide
-- replApp
+- opPerformReplication
 - TestServerCert
-- platformOps
+- writeK8sDeployAllEnv
 - internal/k8s
-- emitYAML
+- Docker and Podman mechanics
 - exit.go
 - .ConfigureReplication
 - Command
 - newTeardownApplyFixture
-- age
+- writeNode
 - ReplSite
-- k8s/matechannel_test.go
+- replCfg
 - limits_test.go
-- occCluster
-- Troubleshooting Guide
-- k8s/inspect_test.go
-- MateConfig
-- haCfg
+- Removing a broker: what stays, what goes
+- Troubleshooting
+- k8s/inspect.go
+- mateSoftware
+- adminCfg
 - render_test.go
 - vulnjudge/main.go
 - RuleFor
-- step
+- registerFlagCompletion
 - Container
-- Config
+- IsAbsHostPath
 - Secret Reference Resolution
-- ParseRole
+- github.com/spf13/cobra.Command
 - replConfig
 - Abbreviation Reference
-- Capture
+- ParseShowReplication
 - .checkUserManagerLimits
 - platformTitle
 - Load
-- certFixture
+- MateConfig
 - Platform
 - internal/cli
-- .rpc
-- AdminSecret
+- .validateContainer
+- deniedCluster
 - Import-Config Apply Rules
 - Config
 - internal/broker
 - GenOperator
 - capRunner
 - Config Package Tests
-- newPerformExportConfigCmd
-- operatorversion_test.go
-- newBlock
+- RenderDiffResult
+- operatorversion.go
+- ExitCode
 - internal/container
 - Container State Inspection
-- cliTransport
-- cliMate
+- runPlatform
+- Cluster
 - scripts.go
-- matchCLI
+- hasCall
 - .validateContainerArtifactValues
-- sempPort
-- runExport
-- Convert
+- EnvPairs
+- cliMate
+- watchCluster
 - .applyScalingTierDefaults
-- go_pkg_runtime
+- github.com/spf13/cobra.ShellCompDirective
 - Scaling YAML Decoding
 - podName
 - .preflightOne
 - ReplVia
 - Namespace Protection Checks
+- storageCfg
+- ContainerSecrets
+- runLeader
+- Fixtures and doubles
 - logArgs
-- TestShowRedundancyIsReadOnly
-- Env Path Resolution
 - Duration and Host Path Checks
-- Exporting and importing configuration
-- internal/engine
 
 ## God Nodes (most connected - your core abstractions)
-1. `newTestOps()` - 131 edges
+1. `newTestOps()` - 159 edges
 2. `ctrCfg()` - 131 edges
-3. `Role` - 128 edges
-4. `Config` - 113 edges
-5. `newCapMgr()` - 111 edges
-6. `NewCluster()` - 101 edges
-7. `loadK8s()` - 89 edges
-8. `Platform` - 79 edges
-9. `matchCLI()` - 75 edges
+3. `Role` - 129 edges
+4. `NewCluster()` - 128 edges
+5. `Config` - 113 edges
+6. `newCapMgr()` - 111 edges
+7. `loadK8s()` - 110 edges
+8. `matchCLI()` - 92 edges
+9. `Platform` - 79 edges
 10. `bg()` - 70 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `parseHeader()` --calls--> `isMarker()`  [INFERRED]
+- `parseBody()` --calls--> `isMarker()`  [INFERRED]
   internal/broker/blocks.go → internal/broker/annotate.go
+- `assertFencesBalanced()` --calls--> `markerVerb()`  [INFERRED]
+  internal/broker/annotate_test.go → internal/broker/annotate.go
 - `parseHeader()` --calls--> `readMarker()`  [INFERRED]
   internal/broker/blocks.go → internal/broker/annotate.go
 - `applyMetaField()` --calls--> `BrokerType`  [INFERRED]
   internal/broker/annotate.go → internal/broker/blocks.go
 - `applyMetaField()` --calls--> `brokerTypeFromSchema()`  [INFERRED]
   internal/broker/annotate.go → internal/broker/blocks.go
-- `sectionBeginMarker()` --calls--> `RuleFor()`  [INFERRED]
-  internal/broker/annotate.go → internal/broker/sections.go
 
 ## Import Cycles
 - None detected.
@@ -190,28 +190,28 @@
 ## Communities (150 total, 16 thin omitted)
 
 ### Community 0 - "bg"
-Cohesion: 0.16
-Nodes (33): bg(), k8sAdminPassword(), k8sCluster(), k8sContext(), k8sLogin(), opK8sCLI(), opK8sConfigLeader(), opK8sCopyFrom() (+25 more)
+Cohesion: 0.12
+Nodes (49): warn(), bg(), k8sAdminPassword(), k8sCluster(), k8sContext(), k8sLogin(), k8sOps(), k8sRestartForCertificate() (+41 more)
 
 ### Community 1 - "newTestOps"
-Cohesion: 0.07
-Nodes (51): newTestOps(), ranContains(), TestDisableDefaultUsers(), TestDisableDefaultUsersNoVPNs(), TestDisableDefaultVPN(), TestDomainCerts(), TestDomainCertsAcceptsAFullHostPath(), TestDomainCertsEmptySkips() (+43 more)
+Cohesion: 0.06
+Nodes (68): leaderCalls(), matchCLI(), newTestOps(), TestDisableDefaultUsers(), TestDisableDefaultUsersNoVPNs(), TestDisableDefaultUsersRefusesAQuotedVPNName(), TestDisableDefaultVPN(), TestDomainCerts() (+60 more)
 
 ### Community 2 - "Sink"
-Cohesion: 0.09
-Nodes (25): BlockDiff, DiffResult, blockLabel(), diffRow(), orDash(), RenderDiffResult(), reportBlockLines(), TestDiffBlockLabelFormatsIdentityForTheReport() (+17 more)
+Cohesion: 0.20
+Nodes (5): solaceRows(), TestSolaceRowsRefusesAnEngineReturnedNameBackIntoArgv(), columnWidths(), Sink, pad()
 
 ### Community 3 - "context.Context"
-Cohesion: 0.04
-Nodes (17): scriptedMate, Transport, Manager, idMapCovers(), origin(), runUserIDs(), EnvRunner, Runner (+9 more)
+Cohesion: 0.06
+Nodes (13): scriptedMate, Exec, Manager, idMapCovers(), origin(), runUserIDs(), EnvRunner, Runner (+5 more)
 
 ### Community 4 - "cli_test.go"
 Cohesion: 0.08
-Nodes (57): capture(), captureStderr(), fakeBinaryOnPath(), firstLine(), runRoot(), runStandalone(), runStatusStderr(), TestBashEnvGivenToEnvFlag() (+49 more)
+Nodes (59): capture(), captureStderr(), collectPaths(), fakeBinaryOnPath(), firstLine(), runRoot(), runStandalone(), runStatusStderr() (+51 more)
 
 ### Community 5 - "testing.T"
 Cohesion: 0.02
-Nodes (202): TestDiagnosticsRunError(), TestDomainCertsUploadFileError(), TestExecCLIFailsOnErrorOutput(), TestExecCLIUploadFileError(), TestGatherNodeDownloadError(), TestOutDefaultsToStdout(), TestPollCondError(), TestPollContextCancelled() (+194 more)
+Nodes (204): TestExecShellScriptUploadFailureRunsNothing(), TestRouterNameReadsTheCaptureHeader(), bridgeHostPort(), sempPort(), sempV1OK(), TestSempPortBridgeFallsBackToPlaintext(), TestSempPortBridgePrefersTLS(), TestSempPortBridgeRefusesNoMapping() (+196 more)
 
 ### Community 6 - "Command Reference Docs"
 Cohesion: 0.04
@@ -222,56 +222,56 @@ Cohesion: 0.10
 Nodes (7): certDigest(), composeNeedsSecretValues(), exactName(), Manager, orNone(), secretSummary(), setOrMissing()
 
 ### Community 8 - "K8sConfig"
-Cohesion: 0.17
-Nodes (7): ContainerSecurity, Operator, PodSecurity, Resources, Storage, K8sConfig, writeSecurity()
+Cohesion: 0.12
+Nodes (14): ContainerSecurity, Operator, PodSecurity, Resources, K8sConfig, LoadBalancer, cut(), parsePort() (+6 more)
 
 ### Community 9 - "runRootWith"
 Cohesion: 0.09
-Nodes (51): TestAllowCommandRejectedWhereNothingExecutes(), allowRuntime(), echoRunner(), runCtr(), runRootWith(), TestAnnounceCommandsNamesResolvedBinaries(), TestAssertLeaderStandaloneSkipsBeforeAnyPrompt(), TestConfigStepsDoNotLeakSecrets() (+43 more)
+Nodes (40): TestAllowCommandApprovesAWrappedRuntime(), TestAllowCommandIsRepeatable(), TestAllowCommandRejectedWhereNothingExecutes(), TestAllowCommandRejectsBadValues(), TestEscalationIsRefusedEndToEnd(), TestGenPathNeverExecutes(), TestHostileRuntimeIsRefusedByEveryVerb(), TestPathRuntimeIsRefused() (+32 more)
 
 ### Community 10 - "CheckCommand"
-Cohesion: 0.15
+Cohesion: 0.16
 Nodes (21): commandRules, checkBinary(), CheckCommand(), checkFlagShape(), checkToken(), clusterRules(), composeRules(), escalator() (+13 more)
 
-### Community 11 - "captureStdout"
+### Community 11 - "opArgvMatch"
 Cohesion: 0.12
-Nodes (34): leaderRun, opCall, captureStdout(), failDisableDefaultUsersUpload(), isDeletePod(), isGetPod(), k8sDeployAllOutputHook(), loadDirect() (+26 more)
+Nodes (34): opCall, captureStdout(), failDisableDefaultUsersUpload(), isDeletePod(), isGetPod(), k8sDeployAllOutputHook(), loadDirect(), opArgvMatch() (+26 more)
 
 ### Community 12 - "NewCluster"
-Cohesion: 0.08
-Nodes (61): TestCheckStopsProbingWhenUnreachable(), TestValidateConfigSectionNeverFails(), TestValidateGroupsAndOrdersSections(), TestValidateNeverPrintsASecret(), TestValidateReadsDeploymentsOnce(), TestValidateReportsEveryFailureInOneRun(), TestValidateReportsResolvedPorts(), TestValidateReportsTheDerivedImagePullSecretName() (+53 more)
+Cohesion: 0.06
+Nodes (83): TestCheckStopsProbingWhenUnreachable(), TestAdditionalUsersRowSaysWhereThePasswordsLand(), TestOperatorRowsCompareTheRunningVersionWithTheConfiguredOne(), TestValidateConfigSectionNeverFails(), TestValidateGroupsAndOrdersSections(), TestValidateNeverPrintsASecret(), TestValidateReadsDeploymentsOnce(), TestValidateReportsEveryFailureInOneRun() (+75 more)
 
 ### Community 13 - "ParseBlocks"
-Cohesion: 0.12
-Nodes (22): Annotate(), sectionBeginMarker(), TestAnnotateIsDeterministic(), TestAnnotateRegionAndSectionFencesAreBalanced(), TestAnnotateRoundTripCaptureIsMarked(), TestAnnotateRoundTripPreservesBlocks(), TestSectionBeginMarkerAdvisoryDisposition(), TestWriteBlocksOpensAndClosesOnChange() (+14 more)
+Cohesion: 0.06
+Nodes (42): BrokerType, Omission, Annotate(), isMarker(), StripMarkers(), assertFencesBalanced(), TestAnnotateIsDeterministic(), TestAnnotateRegionAndSectionFencesAreBalanced() (+34 more)
 
 ### Community 14 - "convert_test.go"
-Cohesion: 0.19
-Nodes (31): checkGolden(), convertOK(), hasWarning(), strictDecode(), TestConvertAdminSecretAlias(), TestConvertAdminUserIsDroppedOnEveryPlatform(), TestConvertBadBooleanWarns(), TestConvertBadNumberWarns() (+23 more)
+Cohesion: 0.06
+Nodes (65): doc, Result, segment, vars, boolOf(), commentSafe(), Convert(), countMarkers() (+57 more)
 
 ### Community 15 - "transform_test.go"
 Cohesion: 0.08
-Nodes (53): Block, Region, TargetState, regionFor(), keepRegion(), injectedBlock(), BridgeEnablementInverted(), ClearExistingNested() (+45 more)
+Nodes (62): Block, TargetState, injectedBlock(), BridgeEnablementInverted(), ClearExistingNested(), ClearExistingSyslogs(), clearNestedObjects(), ClearTargetVirtualHostnames() (+54 more)
 
 ### Community 16 - "manager_test.go"
-Cohesion: 0.06
-Nodes (116): GuardPodmanEUID(), inspectReply(), kvValue(), TestInspectStateSurfacesTheEngineError(), TestReportStateNeverPrintsTheEnvironment(), TestReportStateOnAHealthyRunningContainer(), TestReportStateOnAStoppedContainer(), TestRestartCountComesFromSystemdOnPodman() (+108 more)
+Cohesion: 0.05
+Nodes (142): inspectReply(), kvValue(), TestInspectStateSurfacesTheEngineError(), TestReportStateNeverPrintsTheEnvironment(), TestReportStateOnAHealthyRunningContainer(), TestReportStateOnAStoppedContainer(), TestRestartCountComesFromSystemdOnPodman(), TestRestartCountDoesNotAttributeOurUnitToAnotherContainer() (+134 more)
 
-### Community 17 - "github.com/spf13/cobra.Command"
-Cohesion: 0.21
-Nodes (45): addCommands(), addLogFlags(), group(), newBrokerCLICmd(), newBrokerCmd(), newBrokerConfigureCmd(), newBrokerPerformCmd(), newBrokerRemoveCmd() (+37 more)
+### Community 17 - "commands.go"
+Cohesion: 0.22
+Nodes (45): opFunc, roleOpFunc, addPodFlag(), group(), newBrokerCLICmd(), newBrokerCmd(), newBrokerConfigureCmd(), newBrokerCopyCmd() (+37 more)
 
 ### Community 18 - "GenSecrets"
-Cohesion: 0.07
-Nodes (38): GenBroker(), GenSecrets(), joinManifests(), adminCfg(), secretNamesIn(), TestAdminSecretStatesEmitTheirArtifacts(), TestCreateSecretsAdminOnly(), TestCreateSecretsAllThree() (+30 more)
+Cohesion: 0.06
+Nodes (41): GenSecrets(), TestCreateSecretsAllThree(), TestGenSecretsBuildsNothingWithoutMaterial(), TestGenSecretsStopsAtASecretItCannotBuild(), TestServerCertChanged(), TestUpdateServerCertSecret(), TestUpdateServerCertSecretStopsOnPreflightFailure(), tlsCfg() (+33 more)
 
 ### Community 19 - "Bash Dev Script"
 Cohesion: 0.18
 Nodes (21): finish(), log_init(), main(), NO_COLOR, dev.sh script, build_one(), cap(), die() (+13 more)
 
-### Community 20 - "parse"
-Cohesion: 0.11
-Nodes (20): segment, vars, countMarkers(), resolvePlatform(), TestParseArrayElementsPreserveQuoting(), TestParseAssignmentForms(), TestParseCRLF(), TestParseDoubleQuotedBackslashEscapes() (+12 more)
+### Community 20 - "coverage_test.go"
+Cohesion: 0.05
+Nodes (44): ranContains(), TestLastLines(), writeFile(), TestDiagnosticsMkdirError(), TestDiagnosticsRunError(), TestDiagnosticsTwoRolesNoBundle(), TestDisableDefaultUsersDisableError(), TestDisableDefaultVPNDisableError() (+36 more)
 
 ### Community 21 - "PowerShell Dev Script"
 Cohesion: 0.18
@@ -281,65 +281,65 @@ Nodes (17): Get-Log(), Get-Now(), Build-One(), Cap(), Ok(), Step(), Task-build()
 Cohesion: 0.13
 Nodes (15): Entry, checkShort(), Set, New(), sample(), TestAccessorsReturnCopies(), TestDigitsAreAllowed(), TestExpandResolvesBothSpellings() (+7 more)
 
-### Community 23 - "BuildSwitchPlan"
-Cohesion: 0.12
-Nodes (29): PhaseKind, SiteState, SwitchAction, SwitchPhase, BuildSwitchPlan(), confirmDemotions(), ExecuteSwitchPlan(), SwitchPlan (+21 more)
+### Community 23 - "MateChannel"
+Cohesion: 0.07
+Nodes (49): PhaseKind, SiteState, SwitchAction, SwitchPhase, MateChannel, curlConfigFlag(), Ops, BuildSwitchPlan() (+41 more)
 
 ### Community 24 - "newLocalOps"
 Cohesion: 0.12
-Nodes (32): TestLeaderAssertLeaderError(), TestRedundancyBackupShowError(), TestRedundancyReleaseError(), TestRedundancyRevertToPrimaryError(), TestReleaseToBackupNoReleaseError(), TestReleaseToBackupUnreleasedTimeout(), CLIScriptPath(), cliScriptPath() (+24 more)
+Nodes (33): TestLeaderAssertLeaderError(), TestRedundancyBackupShowError(), TestRedundancyReleaseError(), TestRedundancyRevertToPrimaryError(), TestReleaseToBackupNoReleaseError(), TestReleaseToBackupUnreleasedTimeout(), TestImportOpsExportConfigFailsLoudAtTheFirstBadCapture(), cliScriptPath() (+25 more)
 
 ### Community 25 - "runner_test.go"
 Cohesion: 0.07
-Nodes (35): TestComposeSecretEnvIsTheOnlyChildEnvironment(), TestChildEnvNamesAreNotSystemVariables(), TestExecEchoesOnEveryMethod(), TestExecVerboseAnnouncesEveryCommand(), verboseExec(), MaskEnv(), quoteTok(), captureStdout() (+27 more)
+Nodes (38): TestChildEnvNamesAreNotSystemVariables(), TestExecEchoesOnEveryMethod(), TestExecVerboseAnnouncesEveryCommand(), verboseExec(), MaskEnv(), quoteTok(), captureStdout(), helperCommand() (+30 more)
 
-### Community 26 - "renderDriver"
-Cohesion: 0.11
-Nodes (21): chunk, chunkResult, chunkName(), keywordPattern(), parseDriverOutput(), renderDriver(), sanitizeComment(), shQuote() (+13 more)
+### Community 26 - "planSections"
+Cohesion: 0.08
+Nodes (30): chunk, chunkResult, runCLISkeleton(), chunkName(), keywordPattern(), parseDriverOutput(), renderDriver(), sanitizeComment() (+22 more)
 
-### Community 27 - "eqArgs"
-Cohesion: 0.11
-Nodes (30): TestReachable(), newCluster(), TestApplyOnStdin(), TestDeleteStdin(), TestOperatorNSExplicit(), TestOperatorNSNeverProbesTheCluster(), saCfg(), TestHARoles() (+22 more)
+### Community 27 - "Compose"
+Cohesion: 0.12
+Nodes (25): ContainerNoFile(), HealthCheck, NodeIdentity, TestLimitsCheckAssertsWhatTheArtifactAsks(), Compose(), composeEscape(), ComposeProject(), escapePercent() (+17 more)
 
 ### Community 28 - "ImportPlan"
-Cohesion: 0.14
-Nodes (19): ImportResult, PlannedSection, isPragma(), defaultVPNFirst(), ImportPlan, orNone(), preambleForApply(), quoteList() (+11 more)
+Cohesion: 0.12
+Nodes (22): ImportResult, PlannedSection, isPragma(), defaultVPNFirst(), ImportPlan, orNone(), preambleForApply(), quoteList() (+14 more)
 
-### Community 29 - "desiredWatch"
-Cohesion: 0.17
-Nodes (11): desiredWatch(), Cluster, splitWatch(), subtractWatch(), TestDesiredWatchAppendsTheBrokerNamespace(), TestSubtractWatchEmptyRemainingMeansDelete(), TestSubtractWatchPreservesOrder(), TestUnionWatchKeepsAnotherEnvFilesNamespace() (+3 more)
+### Community 29 - "deploymentItem"
+Cohesion: 0.13
+Nodes (16): desiredWatch(), Cluster, splitWatch(), subtractWatch(), TestDesiredWatchAppendsTheBrokerNamespace(), TestSubtractWatchEmptyRemainingMeansDelete(), TestSubtractWatchPreservesOrder(), TestUnionWatchKeepsAnotherEnvFilesNamespace() (+8 more)
 
 ### Community 31 - "Config"
 Cohesion: 0.11
-Nodes (14): keyValueEntries, TestValidateContainerArtifactValues(), foldToEnvVar(), Config, invertedCPUSetRange(), missingErr(), platformKey(), requireAll() (+6 more)
+Nodes (14): keyValueEntries, TestRoleNames(), RoleNames(), checkCredentialChars(), foldToEnvVar(), Config, missingErr(), requireKeyValue() (+6 more)
 
 ### Community 32 - "Docs and Legacy Scripts"
 Cohesion: 0.15
 Nodes (11): bash/000-env.sh, bash/010-deploy-operator.sh, bash/020-deploy-broker.sh, bash/059-execute-cli.sh, docker-podman/000-env.sh, internal/broker, internal/cli, internal/config (+3 more)
 
 ### Community 33 - "ParseVPNReplication"
-Cohesion: 0.13
-Nodes (16): colSpan, ValidVPNName(), validVPNName(), dashSpans(), flagByte(), gutterClear(), ParseVPNReplication(), sliceSpan() (+8 more)
+Cohesion: 0.10
+Nodes (23): colSpan, dashSpans(), flagByte(), gutterClear(), ParseVPNReplication(), sliceSpan(), TestGutterClearAndSliceSpanBoundaries(), TestParseVPNReplication() (+15 more)
 
 ### Community 34 - "ResolveDomainCerts"
 Cohesion: 0.06
-Nodes (41): Broker, CertDir, DirReader, DomainCerts, fakeDirEntry, domainCANames(), caNameSafe(), checkNoDotDot() (+33 more)
+Nodes (39): Broker, CertDir, DirReader, DomainCerts, fakeDirEntry, caNameSafe(), checkNoDotDot(), DefaultDirReader() (+31 more)
 
 ### Community 35 - "Role"
-Cohesion: 0.08
-Nodes (20): downloadErrTransport, fakeTransport, recDownload, recOutput, recRun, recUpload, recUploadFile, runErrMatchTransport (+12 more)
+Cohesion: 0.05
+Nodes (27): covUploadFailsTo, downloadErrTransport, fakeTransport, recDownload, recOutput, recRun, recUpload, recUploadFile (+19 more)
 
 ### Community 36 - "App"
-Cohesion: 0.11
-Nodes (34): TestCtrManagerConfirmWiring(), childExit(), TestChildExitKeepsItsMessage(), TestExitCodeIsNeverNegative(), resolveScriptPath(), containerRenderRole(), containerRole(), ctrLogin() (+26 more)
+Cohesion: 0.07
+Nodes (58): TestCtrManagerConfirmWiring(), confirmAction(), childExit(), TestChildExitKeepsItsMessage(), TestExitCodeIsNeverNegative(), usagef(), confirmImport(), pluralVPN() (+50 more)
 
 ### Community 37 - "recRunner"
-Cohesion: 0.19
-Nodes (4): TestCanIAnswerReadsTheLastLine(), TestTransportExecArgs(), recRunner, rrCall
+Cohesion: 0.11
+Nodes (13): TestCanIAnswerReadsTheLastLine(), TestExecutorRefusesUnapprovedRuntime(), unapprovedCfg(), TestBrokerReportPreviewStopsAtAnUnapprovedCommand(), NewTransport(), canIVerb(), TestTransportCopy(), TestTransportExecArgs() (+5 more)
 
-### Community 38 - "annotate_test.go"
+### Community 38 - "parseBody"
 Cohesion: 0.07
-Nodes (44): applyMetaField(), isMarker(), markerRegion(), markerSection(), markerVerb(), parseKV(), readMarker(), renderKV() (+36 more)
+Nodes (32): Region, token, applyMetaField(), markerRegion(), markerSection(), markerVerb(), readMarker(), TestApplyMetaFieldBrokerTypeSetsType() (+24 more)
 
 ### Community 39 - "completion_test.go"
 Cohesion: 0.18
@@ -349,109 +349,105 @@ Nodes (21): driveBash(), runComplete(), runCompleteVia(), TestAllowCommandOffers
 Cohesion: 0.15
 Nodes (25): blockKey, mergedBlock, mergedLine, ancestorReported(), DiffBlocks(), indexByIdentity(), keyOf(), keySet() (+17 more)
 
-### Community 41 - "runPlatform"
-Cohesion: 0.29
-Nodes (12): runPlatform(), TestMultiPlatformNonInteractiveIsRefused(), TestMultiPlatformPromptRejectsBadAnswer(), TestMultiPlatformPromptSelects(), TestNoPlatformSectionIsRefused(), TestPlatformFlagAcceptsAbbreviations(), TestPlatformFlagRejectsUndeclaredSection(), TestPlatformFlagRejectsUnknownValue() (+4 more)
-
 ### Community 42 - "inject_test.go"
 Cohesion: 0.15
 Nodes (27): lineRole, serviceLine, shutdownStyle, svcKey, classifyServiceRest(), containsPortCommand(), describeKey(), fieldsUnquoted() (+19 more)
 
 ### Community 43 - "Ops"
 Cohesion: 0.11
-Nodes (17): countContains(), field(), TestCountContains(), TestField(), TestPrimaryRedundancyUp(), TestFieldLabelWithoutColon(), showRedundancyLocalScript(), defaultLocalAddrs() (+9 more)
+Nodes (18): countContains(), field(), TestCountContains(), TestField(), TestPrimaryRedundancyUp(), TestFieldLabelWithoutColon(), TestZipConfigsScript(), zipConfigsScript() (+10 more)
 
 ### Community 44 - "exportconfig_test.go"
 Cohesion: 0.16
 Nodes (18): opRunner, exportconfigDriverOutput(), exportconfigTransportOutput(), exportconfigVPNListOutput(), newExportconfigRunner(), newExportconfigRunnerRejectingChunk(), runImportConfirmation(), TestExportConfigOutOverwriteGate() (+10 more)
 
 ### Community 45 - "Echo"
-Cohesion: 0.12
-Nodes (8): interactiveFailRunner, runFailRunner, Exec, TestExecIsSilentWithoutVerbose(), Echo, NewExec(), Quote(), TestQuote()
+Cohesion: 0.18
+Nodes (7): interactiveFailRunner, runFailRunner, TestExecIsSilentWithoutVerbose(), Echo, NewExec(), Quote(), TestQuote()
 
-### Community 46 - "k8s/inspect.go"
-Cohesion: 0.13
-Nodes (25): anyKnownCondition(), brokerConditionRows(), conditionLevel(), findCondition(), TestConditionLevelDegradesSafely(), imageFromDeployment(), ownedPods(), operatorItem() (+17 more)
+### Community 46 - "eqArgs"
+Cohesion: 0.10
+Nodes (31): TestReachable(), newCluster(), TestApplyOnStdin(), TestDeleteStdin(), TestOperatorNSExplicit(), TestOperatorNSNeverProbesTheCluster(), saCfg(), TestHARoles() (+23 more)
 
-### Community 47 - "replicationVPNLines"
-Cohesion: 0.23
-Nodes (14): ReplicationConfigResult, replicationVPNLines(), siteAEntry(), TestNothingEverShutsDownTheVPNItself(), TestReplicationVPNLinesEnablesListedAndDisablesTheRest(), TestReplicationVPNLinesIsDeterministic(), TestReplicationVPNLinesQuotesNamesWithSpaces(), TestReplicationVPNLinesReEnablesWhatPhase1StoppedOnly() (+6 more)
+### Community 47 - "shellScriptPath"
+Cohesion: 0.40
+Nodes (5): TestExecShellScriptCleanupFailureOnlyWarns(), TestExecShellScriptFailureIsTheProcessExitStatusAndStillCleansUp(), TestExecShellScriptNamesTheRemoteFileByBaseNameOnEitherSeparator(), TestExecShellScriptUploadsRunsWithBashAndRemovesIt(), shellScriptPath()
 
 ### Community 48 - "localCfg"
-Cohesion: 0.09
-Nodes (36): TestLocalMateRunsThroughOps(), assertNoPasswordInArgv(), TestBackupRevertActivityBridgePlaintextOnly(), TestBackupRevertActivityBridgeTLSNoCA(), TestBackupRevertActivityCredsAndBodyNeverInArgv(), TestBackupRevertActivityNon2xx(), TestBackupRevertActivityRPCNotOK(), TestBackupRevertActivitySuccess() (+28 more)
+Cohesion: 0.08
+Nodes (44): TestLocalMateRunsThroughOps(), assertNoPasswordInArgv(), TestBackupRevertActivityBridgePlaintextOnly(), TestBackupRevertActivityBridgeTLSNoCA(), TestBackupRevertActivityCredsAndBodyNeverInArgv(), TestBackupRevertActivityNon2xx(), TestBackupRevertActivityRPCNotOK(), TestBackupRevertActivitySuccess() (+36 more)
 
 ### Community 49 - "config_test.go"
-Cohesion: 0.19
-Nodes (24): sempExecuteResult, sempRedundancyReply, sempReplicationReply, sempVPNReplicationReply, span, dropMessageSpoolLines(), dropRoutingInterfaceLine(), TestSectionsDropMessageSpoolLines() (+16 more)
+Cohesion: 0.20
+Nodes (20): sempExecuteResult, sempRedundancyReply, sempReplicationReply, sempVPNReplicationReply, span, dropMessageSpoolLines(), dropRoutingInterfaceLine(), TestSectionsDropMessageSpoolLines() (+12 more)
 
-### Community 50 - "BrokerType"
-Cohesion: 0.17
-Nodes (12): BrokerType, bannerType(), checkProvenance(), checkSameType(), describeScope(), Ops, planSections(), TestImportOpsDescribeScope() (+4 more)
+### Community 50 - "haCfg"
+Cohesion: 0.09
+Nodes (30): AdminSecretInUse(), ReadAdminPassword(), operatorManagedCfg(), TestAdminPasswordPreflight(), TestAdminSecretInUseFollowsTheStates(), TestReadAdminPasswordArgvAndDecoding(), TestReadAdminPasswordGuardsTheCommand(), TestReadAdminPasswordNamesTheNextStep() (+22 more)
 
 ### Community 51 - "newRootCmd"
-Cohesion: 0.10
-Nodes (29): applyAliases(), TestAliasesDoNotCollide(), TestAliasesResolveToTheCanonicalCommand(), TestEveryAliasEntryIsLive(), TestGroupsRejectAnUnknownVerb(), TestNounGroupsRunNothing(), TestStartStopHaveNoAlias(), TestAllowCommandApprovesAWrappedRuntime() (+21 more)
+Cohesion: 0.11
+Nodes (22): TestAbbreviationDocs(), applyAliases(), TestAliasesDoNotCollide(), TestAliasesResolveToTheCanonicalCommand(), TestEveryAliasEntryIsLive(), TestGroupsRejectAnUnknownVerb(), TestNounGroupsRunNothing(), TestStartStopHaveNoAlias() (+14 more)
 
-### Community 52 - "ExitCode"
-Cohesion: 0.16
-Nodes (16): TestExecute(), TestResolveScriptPath(), TestScriptCommandsRefuseBeforeAnythingRuns(), runGuarded(), TestGenerateIgnoresTheEUID(), TestPodmanEUIDGuardRefusesBeforeAnyCommand(), TestPodmanEUIDGuardSkips(), writeRootlessPodmanEnv() (+8 more)
+### Community 52 - ".Run"
+Cohesion: 0.14
+Nodes (26): allowRuntime(), runCtr(), TestAnnounceCommandsNamesResolvedBinaries(), TestAssertLeaderStandaloneSkipsBeforeAnyPrompt(), TestConfigStepsDoNotLeakSecrets(), TestCtrConfigDryRun(), TestCtrDiagnosticsDryRun(), TestCtrErrorPaths() (+18 more)
 
 ### Community 53 - "Container Security Guidelines"
 Cohesion: 0.18
 Nodes (11): 1. Deny extended privileges, 2. Deny privilege escalation, 3. Run as a non-root identity, 4. Bind only non-root ports, 5. Hand secrets over as files, 6. Narrow the filesystem, 7. State the setting, do not inherit it, 8. Document the version floor each setting needs (+3 more)
 
 ### Community 54 - "Operations"
-Cohesion: 0.08
-Nodes (24): Bringing up a fresh cluster, Configuring a site, Data replication, Docker and Podman mechanics, Every destructive command confirms, Exit codes, Extra CLI users differ by platform, Operations (+16 more)
+Cohesion: 0.10
+Nodes (21): Bringing up a fresh cluster, Broker scope is a fixed classification, Configuring a site, Data replication, Exit codes, Exporting and importing configuration, Extra CLI users differ by platform, Handling the artifact (+13 more)
 
 ### Community 55 - "Test catalogue"
 Cohesion: 0.10
-Nodes (21): abbrev_test.go, convert_test.go, Coverage, examples_test.go, Fixtures and doubles, Injectable seams, internal/abbrev, internal/convert (+13 more)
+Nodes (20): abbrev_test.go, convert_test.go, Coverage, examples_test.go, internal/abbrev, internal/convert, internal/engine, internal/examples (+12 more)
 
-### Community 57 - "MateChannel"
-Cohesion: 0.22
-Nodes (12): MateChannel, requirePrimaryActive(), requireVirtualRouterNamesMatch(), sortedSiteNames(), SwitchPreflight(), replSites(), TestSwitchPreflightHealthyPair(), TestSwitchPreflightRequiresMatchingVirtualRouterNames() (+4 more)
+### Community 56 - "Cluster"
+Cohesion: 0.14
+Nodes (4): Cluster, Cluster, normalizeToList(), TestNormalizeToListHandlesBothKubectlShapes()
 
-### Community 58 - "Ops"
+### Community 57 - "replNewRig"
+Cohesion: 0.17
+Nodes (19): replRig, replNewRig(), replShowMate(), replUp(), replVPNTable(), TestOpConfigureReplicationAppliesTheRoleTheBrokersSiteDerives(), TestOpConfigureReplicationConvergesTheMateAndReportsWhatItStopped(), TestOpConfigureReplicationDeclinedLeavesTheBrokerUntouched() (+11 more)
+
+### Community 59 - ".rpc"
 Cohesion: 0.11
-Nodes (10): cliRunNames(), Ops, runCLISkeleton(), TestValidName(), validName(), ValidScriptName(), rejectionIn(), shellScriptPath() (+2 more)
-
-### Community 59 - ".BackupRevertActivity"
-Cohesion: 0.16
-Nodes (15): backupTarget, Credential, TestHTTPStatusHelpers(), anyHTTP2xx(), curlConfigLine(), Ops, lastHTTPStatus(), revertActivityBackupBody() (+7 more)
+Nodes (17): backupTarget, Credential, sempMate, TestHTTPStatusHelpers(), anyHTTP2xx(), curlConfigLine(), Ops, httpBody() (+9 more)
 
 ### Community 60 - "confirm.go"
 Cohesion: 0.17
-Nodes (21): exportconfigReadCounter, layer, TestConfirmDeleteShortcut(), TestPromptYes(), TestPromptYesNo(), TestStdinCanAnswerClosedFile(), confirmActionStrict(), confirmDelete() (+13 more)
+Nodes (20): exportconfigReadCounter, layer, TestConfirmDeleteShortcut(), TestConfirmNonTTY(), TestPromptYes(), TestPromptYesNo(), TestStdinCanAnswerClosedFile(), confirmActionStrict() (+12 more)
 
 ### Community 61 - ".configRows"
-Cohesion: 0.13
-Nodes (23): setOrMissing(), setOrNone(), storageClassSuitable(), additionalUsersRow(), adminSecretRow(), containsString(), failRow(), Cluster (+15 more)
+Cohesion: 0.11
+Nodes (29): orNone(), orValue(), setOrMissing(), setOrNone(), storageClassSuitable(), additionalUsersRow(), adminPassState(), adminSecretRow() (+21 more)
 
 ### Community 62 - "rootless_test.go"
 Cohesion: 0.17
 Nodes (35): failOnCall(), fakeEnv(), healthyRootlessOut(), lingerOff(), rootlessMgr(), TestCheckDataDirAcceptsAnAlreadyChownedDir(), TestCheckDataDirRefusesAnUnwritableParent(), TestCheckIDMappingRefusesAnUnmappedRunUser() (+27 more)
 
 ### Community 63 - "strings.Builder"
-Cohesion: 0.07
-Nodes (42): shorthand, WeightedNodeTerm, mdRow(), renderAbbrevDocs(), TestAbbreviationDocs(), TestFlagShorthandsAreConsistent(), treeShorthands(), writeAbbrevTable() (+34 more)
+Cohesion: 0.11
+Nodes (26): shorthand, mdRow(), renderAbbrevDocs(), TestFlagShorthandsAreConsistent(), treeShorthands(), writeAbbrevTable(), writeResolutionNotes(), writeShorthandTable() (+18 more)
 
 ### Community 64 - "output_test.go"
-Cohesion: 0.24
-Nodes (14): sink(), TestKVBlockAlignsOnTheLongestKey(), TestKVRowAtLeadsWithTheTag(), TestKVRowHonorsAnExplicitWidth(), TestLeveledLinesCarryTheTagAndNoArrow(), TestLevelOrderKeepsSkipBelowFail(), TestLineAddsNoPrefix(), TestSectionPadsToWidth() (+6 more)
+Cohesion: 0.12
+Nodes (24): TestImportOpsReportsDoNotPanicOnEmptyAndPopulated(), TestImportPlanReportPrintsWarningsBeforeTheConfirmation(), TestImportPlanReportShowsOmissionsAndEachSectionsVerdict(), TestImportResultReportQuotesTheFailedChunkAndItsTail(), TestImportResultReportsTeardownAndRebuildSeparately(), TestCheckReportSkipsEmptySections(), New(), NewFunc() (+16 more)
 
 ### Community 65 - "Configuration Guide"
 Cohesion: 0.14
 Nodes (14): Bring your own TLS Secret, Choosing the env file, Configuration, Keys that were renamed, Migrating from the bash env files (`solace-util convert`), Relative paths resolve against the env file, not the current directory, Replication, Scaling (+6 more)
 
-### Community 66 - "confirmAction"
-Cohesion: 0.20
-Nodes (23): confirmAction(), wantEnable(), wantRemove(), confirmAssertFromBackup(), containerWhat(), opCtrConfigDefaultUsers(), opCtrConfigDefaultVPN(), opCtrConfigDomainCerts() (+15 more)
+### Community 66 - "parseKV"
+Cohesion: 0.17
+Nodes (12): parseKV(), renderKV(), splitKV(), TestMarkerValueSurvivesAnEmbeddedQuote(), TestParseKVEmptyPayload(), TestParseKVIgnoresTokenWithNoEquals(), TestParseKVMultipleTokens(), TestParseKVQuotedValueKeepsSpaces() (+4 more)
 
-### Community 67 - "Mate Channel Tests"
-Cohesion: 0.16
-Nodes (17): CLIRunner, fakeRun, Ops, NewCLIMate(), mateReplies(), newTestMate(), TestMateChannelDescribeNamesTheTarget(), TestMateChannelPreflightLearnsTheBrokerType() (+9 more)
+### Community 67 - "newTestMate"
+Cohesion: 0.14
+Nodes (22): CLIRunner, fakeRun, Ops, NewCLIMate(), mateReplies(), newTestMate(), TestMateChannelCallsKeepTheCauseWhenTheRunnerFails(), TestMateChannelDescribeNamesTheTarget() (+14 more)
 
 ### Community 68 - "Command Reference Doc"
 Cohesion: 0.40
@@ -461,109 +457,109 @@ Nodes (5): Command reference, Global flags, Index, Reading this reference, Tree
 Cohesion: 0.20
 Nodes (10): Build, Dev script tasks, Developer guide, Gates, Goldens, Releases, Repository layout, Tests (+2 more)
 
-### Community 70 - "replApp"
-Cohesion: 0.32
-Nodes (12): mateChannel(), mateSEMPPassword(), replApp(), siteNamed(), TestConfirmReplicationConfigIsStrictAndRefusalStopsTheApply(), TestConfirmReplicationConfigNamesTheBiggerHammer(), TestMateChannelPicksTheMechanismTheSiteDeclares(), TestMateChannelRefusesASiteWithNoVia() (+4 more)
+### Community 70 - "opPerformReplication"
+Cohesion: 0.08
+Nodes (37): mateChannelFunc, App, lineSink(), progress(), step(), confirmReplicationConfig(), confirmReplicationSwitch(), mateChannel() (+29 more)
 
 ### Community 71 - "TestServerCert"
 Cohesion: 0.11
-Nodes (19): TestDiagnostics(), TestPathHelpers(), TestServerCert(), TestServerCertBundleOrder(), TestServerCertBundleRefusesAKeyBearingCert(), TestServerCertBundleReportsAnUnreadableFile(), TestServerCertBundleRequiresBothHalves(), writeFile() (+11 more)
+Nodes (19): TestDiagnostics(), TestPathHelpers(), TestServerCert(), TestServerCertBundleOrder(), TestServerCertBundleRefusesAKeyBearingCert(), TestServerCertBundleReportsAnUnreadableFile(), TestServerCertBundleRequiresBothHalves(), ServerCertBundle() (+11 more)
 
-### Community 72 - "platformOps"
-Cohesion: 0.33
-Nodes (18): opFunc, roleOpFunc, addPodFlag(), newBrokerCopyCmd(), newBrokerDeployCmd(), newBrokerExecCmd(), newBrokerGenerateCmd(), newBrokerLogsCmd() (+10 more)
+### Community 72 - "writeK8sDeployAllEnv"
+Cohesion: 0.19
+Nodes (24): writeK8sDeployAllEnv(), opsK8sAnswer(), opsK8sPods(), opsK8sRun(), opsK8sSilenced(), opsK8sUnattended(), TestOpsK8sConfigureLeavesRefuseOppositeDirections(), TestOpsK8sDomainCertsResolveBeforeAnythingIsAskedOrIssued() (+16 more)
 
 ### Community 73 - "internal/k8s"
 Cohesion: 0.10
 Nodes (21): adminsecret_test.go, check_test.go, checkreport_test.go, cluster_test.go, deploy_test.go, generatorpage_test.go, inspect_test.go, internal/k8s (+13 more)
 
-### Community 74 - "emitYAML"
-Cohesion: 0.22
-Nodes (9): doc, boolOf(), commentSafe(), emitYAML(), joinDomainCertPath(), kubeCommand(), redundancy(), scalar() (+1 more)
+### Community 74 - "Docker and Podman mechanics"
+Cohesion: 0.40
+Nodes (5): Docker and Podman mechanics, Re-deploying is safe and explicit, Rootless podman prerequisites, What the broker cannot gain, Which user the broker runs as
 
 ### Community 75 - "exit.go"
-Cohesion: 0.14
-Nodes (12): childExitError, usageError, asUsage(), childStatus(), isUsage(), markUsageArgs(), TestEveryArgValidatorIsAUsageError(), TestUsageErrorKeepsItsMessage() (+4 more)
+Cohesion: 0.12
+Nodes (15): childExitError, usageError, ValidVPNName(), validVPNName(), asUsage(), childStatus(), isUsage(), markUsageArgs() (+7 more)
 
 ### Community 76 - ".ConfigureReplication"
-Cohesion: 0.13
-Nodes (14): QueueState, VPNRepl, Ops, isRunCLIRejection(), mateConvergenceShutdowns(), missingListedVPNs(), newlineIf(), reenableLine() (+6 more)
+Cohesion: 0.27
+Nodes (7): Ops, isRunCLIRejection(), newlineIf(), replPhase1Rejected(), replPhase2Rejected(), replTransportFailure(), replVPNList()
 
 ### Community 77 - "Command"
-Cohesion: 0.12
-Nodes (13): cmdField, guardedCmd, decodeCommand(), TestCommandArgsDoesNotAliasCommand(), TestCommandUnmarshal(), TestValidateProbeCommandAccepts(), TestValidateProbeCommandRejects(), Command (+5 more)
+Cohesion: 0.16
+Nodes (10): cmdField, guardedCmd, decodeCommand(), TestCommandArgsDoesNotAliasCommand(), TestCommandUnmarshal(), Command, guardCommandOf(), setGuardCommand() (+2 more)
 
 ### Community 78 - "newTeardownApplyFixture"
-Cohesion: 0.13
-Nodes (16): driverAllOK(), driverChunkBody(), driverChunkNames(), driverFailAt(), minimalCapture(), newTeardownApplyFixture(), targetVPNCapture(), TestImportOpsExportConfigScopeSelectsCLICommand() (+8 more)
+Cohesion: 0.16
+Nodes (16): driverAllOK(), driverChunkBody(), driverChunkNames(), driverFailAt(), newTeardownApplyFixture(), TestImportOpsImportApplyClearsTargetOnlyObjectsBeforeAnythingIsApplied(), TestImportOpsImportApplyDriverExitingNonZeroAfterEveryChunkIsItsOwnFailure(), TestImportOpsImportApplyFailedTeardownCaptureStopsBeforeAnythingRuns() (+8 more)
 
-### Community 79 - "age"
-Cohesion: 0.22
-Nodes (9): orNone(), orValue(), age(), roleRank(), Cluster, operatorRunningImage(), ownsPod(), TestOperatorRunningImageWithNoContainers() (+1 more)
+### Community 79 - "writeNode"
+Cohesion: 0.15
+Nodes (17): WeightedNodeTerm, NodeAffinity, NodeMatchExpr, Placement, PodAffinityTerm, validateMatchExprs(), validatePlacementAffinity(), parseToleration() (+9 more)
 
 ### Community 81 - "ReplSite"
-Cohesion: 0.16
-Nodes (12): ReplRole, Replication, PlannedRoles(), RoleAtSite(), TestPlannedRolesNamesEveryListedVPN(), TestRoleAtSiteIsTheComplement(), setReplicationRoleScript(), curlConfigFlag() (+4 more)
+Cohesion: 0.07
+Nodes (35): AdminState, QueueState, replMate, Replication, ReplRole, VPNRepl, sortedKeys(), ReplicationConfigResult (+27 more)
 
-### Community 82 - "k8s/matechannel_test.go"
-Cohesion: 0.24
-Nodes (24): execArgs(), NewMateChannel(), ReadSecretKey(), hasPrefixArgv(), indexOf(), operandOf(), replCfg(), replSite() (+16 more)
+### Community 82 - "replCfg"
+Cohesion: 0.19
+Nodes (23): CLIScriptPath(), execArgs(), NewMateChannel(), ReadSecretKey(), hasPrefixArgv(), indexOf(), operandOf(), replCfg() (+15 more)
 
 ### Community 83 - "limits_test.go"
 Cohesion: 0.13
 Nodes (27): missingControllers(), limitsMgr(), nrOpenProbe(), TestCheckLimitsNrOpenAloneNeedsNoRestart(), TestCheckLimitsPrivilegedSkipsTheUserManager(), TestCheckLimitsRootlessCoreFloorFollowsTheConfiguredLimit(), TestCheckLimitsRootlessEmptyUserManagerAnswerSkips(), TestCheckLimitsRootlessRefusesAShortUserManager() (+19 more)
 
-### Community 84 - "occCluster"
-Cohesion: 0.18
-Nodes (10): occCfg(), occCluster(), TestNamespaceContentsAsksOneQuestion(), TestNamespaceContentsDiscountsWhatKubernetesPutsThere(), TestNamespaceContentsErrorMeansOccupied(), TestNamespaceContentsIgnoresClusterPolicyObjects(), TestNamespaceContentsReportsRealOccupants(), TestNamespaceIsProtectedSharesDeleteNamespacesList() (+2 more)
+### Community 84 - "Removing a broker: what stays, what goes"
+Cohesion: 0.40
+Nodes (5): Every destructive command confirms, Removing a broker: what stays, what goes, Removing the operator does not always remove it, The layer flag raises the question, The namespace is only offered when it is empty
 
-### Community 85 - "Troubleshooting Guide"
-Cohesion: 0.25
-Nodes (8): A replication switch refuses before changing anything, A wrapper runtime is refused, Docker compose secrets need compose 2.23.1+, Import reported failure, Podman secret flags, The limits the container actually gets, Troubleshooting, Wrong cluster (kubeconfig drift)
+### Community 85 - "Troubleshooting"
+Cohesion: 0.22
+Nodes (9): A replication switch refuses before changing anything, A wrapper runtime is refused, Docker compose secrets need compose 2.23.1+, Forbidden: cannot list deployments at the cluster scope, Import reported failure, Podman secret flags, The limits the container actually gets, Troubleshooting (+1 more)
 
-### Community 86 - "k8s/inspect_test.go"
-Cohesion: 0.14
-Nodes (20): sectionLevel(), podHealth(), pvcLevel(), replicaLevel(), serviceAddress(), loadFixture(), TestAgeMatchesKubectlShape(), TestBrokerConditionRowsFromLiveCapture() (+12 more)
+### Community 86 - "k8s/inspect.go"
+Cohesion: 0.08
+Nodes (42): age(), anyKnownCondition(), brokerConditionRows(), conditionLevel(), findCondition(), podHealth(), pvcLevel(), replicaLevel() (+34 more)
 
-### Community 87 - "MateConfig"
-Cohesion: 0.11
-Nodes (35): MateConfig, TestMateChannelShowReplication(), containsEndpoint(), labelValue(), normTransport(), parseHostPort(), ParseShowReplication(), parseShowReplicationAppliance() (+27 more)
+### Community 87 - "mateSoftware"
+Cohesion: 0.16
+Nodes (18): TestMateChannelShowReplication(), containsEndpoint(), normTransport(), RenderMateRemovals(), SameEndpoints(), mateAppliance(), mateSoftware(), TestParseShowReplicationAppliance() (+10 more)
 
-### Community 88 - "haCfg"
-Cohesion: 0.09
-Nodes (32): New(), TestNewDefaults(), AdminSecretInUse(), ReadAdminPassword(), operatorManagedCfg(), TestAdminPasswordPreflight(), TestAdminSecretInUseFollowsTheStates(), TestReadAdminPasswordArgvAndDecoding() (+24 more)
+### Community 88 - "adminCfg"
+Cohesion: 0.12
+Nodes (18): opK8sGenBroker(), GenBroker(), joinManifests(), adminCfg(), secretNamesIn(), TestAdminSecretStatesEmitTheirArtifacts(), TestCreateSecretsAdminOnly(), TestCreateSecretsPreflight() (+10 more)
 
 ### Community 89 - "render_test.go"
-Cohesion: 0.05
-Nodes (85): ContainerNoFile(), HealthCheck, NodeIdentity, TestLimitsCheckAssertsWhatTheArtifactAsks(), boolStr(), BrokerCR(), Compose(), composeEscape() (+77 more)
+Cohesion: 0.14
+Nodes (34): boolStr(), BrokerCR(), containerArtifacts(), load(), TestAdminCredentialsSecretFollowsTheStates(), TestArtifactsCarryNoSecrets(), TestArtifactsCarryNoWideningTokens(), TestArtifactsStateTheirPrivilegePosture() (+26 more)
 
 ### Community 90 - "vulnjudge/main.go"
 Cohesion: 0.16
 Nodes (21): describe(), judge(), main(), plural(), run(), load(), TestJudge(), TestJudgeEmptyTrace() (+13 more)
 
 ### Community 91 - "RuleFor"
-Cohesion: 0.08
-Nodes (36): Disposition, SectionRule, loadApplianceCapture(), TestApplianceCaptureIsReadAsAnAppliance(), TestApplianceOnlySectionsCarryContent(), TestApplianceReplicationGrammarDiffersFromSoftware(), TestEveryApplianceBrokerSectionIsClassified(), renderImportDocs() (+28 more)
+Cohesion: 0.07
+Nodes (40): Disposition, SectionRule, sectionBeginMarker(), TestSectionBeginMarkerAdvisoryDisposition(), TestWriteBlocksOpensAndClosesOnChange(), writeBlocks(), loadApplianceCapture(), TestApplianceCaptureIsReadAsAnAppliance() (+32 more)
 
-### Community 92 - "step"
-Cohesion: 0.14
-Nodes (17): mateChannelFunc, App, lineSink(), step(), confirmReplicationConfig(), opConfigureReplication(), opCtrConfigureReplication(), opCtrPerformReplication() (+9 more)
+### Community 92 - "registerFlagCompletion"
+Cohesion: 0.19
+Nodes (11): registerFlagCompletion(), newConvertCmd(), runConvert(), newExamplesCmd(), runExample(), addAllowCommandFlag(), addDisableEnableFlags(), addExportFlags() (+3 more)
 
 ### Community 93 - "Container"
-Cohesion: 0.17
+Cohesion: 0.16
 Nodes (12): Container, DockerConfig, Network, PodmanConfig, Ulimits, applyContainerBlockDefaults(), Config, podmanRunUser() (+4 more)
 
-### Community 94 - "Config"
-Cohesion: 0.20
-Nodes (6): expandTilde(), expandTildeToken(), Config, isPathSep(), TestExpandTilde(), tildeHome()
+### Community 94 - "IsAbsHostPath"
+Cohesion: 0.16
+Nodes (9): expandTilde(), expandTildeToken(), Config, IsAbsHostPath(), isPathSep(), TestContainerHostDirsExpandATilde(), TestExpandTilde(), TestIsAbsHostPath() (+1 more)
 
 ### Community 95 - "Secret Reference Resolution"
 Cohesion: 0.50
 Nodes (3): secretRef, Config, unsetOrEmpty()
 
-### Community 96 - "ParseRole"
-Cohesion: 0.13
-Nodes (15): argumentLine(), noRolePositional(), completeDirs(), completeEnvFiles(), completePlatforms(), completeRoles(), isEnvFileName(), matching() (+7 more)
+### Community 96 - "github.com/spf13/cobra.Command"
+Cohesion: 0.27
+Nodes (18): addCommands(), addLogFlags(), newOperatorCmd(), newOperatorDeployCmd(), newOperatorGenerateCmd(), newOperatorLogsCmd(), newOperatorRemoveCmd(), newOperatorRestartCmd() (+10 more)
 
 ### Community 97 - "replConfig"
 Cohesion: 0.31
@@ -573,9 +569,9 @@ Nodes (9): replConfig(), TestReplicationCredentialChars(), TestReplicationLocate
 Cohesion: 0.33
 Nodes (6): Abbreviations, Commands, Flag shorthands, How a short form is resolved, Node roles, Platforms
 
-### Community 99 - "Capture"
-Cohesion: 0.25
-Nodes (7): Omission, brokerTypeFromSchema(), Capture, parseHeader(), readHeaderField(), TestBrokerTypeFromSchema(), omittedList()
+### Community 99 - "ParseShowReplication"
+Cohesion: 0.18
+Nodes (16): ParseShowReplication(), RenderMate(), loadShowReplication(), TestMateRoundTripsThroughItsOwnGrammar(), TestParseShowReplicationRejectsAnUnreadableAddressOrPort(), TestParseShowReplicationUnconfigured(), TestParseShowReplicationWrongPlatformFails(), TestRealApplianceCaptureMateRoundTrips() (+8 more)
 
 ### Community 100 - ".checkUserManagerLimits"
 Cohesion: 0.29
@@ -585,61 +581,61 @@ Nodes (6): delegateSetting(), Manager, limitText(), parseLimit(), parseUnitProps
 Cohesion: 0.07
 Nodes (53): Example, TestExamplesBareEmitsTheFullSchema(), TestExamplesEmitsToStdout(), minimalK8s(), TestLoadBashEnvFileHint(), TestLoadNotYAMLHint(), TestLoadParseError(), TestLoadReadError() (+45 more)
 
-### Community 103 - "certFixture"
-Cohesion: 0.09
-Nodes (31): callIndex(), TestPreflightRunsBeforeAnything(), TestCtrRuntimeDefaultArgvUnchanged(), TestCtrTransportHonoursRuntime(), TestManagerHonoursRuntime(), TestManagerReachableProbesRuntimeThenCompose(), withWrapper(), wrappedCtrCfg() (+23 more)
+### Community 103 - "MateConfig"
+Cohesion: 0.17
+Nodes (13): cliTransport(), MateConfig, labelValue(), parseHostPort(), parseShowReplicationAppliance(), parseShowReplicationSoftware(), renderMateAppliance(), renderMateSoftware() (+5 more)
 
 ### Community 104 - "Platform"
-Cohesion: 0.09
-Nodes (34): newConvertCmd(), runConvert(), usagef(), checkAllowCommand(), checkFlagPlatforms(), commandPlatforms(), declaredList(), parsePlatformList() (+26 more)
+Cohesion: 0.12
+Nodes (29): checkFlagPlatforms(), commandPlatforms(), declaredList(), flagOnlyOn(), parsePlatformList(), platformSuffix(), prepare(), promptPlatform() (+21 more)
 
 ### Community 105 - "internal/cli"
-Cohesion: 0.15
-Nodes (13): abbrevdoc_test.go, aliases_test.go, allowcommand_test.go, cli_test.go, commanddoc_test.go, completion_test.go, euid_test.go, examples_test.go (+5 more)
+Cohesion: 0.14
+Nodes (14): abbrevdoc_test.go, aliases_test.go, allowcommand_test.go, cli_test.go, commanddoc_test.go, completion_test.go, euid_test.go, examples_test.go (+6 more)
 
-### Community 106 - ".rpc"
-Cohesion: 0.17
-Nodes (7): AdminState, sempMate, httpBody(), TestHTTPBodyStripsHeaders(), sempAdminState(), sempReplRole(), xmlEscape()
+### Community 106 - ".validateContainer"
+Cohesion: 0.16
+Nodes (11): TestValidateProbeCommandAccepts(), TestValidateProbeCommandRejects(), cpuSetCount(), cpuSetRange(), TestCPUSetCount(), TestCPUSetRange(), invertedCPUSetRange(), platformKey() (+3 more)
 
-### Community 107 - "AdminSecret"
+### Community 107 - "deniedCluster"
 Cohesion: 0.18
-Nodes (13): AdditionalUsersSecret(), AdminSecret(), decodeDataValue(), TestAdditionalUsersSecretCarriesBothHalves(), TestAdditionalUsersSecretIsAbsentWithNoUsers(), TestAdditionalUsersSecretRefusesAnEmptyPassword(), TestAdditionalUsersStayOutOfTheCredentialsSecret(), TestAdminSecretCarriesThePSKOnlyWhenSet() (+5 more)
+Nodes (14): TestValidateUnderADeniedClusterWideListReadsTheOperatorNamespace(), TestOperatorApplyProceedsWhenTheClusterWideListIsDenied(), TestConfirmNoDowngradeStillAsksWhenTheFallbackFindsANewerOperator(), deniedCluster(), deniedRunner(), namedOperatorJSON(), operatorItem(), TestAmbiguousOperatorAbortsTheDeploy() (+6 more)
 
 ### Community 108 - "Import-Config Apply Rules"
 Cohesion: 0.33
 Nodes (6): Appliance only (skipped on a software broker), Applied, Applied, minus some lines, Never applied, Sections that interrupt a service, What `import-config` applies
 
 ### Community 109 - "Config"
-Cohesion: 0.08
-Nodes (15): AdditionalUser, Image, Node, Redundancy, SEMP, TLS, atoiPrefix(), Config (+7 more)
+Cohesion: 0.10
+Nodes (10): AdditionalUser, Image, Node, Redundancy, SEMP, TLS, atoiPrefix(), Config (+2 more)
 
 ### Community 110 - "internal/broker"
-Cohesion: 0.09
-Nodes (23): annotate_test.go, appliance_test.go, blocks_test.go, broker_test.go, coverage_test.go, diff_test.go, driver_test.go, importdoc_test.go (+15 more)
+Cohesion: 0.08
+Nodes (25): annotate_test.go, appliance_test.go, blocks_test.go, broker_test.go, config_ops_test.go, coverage_test.go, diff_test.go, driver_test.go (+17 more)
 
 ### Community 111 - "GenOperator"
-Cohesion: 0.14
-Nodes (22): TestOperatorInstallVerdict(), GenOperator(), joinYAMLDocs(), nonEmpty(), operatorProbes(), RenderOperator(), renderOperatorNS(), splitAfterNamespace() (+14 more)
+Cohesion: 0.11
+Nodes (26): TestOperatorInstallVerdict(), TestValidateSparseConfigExplainsItself(), GenOperator(), joinYAMLDocs(), nonEmpty(), operatorEscalationProbes(), operatorImage(), operatorProbes() (+18 more)
 
 ### Community 112 - "capRunner"
-Cohesion: 0.15
-Nodes (14): capCall, capRunner, mgrOver(), TestCtrExecutorRefusesUnapprovedRuntime(), unapprovedCtrCfg(), NewTransport(), dockerCfg(), podmanCfg() (+6 more)
+Cohesion: 0.11
+Nodes (24): capCall, capRunner, New(), TestNewDefaults(), mgrOver(), TestCtrExecutorRefusesUnapprovedRuntime(), TestCtrTransportHonoursRuntime(), TestManagerHonoursRuntime() (+16 more)
 
 ### Community 113 - "Config Package Tests"
 Cohesion: 0.12
 Nodes (17): adminsecret_test.go, artifactvalues_test.go, command_test.go, config_test.go, domaincerts_resolve_test.go, domaincerts_test.go, duration_test.go, execguard_test.go (+9 more)
 
-### Community 114 - "newPerformExportConfigCmd"
-Cohesion: 0.29
-Nodes (8): newPerformExportConfigCmd(), registerFlagCompletion(), newExamplesCmd(), runExample(), addAllowCommandFlag(), addExportFlags(), addOutFlags(), addRestartFlag()
+### Community 114 - "RenderDiffResult"
+Cohesion: 0.23
+Nodes (11): BlockDiff, DiffResult, blockLabel(), diffRow(), orDash(), RenderDiffResult(), reportBlockLines(), TestDiffBlockLabelFormatsIdentityForTheReport() (+3 more)
 
-### Community 115 - "operatorversion_test.go"
-Cohesion: 0.21
-Nodes (13): compareVersions(), imageTag(), operatorVersionWarning(), parseVersion(), operatorDeployJSON(), TestCompareVersions(), TestConfirmNoDowngradeAsksNothingWhenNotADowngrade(), TestConfirmNoDowngradeIsSilentInAPreview() (+5 more)
+### Community 115 - "operatorversion.go"
+Cohesion: 0.23
+Nodes (10): compareVersions(), Cluster, imageFromDeployment(), imageTag(), operatorVersionWarning(), parseVersion(), TestCompareVersions(), TestImageTag() (+2 more)
 
-### Community 116 - "newBlock"
-Cohesion: 0.28
-Nodes (9): token, firstQuoted(), newBlock(), TestNewBlockMessageSpoolQualifierHasNoOwnName(), TestNewBlockOpener(), TestNewBlockVPNNameWithSpaces(), TestNewBlockVPNQualifierWithSpaces(), tokenizeOpener() (+1 more)
+### Community 116 - "ExitCode"
+Cohesion: 0.18
+Nodes (12): TestExecute(), TestResolveScriptPath(), TestScriptCommandsRefuseBeforeAnythingRuns(), ExitCode(), childStatusError(), TestChildExitFallsBackWhenThereIsNoStatus(), TestChildExitStatusIsScopedToInteractiveSessions(), TestExportConfigScopeConflictIsUsageError() (+4 more)
 
 ### Community 117 - "internal/container"
 Cohesion: 0.22
@@ -649,101 +645,105 @@ Nodes (9): inspect_test.go, internal/container, limits_test.go, manager_test.go,
 Cohesion: 0.16
 Nodes (14): containerState, healthState, decodeInspect(), Manager, orUnknown(), printable(), TestInspectDecodesPartialOutput(), TestInspectDistinguishesNoHealthcheckFromUnknown() (+6 more)
 
-### Community 119 - "cliTransport"
+### Community 119 - "runPlatform"
+Cohesion: 0.29
+Nodes (12): runPlatform(), TestMultiPlatformNonInteractiveIsRefused(), TestMultiPlatformPromptRejectsBadAnswer(), TestMultiPlatformPromptSelects(), TestNoPlatformSectionIsRefused(), TestPlatformFlagAcceptsAbbreviations(), TestPlatformFlagRejectsUndeclaredSection(), TestPlatformFlagRejectsUnknownValue() (+4 more)
+
+### Community 120 - "Cluster"
 Cohesion: 0.22
-Nodes (8): cliTransport(), renderMateAppliance(), renderMateSoftware(), schemaTransport(), sortedKeys(), sortedSet(), TestTransportVocabularyIsThreeWords(), sortedVPNs()
+Nodes (3): Cluster, namespaceManifest(), ownedSecretNames()
 
 ### Community 121 - "scripts.go"
-Cohesion: 0.07
-Nodes (41): showCmd, validCLILine(), Ops, assertLeaderScript(), defaultUsersScript(), disableDefaultUsersScript(), disableDefaultVPNScript(), domainCertsScript() (+33 more)
-
-### Community 122 - "matchCLI"
 Cohesion: 0.08
-Nodes (41): hasCall(), leaderCalls(), matchCLI(), TestDisableDefaultUsersRefusesAQuotedVPNName(), TestLeaderSuccess(), TestLeaderSuccessOnBackup(), TestDisableDefaultUsersDisableError(), TestDisableDefaultUsersShowVPNError() (+33 more)
+Nodes (35): showCmd, validCLILine(), Ops, TestEnableDefaultUsersStartsEveryDefaultUserBackUp(), TestEnableDefaultVPNStartsTheVPNBackUpAndShowsTheList(), assertLeaderScript(), defaultUsersScript(), disableDefaultUsersScript() (+27 more)
+
+### Community 122 - "hasCall"
+Cohesion: 0.15
+Nodes (27): hasCall(), TestEnableDefaultUsersWarnsAndRunsNothingWhenNoVPNsParse(), TestEnableDefaultVPNFailureSkipsTheReadback(), TestDisableDefaultUsersShowVPNError(), TestLeaderReadError(), TestReleaseToBackupReleasedTimeout(), replListed(), replReadOnlyResponder() (+19 more)
 
 ### Community 123 - ".validateContainerArtifactValues"
 Cohesion: 0.20
 Nodes (7): Config, portOrRange(), TestValidContainerPort(), validContainerPort(), validCoreLimit(), validHealthDuration(), validDNSLabel()
 
-### Community 124 - "sempPort"
-Cohesion: 0.29
-Nodes (7): bridgeHostPort(), sempPort(), TestSempPortBridgeFallsBackToPlaintext(), TestSempPortBridgePrefersTLS(), TestSempPortBridgeRefusesNoMapping(), TestSempPortHostMode(), TestSempPortWithoutCertificateStaysPlaintext()
+### Community 124 - "EnvPairs"
+Cohesion: 0.24
+Nodes (10): EnvPairs(), groupKey(), itoa(), assertNoCheckoutPath(), envLines(), TestAdditionalUsersReachBothHalves(), TestGolden(), TestServerCertFilePathKeyKeepsItsUnderscore() (+2 more)
 
-### Community 125 - "runExport"
-Cohesion: 0.13
-Nodes (14): confirmImport(), pluralVPN(), runExport(), runImport(), TestPluralVPNWording(), emitOrWrite(), App, opCtrExportConfig() (+6 more)
+### Community 125 - "cliMate"
+Cohesion: 0.36
+Nodes (3): cliMate, showReplicationScript(), showVPNReplicationScript()
 
-### Community 126 - "Convert"
-Cohesion: 0.40
-Nodes (5): Result, Convert(), TestConvertUnterminatedArray(), TestGeneratedHeader(), TestGeneratedHeaderSanitisesSource()
+### Community 126 - "watchCluster"
+Cohesion: 0.25
+Nodes (9): deployJSON(), TestOperatorReleaseDeletesTheOperatorWhenTheEnvFileCoversEveryNamespace(), TestOperatorReleaseLeavesAnOperatorThatWatchesEverything(), TestOperatorReleaseNarrowingNeedsPermissionToPatch(), TestOperatorReleaseNarrowsInsteadOfRemoving(), TestReconcileWatchDecidesWhatToApply(), TestReconcileWatchFlagsAWideningAsAQuestion(), TestSetWatchRefusesAnEmptyList() (+1 more)
 
 ### Community 127 - ".applyScalingTierDefaults"
-Cohesion: 0.15
-Nodes (11): scalingTier, containerMem(), cpuSetCount(), cpuSetRange(), Config, TestContainerMem(), TestCPUSetCount(), TestCPUSetRange() (+3 more)
+Cohesion: 0.22
+Nodes (7): scalingTier, containerMem(), Config, TestContainerMem(), TestScalingTiers(), TestTierForRejectsOffTierValues(), tierFor()
 
-### Community 128 - "go_pkg_runtime"
-Cohesion: 0.40
-Nodes (3): TestEmit(), emit(), newVersionCmd()
+### Community 128 - "github.com/spf13/cobra.ShellCompDirective"
+Cohesion: 0.29
+Nodes (6): completeDirs(), completeEnvFiles(), completePlatforms(), completeRoles(), isEnvFileName(), matching()
 
 ### Community 129 - "Scaling YAML Decoding"
 Cohesion: 0.31
 Nodes (5): scalingKey, scalingSpelling, Scaling, scalingKeyIndex(), scalingKeyList()
 
 ### Community 130 - "podName"
-Cohesion: 0.09
-Nodes (17): BrokerPodSuffixShape(), Cluster, TestOperatorAdminSecretNameMatchesTheBrokerNames(), Cluster, Cluster, normalizeToList(), TestNormalizeToListHandlesBothKubectlShapes(), HARoles() (+9 more)
+Cohesion: 0.08
+Nodes (18): BrokerPodSuffixShape(), Cluster, TestOperatorAdminSecretNameMatchesTheBrokerNames(), Cluster, TestPodNameForIsTheOneSpelling(), HARoles(), lbServiceName(), podName() (+10 more)
 
 ### Community 131 - ".preflightOne"
-Cohesion: 0.50
+Cohesion: 0.47
 Nodes (3): canIAnswer(), Cluster, probe
 
 ### Community 132 - "ReplVia"
-Cohesion: 0.22
-Nodes (8): ReplVia, ReplViaKube, ReplViaSEMP, ReplPassSecret, checkCredentialChars(), sortedKeys(), validateReplVia(), validateReplViaSEMP()
+Cohesion: 0.29
+Nodes (7): ReplVia, ReplViaKube, ReplViaSEMP, ReplPassSecret, viaDescription(), validateReplVia(), validateReplViaSEMP()
 
-### Community 134 - "logArgs"
+### Community 134 - "storageCfg"
+Cohesion: 0.25
+Nodes (7): storageCfg(), TestCustomMountIgnoresRolesOutsideTheGroup(), TestCustomMountMustCoverEveryNode(), TestCustomMountRejectsAnEmptyClaim(), TestCustomMountRejectsAnUnknownRoleKey(), TestMsgNodeSizeIsOptionalOnlyWithCustomMounts(), TestStorageClassAndCustomMountAreMutuallyExclusive()
+
+### Community 135 - "ContainerSecrets"
+Cohesion: 0.29
+Nodes (7): ContainerSecrets(), containerSecretSpecs(), SecretPreflight(), TestComposeLabelsTheCertificateDigest(), TestFileBackedSecretIsExemptFromSecretPreflight(), TestServerCertIsASecretOnBothEngines(), secretSpec
+
+### Community 136 - "runLeader"
+Cohesion: 0.60
+Nodes (4): leaderRun, runLeader(), TestAssertLeaderAsksBeforeActingFromABackup(), TestAssertLeaderPrimaryAndMonitorNeverAsk()
+
+### Community 137 - "Fixtures and doubles"
+Cohesion: 0.50
+Nodes (4): Fixtures and doubles, Injectable seams, Per-package doubles, Shared env fixtures
+
+### Community 138 - "logArgs"
 Cohesion: 0.67
 Nodes (3): logArgs(), logArgs2(), TestLogArgsBuildsOneSetForBothPlatforms()
-
-### Community 135 - "TestShowRedundancyIsReadOnly"
-Cohesion: 0.67
-Nodes (3): TestBackupActivityStateReadsTheMateColumn(), TestShowRedundancyIsReadOnly(), backupActivityState()
-
-### Community 139 - "Env Path Resolution"
-Cohesion: 0.40
-Nodes (5): envTree(), TestResolveEnvPath(), TestResolveEnvPathDefaultInBaseDir(), TestResolveEnvPathEmptyBaseDir(), ResolveEnvPath()
 
 ### Community 141 - "Duration and Host Path Checks"
 Cohesion: 0.40
 Nodes (5): CanonicalDuration(), TestCanonicalDuration(), CheckHostPath(), TestCheckHostPathAccepts(), TestCheckHostPathRejects()
 
-### Community 153 - "Exporting and importing configuration"
-Cohesion: 0.29
-Nodes (7): Broker scope is a fixed classification, Exporting and importing configuration, Handling the artifact, Kubernetes-specific hazards, The import lifecycle, Two detectors, in order, What export captures, and why it is not a backup
-
-### Community 158 - "internal/engine"
-Cohesion: 0.67
-Nodes (3): internal/engine, resolve_test.go, runner_test.go
-
 ## Knowledge Gaps
-- **238 isolated node(s):** `solace`, `span`, `Ops`, `showCmd`, `Ops` (+233 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 359 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **243 isolated node(s):** `solace`, `span`, `Ops`, `showCmd`, `Ops` (+238 more)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 363 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
 - **16 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Sink` connect `Sink` to `output_test.go`, `Manager`, `age`, `config_test.go`, `BrokerType`, `k8s/inspect_test.go`, `Cluster`, `Ops`, `ImportPlan`, `.configRows`?**
-  _High betweenness centrality (0.020) - this node is a cross-community bridge._
-- **Why does `Config` connect `Config` to `newTestOps`, `podName`, `context.Context`, `Manager`, `K8sConfig`, `runRootWith`, `captureStdout`, `NewCluster`, `convert_test.go`, `manager_test.go`, `GenSecrets`, `eqArgs`, `desiredWatch`, `ResolveDomainCerts`, `Role`, `localCfg`, `config_test.go`, `Cluster`, `Ops`, `.configRows`, `strings.Builder`, `TestServerCert`, `ReplSite`, `k8s/matechannel_test.go`, `occCluster`, `haCfg`, `render_test.go`, `step`, `Container`, `certFixture`, `AdminSecret`, `GenOperator`, `capRunner`, `sempPort`?**
-  _High betweenness centrality (0.019) - this node is a cross-community bridge._
-- **Why does `Platform` connect `Platform` to `testing.T`, `Manager`, `CheckCommand`, `captureStdout`, `convert_test.go`, `manager_test.go`, `github.com/spf13/cobra.Command`, `parse`, `Config`, `Role`, `config_test.go`, `Ops`, `platformOps`, `emitYAML`, `Command`, `limits_test.go`, `render_test.go`, `step`, `Container`, `Config`, `platformTitle`, `Load`, `certFixture`, `capRunner`, `.validateContainerArtifactValues`, `sempPort`, `Convert`, `.applyScalingTierDefaults`?**
+- **Why does `Config` connect `Config` to `newTestOps`, `podName`, `testing.T`, `Manager`, `K8sConfig`, `ContainerSecrets`, `opArgvMatch`, `NewCluster`, `convert_test.go`, `manager_test.go`, `GenSecrets`, `runner_test.go`, `Compose`, `deploymentItem`, `ResolveDomainCerts`, `Role`, `recRunner`, `eqArgs`, `localCfg`, `config_test.go`, `haCfg`, `.Run`, `Cluster`, `Ops`, `.configRows`, `opPerformReplication`, `TestServerCert`, `writeK8sDeployAllEnv`, `Command`, `writeNode`, `ReplSite`, `replCfg`, `adminCfg`, `render_test.go`, `Container`, `Platform`, `GenOperator`, `capRunner`, `Cluster`, `EnvPairs`?**
   _High betweenness centrality (0.016) - this node is a cross-community bridge._
-- **Are the 81 inferred relationships involving `newTestOps()` (e.g. with `TestDiagnosticsMkdirError()` and `TestDiagnosticsTwoRolesNoBundle()`) actually correct?**
-  _`newTestOps()` has 81 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `Role` connect `Role` to `bg`, `newTestOps`, `podName`, `Manager`, `ParseBlocks`, `Abbreviation Sets`, `planSections`, `ImportPlan`, `Config`, `App`, `Ops`, `config_test.go`, `haCfg`, `Ops`, `.rpc`, `strings.Builder`, `newTestMate`, `opPerformReplication`, `TestServerCert`, `.ConfigureReplication`, `newTeardownApplyFixture`, `scripts.go`?**
+  _High betweenness centrality (0.016) - this node is a cross-community bridge._
+- **Why does `Platform` connect `Platform` to `testing.T`, `Manager`, `runLeader`, `ContainerSecrets`, `CheckCommand`, `opArgvMatch`, `convert_test.go`, `manager_test.go`, `commands.go`, `Config`, `Role`, `config_test.go`, `Ops`, `opPerformReplication`, `Command`, `limits_test.go`, `render_test.go`, `Container`, `IsAbsHostPath`, `platformTitle`, `Load`, `.validateContainer`, `capRunner`, `.validateContainerArtifactValues`, `.applyScalingTierDefaults`?**
+  _High betweenness centrality (0.016) - this node is a cross-community bridge._
+- **Are the 109 inferred relationships involving `newTestOps()` (e.g. with `TestDomainCertsLoadsInSortedNameOrder()` and `TestEnableDefaultUsersStartsEveryDefaultUserBackUp()`) actually correct?**
+  _`newTestOps()` has 109 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 49 inferred relationships involving `ctrCfg()` (e.g. with `TestInspectStateSurfacesTheEngineError()` and `TestReportStateNeverPrintsTheEnvironment()`) actually correct?**
   _`ctrCfg()` has 49 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `solace`, `span`, `Ops` to the rest of the system?**
-  _238 weakly-connected nodes found - possible documentation gaps or missing edges._
-- **Should `newTestOps` be split into smaller, more focused modules?**
-  _Cohesion score 0.0726764500349406 - nodes in this community are weakly interconnected._
+  _243 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Should `bg` be split into smaller, more focused modules?**
+  _Cohesion score 0.12408163265306123 - nodes in this community are weakly interconnected._

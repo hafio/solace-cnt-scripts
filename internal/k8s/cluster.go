@@ -19,6 +19,12 @@ const defaultOperatorNS = "pubsubplus-operator-system"
 // ServiceAccount (assets/operator-1.4.2.yaml.tmpl).
 const operatorDeployment = "pubsubplus-eventbroker-operator"
 
+// operatorClusterRole is the fixed name of the ClusterRole the operator bundle grants its
+// ServiceAccount, which the bundle's fixed-name ClusterRoleBinding refers to
+// (assets/operator-1.4.2.yaml.tmpl). The `bind` escalation probe names it; a test pins it
+// to the rendered bundle so the two cannot drift.
+const operatorClusterRole = "pubsubplus-eventbroker-operator-role"
+
 // operatorDeployRef is the same Deployment in the `<kind>/<name>` form kubectl wants for
 // rollout, logs, describe and set env. Written once so the four call sites cannot
 // disagree about the prefix.

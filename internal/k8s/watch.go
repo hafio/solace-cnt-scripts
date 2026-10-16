@@ -71,18 +71,21 @@ func watchNamespace(cfg *config.Config) string {
 // It separates three states that mean different things, and conflating any two of them
 // is how the original bug worked:
 //
-//	found=false             no operator Deployment anywhere in the cluster
+//	found=false             no operator Deployment was found -- anywhere in the cluster,
+//	                        or, for an identity that may not list Deployments
+//	                        cluster-wide, in the operator namespace (findOperatorDeployment
+//	                        warns which)
 //	allNS=true, list=nil    an operator watching EVERY namespace -- either
 //	                        WATCH_NAMESPACE is absent (the operator-sdk default) or it
 //	                        is present and empty. Both mean the same thing to the
 //	                        operator, so they mean the same thing here.
 //	allNS=false, list=[...]  an operator watching exactly these namespaces
 //
-// The query is all-namespaces for the same reason installedOperatorImage's is: asking in
-// the configured namespace returns NotFound on a first install, and an operator someone
-// installed elsewhere is precisely the one whose watch list must not be clobbered.
+// It is OperatorRelease's reader; OperatorApply and validate fetch the Deployment once
+// themselves. Where it is looked for, and why that is not simply the configured
+// namespace, is findOperatorDeployment's to say.
 func (c *Cluster) installedWatch(ctx context.Context) (list []string, allNS, found bool, err error) {
-	dep, err := c.findOperatorDeployment(ctx)
+	dep, _, err := c.findOperatorDeployment(ctx)
 	if err != nil {
 		return nil, false, false, fmt.Errorf("reading the installed operator's watch scope: %w", err)
 	}
@@ -93,15 +96,25 @@ func (c *Cluster) installedWatch(ctx context.Context) (list []string, allNS, fou
 // findOperatorDeployment fetches the operator Deployment, or nil when no operator is
 // installed -- which is the ordinary first-install case, not an error.
 //
-// The query is all-namespaces, for the reason both its callers record: asking in the
-// configured namespace returns NotFound on a first install, printing an alarming line
-// about a lookup whose failure is expected, and an operator installed somewhere ELSE is
-// precisely the one worth noticing before a deploy.
+// The first question is all-namespaces: asking in the configured namespace alone cannot
+// see an operator installed somewhere ELSE, which is precisely the one worth noticing
+// before a deploy.
 //
-// It exists so the fetch can happen ONCE and be read twice. `check deploy` wants two
-// facts about this same object -- the watch scope and the running image -- and each
-// reader used to issue its own identical cluster-wide list, so every healthy `validate`
-// paid for two.
+// An identity that may not list Deployments cluster-wide gets kubectl's Forbidden
+// instead, and that must not stop a deploy, a removal or a report. So ANY failure of the
+// list falls back to findOperatorDeploymentIn, which reads the operator by name in the one
+// namespace this env file resolves; onlyNS then names that namespace, so a caller can say
+// how far the answer reaches, and is "" when the whole cluster was searched. Stderr is not
+// captured, so a refusal cannot be told from an unreachable server here -- the fallback
+// read is what finds out, and it fails the same way when the server really is down. A
+// list that ANSWERED is final: empty, a sole install elsewhere and the ambiguity below are
+// all answers, and none of them falls back.
+//
+// It exists so the fetch can happen ONCE and be read twice. `validate` and `operator
+// deploy` each want two facts about this same object -- the watch scope and the running
+// image -- and each reader used to issue its own identical cluster-wide list, so every
+// healthy `validate` paid for two, and an identity that cannot list would be shown the
+// refusal and the fallback warning twice.
 //
 // The match is by name AND namespace, in that order of preference. A Deployment of the
 // same name in ANY namespace used to answer, and the answer decides whether the watch
@@ -109,12 +122,12 @@ func (c *Cluster) installedWatch(ctx context.Context) (list []string, allNS, fou
 // Deployment somewhere on the cluster could steer both. The one in the namespace this
 // env file resolves wins outright; an install elsewhere counts only when nothing is
 // there and it is the sole candidate, and two elsewhere is an error naming them.
-func (c *Cluster) findOperatorDeployment(ctx context.Context) (*deploymentItem, error) {
-	var deps deploymentList
-	if err := c.getJSON(ctx, &deps, "deployment", "--all-namespaces"); err != nil {
-		return nil, err
-	}
+func (c *Cluster) findOperatorDeployment(ctx context.Context) (dep *deploymentItem, onlyNS string, err error) {
 	want := c.operatorNS(ctx)
+	var deps deploymentList
+	if listErr := c.getJSON(ctx, &deps, "deployment", "--all-namespaces"); listErr != nil {
+		return c.findOperatorDeploymentIn(ctx, want, listErr)
+	}
 	var elsewhere []*deploymentItem
 	for i := range deps.Items {
 		it := &deps.Items[i]
@@ -122,34 +135,82 @@ func (c *Cluster) findOperatorDeployment(ctx context.Context) (*deploymentItem, 
 			continue
 		}
 		if it.Metadata.Namespace == want {
-			return it, nil
+			return it, "", nil
 		}
 		elsewhere = append(elsewhere, it)
 	}
 	switch len(elsewhere) {
 	case 0:
-		return nil, nil
+		return nil, "", nil
 	case 1:
-		return elsewhere[0], nil
+		return elsewhere[0], "", nil
 	}
 	namespaces := make([]string, len(elsewhere))
 	for i, it := range elsewhere {
 		namespaces[i] = it.Metadata.Namespace
 	}
-	return nil, fmt.Errorf("%w: %d Deployments named %q outside the resolved operator namespace %s (in %s). "+
+	return nil, "", fmt.Errorf("%w: %d Deployments named %q outside the resolved operator namespace %s (in %s). "+
 		"Set kubernetes.operator.namespace to the one this env file means",
 		errAmbiguousOperator, len(elsewhere), operatorDeployment, want, strings.Join(namespaces, ", "))
 }
 
-// errAmbiguousOperator marks the ONE findOperatorDeployment failure a caller must never
-// fold into "no operator installed".
+// findOperatorDeploymentIn is findOperatorDeployment's fallback for a cluster-wide list that
+// failed (listErr): it reads the operator Deployment BY NAME in ns, the one namespace this
+// env file resolves.
 //
-// Every other failure here is a read that did not happen -- an RBAC denial, an
-// unreachable API server -- and installedOperatorImage deliberately answers "" for those,
-// because a first install has no operator namespace yet and must not alarm. Ambiguity is
-// the opposite: the operator IS installed, more than once, and this tool cannot say which
-// one a deploy would be downgrading. Answering "" there would disable the downgrade
-// confirmation using the very condition it exists to catch.
+// That needs only `get` on deployments in ns, which applying the bundle needs anyway, so an
+// identity that may not list cluster-wide -- but holds what the deploy's and the removal's
+// own preflights ask for -- can still deploy and remove, and validate needs nothing more.
+// What it cannot do is look anywhere else. An operator installed in another namespace is
+// not seen: its version is not compared, its watch list is not merged, and a deploy
+// installs a second operator beside it -- re-pointing the bundle's fixed-name
+// ClusterRoleBinding at this namespace's ServiceAccount. The warning says so once, here,
+// which is once per command because every caller reads the Deployment once.
+//
+// --ignore-not-found makes "nothing there" an answer rather than an error: on a first
+// install neither the Deployment nor, often, its namespace exists yet. So an empty read is
+// nil -- not installed, as far as this namespace goes -- and only a read that FAILED is an
+// error. A get by name returns one OBJECT rather than a list; getJSON's normalizeToList
+// wraps it.
+//
+// When this read fails too there is no answer at all, and the error names both reads and
+// what to ask for. It is never errAmbiguousOperator: that means the operator IS installed,
+// more than once, while this means nobody could look.
+func (c *Cluster) findOperatorDeploymentIn(ctx context.Context, ns string, listErr error) (*deploymentItem, string, error) {
+	var deps deploymentList
+	if err := c.getJSON(ctx, &deps, "deployment", operatorDeployment, "-n", ns, "--ignore-not-found"); err != nil {
+		return nil, "", fmt.Errorf("cannot tell whether an operator is installed: listing Deployments cluster-wide "+
+			"failed (%w), and so did reading %s in namespace %s (%w)\n"+
+			"  ask a cluster admin for `get` on deployments in %s (or `list` on deployments cluster-wide), then re-run",
+			listErr, operatorDeployment, ns, err, ns)
+	}
+	var dep *deploymentItem
+	for i := range deps.Items {
+		if deps.Items[i].Metadata.Name == operatorDeployment {
+			dep = &deps.Items[i]
+			break
+		}
+	}
+	if dep != nil {
+		c.progress().Warn("could not list Deployments cluster-wide (%v), so the operator was looked for in "+
+			"namespace %s only, and found there; an operator in any other namespace is not seen.", listErr, ns)
+	} else {
+		c.progress().Warn("could not list Deployments cluster-wide (%v), so the operator was looked for in "+
+			"namespace %s only, and is not there; an operator in any other namespace is not seen -- if one "+
+			"runs elsewhere, set kubernetes.operator.namespace to it.", listErr, ns)
+	}
+	return dep, ns, nil
+}
+
+// errAmbiguousOperator marks the one findOperatorDeployment failure that is an ANSWER rather
+// than a read that did not happen: the operator IS installed, more than once, and this tool
+// cannot say which one a deploy would be touching.
+//
+// A read that FAILED -- an RBAC denial, an unreachable API server -- goes to the
+// operator-namespace fallback instead and, when that fails too, becomes an error naming both
+// reads. Ambiguity gets neither, because the list worked. No caller may answer "nothing
+// installed" for either: that would skip the downgrade confirmation using the very
+// condition it exists to catch, so OperatorApply stops on both before anything is applied.
 var errAmbiguousOperator = errors.New("cannot tell which Deployment is the operator")
 
 // watchFromDeployment reads the watch scope off an already-fetched operator Deployment.
@@ -262,19 +323,17 @@ type watchPlan struct {
 	widening bool
 }
 
-// reconcileWatch decides what WATCH_NAMESPACE `operator deploy` should apply.
+// reconcileWatch decides what WATCH_NAMESPACE `operator deploy` should apply, from the
+// operator Deployment OperatorApply has already read (nil: none was found).
 //
 //	installed        desired      -> applied
-//	not installed    anything     -> desired (a first install has nothing to preserve)
+//	not found        anything     -> desired (a first install has nothing to preserve)
 //	all namespaces   anything     -> unchanged (already a superset of every list)
 //	list L           empty (ALL)  -> all namespaces, CONFIRMED (widening)
 //	list L           list D       -> L union D
-func (c *Cluster) reconcileWatch(ctx context.Context) (watchPlan, error) {
+func (c *Cluster) reconcileWatch(dep *deploymentItem) watchPlan {
 	desired := desiredWatch(c.Cfg)
-	installed, allNS, found, err := c.installedWatch(ctx)
-	if err != nil {
-		return watchPlan{}, err
-	}
+	installed, allNS, found := watchFromDeployment(dep)
 	switch {
 	case !found:
 		if len(desired) == 0 {
@@ -283,13 +342,13 @@ func (c *Cluster) reconcileWatch(ctx context.Context) (watchPlan, error) {
 			c.logf("installing the operator to watch %s (%d namespace(s))",
 				strings.Join(desired, ","), len(desired))
 		}
-		return watchPlan{value: strings.Join(desired, ",")}, nil
+		return watchPlan{value: strings.Join(desired, ",")}
 
 	case allNS:
 		// Nothing to merge into a superset. Said out loud because an operator expecting
 		// their namespace to be "added" should learn it was already covered.
 		c.progress().OK("the operator already watches ALL namespaces; watch list unchanged.")
-		return watchPlan{value: ""}, nil
+		return watchPlan{value: ""}
 
 	case len(desired) == 0:
 		// The env file asks for every namespace and the operator currently watches a
@@ -297,7 +356,7 @@ func (c *Cluster) reconcileWatch(ctx context.Context) (watchPlan, error) {
 		// is a question, not a side effect.
 		c.progress().Warn("this env file asks the operator to watch ALL namespaces; it currently "+
 			"watches only %s.", strings.Join(installed, ","))
-		return watchPlan{value: "", widening: true}, nil
+		return watchPlan{value: "", widening: true}
 
 	default:
 		merged, added := unionWatch(installed, desired)
@@ -306,7 +365,7 @@ func (c *Cluster) reconcileWatch(ctx context.Context) (watchPlan, error) {
 		} else {
 			c.logf("widening the operator watch list: + %s", strings.Join(added, ","))
 		}
-		return watchPlan{value: strings.Join(merged, ",")}, nil
+		return watchPlan{value: strings.Join(merged, ",")}
 	}
 }
 
@@ -337,7 +396,10 @@ func (c *Cluster) OperatorRelease(ctx context.Context, deleteCRDs bool) error {
 	opNS := c.operatorNS(ctx)
 
 	if !found && !c.isEcho() {
-		c.progress().Warn("no operator is installed in this cluster; nothing to remove.")
+		// Scope-neutral on purpose: for an identity that may not list Deployments
+		// cluster-wide only the operator namespace was searched, and the warning
+		// findOperatorDeploymentIn printed just before this one already says so.
+		c.progress().Warn("no %s Deployment was found; nothing to remove.", operatorDeployment)
 		return nil
 	}
 	if allNS && !c.isEcho() {

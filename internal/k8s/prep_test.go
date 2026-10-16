@@ -1,8 +1,10 @@
 package k8s
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -970,5 +972,143 @@ func TestBrokerPodsExist(t *testing.T) {
 		if call := rr.last(); !slices.Contains(call.args, "dev-broker-pubsubplus-p-0") {
 			t.Errorf("argv = %v, want the primary pod", call.args)
 		}
+	}
+}
+
+// TestClusterOutDefaultsToStdout covers the report sink's default: a Cluster built with no Out
+// writes its reports to stdout, where a report belongs (stderr narrates, stdout reports) -- not to
+// nowhere, and not to stderr. An injected sink is used as given.
+func TestClusterOutDefaultsToStdout(t *testing.T) {
+	if got := (&Cluster{}).out(); got != os.Stdout {
+		t.Errorf("out() with no sink = %v, want os.Stdout", got)
+	}
+	buf := &bytes.Buffer{}
+	if got := (&Cluster{Out: buf}).out(); got != buf {
+		t.Errorf("out() with a sink = %v, want the injected writer", got)
+	}
+}
+
+// TestCreateNamespaceStopsOnPreflightFailure: a refused `auth can-i create namespaces` stops
+// CreateNamespace before any manifest is applied -- the same shape as the other preflighted
+// operations, and the one that matters on a first deploy, where the namespace is the first write
+// of everything that follows.
+func TestCreateNamespaceStopsOnPreflightFailure(t *testing.T) {
+	rr := &recRunner{canI: "no"}
+	c := newCluster(rr)
+	err := c.CreateNamespace(context.Background())
+	if err == nil {
+		t.Fatal("CreateNamespace must fail when the permission probe answers no")
+	}
+	if !strings.Contains(err.Error(), "not allowed to create namespaces") {
+		t.Errorf("error = %v, want it to name the refused permission", err)
+	}
+	for _, call := range rr.calls {
+		if call.method == "RunInput" {
+			t.Errorf("a refused create still applied a manifest: %+v", call)
+		}
+	}
+}
+
+// TestGenSecretsStopsAtASecretItCannotBuild: GenSecrets is the one rendering behind both `broker
+// generate` and the apply, so a Secret whose builder refuses must fail the whole render --
+// returning the documents built so far would print, or apply, a partial set that the CR then
+// references the rest of. Both refusals here are states only a Config assembled in code can reach
+// (config.Load requires a name and a password), which is exactly what GenSecrets is handed on the
+// render-only path, where nothing validated it.
+func TestGenSecretsStopsAtASecretItCannotBuild(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*config.Config)
+		want   string
+	}{
+		{"an admin Secret with no name to build it under", func(c *config.Config) {
+			c.SEMP.AdminPass = "pw"
+			c.K8s.Name, c.K8s.AdminSecret = "", ""
+		}, "the admin secret has no name"},
+		{"an additional user with no password", func(c *config.Config) {
+			c.SEMP.AdditionalUsers = []config.AdditionalUser{{Username: "ops", AccessLevel: "read-only"}}
+		}, `semp.additionalUsers "ops" has no password`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := haCfg()
+			tc.mutate(cfg)
+			got, err := GenSecrets(cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("GenSecrets = (%q, %v), want an error containing %q", got, err, tc.want)
+			}
+			if got != nil {
+				t.Errorf("a failed build must return no manifest, got:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestCreateSecretsStopsWhenASecretCannotBeBuilt: the whole manifest is built after the permission
+// probe and before the first apply, so a builder error aborts cleanly -- the cluster was asked,
+// and nothing was applied, rather than a partial Secret set left behind for the operator to find.
+func TestCreateSecretsStopsWhenASecretCannotBeBuilt(t *testing.T) {
+	cfg := haCfg()
+	cfg.SEMP.AdditionalUsers = []config.AdditionalUser{{Username: "ops", AccessLevel: "read-only"}}
+	rr := &recRunner{}
+	err := NewCluster(rr, cfg, nil, nil).CreateSecrets(context.Background())
+	if err == nil || !strings.Contains(err.Error(), `"ops" has no password`) {
+		t.Fatalf("CreateSecrets err = %v, want the additional user with no password named", err)
+	}
+	if calls := rr.afterPreflight(t, "create", "secrets"); len(calls) != 0 {
+		t.Errorf("a Secret that could not be built must leave nothing applied, got %+v", calls)
+	}
+}
+
+// TestGenBrokerStopsWhenASecretCannotBeBuilt: `broker generate` fails rather than print a stream
+// that is missing a Secret the CR references -- a manifest an operator would review, approve and
+// pipe to kubectl, only to have the broker pods wait on a Secret nothing creates.
+func TestGenBrokerStopsWhenASecretCannotBeBuilt(t *testing.T) {
+	cfg := haCfg()
+	cfg.SEMP.AdditionalUsers = []config.AdditionalUser{{Username: "ops", AccessLevel: "read-only"}}
+	got, err := GenBroker(cfg)
+	if err == nil || !strings.Contains(err.Error(), `"ops" has no password`) {
+		t.Fatalf("GenBroker = (%q, %v), want the additional user with no password named", got, err)
+	}
+	if got != nil {
+		t.Errorf("a failed build must print no stream at all, got:\n%s", got)
+	}
+}
+
+// TestUpdateServerCertSecretStopsOnPreflightFailure: a refused `auth can-i update secrets` stops the
+// rotation before it reads the certificate and private key off disk -- loading key material for a
+// cluster that will not accept it is work not worth doing -- and before any apply.
+func TestUpdateServerCertSecretStopsOnPreflightFailure(t *testing.T) {
+	rr := &recRunner{canI: "no"}
+	c := NewCluster(rr, tlsCfg(t), nil, nil)
+	err := c.UpdateServerCertSecret(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not allowed to update secrets") {
+		t.Fatalf("UpdateServerCertSecret err = %v, want the refused permission named", err)
+	}
+	if len(rr.calls) != 1 {
+		t.Errorf("%d calls after a refused probe, want only the probe itself: %+v", len(rr.calls), rr.calls)
+	}
+}
+
+// TestServerCertChangedFailsWhenTheCertificateFilesCannotBeRead: with files configured but not
+// readable there is nothing to compare the cluster's Secret against, and that is an error naming
+// the file -- not "unchanged", which would skip a renewal, and not "changed", which would offer a
+// restart for a certificate that does not exist. The cluster is not asked at all.
+func TestServerCertChangedFailsWhenTheCertificateFilesCannotBeRead(t *testing.T) {
+	cfg := haCfg()
+	cfg.TLS.Cert = filepath.Join(t.TempDir(), "gone.crt")
+	cfg.TLS.CertKey = filepath.Join(t.TempDir(), "gone.key")
+	rr := &recRunner{}
+	changed, err := NewCluster(rr, cfg, nil, nil).ServerCertChanged(context.Background())
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ServerCertChanged err = %v, want the unreadable certificate file", err)
+	}
+	if !strings.Contains(err.Error(), cfg.TLS.Cert) {
+		t.Errorf("error = %v, want it to name %s", err, cfg.TLS.Cert)
+	}
+	if changed {
+		t.Error("a certificate that could not be read must not report as changed")
+	}
+	if len(rr.calls) != 0 {
+		t.Errorf("nothing to compare means the cluster is not asked; got %+v", rr.calls)
 	}
 }

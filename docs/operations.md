@@ -93,7 +93,7 @@ of them at runtime**:
 | Docker Compose | 2.23.1 | The `environment:` secret source in the generated compose file | `broker deploy` fails on the secret source. Loud. On a host with only the standalone v1 binary, set `docker.compose: docker-compose` |
 | podman | 4.7 | `ShmSize=` and `Ulimit=` in the quadlet unit. Below them: `HostName=` (4.6), `Secret=...,type=mount` with an absolute target and the `Health*=` keys (4.5), `NoNewPrivileges=` and `DropCapability=` (4.4), and `secret create --label` for the certificate's change-detection label (4.3). The memory cap rides `PodmanArgs=--memory=` rather than quadlet's own `Memory=` key, which needs **5.5** | Quadlet refuses a unit carrying a key it does not know, so the unit fails to load at deploy time. Loud. `TestQuadletKeysAreWithinTheFloor` holds every key the unit emits to this floor |
 | Solace broker image | 10.26 | The built-in readiness endpoint the opt-in health check uses with no `cmd` of its own | Refused at load: an older tag and an unidentifiable one are both rejected. This is the one floor that IS checked, because the tag is in the env file rather than on the host |
-| EventBroker operator | bundled 1.4.2 | The `PubSubPlusEventBroker` schema this tool renders | `operator deploy` installs the bundled version. An older operator already in the cluster prompts before a downgrade |
+| EventBroker operator | bundled 1.4.2 | The `PubSubPlusEventBroker` schema this tool renders | `operator deploy` installs the bundled version. A newer operator already in the cluster prompts before a downgrade -- one the deploy can see; an identity that cannot list Deployments cluster-wide sees only the operator namespace ([Bringing up a fresh cluster](#bringing-up-a-fresh-cluster)) |
 | kubectl / oc | none | Namespace, Secret and the custom resource are all core API shapes plus the operator's own CRD | n/a |
 | Go | 1.27 | Building the binary, pinned so builds use a patched standard library | n/a |
 
@@ -118,9 +118,11 @@ solace-util operator deploy -e dev.yaml
 After that, any number of env files can each `broker deploy` their own broker against the
 same cluster. Running `operator deploy` again from a second env file does not replace the
 watch list -- it UNIONS the namespaces, so the operator keeps reconciling the brokers that
-were already there. `validate` warns rather than fails when an operator install is
-required, so that warning is what tells you this step was skipped -- `broker deploy` then
-fails once it tries to apply a custom resource the cluster does not know how to reconcile.
+were already there (an identity that cannot list Deployments cluster-wide sees, and so
+unions with, only an operator in the namespace its env file resolves -- see below).
+`validate` warns rather than fails when an operator install is required, so that warning is
+what tells you this step was skipped -- `broker deploy` then fails once it tries to apply a
+custom resource the cluster does not know how to reconcile.
 
 `validate`'s report opens with a **Config** section, ahead of Deployment: it states that
 the env file was already accepted -- `config.Load` validates before this report can even
@@ -137,7 +139,8 @@ checks permission to create the broker resource, gives the **operator install** 
 checks the target StorageClass's volume-binding mode and whether it allows volume expansion.
 
 The verdict reads the operator that is running -- its `WATCH_NAMESPACE` against this env
-file's `kubernetes.namespace` -- and says `required` or `not required`, with what to do:
+file's `kubernetes.namespace` -- and says `required`, `not required` or `unknown`, with what
+to do:
 
 - **required** when no operator is installed, or the one running does not watch this
   namespace (`solace-util operator deploy` installs it, or adds the namespace to its watch
@@ -149,6 +152,13 @@ file's `kubernetes.namespace` -- and says `required` or `not required`, with wha
   otherwise install a second operator.
 - **not required** is a `[WARN]` rather than `[ OK ]` when the operator is stopped
   (`operator start`) or lives in that other namespace.
+- **unknown** when the operator Deployment could not be read at all; when two operators are
+  installed outside the namespace `kubernetes.operator.namespace` resolves to (set it to the
+  one this env file means); or when the identity may not list Deployments cluster-wide and
+  the operator namespace holds none. In that last case the lookup read that one namespace
+  (the same fallback `operator deploy` uses, below), so an operator installed elsewhere would
+  be invisible; it says to set `kubernetes.operator.namespace` if one runs elsewhere, and
+  otherwise to run `operator deploy`.
 
 It is never a `[FAIL]`: `validate` is also what you run before installing anything. All
 three views show it once -- `validate` and `operator validate` in the Operator section,
@@ -172,6 +182,39 @@ just the CRD -- so a missing permission is caught before the apply is half done 
 partway through it; an operator already watching every namespace is left alone rather than
 narrowed, and when the watch list comes out unchanged the rendered controller Deployment is
 byte-identical, so it is not rolled for nothing.
+
+Before applying, `operator deploy` reads the operator that is already installed -- once; the
+downgrade question and the watch-list union both use that one read -- with a cluster-wide
+`kubectl get deployment --all-namespaces`. An identity that may not list Deployments across
+the cluster gets kubectl's `Forbidden: ... cannot list resource "deployments" in API group
+"apps" at the cluster scope`, and the deploy carries on rather than stopping there: it reads
+the operator by name in the namespace `kubernetes.operator.namespace` resolves to
+(`kubectl get deployment pubsubplus-eventbroker-operator -n <ns> --ignore-not-found`, which
+needs only `get` there) and prints one `[WARN]` saying what it found and that an operator in
+any other namespace is not seen. An operator found there is treated exactly as the cluster-wide
+read would treat it. One running elsewhere is invisible: its version is not compared, its
+watch list is not merged, and the deploy installs a second operator, re-pointing the bundle's
+fixed-name ClusterRoleBinding at this namespace -- so if one runs elsewhere, set
+`kubernetes.operator.namespace` to it. If the by-name read fails too, nothing is applied and
+the error names both reads and the `get` to ask for. A cluster-wide list that finds two
+operators outside the resolved namespace stops the deploy too, before anything is applied:
+it cannot tell which one it would be downgrading or re-scoping, so set
+`kubernetes.operator.namespace` to the one this env file means.
+
+When that namespace holds no operator -- a first install -- the identity does not hold every
+permission the operator's ClusterRole grants (listing Deployments cluster-wide is one of them),
+and Kubernetes lets such an identity create that role only with `escalate`, and bind it only
+with `bind` on it. The `create` probes cannot show either, so the deploy also asks
+`kubectl auth can-i escalate clusterroles --all-namespaces` and
+`kubectl auth can-i bind clusterroles/pubsubplus-eventbroker-operator-role --all-namespaces`,
+and refuses before applying anything if either is denied, rather than failing halfway through
+the bundle with the CRDs and the controller Deployment already created. `escalate` is asked
+about the kind rather than the role because a create is authorized before the new role's
+name is known, so a grant limited to that one name does not cover it; `bind` is checked
+against the role bound, so a grant limited to it does. A re-deploy that found the operator in
+its namespace is not asked, since an unchanged ClusterRole is not rewritten -- but an operator
+upgrade whose bundle changes the role's rules needs the same verbs and is not checked
+beforehand. Without those verbs the first install is a cluster admin's to run.
 
 Removing a broker never removes the operator either -- see
 [Removing a broker: what stays, what goes](#removing-a-broker-what-stays-what-goes) below.
@@ -1065,6 +1108,10 @@ the operator is cluster-scoped and may be serving brokers this env file knows no
 - An operator watching **all** namespaces (an empty `WATCH_NAMESPACE`) cannot be narrowed to
   exclude one, so it is kept with a warning rather than being silently left watching
   everything minus nothing.
+- The watch list is read the way `operator deploy` reads it. An identity that may not list
+  Deployments cluster-wide is warned once and reads the operator namespace alone -- the only
+  namespace a removal ever acts on -- so finding nothing there removes nothing, and an
+  operator installed elsewhere is not touched.
 
 ### Every destructive command confirms
 
@@ -1772,3 +1819,19 @@ any of these cases. See [Data replication](#data-replication).
 allowlisted bare binary name. A wrapper such as `microk8s kubectl` or `lima nerdctl` needs
 `--allow-command <name>` on the invocation -- see
 [The command fields are executable content](configuration.md#the-command-fields-are-executable-content).
+
+### Forbidden: cannot list deployments at the cluster scope
+
+`operator deploy`, `operator remove` and `validate` each look for an operator that is already
+installed, with one `kubectl get deployment --all-namespaces`. An identity without a
+cluster-scope `list` on deployments gets kubectl's `Error from server (Forbidden):
+deployments.apps is forbidden: User "..." cannot list resource "deployments" in API group
+"apps" at the cluster scope`, and the command carries on: one `[WARN]` follows it, and the
+operator is read by name in the namespace `kubernetes.operator.namespace` resolves to. That
+line is expected for such an identity, not a failure. What it costs, and the
+`escalate`/`bind` check a first install then makes, are in
+[Bringing up a fresh cluster](#bringing-up-a-fresh-cluster). `operator remove` also lists
+broker resources cluster-wide first, to decide whether the CRDs may go, and kubectl prints
+its own Forbidden for that list too; a failed list keeps the CRDs -- with `--delete-crd` the
+deletion is refused -- which is the safe direction. `broker status --all` is cluster-wide by
+design and needs that list outright.

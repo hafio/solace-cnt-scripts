@@ -1,8 +1,6 @@
 package k8s
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -114,36 +112,10 @@ func operatorVersionWarning(existingImage, newImage string) []string {
 	}
 }
 
-// installedOperatorImage reads the image the operator deployment is actually
-// running, or "" when there is no operator to read (the normal first-install
-// case, not an error).
-//
-// It reads across ALL namespaces rather than naming one, for two reasons. The
-// first is noise: on a first install the operator namespace does not exist yet,
-// and a namespaced get prints `Error from server (NotFound): namespaces
-// "solace-operator" not found` straight to stderr -- an alarming line about a
-// lookup whose failure this function is designed to shrug off. The second is
-// correctness: the operator may be running somewhere other than where this env
-// file expects, and that is precisely the case worth noticing before a deploy.
-func (c *Cluster) installedOperatorImage(ctx context.Context) (string, error) {
-	dep, err := c.findOperatorDeployment(ctx)
-	if errors.Is(err, errAmbiguousOperator) {
-		// The one failure not folded into "": the operator IS installed, more than once,
-		// and "" reads as "none installed" -- which skips the downgrade confirmation
-		// using the very condition it exists to catch. Every other error still folds,
-		// because a first install has no operator namespace to read and must not alarm.
-		return "", err
-	}
-	if err != nil {
-		return "", nil
-	}
-	return imageFromDeployment(dep), nil
-}
-
 // imageFromDeployment reads the running image off an already-fetched operator
 // Deployment, so a caller that already has one does not fetch it again. A nil dep, or
-// one whose containers name no image, is "" -- the same "nothing to read" this function
-// has always returned rather than an error.
+// one whose containers name no image, is "" -- nothing to compare, which the downgrade
+// gate and validate's version row both read as nothing to say.
 func imageFromDeployment(dep *deploymentItem) string {
 	if dep == nil {
 		return ""
@@ -157,7 +129,10 @@ func imageFromDeployment(dep *deploymentItem) string {
 }
 
 // confirmNoDowngrade is the gate OperatorApply passes through before it applies
-// the bundle. It shows the two versions and asks; declining aborts the apply.
+// the bundle, given the operator Deployment OperatorApply has already read (nil:
+// none was found). It shows the two versions and asks; declining aborts the apply.
+// A read that failed never reaches here -- OperatorApply stops on it -- so "nothing
+// to compare" can only mean nothing was found.
 //
 // It asks rather than merely warning because the operator is cluster-scoped: the
 // blast radius is every broker in the cluster, including ones this env file has
@@ -168,18 +143,11 @@ func imageFromDeployment(dep *deploymentItem) string {
 //
 // It returns nil when there is nothing to ask about: a preview, a first install,
 // an upgrade, the same version, or tags that cannot be ordered.
-func (c *Cluster) confirmNoDowngrade(ctx context.Context, opNS string) error {
+func (c *Cluster) confirmNoDowngrade(dep *deploymentItem) error {
 	if c.isEcho() {
 		return nil // a preview has no cluster to read
 	}
-	installed, err := c.installedOperatorImage(ctx)
-	if err != nil {
-		// A lookup that could not decide which install is the operator must not be read
-		// as "none installed": that is exactly how the downgrade guard would be skipped.
-		return fmt.Errorf("cannot establish which operator is installed, so a downgrade "+
-			"cannot be ruled out: %w", err)
-	}
-	body := operatorVersionWarning(installed, operatorImage(c.Cfg))
+	body := operatorVersionWarning(imageFromDeployment(dep), operatorImage(c.Cfg))
 	if body == nil {
 		return nil
 	}

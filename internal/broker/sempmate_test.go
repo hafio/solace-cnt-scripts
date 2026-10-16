@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -366,5 +367,269 @@ func TestSEMPMatePlainTextURL(t *testing.T) {
 	}
 	if strings.Contains(calls[0].stdin, "insecure") {
 		t.Errorf("a plaintext leg needs no TLS options: %q", calls[0].stdin)
+	}
+}
+
+// --- failure and boundary paths -------------------------------------------------------
+
+// covSEMPMate builds the channel over a recording transport whose reply the test scripts
+// per request. The responder is handed the curl config the call put on stdin, so it can
+// answer by what was asked -- which is how one test makes the first of two requests succeed
+// and the second fail.
+func covSEMPMate(t *testing.T, respond func(stdin string) ([]byte, error)) (MateChannel, *fakeTransport) {
+	t.Helper()
+	ft := &fakeTransport{responder: func(_ config.Role, _ []string, stdin []byte) ([]byte, error) {
+		return respond(string(stdin))
+	}}
+	o, _ := newTestOps(t, localCfg("true"), ft)
+	m, err := o.NewSEMPMate(sempSite(), "dr-site-password")
+	if err != nil {
+		t.Fatalf("NewSEMPMate: %v", err)
+	}
+	return m, ft
+}
+
+// TestSEMPMateDescribeNamesTheSiteAndEndpoint proves the channel can say which site it
+// reaches and where. A two-site flow reports errors through this, so an operator reading
+// one knows which side of the pair it is about.
+func TestSEMPMateDescribeNamesTheSiteAndEndpoint(t *testing.T) {
+	m, _ := newSEMPTestMate(t, sempOKResult)
+	if got, want := m.Describe(), "site v:sol-dr over SEMP at 10.0.1.1:1943"; got != want {
+		t.Errorf("Describe = %q, want %q", got, want)
+	}
+}
+
+// TestSEMPMateEveryCallSurfacesATransportFailure proves a curl that cannot run -- the
+// container is gone, the exec was refused -- reaches the caller from every operation with
+// its cause intact and the endpoint named, and without the site's password. The credential
+// rides stdin precisely so that no error, log line or argv can carry it, and a failure path
+// is where a careless message would break that.
+func TestSEMPMateEveryCallSurfacesATransportFailure(t *testing.T) {
+	boom := errors.New("connection refused")
+	calls := []struct {
+		name string
+		run  func(MateChannel) error
+	}{
+		{"Preflight", func(c MateChannel) error { return c.Preflight(context.Background()) }},
+		{"ShowReplication", func(c MateChannel) error {
+			_, err := c.ShowReplication(context.Background())
+			return err
+		}},
+		{"ReadRoles", func(c MateChannel) error {
+			_, err := c.ReadRoles(context.Background(), nil)
+			return err
+		}},
+		{"PrimaryActive", func(c MateChannel) error {
+			_, err := c.PrimaryActive(context.Background())
+			return err
+		}},
+		{"Status", func(c MateChannel) error {
+			_, err := c.Status(context.Background())
+			return err
+		}},
+		{"SetRole", func(c MateChannel) error {
+			return c.SetRole(context.Background(), "ORDERS", RoleActive)
+		}},
+	}
+	for _, tc := range calls {
+		t.Run(tc.name, func(t *testing.T) {
+			m, ft := covSEMPMate(t, func(string) ([]byte, error) { return nil, boom })
+			err := tc.run(m)
+			if !errors.Is(err, boom) {
+				t.Fatalf("err = %v, want the transport cause kept", err)
+			}
+			if !strings.Contains(err.Error(), "https://10.0.1.1:1943/SEMP") {
+				t.Errorf("err = %v, want the endpoint named", err)
+			}
+			if strings.Contains(err.Error(), "dr-site-password") {
+				t.Errorf("err = %v, the site's password must never reach an error", err)
+			}
+			assertNoPasswordInArgv(t, ft, "dr-site-password")
+		})
+	}
+}
+
+// TestSEMPMateRefusesAReplyThatIsNotASuccessfulSEMPResponse covers the three shapes of a
+// reply that must not be read as an answer: a non-2xx status (the credential, host, port or
+// a firewall is wrong), no HTTP status at all (something other than a broker answered), and
+// a 200 whose body is not the XML the schema describes. Each says what to check, and the
+// body of a failed reply is never echoed -- a broker may repeat what it was sent.
+func TestSEMPMateRefusesAReplyThatIsNotASuccessfulSEMPResponse(t *testing.T) {
+	cases := []struct {
+		name  string
+		reply string
+		want  string
+	}{
+		{"a non-2xx status", "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\n\r\nbad credentials",
+			"HTTP/1.1 401 Unauthorized"},
+		{"no HTTP status at all", "something that is not a broker", "<no HTTP response from mate>"},
+		{"a 200 whose body is not XML", sempReply("this is not xml <<<"), "could not parse"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := covSEMPMate(t, func(string) ([]byte, error) { return []byte(tc.reply), nil })
+			err := m.Preflight(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to contain %q", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), "cannot reach site v:sol-dr") {
+				t.Errorf("err = %v, want the preflight to name what it could not reach", err)
+			}
+			if strings.Contains(err.Error(), "bad credentials") {
+				t.Errorf("err = %v, the body of a failed reply must not be echoed", err)
+			}
+		})
+	}
+}
+
+// TestSEMPMateStatusIsBothReportsInOrder proves Status returns the mate report and then the
+// per-VPN report, each as the broker sent it, for display only. They are two requests -- the
+// first asks for `show replication`, the second for the per-VPN table -- and the order is the
+// order an operator reads them in.
+func TestSEMPMateStatusIsBothReportsInOrder(t *testing.T) {
+	const mate = `<rpc-reply><rpc><show><replication><mate><router-name>v:sol-b</router-name></mate>` +
+		`</replication></show></rpc><execute-result code="ok"/></rpc-reply>`
+	const vpns = `<rpc-reply><rpc><show><message-vpn><replication><message-vpns>` +
+		`<message-vpn><vpn-name>ORDERS</vpn-name></message-vpn></message-vpns></replication>` +
+		`</message-vpn></show></rpc><execute-result code="ok"/></rpc-reply>`
+	m, ft := covSEMPMate(t, func(stdin string) ([]byte, error) {
+		if strings.Contains(stdin, "message-vpn") {
+			return []byte(sempReply(vpns)), nil
+		}
+		return []byte(sempReply(mate)), nil
+	})
+
+	got, err := m.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if got != mate+"\n"+vpns {
+		t.Errorf("Status = %q, want the mate report, a newline, then the per-VPN report", got)
+	}
+	if n := len(curlCalls(ft)); n != 2 {
+		t.Errorf("Status made %d requests, want exactly the two reports", n)
+	}
+}
+
+// TestSEMPMateStatusFailsOnEitherReport proves a failed report fails Status outright and
+// returns no text. Handing back one half of a two-part picture would show an operator a mate
+// with no VPN table and nothing to say the second request never succeeded. A failed first
+// request also means the second is never sent.
+func TestSEMPMateStatusFailsOnEitherReport(t *testing.T) {
+	const ok = `<rpc-reply><execute-result code="ok"/></rpc-reply>`
+	const refused = "HTTP/1.1 500 Internal Server Error\r\n\r\n"
+	cases := []struct {
+		name      string
+		failMatch string
+		wantCalls int
+	}{
+		{"the mate report fails", "<show><replication/>", 1},
+		{"the per-VPN report fails", "<vpn-name>*</vpn-name>", 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, ft := covSEMPMate(t, func(stdin string) ([]byte, error) {
+				if strings.Contains(stdin, tc.failMatch) {
+					return []byte(refused), nil
+				}
+				return []byte(sempReply(ok)), nil
+			})
+			got, err := m.Status(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "HTTP/1.1 500") {
+				t.Fatalf("Status = %q, %v; want the failed report's status in the error", got, err)
+			}
+			if got != "" {
+				t.Errorf("Status returned %q alongside its error, want no partial report", got)
+			}
+			if n := len(curlCalls(ft)); n != tc.wantCalls {
+				t.Errorf("Status made %d requests, want %d", n, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// TestSEMPMateShowReplicationRefusesAReplyItCannotRead covers the replies that parse as XML
+// but do not describe a mate this tool can use. Each fails naming the site and what was
+// wrong, rather than yielding a mate with a silently missing endpoint -- which a caller
+// would converge a broker onto -- and one case is NOT a failure: an appliance connect-via
+// with no address contributes nothing and is skipped.
+func TestSEMPMateShowReplicationRefusesAReplyItCannotRead(t *testing.T) {
+	wrap := func(mate string) string {
+		return `<rpc-reply><rpc><show><replication><mate>` + mate +
+			`</mate></replication></show></rpc><execute-result code="ok"/></rpc-reply>`
+	}
+	t.Run("a port that is not a number", func(t *testing.T) {
+		const mate = `<router-name>v:appl-b</router-name><connect-via><address>10.0.0.9</address>` +
+			`<connect-ports><ssl>not-a-port</ssl></connect-ports></connect-via>`
+		m, _ := newSEMPTestMate(t, wrap(mate))
+		_, err := m.ShowReplication(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "reading `show replication`") {
+			t.Errorf("err = %v, want the unreadable reply named", err)
+		}
+	})
+
+	cases := []struct {
+		name string
+		mate string
+		want string
+	}{
+		{"a transport outside the vocabulary",
+			`<router-name>v:b</router-name><mate-list><connect-via><address>b:55443</address>` +
+				`<transport>encrypted</transport></connect-via></mate-list>`,
+			`unknown replication transport keyword "encrypted"`},
+		{"an address that is not host:port",
+			`<router-name>v:b</router-name><mate-list><connect-via><address>broker-b</address>` +
+				`<transport>ssl</transport></connect-via></mate-list>`,
+			"which is not host:port"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := newSEMPTestMate(t, wrap(tc.mate))
+			_, err := m.ShowReplication(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to contain %q", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), "site v:sol-dr") {
+				t.Errorf("err = %v, want the site named", err)
+			}
+		})
+	}
+
+	t.Run("an appliance connect-via with no address is skipped", func(t *testing.T) {
+		const mate = `<router-name>v:appl-b</router-name><connect-via><address> </address>` +
+			`<connect-ports><ssl>55443</ssl></connect-ports></connect-via>`
+		m, _ := newSEMPTestMate(t, wrap(mate))
+		got, err := m.ShowReplication(context.Background())
+		if err != nil {
+			t.Fatalf("ShowReplication: %v", err)
+		}
+		if got.VirtualRouterName != "v:appl-b" || len(got.Endpoints) != 0 {
+			t.Errorf("got %+v, want the mate's name and no endpoint for an address that is blank", got)
+		}
+	})
+}
+
+// TestSEMPMateReadRolesRefusesAnUnknownAdminState is the admin-state half of the tri-state
+// rule, which TestSEMPMateReadsRolesTriState checks for the config-state only. A value
+// outside enabled, shutdown and n/a is a refusal naming the VPN, never a guess: reading it
+// as shutdown would let a switch skip a VPN it cannot see, and as enabled would let it
+// promote against one that is not replicating.
+func TestSEMPMateReadRolesRefusesAnUnknownAdminState(t *testing.T) {
+	const reply = `<rpc-reply><rpc><show><message-vpn><replication><message-vpns>` +
+		`<message-vpn><vpn-name>ORDERS</vpn-name><admin-state>sideways</admin-state>` +
+		`<config-state>active</config-state></message-vpn>` +
+		`</message-vpns></replication></message-vpn></show></rpc><execute-result code="ok"/></rpc-reply>`
+	m, _ := newSEMPTestMate(t, reply)
+	got, err := m.ReadRoles(context.Background(), nil)
+	if err == nil {
+		t.Fatalf("ReadRoles = %+v, want a refusal of an admin-state outside the enumeration", got)
+	}
+	for _, want := range []string{`message-vpn "ORDERS"`, `admin-state "sideways"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to mention %q", err, want)
+		}
+	}
+	if got != nil {
+		t.Errorf("ReadRoles returned %+v alongside its error, want nothing to act on", got)
 	}
 }

@@ -257,23 +257,38 @@ type scriptedMate struct {
 	// the preflight does not have to say so.
 	notPrimaryActive bool
 	mateName         string // what this broker says its replication mate is
+	// Read-side failures: each makes the one method named return its error, so a test can
+	// reach a refusal that a healthy channel never gives.
+	preflightErr error
+	primaryErr   error
+	showErr      error
+	readErr      error
 }
 
-func (m *scriptedMate) Preflight(context.Context) error { return nil }
+func (m *scriptedMate) Preflight(context.Context) error        { return m.preflightErr }
 func (m *scriptedMate) Status(context.Context) (string, error) { return "", nil }
 func (m *scriptedMate) Describe() string                       { return m.site }
 
 func (m *scriptedMate) PrimaryActive(context.Context) (bool, error) {
+	if m.primaryErr != nil {
+		return false, m.primaryErr
+	}
 	return !m.notPrimaryActive, nil
 }
 
 func (m *scriptedMate) ShowReplication(context.Context) (MateConfig, error) {
+	if m.showErr != nil {
+		return MateConfig{}, m.showErr
+	}
 	return MateConfig{VirtualRouterName: m.mateName}, nil
 }
 
 func (m *scriptedMate) ReadRoles(_ context.Context, _ []string) (map[string]VPNRepl, error) {
 	if m.onRead != nil {
 		m.onRead()
+	}
+	if m.readErr != nil {
+		return nil, m.readErr
 	}
 	out := map[string]VPNRepl{}
 	for k, v := range m.state {
@@ -524,4 +539,232 @@ func TestExecuteSwitchPlanEmptyDoesNothing(t *testing.T) {
 	if len(a.writes)+len(b.writes) != 0 {
 		t.Errorf("an empty plan must write nothing, got %v and %v", a.writes, b.writes)
 	}
+}
+
+// --- what a plan reports, and the refusals a healthy pair never reaches ---------------
+
+// TestSwitchPlanReportsWhatItMoves covers the non-empty side of Empty and Moves, which the
+// converged-pair test leaves untried. A plan that moves anything is not empty -- that is what
+// puts the exact-`yes` gate in front of it -- and Moves names exactly the VPNs it promotes,
+// sorted, so the confirmation lists them the same way on every run.
+func TestSwitchPlanReportsWhatItMoves(t *testing.T) {
+	// Both VPNs are active at the wrong site, so both move.
+	a := st(siteA, map[string]ReplRole{"ORDERS": RoleStandby, "PAYMENTS": RoleActive})
+	b := st(siteB, map[string]ReplRole{"ORDERS": RoleActive, "PAYMENTS": RoleStandby})
+	p, err := BuildSwitchPlan(replVPNs(), a, b)
+	if err != nil {
+		t.Fatalf("BuildSwitchPlan: %v", err)
+	}
+	if p.Empty() {
+		t.Error("a plan that moves two VPNs must not read as empty")
+	}
+	if got := strings.Join(p.Moves(), ","); got != "ORDERS,PAYMENTS" {
+		t.Errorf("Moves = %q, want both promoted VPNs, sorted", got)
+	}
+
+	// One VPN already right: only the one that moves is named.
+	one, err := BuildSwitchPlan(replVPNs(),
+		st(siteA, map[string]ReplRole{"ORDERS": RoleStandby, "PAYMENTS": RoleStandby}),
+		st(siteB, map[string]ReplRole{"ORDERS": RoleActive, "PAYMENTS": RoleActive}))
+	if err != nil {
+		t.Fatalf("BuildSwitchPlan: %v", err)
+	}
+	if one.Empty() || strings.Join(one.Moves(), ",") != "ORDERS" {
+		t.Errorf("Moves = %v (empty=%v), want only ORDERS", one.Moves(), one.Empty())
+	}
+}
+
+// TestBuildSwitchPlanNamesEveryUnusableVPNTogether proves a pair with two different problems
+// reports both in one refusal. A VPN missing at one site and another with replication shut
+// down at the other are separate faults with separate fixes, and an operator told only about
+// the first would fix it, run again, and meet the second -- one round trip per problem on a
+// command that is awkward to repeat.
+func TestBuildSwitchPlanNamesEveryUnusableVPNTogether(t *testing.T) {
+	// ORDERS was never created at A; PAYMENTS exists at both but is shut down at B.
+	a := st(siteA, map[string]ReplRole{"PAYMENTS": RoleStandby})
+	b := SiteState{Site: siteB, State: map[string]VPNRepl{
+		"ORDERS":   {Admin: AdminEnabled, Role: RoleActive},
+		"PAYMENTS": {Admin: AdminShutdown, Role: RoleActive},
+	}}
+	_, err := BuildSwitchPlan(replVPNs(), a, b)
+	if err == nil {
+		t.Fatal("a pair with an unusable VPN must be refused")
+	}
+	want := "do not exist: ORDERS at " + siteA + "; these have replication shut down: PAYMENTS at " + siteB
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("err = %v, want both faults in one sentence: %q", err, want)
+	}
+	if !strings.Contains(err.Error(), "configure data-replication") {
+		t.Errorf("err = %v, want the command that fixes both", err)
+	}
+}
+
+// TestSwitchPreflightSurfacesAFailedReadAsItself proves a preflight step that FAILS to read
+// is reported as that failure, not as a verdict on the pair. An unreachable channel, a
+// primary-activity read that errors and a mate-name read that errors each say nothing about
+// whether the pair is healthy, so none may be worded as "refusing to switch" -- which would
+// send an operator off to fix an HA group that may be fine -- and none may have written
+// anything.
+func TestSwitchPreflightSurfacesAFailedReadAsItself(t *testing.T) {
+	boom := errors.New("connection reset")
+	for _, tc := range []struct {
+		name    string
+		breakIt func(a, b *scriptedMate)
+	}{
+		{"a channel that cannot be reached", func(_, b *scriptedMate) { b.preflightErr = boom }},
+		{"a primary-activity read that fails", func(a, _ *scriptedMate) { a.primaryErr = boom }},
+		{"a mate-name read that fails", func(_, b *scriptedMate) { b.showErr = boom }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chans, a, b := twoMates()
+			tc.breakIt(a, b)
+			err := SwitchPreflight(context.Background(), chans, replSites())
+			if !errors.Is(err, boom) {
+				t.Fatalf("err = %v, want the failed read itself", err)
+			}
+			if strings.Contains(err.Error(), "refusing to switch") {
+				t.Errorf("err = %v: a read that failed is not a verdict on the pair", err)
+			}
+			if len(a.writes)+len(b.writes) != 0 {
+				t.Errorf("the preflight must write nothing, got %v and %v", a.writes, b.writes)
+			}
+		})
+	}
+}
+
+// TestSwitchPreflightNeedsExactlyTwoSites proves the pairing check is about a PAIR. One
+// channel has no mate to compare against, and three has no way to say which two the file
+// means; either is a caller that disagrees with the file about what the pair is, and is
+// refused before any broker is asked what it names as its mate.
+func TestSwitchPreflightNeedsExactlyTwoSites(t *testing.T) {
+	chans, _, _ := twoMates()
+	third := &scriptedMate{site: "v:sol-c", mateName: siteA, state: map[string]VPNRepl{}}
+	for _, tc := range []struct {
+		name  string
+		chans map[string]MateChannel
+	}{
+		{"one site", map[string]MateChannel{siteA: chans[siteA]}},
+		{"three sites", map[string]MateChannel{siteA: chans[siteA], siteB: chans[siteB], "v:sol-c": third}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := SwitchPreflight(context.Background(), tc.chans, replSites())
+			if err == nil || !strings.Contains(err.Error(), "exactly 2 sites") {
+				t.Errorf("err = %v, want a refusal naming the two-site requirement", err)
+			}
+		})
+	}
+}
+
+// TestExecuteSwitchPlanRefusesASiteItHasNoChannelFor proves a plan that names a site the
+// caller has no channel for stops at that action, in the demotion and in the promotion alike,
+// with the site named and nothing written. A plan and a channel set that disagree about what
+// the pair is must not be papered over by skipping the action: a skipped demotion leaves two
+// actives, and a skipped promotion leaves none.
+func TestExecuteSwitchPlanRefusesASiteItHasNoChannelFor(t *testing.T) {
+	t.Run("a demotion", func(t *testing.T) {
+		chans, a, b := twoMates()
+		plan := SwitchPlan{Phases: []SwitchPhase{
+			{Kind: PhaseDemote, Actions: []SwitchAction{{Site: "v:nowhere", VPN: "ORDERS", Role: RoleStandby}}},
+		}}
+		err := ExecuteSwitchPlan(context.Background(), chans, plan, []string{"ORDERS"}, nil)
+		if err == nil || !strings.Contains(err.Error(), `no channel for site "v:nowhere"`) {
+			t.Fatalf("err = %v, want the site with no channel named", err)
+		}
+		if len(a.writes)+len(b.writes) != 0 {
+			t.Errorf("nothing may be written, got %v and %v", a.writes, b.writes)
+		}
+	})
+
+	t.Run("a promotion", func(t *testing.T) {
+		chans, a, b := twoMates()
+		// ORDERS is standby everywhere, so the re-read finds nothing that moved and the
+		// action reaches the channel lookup.
+		b.state["ORDERS"] = VPNRepl{Admin: AdminEnabled, Role: RoleStandby}
+		plan := SwitchPlan{Phases: []SwitchPhase{
+			{Kind: PhasePromote, Actions: []SwitchAction{{Site: "v:nowhere", VPN: "ORDERS", Role: RoleActive}}},
+		}}
+		err := ExecuteSwitchPlan(context.Background(), chans, plan, []string{"ORDERS"}, nil)
+		if err == nil || !strings.Contains(err.Error(), `no channel for site "v:nowhere"`) {
+			t.Fatalf("err = %v, want the site with no channel named", err)
+		}
+		if len(a.writes)+len(b.writes) != 0 {
+			t.Errorf("nothing may be written, got %v and %v", a.writes, b.writes)
+		}
+	})
+}
+
+// TestExecuteSwitchPlanReturnsAFailedPromotionAfterTheDemotionLanded covers the worst place
+// for a write to fail: the demotion has landed and been confirmed, and the promotion is the
+// one that is refused. The error is the broker's own, unwrapped, and the pair is left as the
+// design says it fails -- the VPN standby at BOTH sites, unavailable rather than corrupted --
+// with the attempted promotion on record so the report can say how far the run got.
+func TestExecuteSwitchPlanReturnsAFailedPromotionAfterTheDemotionLanded(t *testing.T) {
+	chans, a, b := twoMates()
+	plan, err := BuildSwitchPlan(ordersToA(), SiteState{siteA, a.state}, SiteState{siteB, b.state})
+	if err != nil {
+		t.Fatalf("BuildSwitchPlan: %v", err)
+	}
+	boom := errors.New("invalid command")
+	a.setErr = boom
+
+	err = ExecuteSwitchPlan(context.Background(), chans, plan, []string{"ORDERS"}, nil)
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the rejected promotion", err)
+	}
+	if strings.Join(b.writes, ",") != "ORDERS=standby" {
+		t.Errorf("site B writes = %v, want the demotion that had already landed", b.writes)
+	}
+	if strings.Join(a.writes, ",") != "ORDERS=active" {
+		t.Errorf("site A writes = %v, want the one promotion that was attempted", a.writes)
+	}
+	if a.state["ORDERS"].Role != RoleStandby || b.state["ORDERS"].Role != RoleStandby {
+		t.Errorf("states = %+v and %+v, want standby at both sites after a rejected promotion",
+			a.state["ORDERS"], b.state["ORDERS"])
+	}
+}
+
+// TestExecuteSwitchPlanStopsWhenAReadBackFails covers the two read-backs a switch depends
+// on. The confirmation of a demotion and the re-read immediately before each promotion are
+// the evidence the run is allowed to promote on, so a read that fails is a stop, not a
+// skip -- with the site named and the cause kept, and nothing promoted.
+func TestExecuteSwitchPlanStopsWhenAReadBackFails(t *testing.T) {
+	boom := errors.New("connection reset")
+
+	t.Run("confirming the demotion", func(t *testing.T) {
+		chans, a, b := twoMates()
+		plan, err := BuildSwitchPlan(ordersToA(), SiteState{siteA, a.state}, SiteState{siteB, b.state})
+		if err != nil {
+			t.Fatalf("BuildSwitchPlan: %v", err)
+		}
+		b.readErr = boom
+
+		err = ExecuteSwitchPlan(context.Background(), chans, plan, []string{"ORDERS"}, nil)
+		if !errors.Is(err, boom) || !strings.Contains(err.Error(), "confirming demotions at "+siteB) {
+			t.Fatalf("err = %v, want the confirmation at %s named and the cause kept", err, siteB)
+		}
+		if len(a.writes) != 0 {
+			t.Errorf("nothing may be promoted when the demotion cannot be confirmed, got %v", a.writes)
+		}
+	})
+
+	t.Run("re-reading before the promotion", func(t *testing.T) {
+		chans, a, b := twoMates()
+		plan, err := BuildSwitchPlan(ordersToA(), SiteState{siteA, a.state}, SiteState{siteB, b.state})
+		if err != nil {
+			t.Fatalf("BuildSwitchPlan: %v", err)
+		}
+		// Only the demoted site is read to confirm, so A's first read is the pre-promotion one.
+		a.readErr = boom
+
+		err = ExecuteSwitchPlan(context.Background(), chans, plan, []string{"ORDERS"}, nil)
+		if !errors.Is(err, boom) || !strings.Contains(err.Error(), "re-reading "+siteA+" before promoting") {
+			t.Fatalf("err = %v, want the re-read at %s named and the cause kept", err, siteA)
+		}
+		if len(a.writes) != 0 {
+			t.Errorf("nothing may be promoted on state that could not be re-read, got %v", a.writes)
+		}
+		if strings.Join(b.writes, ",") != "ORDERS=standby" {
+			t.Errorf("site B writes = %v, want the demotion that had already landed", b.writes)
+		}
+	})
 }

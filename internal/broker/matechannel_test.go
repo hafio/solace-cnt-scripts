@@ -339,3 +339,154 @@ func TestLocalMateRunsThroughOps(t *testing.T) {
 		}
 	}
 }
+
+// --- runner failures and unreadable replies --------------------------------------------
+
+// TestMateChannelCallsKeepTheCauseWhenTheRunnerFails proves every operation passes a failed
+// runner's error up with the cause intact, and -- wherever the call has the site to name --
+// says which site it was about. A two-site flow reports through these errors, so one that
+// said only "connection refused" would leave an operator guessing which end of the pair was
+// unreachable. ShowReplication is the exception on purpose: its first act is the type probe,
+// which has no site to add and reports the transport's own error.
+func TestMateChannelCallsKeepTheCauseWhenTheRunnerFails(t *testing.T) {
+	boom := errors.New("connection refused")
+	calls := []struct {
+		name  string
+		run   func(MateChannel) error
+		named bool
+	}{
+		{"ShowReplication", func(c MateChannel) error {
+			_, err := c.ShowReplication(context.Background())
+			return err
+		}, false},
+		{"ReadRoles", func(c MateChannel) error {
+			_, err := c.ReadRoles(context.Background(), nil)
+			return err
+		}, true},
+		{"SetRole", func(c MateChannel) error {
+			return c.SetRole(context.Background(), "default", RoleStandby)
+		}, true},
+		{"PrimaryActive", func(c MateChannel) error {
+			_, err := c.PrimaryActive(context.Background())
+			return err
+		}, true},
+		{"Status", func(c MateChannel) error {
+			_, err := c.Status(context.Background())
+			return err
+		}, true},
+	}
+	for _, tc := range calls {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRun{err: boom}
+			c := NewCLIMate(f.runner(), "site v:broker-b")
+			err := tc.run(c)
+			if !errors.Is(err, boom) {
+				t.Fatalf("err = %v, want the runner's cause kept", err)
+			}
+			if tc.named && !strings.Contains(err.Error(), "site v:broker-b") {
+				t.Errorf("err = %v, want the site named", err)
+			}
+		})
+	}
+}
+
+// TestMateChannelShowReplicationFailsOncePastTheTypeProbe covers the two failures that come
+// AFTER the broker's type is known. The probe is cached, so the read that follows is a
+// separate round trip that can fail on its own, and a report that arrives but cannot be
+// parsed is a different fault from either -- both must name the site, and neither may
+// return a half-read mate for a caller to converge a broker onto.
+func TestMateChannelShowReplicationFailsOncePastTheTypeProbe(t *testing.T) {
+	t.Run("the read itself fails", func(t *testing.T) {
+		c, f := newTestMate(t)
+		if err := c.Preflight(context.Background()); err != nil {
+			t.Fatalf("Preflight: %v", err)
+		}
+		boom := errors.New("connection reset")
+		f.err = boom
+
+		got, err := c.ShowReplication(context.Background())
+		if !errors.Is(err, boom) || !strings.Contains(err.Error(), "read replication config from site v:broker-b") {
+			t.Fatalf("err = %v, want the site named and the cause kept", err)
+		}
+		if got.VirtualRouterName != "" || len(got.Endpoints) != 0 {
+			t.Errorf("ShowReplication returned %+v alongside its error, want an empty mate", got)
+		}
+	})
+
+	t.Run("the report does not parse", func(t *testing.T) {
+		f := &fakeRun{reply: mateReplies()}
+		f.reply[scriptShowReplication] = softwareBanner + "Replication Mate:   v:broker-b\n    SSL:   not-an-address\n"
+		c := NewCLIMate(f.runner(), "site v:broker-b")
+
+		got, err := c.ShowReplication(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "site v:broker-b") ||
+			!strings.Contains(err.Error(), "which is not host:port") {
+			t.Fatalf("err = %v, want the site named and the unreadable address described", err)
+		}
+		if got.VirtualRouterName != "" || len(got.Endpoints) != 0 {
+			t.Errorf("ShowReplication returned %+v alongside its error, want an empty mate", got)
+		}
+	})
+}
+
+// TestMateChannelReadRolesWithNoListReturnsEveryVPN covers the NIL list, which means every
+// VPN the broker has rather than none. The local convergence needs exactly that: shutting
+// replication down on a VPN the file does not list requires knowing which unlisted VPNs are
+// replicating at all, including the internal `#config-sync` and the ones with spaces in
+// their names. A switch always passes its own list, so it can never reach this path.
+func TestMateChannelReadRolesWithNoListReturnsEveryVPN(t *testing.T) {
+	c, _ := newTestMate(t)
+	got, err := c.ReadRoles(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ReadRoles: %v", err)
+	}
+	if len(got) != 6 {
+		t.Errorf("got %d VPNs, want the broker's whole table of 6: %+v", len(got), got)
+	}
+	for _, name := range []string{"#config-sync", "A VPN WITH LONG NAME AND SPACES", "default", "vpn-01"} {
+		if _, ok := got[name]; !ok {
+			t.Errorf("VPN %q missing from an unfiltered read", name)
+		}
+	}
+}
+
+// TestMateChannelReadRolesRefusesAnUnreadableTable proves a reply that is not the flag table
+// is an error naming the site, never an empty map. Empty would read as "this broker has no
+// VPNs to switch", which a caller acts on as readily as any other answer.
+func TestMateChannelReadRolesRefusesAnUnreadableTable(t *testing.T) {
+	f := &fakeRun{reply: mateReplies()}
+	f.reply[scriptShowVPN] = softwareBanner + "no table in this reply\n"
+	c := NewCLIMate(f.runner(), "site v:broker-b")
+
+	got, err := c.ReadRoles(context.Background(), []string{"default"})
+	if err == nil || !strings.Contains(err.Error(), "site v:broker-b") ||
+		!strings.Contains(err.Error(), "no column rule") {
+		t.Fatalf("err = %v, want the site named and the missing table described", err)
+	}
+	if got != nil {
+		t.Errorf("ReadRoles returned %+v alongside its error, want nothing to act on", got)
+	}
+}
+
+// TestMateChannelStatusFailsWhenOnlyTheSecondReportFails proves Status is all or nothing.
+// The first report arrives and the second does not, and handing back the first alone would
+// show an operator a mate with no VPN table and nothing to say a read had failed. The runner
+// is scripted per script name, which fakeRun's single error cannot express.
+func TestMateChannelStatusFailsWhenOnlyTheSecondReportFails(t *testing.T) {
+	boom := errors.New("connection reset")
+	run := func(_ context.Context, name, _ string) ([]byte, error) {
+		if name == scriptShowVPN {
+			return nil, boom
+		}
+		return []byte(softwareBanner + showReplicationSoftware), nil
+	}
+	c := NewCLIMate(run, "site v:broker-b")
+
+	got, err := c.Status(context.Background())
+	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "read replication status from site v:broker-b") {
+		t.Fatalf("err = %v, want the site named and the cause kept", err)
+	}
+	if got != "" {
+		t.Errorf("Status returned %q alongside its error, want no partial report", got)
+	}
+}

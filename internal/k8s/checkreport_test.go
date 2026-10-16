@@ -722,6 +722,71 @@ func TestValidateReadsDeploymentsOnce(t *testing.T) {
 	}
 }
 
+// TestValidateUnderADeniedClusterWideListReadsTheOperatorNamespace: validate makes the same
+// one lookup a deploy makes, so an identity that cannot list Deployments cluster-wide gets
+// a verdict read off the operator namespace rather than `unknown -- could not be read`.
+// Found there, the verdict and the version row are the ordinary ones; nothing there, the
+// verdict is `unknown` rather than a confident "no operator is installed".
+func TestValidateUnderADeniedClusterWideListReadsTheOperatorNamespace(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		installed bool
+		wantLevel output.Level
+		want      []string
+		dont      string
+	}{
+		{"found there", true, output.LevelOK, []string{"not required -- the operator in op-ns watches team-a,"}, "unknown"},
+		{"nothing there", false, output.LevelWarn,
+			[]string{"unknown -- no operator in op-ns", "could not be listed"}, "no operator is installed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := loadK8s(t)
+			cfg.K8s.Operator.Namespace = "op-ns"
+			var named []byte
+			if tc.installed {
+				named = namedOperatorJSON("op-ns", "solace/pubsubplus-eventbroker-operator:1.4.2",
+					"team-a,"+cfg.K8s.Namespace)
+			}
+			// Reachable's `version` read comes first, then the refused list, then the by-name
+			// read; `auth can-i` bypasses both queues.
+			rr := &recRunner{outQueue: [][]byte{nil, nil, named}, outErrQueue: []error{nil, errListDenied, nil}}
+			c := NewCluster(rr, cfg, nil, &bytes.Buffer{})
+			rep := &checkReport{}
+			c.verifyRows(context.Background(), rep)
+			if rep.install == nil {
+				t.Fatal("no operator-install verdict was recorded")
+			}
+			if rep.install.Level != tc.wantLevel {
+				t.Errorf("level = %v, want %v: %s", rep.install.Level, tc.wantLevel, rep.install.Value)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(rep.install.Value, w) {
+					t.Errorf("verdict = %q, want it to contain %q", rep.install.Value, w)
+				}
+			}
+			if strings.Contains(rep.install.Value, tc.dont) {
+				t.Errorf("verdict = %q, must not say %q", rep.install.Value, tc.dont)
+			}
+			versionRow := false
+			for _, row := range rep.operator {
+				versionRow = versionRow || row.Key == "running version"
+			}
+			if versionRow != tc.installed {
+				t.Errorf("running-version row present = %v, want %v: it reads the same Deployment", versionRow, tc.installed)
+			}
+			reads := 0
+			for _, call := range rr.calls {
+				if strings.HasPrefix(strings.Join(call.args, " "), "get deployment ") {
+					reads++
+				}
+			}
+			if reads != 2 {
+				t.Errorf("made %d Deployment reads, want 2 (the refused list and the by-name read)", reads)
+			}
+		})
+	}
+}
+
 // TestOperatorInstallVerdict pins every answer of the operator-install verdict, the one
 // row that says whether an `operator deploy` is needed before this broker is reconciled.
 // It replaced two rows that read the cluster two ways and could disagree, so the cases
@@ -745,6 +810,7 @@ func TestOperatorInstallVerdict(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		dep       *deploymentItem
+		onlyNS    string // set when the cluster-wide list was refused and only this namespace was read
 		depErr    error
 		cfgWatch  string // kubernetes.operator.watchNamespaces
 		brokerNs  *bool  // kubernetes.operator.watchBrokerNs (nil = the default, true)
@@ -753,6 +819,20 @@ func TestOperatorInstallVerdict(t *testing.T) {
 	}{
 		{name: "the Deployment could not be read", depErr: errors.New("deployments is forbidden"),
 			wantLevel: output.LevelWarn, want: []string{"unknown", "deployments is forbidden"}},
+		// Only the operator namespace could be read. Finding nothing there is NOT "no operator
+		// is installed": one elsewhere is invisible, and advising `operator deploy` as if it
+		// were certain would install a second operator beside it.
+		{name: "nothing in the operator namespace, and the rest could not be listed", onlyNS: opNS,
+			wantLevel: output.LevelWarn, want: []string{"unknown -- no operator in " + opNS,
+				"the rest of the cluster could not be listed", "set kubernetes.operator.namespace to it",
+				"otherwise `solace-util operator deploy` installs it"}},
+		{name: "nothing in the operator namespace, and the env file leaves this namespace out", onlyNS: opNS,
+			cfgWatch: "team-a", brokerNs: boolPtr(false), wantLevel: output.LevelWarn,
+			want: []string{"unknown -- no operator in " + opNS,
+				`otherwise add "solace" to kubernetes.operator.watchNamespaces`, "then run `solace-util operator deploy`"}},
+		{name: "found in the operator namespace, though the rest could not be listed", onlyNS: opNS,
+			dep: operator(opNS, "team-a,solace", nil), wantLevel: output.LevelOK,
+			want: []string{"not required", "watches team-a,solace"}},
 		{name: "no operator", wantLevel: output.LevelWarn,
 			want: []string{"required -- no operator is installed; `solace-util operator deploy` installs it"}},
 		{name: "no operator, and the env file leaves this namespace out", cfgWatch: "team-a", brokerNs: boolPtr(false),
@@ -794,7 +874,7 @@ func TestOperatorInstallVerdict(t *testing.T) {
 			cfg.K8s.Operator.WatchNamespaces = tc.cfgWatch
 			cfg.K8s.Operator.WatchBrokerNS = tc.brokerNs
 			c := NewCluster(&recRunner{}, cfg, nil, &bytes.Buffer{})
-			row := c.operatorInstallRow(opNS, tc.dep, tc.depErr)
+			row := c.operatorInstallRow(opNS, tc.dep, tc.onlyNS, tc.depErr)
 			if row.Key != installKey {
 				t.Errorf("key = %q, want %q", row.Key, installKey)
 			}
@@ -847,6 +927,151 @@ func TestOperatorInstallVerdictShowsOnceInEveryView(t *testing.T) {
 		}
 		if got := strings.Count(buf.String(), "[SKIP] "+installKey); got != 1 {
 			t.Errorf("%s shows the verdict %d time(s), want once:\n%s", name, got, buf.String())
+		}
+	}
+}
+
+// TestStorageInfoRows pins what the Broker section says about where each node's data volume comes
+// from, which is not readable off the env file at a glance once custom mounts are in play. The last
+// case is the one that matters if validateStorage's all-or-none rule is ever relaxed: a node the
+// env file left out of customVolumeMount quietly goes back to default provisioning, and this is the
+// row that says which one -- a warning, because that is the node whose data a kept claim does not
+// protect.
+func TestStorageInfoRows(t *testing.T) {
+	mount := func(role, claim string) checkRow {
+		return info("storage "+role, "custom mount %s (never deleted by --delete-data)", claim)
+	}
+	unmounted := func(role string) checkRow {
+		return warnRow("storage "+role, "cluster default StorageClass (no custom mount)")
+	}
+	claims := func(m map[string]string) func(*config.Config) {
+		return func(c *config.Config) { c.K8s.Storage.CustomVolumeMount = m }
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*config.Config)
+		want   []checkRow
+	}{
+		{"neither a class nor mounts: the cluster default", func(*config.Config) {},
+			[]checkRow{info("storage", "provisioned from the cluster's default StorageClass")}},
+		{"a configured class", func(c *config.Config) { c.K8s.Storage.Class = "fast" },
+			[]checkRow{info("storage", "provisioned from StorageClass %q", "fast")}},
+		{"every node mounted", claims(map[string]string{"primary": "pvc-p", "backup": "pvc-b", "monitor": "pvc-m"}),
+			[]checkRow{mount("primary", "pvc-p"), mount("backup", "pvc-b"), mount("monitor", "pvc-m")}},
+		{"only the primary mounted", claims(map[string]string{"primary": "pvc-p"}),
+			[]checkRow{mount("primary", "pvc-p"), unmounted("backup"), unmounted("monitor")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := haCfg()
+			tc.mutate(cfg)
+			got := storageInfoRows(cfg)
+			if len(got) != len(tc.want) {
+				t.Fatalf("storageInfoRows = %+v, want %+v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("row %d = %+v, want %+v", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestOperatorRowsCompareTheRunningVersionWithTheConfiguredOne: the Operator section reports the
+// version actually running next to the one this env file would apply. A cluster ahead of the file
+// is a warning that says `operator deploy` would roll it back (the downgrade prompt guards the same
+// thing at deploy time), one behind says it would upgrade it, and a tag that cannot be ordered is
+// reported as running rather than compared. A Deployment naming no image has no version to show,
+// so it adds no row and the namespace and install rows stand alone.
+func TestOperatorRowsCompareTheRunningVersionWithTheConfiguredOne(t *testing.T) {
+	const repo = "solace/pubsubplus-eventbroker-operator:"
+	for _, tc := range []struct {
+		name      string
+		image     string
+		wantLevel output.Level
+		want      string
+	}{
+		{"the same version", repo + "1.4.2", output.LevelOK, "1.4.2"},
+		{"the cluster is ahead", repo + "1.5.0", output.LevelWarn,
+			"1.5.0, NEWER than the configured 1.4.2 -- `solace-util operator deploy` would downgrade it"},
+		{"the cluster is behind", repo + "1.3.0", output.LevelWarn,
+			"1.3.0, older than the configured 1.4.2 -- `solace-util operator deploy` would upgrade it"},
+		{"a tag that cannot be ordered", repo + "latest", output.LevelOK, "latest"},
+		{"a Deployment naming no image", "", output.LevelInfo, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.K8s.Command = config.Command{"kubectl"}
+			cfg.K8s.Namespace = "solace"
+			cfg.K8s.Operator.Image = repo + "1.4.2" // the version this env file would apply
+			dep := &deploymentItem{}
+			dep.Metadata.Name = operatorDeployment
+			dep.Metadata.Namespace = defaultOperatorNS
+			if tc.image != "" {
+				dep.Spec.Template.Spec.Containers = []containerSpec{{Image: tc.image}}
+			}
+			rep := &checkReport{}
+			c := NewCluster(&recRunner{}, cfg, nil, &bytes.Buffer{})
+			c.operatorRows(context.Background(), rep, dep, "", nil)
+
+			var version *checkRow
+			for i := range rep.operator {
+				if rep.operator[i].Key == "running version" {
+					version = &rep.operator[i]
+				}
+			}
+			if tc.want == "" {
+				if version != nil {
+					t.Errorf("a Deployment naming no image has no version to report, got %+v", *version)
+				}
+				if len(rep.operator) != 2 || rep.install == nil {
+					t.Errorf("the namespace and install rows should stand alone, got %+v", rep.operator)
+				}
+				return
+			}
+			if version == nil {
+				t.Fatalf("no running-version row in %+v", rep.operator)
+			}
+			if version.Level != tc.wantLevel || version.Value != tc.want {
+				t.Errorf("running version = %+v, want level %v and %q", *version, tc.wantLevel, tc.want)
+			}
+		})
+	}
+}
+
+// TestAdditionalUsersRowSaysWhereThePasswordsLand: on Kubernetes the additional users' passwords
+// reach the broker as environment variables -- the CRD offers no way to mount an arbitrary Secret
+// -- unlike every other secret this tool handles, and the report is where someone reviewing that
+// finds out. The row counts the users and names the Secret they land in; no password reaches the
+// report.
+func TestAdditionalUsersRowSaysWhereThePasswordsLand(t *testing.T) {
+	cfg := loadK8s(t)
+	cfg.SEMP.AdditionalUsers = []config.AdditionalUser{
+		{Username: "app", AccessLevel: "read-only", Password: "UNIQUE-APP-PASSWORD"},
+		{Username: "ops", AccessLevel: "read-write", Password: "UNIQUE-OPS-PASSWORD"},
+	}
+	row := additionalUsersRow(cfg)
+	if row.Level != output.LevelInfo || row.Key != "additional users" {
+		t.Errorf("row = %+v, want an [INFO] additional users row", row)
+	}
+	secret := "2 in Secret " + cfg.AdditionalUsersSecretName()
+	for _, want := range []string{secret, "environment variables", "not as mounted files"} {
+		if !strings.Contains(row.Value, want) {
+			t.Errorf("row value = %q, want it to contain %q", row.Value, want)
+		}
+	}
+
+	buf := &bytes.Buffer{}
+	if err := NewCluster(engine.Echo{W: buf}, cfg, nil, buf).Validate(context.Background()); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "] additional users") {
+		t.Errorf("the report should carry the additional users row:\n%s", out)
+	}
+	for _, password := range []string{"UNIQUE-APP-PASSWORD", "UNIQUE-OPS-PASSWORD"} {
+		if strings.Contains(out, password) {
+			t.Errorf("the report leaked a password (%q):\n%s", password, out)
 		}
 	}
 }

@@ -51,7 +51,7 @@ func (c *Cluster) PreflightAll(ctx context.Context, probes ...probe) error {
 }
 
 func (c *Cluster) preflightOne(ctx context.Context, p probe) error {
-	verb, resource := p.verb, p.resource
+	verb, resource := p.verb, p.target()
 	where := c.nsFor(p)
 	if where == "" {
 		where = "the cluster"
@@ -145,6 +145,23 @@ type probe struct {
 	verb     string
 	resource string
 	ns       string
+	// name narrows the question to one object, asked as `resource/name`. Empty asks about
+	// every object of the kind, which is what almost every probe wants. The `bind` probe
+	// sets it: RBAC checks bind against the one role being bound, and a grant of it can be
+	// limited to that role by resourceNames, so asking about every ClusterRole would refuse
+	// an identity granted exactly enough. Only name a probe whose real request carries the
+	// name -- a create does not, which is why the `escalate` probe leaves it empty.
+	name string
+}
+
+// target is what the probe asks about: the resource, or `resource/name` for a named probe.
+// Scoping is still decided by the bare resource, so a named cluster-scoped probe carries
+// --all-namespaces like any other.
+func (p probe) target() string {
+	if p.name == "" {
+		return p.resource
+	}
+	return p.resource + "/" + p.name
 }
 
 // nsFor is the namespace a probe asks about: its own, else the broker's, and none at
@@ -162,7 +179,7 @@ func (c *Cluster) nsFor(p probe) string {
 // canIArgs builds the `auth can-i` argv, scoping it to a namespace only for
 // resources that live in one.
 func (c *Cluster) canIArgs(p probe) []string {
-	args := []string{"auth", "can-i", p.verb, p.resource}
+	args := []string{"auth", "can-i", p.verb, p.target()}
 	if ns := c.nsFor(p); ns != "" {
 		return append(args, "-n", ns)
 	}

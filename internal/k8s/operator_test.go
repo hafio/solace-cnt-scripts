@@ -12,6 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"solace/internal/config"
+	"solace/internal/engine"
 	"solace/internal/examples"
 )
 
@@ -241,10 +242,11 @@ func TestGenOperatorSplicesRegcredOnCredentialsNotOnName(t *testing.T) {
 	})
 }
 
-// TestOperatorApply asserts the apply sequence: the bundle's own Namespace document,
-// then the regcred into that namespace, then the rest of the bundle -- each on stdin
-// via `apply -f -`. The split exists so nothing applied is absent from a `generate`
-// output; the ordering is what makes a first install work at all.
+// TestOperatorApply asserts the apply sequence: ONE read of the installed operator, then
+// the bundle's own Namespace document, then the regcred into that namespace, then the
+// rest of the bundle -- each on stdin via `apply -f -`. The split exists so nothing
+// applied is absent from a `generate` output; the ordering is what makes a first install
+// work at all.
 func TestOperatorApply(t *testing.T) {
 	cfg := loadK8s(t) // pull secret set -> regcred applied
 	cfg.K8s.Operator.Namespace = "op-ns"
@@ -254,20 +256,19 @@ func TestOperatorApply(t *testing.T) {
 		t.Fatalf("OperatorApply: %v", err)
 	}
 	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
-	if len(calls) != 5 {
-		t.Fatalf("OperatorApply made %d calls after the probe, want 5 "+
-			"(version read + watch-list read + namespace + regcred + bundle)", len(calls))
+	if len(calls) != 4 {
+		t.Fatalf("OperatorApply made %d calls after the probe, want 4 "+
+			"(operator read + namespace + regcred + bundle)", len(calls))
 	}
-	// Both reads are cluster-wide `get deployment`: one resolves the installed version
-	// for the downgrade check, the other the installed WATCH_NAMESPACE so the applied
-	// value can be the union rather than this env file's list alone.
-	for i, read := range []rrCall{calls[0], calls[1]} {
-		if read.method != "Output" || !eqArgs(read.args,
-			[]string{"get", "deployment", "--all-namespaces", "-o", "json"}) {
-			t.Errorf("read %d = %+v, want the cluster-wide deployment read", i+1, read)
-		}
+	// The one read is the cluster-wide `get deployment`, and both the downgrade check
+	// (installed version) and the watch reconcile (installed WATCH_NAMESPACE, so the
+	// applied value can be the union rather than this env file's list alone) use it.
+	// Each used to issue its own.
+	if read := calls[0]; read.method != "Output" || !eqArgs(read.args,
+		[]string{"get", "deployment", "--all-namespaces", "-o", "json"}) {
+		t.Errorf("read = %+v, want the cluster-wide deployment read", read)
 	}
-	ns, regcred, bundle := calls[2], calls[3], calls[4]
+	ns, regcred, bundle := calls[1], calls[2], calls[3]
 	for i, call := range []rrCall{ns, regcred, bundle} {
 		if call.method != "RunInput" || call.name != "kubectl" || !eqArgs(call.args, []string{"apply", "-f", "-"}) {
 			t.Errorf("apply call %d = %+v, want RunInput kubectl [apply -f -]", i+1, call)
@@ -318,13 +319,13 @@ func TestOperatorApplyNoCredentialsSkipsRegcred(t *testing.T) {
 		t.Fatalf("OperatorApply: %v", err)
 	}
 	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
-	if len(calls) != 4 {
-		t.Fatalf("OperatorApply without credentials made %d calls after the probe, want 4 "+
-			"(version read + watch-list read + namespace + bundle)", len(calls))
+	if len(calls) != 3 {
+		t.Fatalf("OperatorApply without credentials made %d calls after the probe, want 3 "+
+			"(operator read + namespace + bundle)", len(calls))
 	}
-	// calls[0] and calls[1] are the two cluster-wide reads (installed version, installed
-	// watch list); the applies start at calls[2].
-	applies := calls[2:]
+	// calls[0] is the one cluster-wide read of the installed operator; the applies start
+	// at calls[1].
+	applies := calls[1:]
 	if !strings.Contains(applies[0].stdin, "kind: Namespace") {
 		t.Errorf("the namespace must still be applied first:\n%s", applies[0].stdin)
 	}
@@ -362,11 +363,11 @@ func TestOperatorApplyNamedPullSecretWithoutCredentials(t *testing.T) {
 		t.Fatalf("OperatorApply: %v", err)
 	}
 	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
-	if len(calls) != 4 {
-		t.Fatalf("OperatorApply with a named-but-unbuilt pull secret made %d calls after the probe, want 4 "+
-			"(version read + watch-list read + namespace + bundle)", len(calls))
+	if len(calls) != 3 {
+		t.Fatalf("OperatorApply with a named-but-unbuilt pull secret made %d calls after the probe, want 3 "+
+			"(operator read + namespace + bundle)", len(calls))
 	}
-	for _, call := range calls[2:] {
+	for _, call := range calls[1:] {
 		if strings.Contains(call.stdin, "kind: Secret") || strings.Contains(call.stdin, ".dockerconfigjson") {
 			t.Errorf("a named pull secret with no credentials is the operator's bring-your-own case: "+
 				"nothing here may build or apply a Secret for it:\n%s", call.stdin)
@@ -374,6 +375,151 @@ func TestOperatorApplyNamedPullSecretWithoutCredentials(t *testing.T) {
 		if strings.Contains(call.stdin, "imagePullSecrets:") {
 			t.Errorf("the operator bundle can only reference its OWN regcred, so it must carry no "+
 				"imagePullSecrets block when there are no credentials to build one from:\n%s", call.stdin)
+		}
+	}
+}
+
+// TestOperatorApplyProceedsWhenTheClusterWideListIsDenied is the reported failure: an
+// identity that may not list Deployments cluster-wide got kubectl's Forbidden, and the
+// deploy stopped there. It now reads the operator namespace by name instead and carries
+// on -- asking the escalation questions on a first install, not when the operator is
+// already there -- reading once and warning once either way.
+func TestOperatorApplyProceedsWhenTheClusterWideListIsDenied(t *testing.T) {
+	const role = "clusterroles/" + operatorClusterRole
+	for _, tc := range []struct {
+		name      string
+		named     []byte // the by-name read's reply; nil = nothing there
+		wantProbe bool   // escalate and bind asked
+		wantWatch string // what the applied bundle's WATCH_NAMESPACE must carry
+	}{
+		{"first install: nothing in the operator namespace", nil, true, ""},
+		{"re-deploy: the operator is in its namespace",
+			namedOperatorJSON("op-ns", "solace/pubsubplus-eventbroker-operator:1.4.2", "team-a"), false, `"team-a,`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := loadK8s(t) // pull secret set -> regcred applied
+			cfg.K8s.Operator.Namespace = "op-ns"
+			rr := deniedRunner(tc.named)
+			buf := &bytes.Buffer{}
+			c := NewCluster(rr, cfg, func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) }, buf)
+			if err := c.OperatorApply(context.Background()); err != nil {
+				t.Fatalf("OperatorApply: %v\n%s", err, buf.String())
+			}
+			calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
+			want := [][]string{
+				{"get", "deployment", "--all-namespaces", "-o", "json"},
+				{"get", "deployment", operatorDeployment, "-n", "op-ns", "--ignore-not-found", "-o", "json"},
+			}
+			if tc.wantProbe {
+				// escalate asks about the kind: a create is authorized before the new role's
+				// name is known, so a grant limited to one name cannot cover it. bind is
+				// checked against the role bound, so it names it.
+				want = append(want,
+					[]string{"auth", "can-i", "escalate", "clusterroles", "--all-namespaces"},
+					[]string{"auth", "can-i", "bind", role, "--all-namespaces"})
+			}
+			if len(calls) != len(want)+3 {
+				t.Fatalf("made %d calls after the probe, want %d (%d reads and probes + namespace + regcred + "+
+					"bundle):\n%+v", len(calls), len(want)+3, len(want), calls)
+			}
+			for i, w := range want {
+				if calls[i].method != "Output" || !eqArgs(calls[i].args, w) {
+					t.Errorf("call %d = %+v, want Output %v", i, calls[i], w)
+				}
+			}
+			for _, call := range calls[len(want):] {
+				if call.method != "RunInput" || !eqArgs(call.args, []string{"apply", "-f", "-"}) {
+					t.Errorf("after the reads, want only the three applies, got %+v", call)
+				}
+			}
+			if bundle := calls[len(calls)-1].stdin; tc.wantWatch != "" && !strings.Contains(bundle, tc.wantWatch) {
+				t.Errorf("the bundle must carry the union with the watch list the fallback read (%s):\n%s",
+					tc.wantWatch, bundle)
+			}
+			if n := strings.Count(buf.String(), "could not list Deployments cluster-wide"); n != 1 {
+				t.Errorf("the fallback warning printed %d times, want exactly 1:\n%s", n, buf.String())
+			}
+		})
+	}
+}
+
+// TestOperatorApplyRefusesAFallbackFirstInstallWithoutEscalateOrBind is the half-install the
+// escalation probes exist to prevent. An identity that cannot list Deployments cluster-wide
+// does not hold every permission the operator's ClusterRole grants, so creating that role
+// needs `escalate` and binding it needs `bind` -- neither of which the `create` probes can
+// see. Without them the bundle would fail mid-apply, after the CRDs and the controller
+// Deployment had landed; instead nothing is applied and the error says why.
+func TestOperatorApplyRefusesAFallbackFirstInstallWithoutEscalateOrBind(t *testing.T) {
+	for _, tc := range []struct{ verb, target string }{
+		{"escalate", "clusterroles"},
+		{"bind", "clusterroles/" + operatorClusterRole},
+	} {
+		t.Run(tc.verb, func(t *testing.T) {
+			cfg := loadK8s(t)
+			cfg.K8s.Operator.Namespace = "op-ns"
+			rr := deniedRunner(nil)
+			rr.canIByVerb = map[string]string{tc.verb: "no"}
+			c := NewCluster(rr, cfg, nil, nil)
+			asked := false
+			c.Confirm = func(string) bool { asked = true; return true }
+			err := c.OperatorApply(context.Background())
+			if err == nil {
+				t.Fatal("a fallback first install without " + tc.verb + " must be refused before anything is applied")
+			}
+			for _, want := range []string{"not allowed to " + tc.verb + " " + tc.target + " in the cluster",
+				operatorClusterRole, "cannot list Deployments cluster-wide", "Nothing was applied",
+				"kubernetes.operator.namespace"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %v\nwant it to contain %q", err, want)
+				}
+			}
+			for _, call := range rr.calls {
+				if call.method == "RunInput" {
+					t.Errorf("refused, yet something was applied: %+v", call)
+				}
+			}
+			if asked {
+				t.Error("a refused deploy must not reach any question")
+			}
+		})
+	}
+}
+
+// TestOperatorApplyPreviewReadsTheOperatorOnce: under Echo the read answers nothing and
+// fails nothing, so a preview shows the one cluster-wide read where it always stood, and
+// neither the namespace fallback nor the escalation probes -- both belong to a refused
+// list, which a preview cannot have.
+func TestOperatorApplyPreviewReadsTheOperatorOnce(t *testing.T) {
+	var out strings.Builder
+	c := NewCluster(engine.Echo{W: &out}, loadK8s(t), nil, &out)
+	if err := c.OperatorApply(context.Background()); err != nil {
+		t.Fatalf("OperatorApply under Echo: %v", err)
+	}
+	got := out.String()
+	if n := strings.Count(got, "get deployment --all-namespaces -o json"); n != 1 {
+		t.Errorf("the preview showed the cluster-wide read %d times, want exactly 1:\n%s", n, got)
+	}
+	for _, never := range []string{"--ignore-not-found", "can-i escalate", "can-i bind"} {
+		if strings.Contains(got, never) {
+			t.Errorf("a preview has no refused list, so it must not show %q:\n%s", never, got)
+		}
+	}
+}
+
+// TestOperatorClusterRoleNameMatchesTheBundle pins the name the `bind` escalation probe asks
+// about to the role the bundle creates and binds. A renamed role would leave the probe
+// asking about an object nothing applies -- answering for the wrong grant.
+func TestOperatorClusterRoleNameMatchesTheBundle(t *testing.T) {
+	manifest, err := RenderOperator(loadK8s(t), "op-ns", "solace")
+	if err != nil {
+		t.Fatalf("RenderOperator: %v", err)
+	}
+	for _, want := range []string{
+		"kind: ClusterRole\nmetadata:\n  name: " + operatorClusterRole + "\n",
+		"roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n  name: " + operatorClusterRole + "\n",
+	} {
+		if !strings.Contains(string(manifest), want) {
+			t.Errorf("the rendered bundle has no %q -- operatorClusterRole has drifted from the template", want)
 		}
 	}
 }
@@ -1006,4 +1152,504 @@ func commentedExamplePorts(t *testing.T) []string {
 		break
 	}
 	return out
+}
+
+// covSwapBundle replaces the embedded operator bundle for the rest of one test and restores it
+// when the test ends. The bundle is a package variable only because go:embed needs one; the
+// states the tests below build with it -- a template that does not render, a bundle with no
+// Namespace document, one with no CRD -- cannot be reached from the shipped asset, and each is a
+// branch the apply, the delete or the render-only path has to answer for. It writes a package
+// variable, so a test that uses it must not call t.Parallel; none in this package does.
+func covSwapBundle(t *testing.T, bundle string) {
+	t.Helper()
+	orig := operatorBundle
+	operatorBundle = bundle
+	t.Cleanup(func() { operatorBundle = orig })
+}
+
+// covApplyRunner is a recRunner whose RunInput fails for the manifests failOn selects and
+// succeeds for the rest. recRunner.runInputErr fails every call alike, so it can only ever reach
+// the FIRST apply or delete of a multi-step operation; this is what lets a test let the namespace
+// through and fail the Secret or the bundle that follows it.
+type covApplyRunner struct {
+	recRunner
+	// failOn is handed each manifest on stdin and says whether its apply or delete fails.
+	failOn func(manifest string) bool
+	// err is what a selected manifest fails with.
+	err error
+}
+
+// RunInput records the call like recRunner does, then fails it when failOn selects the manifest.
+func (r *covApplyRunner) RunInput(ctx context.Context, in []byte, name string, args ...string) error {
+	if err := r.recRunner.RunInput(ctx, in, name, args...); err != nil {
+		return err
+	}
+	if r.failOn(string(in)) {
+		return r.err
+	}
+	return nil
+}
+
+// TestRenderOperatorReportsABrokenBundleTemplate covers the two ways the embedded bundle can fail
+// to render -- a template that does not parse, and one that names a variable RenderOperator does
+// not supply -- and pins what they must share: an error saying which stage failed, and no bytes
+// at all. A caller handed a half-rendered manifest next to the error would be one unchecked
+// return away from applying it.
+func TestRenderOperatorReportsABrokenBundleTemplate(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		bundle string
+		want   string
+	}{
+		{"a template that does not parse", "name: {{.Namespace\n", "parse operator bundle template"},
+		{"a template naming an unknown variable", "name: {{.NoSuchVariable}}\n", "render operator bundle"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			covSwapBundle(t, tc.bundle)
+			out, err := RenderOperator(haCfg(), "op-ns", "solace")
+			if err == nil {
+				t.Fatalf("RenderOperator accepted a broken bundle and returned:\n%s", out)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to say %q", err, tc.want)
+			}
+			if out != nil {
+				t.Errorf("a failed render must return no manifest, got %d bytes", len(out))
+			}
+		})
+	}
+}
+
+// TestGenOperatorRefusesABundleItCannotUse is the render-only twin of the apply guards below: a
+// bundle that does not render fails the whole command and prints nothing, and a bundle with no
+// Namespace document cannot have the regcred spliced after it. The stream's ordering rests on
+// that document, so emitting the Secret with no namespace ahead of it would print an artifact
+// that fails on a first install -- the one thing a rendered artifact must not do.
+func TestGenOperatorRefusesABundleItCannotUse(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		bundle string
+		want   string
+	}{
+		{"a template that does not render", "name: {{.NoSuchVariable}}\n", "render operator bundle"},
+		{"credentials to splice and no Namespace document to splice after",
+			"kind: Deployment\nmetadata:\n  name: x\n", "no Namespace document to apply first"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			covSwapBundle(t, tc.bundle)
+			out, err := GenOperator(loadK8s(t)) // the sample carries image credentials, so a regcred is due
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("GenOperator = (%q, %v), want an error saying %q", out, err, tc.want)
+			}
+			if out != nil {
+				t.Errorf("a refused render must print nothing, got:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestOperatorApplyStopsAtARefusedPermission: the bundle creates cluster-scoped kinds, so an
+// identity without the grant is turned away by the first probe -- before the installed operator
+// is read, before any question, and long before the first apply. The error is the preflight's
+// own, which names the verb, the kind and what to ask a cluster admin for; a deploy that got as
+// far as `apply` would leave nobody sure which of the bundle's documents had landed.
+func TestOperatorApplyStopsAtARefusedPermission(t *testing.T) {
+	rr := &recRunner{canI: "no"}
+	c := NewCluster(rr, loadK8s(t), nil, nil)
+	asked := false
+	c.Confirm = func(string) bool { asked = true; return true }
+	err := c.OperatorApply(context.Background())
+	if err == nil {
+		t.Fatal("OperatorApply must fail when the permission probe answers no")
+	}
+	for _, want := range []string{"not allowed to create customresourcedefinitions", "role binding"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v\nwant it to contain %q", err, want)
+		}
+	}
+	if len(rr.calls) != 1 {
+		t.Errorf("%d calls after a refused first probe, want only the probe itself: %+v", len(rr.calls), rr.calls)
+	}
+	if asked {
+		t.Error("a refused deploy must not reach any question")
+	}
+}
+
+// TestOperatorApplyAsksBeforeWideningTheWatchList: an env file that asks for EVERY namespace,
+// against a shared operator that watches a named list, hands brokers this env file has never
+// heard of a wider reconciler -- a privilege increase, so a question and not a side effect. An
+// unattended run (no Confirm) and a plain "no" both apply nothing; only an explicit yes lets the
+// empty WATCH_NAMESPACE through, and it is then applied empty rather than as the installed list.
+func TestOperatorApplyAsksBeforeWideningTheWatchList(t *testing.T) {
+	const question = "Let the operator watch EVERY namespace in this cluster?"
+	var asked []string
+	answer := func(yes bool) func(string) bool {
+		return func(q string) bool { asked = append(asked, q); return yes }
+	}
+	for _, tc := range []struct {
+		name      string
+		confirm   func(string) bool
+		wantErr   bool
+		wantAsked bool
+	}{
+		{"an unattended run declines", nil, true, false},
+		{"answered no", answer(false), true, true},
+		{"answered yes", answer(true), false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asked = nil
+			cfg := loadK8s(t)
+			cfg.K8s.Operator.Namespace = "op-ns"
+			cfg.K8s.Operator.WatchNamespaces = ""
+			cfg.K8s.Operator.WatchBrokerNS = boolPtr(false) // nothing listed at all: every namespace
+			// Installed at the version this env file would apply, so the downgrade gate has nothing
+			// to ask and the widening is the only question in play.
+			installed := operatorItem("op-ns", operatorImage(cfg), "team-a")
+			rr := &recRunner{out: []byte(`{"items":[` + installed + `]}`)}
+			c := NewCluster(rr, cfg, nil, nil)
+			c.Confirm = tc.confirm
+			err := c.OperatorApply(context.Background())
+
+			var applied []rrCall
+			for _, call := range rr.calls {
+				if call.method == "RunInput" {
+					applied = append(applied, call)
+				}
+			}
+			if tc.wantAsked && (len(asked) != 1 || asked[0] != question) {
+				t.Errorf("asked %q, want exactly %q", asked, question)
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("a declined widening must stop the deploy")
+				}
+				for _, want := range []string{"declined", "nothing was applied"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error = %v, want it to contain %q", err, want)
+					}
+				}
+				if len(applied) != 0 {
+					t.Errorf("a declined widening still applied %d document(s): %+v", len(applied), applied)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("OperatorApply: %v", err)
+			}
+			if len(applied) != 3 {
+				t.Fatalf("an accepted widening made %d applies, want 3 (namespace + regcred + bundle)", len(applied))
+			}
+			bundle := applied[2].stdin
+			if !strings.Contains(bundle, `value: ""`) || strings.Contains(bundle, "team-a") {
+				t.Error("the applied WATCH_NAMESPACE must be empty (every namespace), not the installed list")
+			}
+		})
+	}
+}
+
+// TestOperatorApplyAppliesNothingFromABundleItCannotUse: both refusals come before the first
+// write, so "nothing was applied" stays a true statement. A bundle that does not render stops
+// there; one with no Namespace document would apply the regcred into a namespace that does not
+// exist yet -- the exact first-install failure the namespace-first ordering exists to prevent.
+func TestOperatorApplyAppliesNothingFromABundleItCannotUse(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		bundle string
+		want   string
+	}{
+		{"a template that does not render", "name: {{.NoSuchVariable}}\n", "render operator bundle"},
+		{"no Namespace document to apply first",
+			"kind: Deployment\nmetadata:\n  name: x\n", "no Namespace document to apply first"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			covSwapBundle(t, tc.bundle)
+			cfg := loadK8s(t) // image credentials set: a regcred would follow the namespace
+			cfg.K8s.Operator.Namespace = "op-ns"
+			rr := &recRunner{}
+			err := NewCluster(rr, cfg, nil, nil).OperatorApply(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("OperatorApply err = %v, want it to say %q", err, tc.want)
+			}
+			for _, call := range rr.calls {
+				if call.method == "RunInput" {
+					t.Errorf("a bundle that cannot be used still had something applied: %+v", call)
+				}
+			}
+		})
+	}
+}
+
+// TestOperatorApplyNamesTheApplyThatFailed: the install is three applies, and a failure of any
+// one must say which -- so the operator knows what landed -- carry the cause, and stop what would
+// have followed. A namespace that failed must not go on to apply a Secret into it, and a Secret
+// that failed must not go on to apply the Deployment that pulls with it.
+func TestOperatorApplyNamesTheApplyThatFailed(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		failOn      func(manifest string) bool
+		want        string
+		wantApplies int
+	}{
+		{"the namespace", func(m string) bool { return strings.Contains(m, "kind: Namespace") },
+			"apply operator namespace", 1},
+		{"the image-pull secret", func(m string) bool { return strings.Contains(m, "kind: Secret") },
+			"apply operator image-pull secret", 2},
+		{"the rest of the bundle", func(m string) bool { return strings.Contains(m, "kind: Deployment") },
+			"apply operator bundle", 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := loadK8s(t) // image credentials set: all three applies are made
+			cfg.K8s.Operator.Namespace = "op-ns"
+			rr := &covApplyRunner{failOn: tc.failOn, err: errFake}
+			err := NewCluster(rr, cfg, nil, nil).OperatorApply(context.Background())
+			if !errors.Is(err, errFake) {
+				t.Fatalf("OperatorApply err = %v, want it to carry the failed apply's cause", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to name the failed apply (%q)", err, tc.want)
+			}
+			applies := 0
+			for _, call := range rr.calls {
+				if call.method == "RunInput" {
+					applies++
+				}
+			}
+			if applies != tc.wantApplies {
+				t.Errorf("made %d apply(ies), want %d: nothing may follow the one that failed", applies, tc.wantApplies)
+			}
+		})
+	}
+}
+
+// TestOperatorDeleteStopsAtARefusedPermission: the teardown asks `delete` on every kind it will
+// touch before it touches one. Refused, nothing is deleted and the CRD layer is never even
+// considered -- not the bundle, and not the broker listing that guards the CRDs, even with
+// --delete-crd -- so a refusal cannot leave an operator half removed.
+func TestOperatorDeleteStopsAtARefusedPermission(t *testing.T) {
+	cfg := loadK8s(t)
+	cfg.K8s.Operator.Namespace = "op-ns"
+	rr := &recRunner{canI: "no"}
+	err := NewCluster(rr, cfg, nil, nil).OperatorDelete(context.Background(), true)
+	if err == nil || !strings.Contains(err.Error(), "not allowed to delete customresourcedefinitions") {
+		t.Fatalf("OperatorDelete err = %v, want the refused `delete` permission", err)
+	}
+	if len(rr.calls) != 1 {
+		t.Errorf("%d calls after a refused first probe, want only the probe itself: %+v", len(rr.calls), rr.calls)
+	}
+}
+
+// TestOperatorDeleteDeletesNothingFromABundleItCannotRender: the document set to delete IS the
+// rendered bundle, so a bundle that does not render leaves nothing to delete, and nothing is
+// deleted -- not a partial stream, and not the CRD layer behind it.
+func TestOperatorDeleteDeletesNothingFromABundleItCannotRender(t *testing.T) {
+	covSwapBundle(t, "name: {{.NoSuchVariable}}\n")
+	cfg := loadK8s(t)
+	cfg.K8s.Operator.Namespace = "op-ns"
+	rr := &recRunner{}
+	err := NewCluster(rr, cfg, nil, nil).OperatorDelete(context.Background(), true)
+	if err == nil || !strings.Contains(err.Error(), "render operator bundle") {
+		t.Fatalf("OperatorDelete err = %v, want the render failure", err)
+	}
+	if calls := rr.afterPreflights(t, probe{verb: "delete", resource: "customresourcedefinitions"}); len(calls) != 0 {
+		t.Errorf("a bundle that could not be rendered still issued %+v", calls)
+	}
+}
+
+// TestOperatorDeleteNamesTheDeleteThatFailed: the teardown is a bundle delete and then, when the
+// CRDs are asked for, a second delete of them. A failure of either names which, carries the
+// cause, and stops the rest: a bundle delete that failed never reaches the CRD layer (no broker
+// listing, no CRD delete), and a CRD delete that failed does not log the success line that says
+// every broker resource went with them.
+func TestOperatorDeleteNamesTheDeleteThatFailed(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		failOn      func(manifest string) bool
+		want        string
+		wantDeletes int
+		wantListing bool
+	}{
+		{"the operator bundle", func(m string) bool { return strings.Contains(m, "kind: Deployment") },
+			"delete operator bundle", 1, false},
+		{"the CRDs", func(m string) bool { return strings.Contains(m, "kind: CustomResourceDefinition") },
+			"delete operator CRDs", 2, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := loadK8s(t)
+			cfg.K8s.Operator.Namespace = "op-ns"
+			rr := &covApplyRunner{failOn: tc.failOn, err: errFake}
+			buf := &bytes.Buffer{}
+			c := NewCluster(rr, cfg, func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) }, nil)
+			err := c.OperatorDelete(context.Background(), true)
+			if !errors.Is(err, errFake) {
+				t.Fatalf("OperatorDelete err = %v, want it to carry the failed delete's cause", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to name the failed delete (%q)", err, tc.want)
+			}
+			deletes, listed := 0, false
+			for _, call := range rr.calls {
+				if call.method == "RunInput" {
+					deletes++
+				}
+				if strings.Contains(strings.Join(call.args, " "), "get pubsubpluseventbrokers") {
+					listed = true
+				}
+			}
+			if deletes != tc.wantDeletes {
+				t.Errorf("made %d delete(s), want %d: nothing may follow the one that failed", deletes, tc.wantDeletes)
+			}
+			if listed != tc.wantListing {
+				t.Errorf("broker listing issued = %v, want %v", listed, tc.wantListing)
+			}
+			if strings.Contains(buf.String(), "operator CRDs deleted") {
+				t.Errorf("a failed delete must not claim the CRDs were deleted:\n%s", buf.String())
+			}
+		})
+	}
+}
+
+// TestOperatorDeleteSaysSoWhenTheBundleCarriesNoCRDs: --delete-crd on an install whose bundle
+// holds no CustomResourceDefinition has nothing to remove, and says so. It neither lists broker
+// resources to guard a deletion that will not happen nor pipes an empty stream to kubectl, which
+// rejects one ("no objects passed to delete") and would turn a no-op into a failed teardown.
+func TestOperatorDeleteSaysSoWhenTheBundleCarriesNoCRDs(t *testing.T) {
+	covSwapBundle(t, "kind: Namespace\nmetadata:\n  name: {{.Namespace}}\n---\nkind: Deployment\nmetadata:\n  name: x\n")
+	cfg := loadK8s(t)
+	cfg.K8s.Operator.Namespace = "op-ns"
+	rr := &recRunner{}
+	buf := &bytes.Buffer{}
+	c := NewCluster(rr, cfg, func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) }, nil)
+	if err := c.OperatorDelete(context.Background(), true); err != nil {
+		t.Fatalf("OperatorDelete: %v", err)
+	}
+	calls := rr.afterPreflights(t, probe{verb: "delete", resource: "customresourcedefinitions"})
+	if len(calls) != 1 || calls[0].method != "RunInput" {
+		t.Fatalf("calls after the probes = %+v, want only the delete of the non-CRD documents: "+
+			"no broker listing and no CRD delete", calls)
+	}
+	if !strings.Contains(buf.String(), "none in the bundle") {
+		t.Errorf("the output should say there were no CRDs to delete:\n%s", buf.String())
+	}
+}
+
+// TestOperatorRestartStopsAtARefusedPermission: a restart is a patch on the operator's own
+// Deployment, so the refusal names the OPERATOR's namespace -- the broker's would answer a
+// question nobody was asking -- and no `rollout restart` is issued.
+func TestOperatorRestartStopsAtARefusedPermission(t *testing.T) {
+	cfg := loadK8s(t)
+	cfg.K8s.Operator.Namespace = "op-ns"
+	rr := &recRunner{canI: "no"}
+	err := NewCluster(rr, cfg, nil, nil).OperatorRestart(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not allowed to patch deployments in op-ns") {
+		t.Fatalf("OperatorRestart err = %v, want the refused `patch deployments` permission in op-ns", err)
+	}
+	for _, call := range rr.calls {
+		if call.method == "Run" {
+			t.Errorf("a refused restart still issued %+v", call)
+		}
+	}
+}
+
+// TestOperatorScale pins both directions of `operator start` and `operator stop`. Starting waits
+// for the rollout, because a start that returned before the controller was ready would say done
+// about an operator that is still not reconciling. Stopping does not wait -- there is nothing to
+// wait for on the way down -- and says what it costs, because the operator is cluster-scoped and
+// a stopped one freezes every broker it watches, in every namespace. Both patch the operator's
+// own namespace behind the same `patch deployments` probe a restart uses.
+func TestOperatorScale(t *testing.T) {
+	scale := func(replicas string) []string {
+		return []string{"scale", "deployment", operatorDeployment, "-n", "op-ns", "--replicas=" + replicas}
+	}
+	rollout := []string{"rollout", "status", operatorDeployRef, "-n", "op-ns", "--timeout=" + rolloutTimeout}
+	for _, tc := range []struct {
+		name     string
+		replicas int
+		want     [][]string
+		wantWarn bool
+	}{
+		{"start waits for the rollout", 1, [][]string{scale("1"), rollout}, false},
+		{"stop does not wait, and warns", 0, [][]string{scale("0")}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := haCfg()
+			cfg.K8s.Operator.Namespace = "op-ns"
+			rr := &recRunner{}
+			buf := &bytes.Buffer{}
+			c := NewCluster(rr, cfg, func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) }, nil)
+			if err := c.OperatorScale(context.Background(), tc.replicas); err != nil {
+				t.Fatalf("OperatorScale(%d): %v", tc.replicas, err)
+			}
+			calls := rr.afterPreflights(t, probe{verb: "patch", resource: "deployments"})
+			if len(calls) != len(tc.want) {
+				t.Fatalf("OperatorScale(%d) made %d call(s) after the probe, want %d: %+v",
+					tc.replicas, len(calls), len(tc.want), calls)
+			}
+			for i, want := range tc.want {
+				if calls[i].method != "Run" || calls[i].name != "kubectl" || !eqArgs(calls[i].args, want) {
+					t.Errorf("call %d = %+v, want Run kubectl %v", i, calls[i], want)
+				}
+			}
+			if ns, found := rr.probedNamespace("patch", "deployments"); !found || ns != "op-ns" {
+				t.Errorf("probed namespace = %q (found %v), want the operator's own (op-ns)", ns, found)
+			}
+			if stopped := strings.Contains(buf.String(), "the operator is stopped"); stopped != tc.wantWarn {
+				t.Errorf("stop warning printed = %v, want %v:\n%s", stopped, tc.wantWarn, buf.String())
+			}
+		})
+	}
+}
+
+// TestOperatorScaleStopsAtARefusedPermission: scaling the controller is a patch on its
+// Deployment, so a refused grant ends it at the probe -- the Deployment is neither scaled nor
+// waited on, in either direction.
+func TestOperatorScaleStopsAtARefusedPermission(t *testing.T) {
+	for _, replicas := range []int{0, 1} {
+		t.Run(fmt.Sprintf("replicas=%d", replicas), func(t *testing.T) {
+			cfg := haCfg()
+			cfg.K8s.Operator.Namespace = "op-ns"
+			rr := &recRunner{canI: "no"}
+			err := NewCluster(rr, cfg, nil, nil).OperatorScale(context.Background(), replicas)
+			if err == nil || !strings.Contains(err.Error(), "not allowed to patch deployments in op-ns") {
+				t.Fatalf("OperatorScale(%d) err = %v, want the refused `patch deployments` permission", replicas, err)
+			}
+			if len(rr.calls) != 1 {
+				t.Errorf("%d calls after a refused probe, want only the probe itself: %+v", len(rr.calls), rr.calls)
+			}
+		})
+	}
+}
+
+// TestOperatorScaleSurfacesAFailure: a scale that kubectl refused is an error, not a state -- and
+// a failed STOP must not claim the operator is stopped, which would tell someone it is safe to
+// edit a StatefulSet the controller is still reconciling. A start whose rollout never completes
+// is an error too, reported after the scale that was already issued.
+func TestOperatorScaleSurfacesAFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		replicas  int
+		runErrs   []error
+		wantCalls int
+	}{
+		{"a stop that kubectl refuses", 0, []error{errFake}, 1},
+		{"a start that kubectl refuses", 1, []error{errFake}, 1},
+		{"a start whose rollout does not complete", 1, []error{nil, errFake}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := haCfg()
+			cfg.K8s.Operator.Namespace = "op-ns"
+			rr := &recRunner{runErrQueue: tc.runErrs}
+			buf := &bytes.Buffer{}
+			c := NewCluster(rr, cfg, func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) }, nil)
+			err := c.OperatorScale(context.Background(), tc.replicas)
+			if !errors.Is(err, errFake) {
+				t.Fatalf("OperatorScale(%d) err = %v, want the failed kubectl call's error", tc.replicas, err)
+			}
+			if calls := rr.afterPreflights(t, probe{verb: "patch", resource: "deployments"}); len(calls) != tc.wantCalls {
+				t.Errorf("made %d call(s) after the probe, want %d: %+v", len(calls), tc.wantCalls, calls)
+			}
+			if strings.Contains(buf.String(), "the operator is stopped") {
+				t.Errorf("a failed scale must not claim the operator is stopped:\n%s", buf.String())
+			}
+		})
+	}
 }

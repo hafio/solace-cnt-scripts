@@ -114,6 +114,9 @@ func TestCanIArgsScopesByResourceKind(t *testing.T) {
 			[]string{"auth", "can-i", "delete", "secrets", "-n", "solace"}},
 		{probe{verb: "patch", resource: "deployments", ns: "solace-system"},
 			[]string{"auth", "can-i", "patch", "deployments", "-n", "solace-system"}},
+		// A named probe asks about the one object, and is scoped by its bare resource.
+		{probe{verb: "bind", resource: "clusterroles", name: operatorClusterRole},
+			[]string{"auth", "can-i", "bind", "clusterroles/" + operatorClusterRole, "--all-namespaces"}},
 	}
 	for _, tc := range cases {
 		got := c.canIArgs(tc.p)
@@ -127,6 +130,29 @@ func TestCanIArgsScopesByResourceKind(t *testing.T) {
 					t.Errorf("cluster-scoped probe %+v carried -n: %v", tc.p, got)
 				}
 			}
+		}
+	}
+}
+
+// TestPreflightNamesTheObjectOfANamedProbe: a named probe asks about `resource/name`, keeps
+// the --all-namespaces its cluster-scoped resource earns, and a refusal names the object,
+// so the grant a cluster admin is asked for is the exact one -- bind can be granted for a
+// single role through resourceNames.
+func TestPreflightNamesTheObjectOfANamedProbe(t *testing.T) {
+	rr := &recRunner{canI: "no"}
+	c := NewCluster(rr, loadK8s(t), nil, nil)
+	err := c.PreflightAll(context.Background(), probe{verb: "bind", resource: "clusterroles", name: "some-role"})
+	if err == nil {
+		t.Fatal("a refused named probe must fail")
+	}
+	want := []string{"auth", "can-i", "bind", "clusterroles/some-role", "--all-namespaces"}
+	if len(rr.calls) != 1 || !eqArgs(rr.calls[0].args, want) {
+		t.Errorf("calls = %+v, want exactly the probe %v", rr.calls, want)
+	}
+	for _, w := range []string{"not allowed to bind clusterroles/some-role in the cluster",
+		"granting bind on clusterroles/some-role"} {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("error = %v, want it to contain %q", err, w)
 		}
 	}
 }

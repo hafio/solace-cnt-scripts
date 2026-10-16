@@ -200,19 +200,40 @@ func (c *Cluster) OperatorApply(ctx context.Context) error {
 	if err := c.PreflightAll(ctx, operatorProbes("create", opNS, c.Cfg.ManagesImagePullSecret())...); err != nil {
 		return err
 	}
+	// ONE read of the operator already installed, shared by the downgrade gate and the
+	// watch reconcile below -- the fetch-once rule validate follows too. A read nobody
+	// could make, or one that found the operator installed more than once, stops here:
+	// answering "none installed" would skip the downgrade question and overwrite a shared
+	// watch list.
+	dep, onlyNS, err := c.findOperatorDeployment(ctx)
+	if err != nil {
+		return fmt.Errorf("reading the installed operator (nothing was applied): %w", err)
+	}
+	// The cluster-wide list was refused and the operator namespace is empty: a first
+	// install by an identity that does not hold every permission the bundle's ClusterRole
+	// grants (listing Deployments cluster-wide is one of them). Kubernetes lets such an
+	// identity create that role only with `escalate`, and bind it only with `bind` on it,
+	// and the `create` probes above cannot show either -- so both are asked before the
+	// first write rather than discovered halfway through the bundle, after the CRDs and
+	// the controller Deployment already landed.
+	if onlyNS != "" && dep == nil {
+		if err := c.PreflightAll(ctx, operatorEscalationProbes()...); err != nil {
+			return fmt.Errorf("%w\n  why: this identity cannot list Deployments cluster-wide, so it does not hold "+
+				"every permission the operator's ClusterRole %s grants, and Kubernetes then requires escalate to "+
+				"create that role and bind on it to bind it. Nothing was applied. If an operator already runs in "+
+				"another namespace, set kubernetes.operator.namespace to it instead", err, operatorClusterRole)
+		}
+	}
 	// Before anything is applied: the operator is cluster-scoped, and `apply`
 	// downgrades an image without comment, so a downgrade is asked about rather
 	// than merely narrated. Declining aborts before the first write.
-	if err := c.confirmNoDowngrade(ctx, opNS); err != nil {
+	if err := c.confirmNoDowngrade(dep); err != nil {
 		return err
 	}
 	// What the operator should watch is decided against what it ALREADY watches, not
 	// rendered from this env file alone -- see watch.go. Also before the first write,
 	// because the widening case is a question.
-	plan, err := c.reconcileWatch(ctx)
-	if err != nil {
-		return err
-	}
+	plan := c.reconcileWatch(dep)
 	if plan.widening && !c.confirm("Let the operator watch EVERY namespace in this cluster?") {
 		return fmt.Errorf("declined: the operator's watch list was left as it is, and nothing was applied")
 	}
@@ -282,6 +303,22 @@ func operatorProbes(verb, opNS string, withRegcred bool) []probe {
 		ps = append(ps, probe{verb: verb, resource: "secrets", ns: opNS})
 	}
 	return ps
+}
+
+// operatorEscalationProbes are the two questions the bundle's ClusterRole raises for an
+// identity that does not already hold everything it grants: Kubernetes' escalation
+// prevention lets such an identity create that role only with `escalate`, and bind it only
+// with `bind` on it. They are asked differently on purpose. `bind` is checked against the
+// role the binding refers to, so it names that role, and a grant limited to it by
+// resourceNames answers yes. `escalate` on a CREATE is checked before the new role's name
+// is known, so a resourceNames grant cannot cover it and the probe asks about the kind --
+// asking by name would say yes to a grant the create then refuses. OperatorApply asks them
+// only on the path that implies such an identity -- see its comment.
+func operatorEscalationProbes() []probe {
+	return []probe{
+		{verb: "escalate", resource: "clusterroles"},
+		{verb: "bind", resource: "clusterroles", name: operatorClusterRole},
+	}
 }
 
 // splitOperatorBundle separates the rendered bundle into three classes, because all

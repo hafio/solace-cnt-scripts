@@ -3,6 +3,7 @@ package k8s
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -112,7 +113,9 @@ func TestOperatorVersionWarningFiresOnlyOnADowngrade(t *testing.T) {
 
 // TestConfirmNoDowngradeIsSilentInAPreview covers the guard: a preview has no
 // cluster to read, so it must neither claim anything about what is installed nor
-// block the preview on a question it has no basis to ask.
+// block the preview on a question it has no basis to ask. It is handed a NEWER
+// installed operator on purpose: without the preview guard that is a downgrade, so
+// the absence of a warning proves the guard and not merely an empty input.
 func TestConfirmNoDowngradeIsSilentInAPreview(t *testing.T) {
 	buf := &bytes.Buffer{}
 	cfg := haCfg()
@@ -120,7 +123,9 @@ func TestConfirmNoDowngradeIsSilentInAPreview(t *testing.T) {
 	c := NewCluster(engine.Echo{W: buf}, cfg, func(f string, a ...any) {
 		fmt.Fprintf(buf, f+"\n", a...)
 	}, buf)
-	if err := c.confirmNoDowngrade(context.Background(), "solace-operator"); err != nil {
+	newer := &deploymentItem{}
+	newer.Spec.Template.Spec.Containers = []containerSpec{{Image: "solace/pubsubplus-eventbroker-operator:1.4.2"}}
+	if err := c.confirmNoDowngrade(newer); err != nil {
 		t.Errorf("a preview must not block: %v", err)
 	}
 	if strings.Contains(buf.String(), "WARNING") {
@@ -129,9 +134,10 @@ func TestConfirmNoDowngradeIsSilentInAPreview(t *testing.T) {
 }
 
 // operatorDeployJSON builds the `kubectl get deployment --all-namespaces -o json`
-// reply installedOperatorImage decodes, naming only the fields it reads. Tests
-// script it through recRunner's outQueue so confirmNoDowngrade is driven by the
-// exact query shape production issues, not a shortcut around it.
+// reply OperatorApply's one operator read decodes, naming only the fields the
+// downgrade gate reads. Tests script it through recRunner's outQueue so
+// confirmNoDowngrade is driven by the exact query shape production issues, not a
+// shortcut around it.
 func operatorDeployJSON(image string) []byte {
 	return []byte(fmt.Sprintf(
 		`{"kind":"DeploymentList","items":[{"metadata":{"name":%q},"spec":{"template":{"spec":{"containers":[{"image":%q}]}}}}]}`,
@@ -161,7 +167,7 @@ func TestConfirmNoDowngradeRefusesByDefault(t *testing.T) {
 	}
 	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
 	if len(calls) != 1 {
-		t.Fatalf("refused downgrade made %d calls after the probe, want 1 (the version read only, no apply)", len(calls))
+		t.Fatalf("refused downgrade made %d calls after the probe, want 1 (the operator read only, no apply)", len(calls))
 	}
 }
 
@@ -180,28 +186,35 @@ func TestConfirmNoDowngradeRefusedWhenConfirmDeclines(t *testing.T) {
 	}
 	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
 	if len(calls) != 1 {
-		t.Fatalf("declined downgrade made %d calls after the probe, want 1 (the version read only, no apply)", len(calls))
+		t.Fatalf("declined downgrade made %d calls after the probe, want 1 (the operator read only, no apply)", len(calls))
 	}
 }
 
 // TestConfirmNoDowngradeProceedsWhenConfirmAccepts covers the deliberate-rollback
 // path: a downgrade is a legitimate thing to want, so answering yes lets the
-// apply through the same three writes TestOperatorApply pins.
+// apply through the same three writes TestOperatorApply pins. The configured image
+// is pinned BELOW the installed one: the sample's default equals it, which made this
+// a same-version re-apply that never reached the question it is named for.
 func TestConfirmNoDowngradeProceedsWhenConfirmAccepts(t *testing.T) {
 	cfg := loadK8s(t) // pull secret set -> regcred applied
 	cfg.K8s.Operator.Namespace = "op-ns"
+	cfg.K8s.Operator.Image = "solace/pubsubplus-eventbroker-operator:1.4.0"
 	rr := &recRunner{outQueue: [][]byte{
 		operatorDeployJSON("registry.example.com/solace/pubsubplus-eventbroker-operator:1.4.2"),
 	}}
 	c := NewCluster(rr, cfg, nil, nil)
-	c.Confirm = func(string) bool { return true }
+	var asked []string
+	c.Confirm = func(q string) bool { asked = append(asked, q); return true }
 	if err := c.OperatorApply(context.Background()); err != nil {
 		t.Fatalf("OperatorApply: %v", err)
 	}
+	if len(asked) != 1 || asked[0] != "Downgrade the operator?" {
+		t.Errorf("asked %q, want exactly the downgrade question", asked)
+	}
 	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
-	if len(calls) != 5 {
-		t.Fatalf("accepted downgrade made %d calls after the probe, want 5 "+
-			"(version read + watch-list read + namespace + regcred + bundle)", len(calls))
+	if len(calls) != 4 {
+		t.Fatalf("accepted downgrade made %d calls after the probe, want 4 "+
+			"(operator read + namespace + regcred + bundle)", len(calls))
 	}
 }
 
@@ -219,6 +232,8 @@ func TestConfirmNoDowngradeAsksNothingWhenNotADowngrade(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := loadK8s(t)
 			cfg.K8s.Operator.Namespace = "op-ns"
+			// Pinned rather than the sample's default, so "same version" really is equal.
+			cfg.K8s.Operator.Image = "solace/pubsubplus-eventbroker-operator:1.4.0"
 			rr := &recRunner{outQueue: [][]byte{operatorDeployJSON(tc.existing)}}
 			c := NewCluster(rr, cfg, nil, nil)
 			asked := false
@@ -230,37 +245,88 @@ func TestConfirmNoDowngradeAsksNothingWhenNotADowngrade(t *testing.T) {
 				t.Error("an upgrade or same-version apply must not ask at all")
 			}
 			calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
-			if len(calls) != 5 {
-				t.Fatalf("made %d calls after the probe, want 5 "+
-					"(version read + watch-list read + namespace + regcred + bundle)", len(calls))
+			if len(calls) != 4 {
+				t.Fatalf("made %d calls after the probe, want 4 "+
+					"(operator read + namespace + regcred + bundle)", len(calls))
 			}
 		})
 	}
 }
 
-// TestConfirmNoDowngradeProceedsWhenVersionReadFails pins what the code actually
-// does when the installed-version read itself fails (RBAC denial, an unreachable
-// API server): installedOperatorImage folds any read error into "" -- the same
-// value a genuine first install produces -- so confirmNoDowngrade has nothing to
-// compare against and proceeds without asking. That is installedOperatorImage's
-// existing documented behaviour (a first install must not alarm), not a new
-// decision made here; this test exists so a future change to it is deliberate
-// rather than an unnoticed regression in the downgrade gate.
-func TestConfirmNoDowngradeProceedsWhenVersionReadFails(t *testing.T) {
+// TestConfirmNoDowngradeIsNotSkippedByAFailedRead pins the end of a fold that used to
+// skip the gate: a failed installed-version read answered "" -- what a first install
+// answers -- so the gate had nothing to compare and let the apply through. A read
+// nobody could make now stops the deploy instead: the cluster-wide list fails, the
+// operator-namespace fallback fails too, and nothing is asked and nothing applied.
+func TestConfirmNoDowngradeIsNotSkippedByAFailedRead(t *testing.T) {
 	cfg := loadK8s(t)
 	cfg.K8s.Operator.Namespace = "op-ns"
-	rr := &recRunner{outErrQueue: []error{errFake}}
+	rr := &recRunner{outErr: errFake} // every read fails: the list AND the fallback
 	c := NewCluster(rr, cfg, nil, nil)
 	asked := false
-	c.Confirm = func(string) bool { asked = true; return false }
-	if err := c.OperatorApply(context.Background()); err != nil {
-		t.Fatalf("OperatorApply: %v", err)
+	c.Confirm = func(string) bool { asked = true; return true }
+	err := c.OperatorApply(context.Background())
+	if !errors.Is(err, errFake) {
+		t.Fatalf("OperatorApply err = %v, want it to carry the failed read", err)
+	}
+	if !strings.Contains(err.Error(), "nothing was applied") {
+		t.Errorf("error = %v, want it to say nothing was applied", err)
 	}
 	if asked {
-		t.Error("a failed version read must not be treated as a downgrade to ask about")
+		t.Error("a read nobody could make is not a downgrade to ask about")
 	}
 	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
-	if len(calls) != 5 {
-		t.Fatalf("made %d calls after the probe, want 4 (version read + namespace + regcred + bundle)", len(calls))
+	if len(calls) != 2 {
+		t.Fatalf("made %d calls after the probe, want 2 (the list and its fallback, no apply): %+v", len(calls), calls)
+	}
+}
+
+// TestConfirmNoDowngradeStillAsksWhenTheFallbackFindsANewerOperator: the operator the
+// namespace fallback finds feeds the downgrade gate exactly as one found by the
+// cluster-wide list does, so an identity that cannot list is still asked before rolling
+// a shared operator back -- and an unattended run still declines.
+func TestConfirmNoDowngradeStillAsksWhenTheFallbackFindsANewerOperator(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		accept  bool
+		wantErr bool
+	}{
+		{"declined: refused, nothing applied", false, true},
+		{"accepted: the rollback goes ahead", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := loadK8s(t)
+			cfg.K8s.Operator.Namespace = "op-ns"
+			cfg.K8s.Operator.Image = "solace/pubsubplus-eventbroker-operator:1.4.0"
+			rr := deniedRunner(namedOperatorJSON("op-ns", "solace/pubsubplus-eventbroker-operator:1.4.2", "solace"))
+			buf := &bytes.Buffer{}
+			c := NewCluster(rr, cfg, func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) }, buf)
+			var asked []string
+			c.Confirm = func(q string) bool { asked = append(asked, q); return tc.accept }
+			err := c.OperatorApply(context.Background())
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("OperatorApply err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if len(asked) != 1 || asked[0] != "Downgrade the operator?" {
+				t.Errorf("asked %q, want exactly the downgrade question", asked)
+			}
+			for _, want := range []string{"existing : 1.4.2", "new      : 1.4.0"} {
+				if !strings.Contains(buf.String(), want) {
+					t.Errorf("the downgrade warning should show %q:\n%s", want, buf.String())
+				}
+			}
+			applied := 0
+			for _, call := range rr.calls {
+				if call.method == "RunInput" {
+					applied++
+				}
+			}
+			if tc.wantErr && applied != 0 {
+				t.Errorf("a declined downgrade applied %d documents, want none", applied)
+			}
+			if !tc.wantErr && applied != 3 {
+				t.Errorf("an accepted downgrade applied %d times, want 3 (namespace + regcred + bundle)", applied)
+			}
+		})
 	}
 }

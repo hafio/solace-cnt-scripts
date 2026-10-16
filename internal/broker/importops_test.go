@@ -1244,3 +1244,524 @@ func TestImportOpsReportsDoNotPanicOnEmptyAndPopulated(t *testing.T) {
 		Warnings: []string{"a warning to render"},
 	}).Report(sink)
 }
+
+// --- capture and plan failure paths ---------------------------------------------------
+
+// TestImportOpsExportConfigFailsLoudAtTheFirstBadCapture covers the three ways one VPN's
+// capture can go wrong inside a --vpn list: the exec fails, the broker answers with nothing,
+// or the answer is not a capture. Each stops the export at that VPN -- the second is never
+// asked for, because an artifact missing a VPN the operator named is worse than no artifact
+// -- and none returns a partial one for a caller to write to disk and later import.
+func TestImportOpsExportConfigFailsLoudAtTheFirstBadCapture(t *testing.T) {
+	boom := errors.New("connection reset")
+	cases := []struct {
+		name  string
+		reply []byte
+		err   error
+		want  string
+	}{
+		{"the exec fails", nil, boom, "connection reset"},
+		{"the capture is empty", []byte("   \n"), nil, "no output"},
+		{"the capture does not parse", []byte(" ! BEGIN\nno terminator here\n"), nil,
+			`parse the capture of message-VPN "acme"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
+				if matchCLI(argv, "export-config") {
+					return tc.reply, tc.err
+				}
+				return nil, nil
+			}}
+			o, _ := newTestOps(t, &config.Config{}, ft)
+			out, err := o.ExportConfig(context.Background(), config.Primary, []string{"acme", "beta"}, false, "x")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ExportConfig = %q, %v; want an error containing %q", out, err, tc.want)
+			}
+			if tc.err != nil && !errors.Is(err, tc.err) {
+				t.Errorf("err = %v, want the transport cause kept", err)
+			}
+			if out != nil {
+				t.Errorf("a failed export must return no artifact, got %q", out)
+			}
+			var captures int
+			for _, u := range ft.uploads {
+				if u.dest == cliScriptPath("export-config") {
+					captures++
+				}
+			}
+			if captures != 1 {
+				t.Errorf("made %d capture(s), want 1: the export stops at the first VPN it cannot capture", captures)
+			}
+			if !ft.removed(cliScriptPath("export-config")) {
+				t.Errorf("the capture script must be removed even when the capture failed, runs = %v", ft.runs)
+			}
+		})
+	}
+}
+
+// TestImportOpsImportPlanRefusesAnUnreadableArtifactBeforeReadingTheTarget proves the
+// artifact is checked first. A file that is not a complete capture says nothing about which
+// VPNs it would tear down, and reading the target to plan against it would be a full
+// capture of a live broker spent on an import that cannot go ahead.
+func TestImportOpsImportPlanRefusesAnUnreadableArtifactBeforeReadingTheTarget(t *testing.T) {
+	ft := &fakeTransport{}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	plan, err := o.ImportPlan(context.Background(), config.Primary, []byte("home\nenable\nconfigure\n"))
+	if err == nil || !strings.Contains(err.Error(), "`! END`") {
+		t.Fatalf("ImportPlan = %v, %v; want the missing terminator named", plan, err)
+	}
+	if plan != nil {
+		t.Errorf("ImportPlan returned %+v alongside its error, want no plan to act on", plan)
+	}
+	if len(ft.uploads) != 0 || len(ft.outputs) != 0 {
+		t.Errorf("an unreadable artifact must not touch the broker, got uploads=%v outputs=%v", ft.uploads, ft.outputs)
+	}
+}
+
+// TestImportOpsImportPlanReportsATargetItCannotRead proves a failed read of the target
+// reaches the caller as the plan's own error, with the transport cause intact -- never as a
+// plan with an empty VPN list, which would quietly turn teardown-and-rebuild into
+// apply-on-top. This is the whole-method twin of TestImportOpsReadTargetFailsLoudly.
+func TestImportOpsImportPlanReportsATargetItCannotRead(t *testing.T) {
+	boom := errors.New("connection reset")
+	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
+		if matchCLI(argv, "plan-vpns") {
+			return nil, boom
+		}
+		return nil, nil
+	}}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	plan, err := o.ImportPlan(context.Background(), config.Primary, minimalCapture("broker/10.26.0.8827", "False"))
+	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "read the target's configuration to list its message-VPNs") {
+		t.Fatalf("ImportPlan = %v, %v; want the target read named and the cause kept", plan, err)
+	}
+	if plan != nil {
+		t.Errorf("ImportPlan returned %+v alongside its error, want no plan to act on", plan)
+	}
+}
+
+// --- plan and result reports ----------------------------------------------------------
+
+// TestImportPlanReportShowsOmissionsAndEachSectionsVerdict pins what the operator reads
+// before the exact-"yes". The "omitted at export" row is the only place anyone learns which
+// sections export dropped, since import never sees them; and every section row carries the
+// verdict its disposition earns -- a skipped one is [SKIP] (its lines are excused from
+// verification), one that interrupts something is [WARN] (it is worth reading first), and a
+// plain apply is [ OK ] -- so the table can be scanned rather than read.
+func TestImportPlanReportShowsOmissionsAndEachSectionsVerdict(t *testing.T) {
+	var buf bytes.Buffer
+	p := &ImportPlan{
+		Capture: &Capture{Type: BrokerSoftware, Version: "10.26.0.8827", Omitted: []Omission{
+			{Section: "Configure Redundancy", Reason: "ends shut down"},
+			{Section: "Configure Config Sync", Reason: "propagates VPN configuration"},
+		}},
+		Sections: []PlannedSection{
+			{Name: "Create console", Disposition: Apply, Reason: "console timeout"},
+			{Name: "Create logging", Disposition: Apply, Interrupts: "this CLI session", Reason: "ends the session"},
+			{Name: "Configure Config Sync", Disposition: Skip, Reason: "shut down"},
+			{Name: "Configure DNS", Disposition: SkipAppliance, Reason: "appliance only"},
+		},
+	}
+	p.Report(output.New(&buf))
+	got := buf.String()
+
+	if !strings.Contains(got, "omitted at export : Configure Redundancy, Configure Config Sync") {
+		t.Errorf("the report must name every section export omitted, got:\n%s", got)
+	}
+	for _, want := range []string{
+		"[ OK ] Create console",
+		"[WARN] Create logging",
+		"[SKIP] Configure Config Sync",
+		"[SKIP] Configure DNS",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the report is missing the row %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestImportResultReportQuotesTheFailedChunkAndItsTail pins the failure half of the result
+// report, which is printed before the error is returned and so is the operator's only
+// account of where the apply stopped. It names the chunk the broker rejected a line in, and
+// quotes the transcript tail the driver echoed -- the only part of any transcript that ever
+// leaves the broker -- indented as a block. A chunk that failed with no detail still gets the
+// failure line, but not a heading promising words that never came.
+func TestImportResultReportQuotesTheFailedChunkAndItsTail(t *testing.T) {
+	var buf bytes.Buffer
+	res := &ImportResult{
+		TornDown:     []string{"acme"},
+		Failed:       "message-vpn acme",
+		FailedDetail: "Error: invalid command\nxps-ps-01> ",
+	}
+	res.Report(output.New(&buf))
+	got := buf.String()
+
+	for _, want := range []string{
+		`[FAIL] the broker rejected a line in chunk "message-vpn acme"`,
+		"  the broker's last words on that chunk:\n    Error: invalid command\n    xps-ps-01> \n",
+		"NOT rebuilt",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the report is missing %q:\n%s", want, got)
+		}
+	}
+
+	buf.Reset()
+	(&ImportResult{Failed: "teardown acme"}).Report(output.New(&buf))
+	got = buf.String()
+	if !strings.Contains(got, `chunk "teardown acme"`) {
+		t.Errorf("a failed chunk with no detail still names itself:\n%s", got)
+	}
+	if strings.Contains(got, "last words") {
+		t.Errorf("there are no words to quote, so no heading may promise them:\n%s", got)
+	}
+}
+
+// TestPreambleForApplyKeepsASingleNoPaging pins the rule that the emitted script does not
+// depend on how the capture was taken. `no paging` is this tool's to add, once, after the
+// `home` -- a capture from a session that already had paging off carries its own, and
+// copying it as well would make two exports of one broker apply differently-shaped scripts.
+func TestPreambleForApplyKeepsASingleNoPaging(t *testing.T) {
+	want := "home|no paging|enable|configure"
+	for name, preamble := range map[string][]string{
+		"after home":  {"home", "no paging", "enable", "configure"},
+		"before home": {"no paging", "home", "enable", "configure"},
+	} {
+		if got := strings.Join(preambleForApply(preamble), "|"); got != want {
+			t.Errorf("%s: preambleForApply = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// --- chunk building ------------------------------------------------------------------
+
+// TestBuildChunksOrdersTeardownClearCreateSectionsThenVPNs pins the whole order an import
+// runs in, every kind of chunk at once -- the order the doc comment on buildChunks states
+// and nothing else asserts end to end:
+//
+//	every teardown, then the removals for objects only the target has, then the create-VPN
+//	pass, then `Create logging` alone, `Create Usernames` alone, the other broker sections,
+//	and finally one chunk per message-VPN with `default` FIRST.
+//
+// Each position is load-bearing. Usernames rewrite the CLI admin password and logging ends
+// the CLI session, so each shares a chunk with nothing; `default` is edited in place and is
+// where the riskiest port changes live, so it runs while every other VPN is still untouched;
+// and a VPN that created nothing of its own (empty-vpn here) gets no chunk, since its
+// create already ran in the create-VPN pass and an empty chunk is only a round trip.
+func TestBuildChunksOrdersTeardownClearCreateSectionsThenVPNs(t *testing.T) {
+	blk := func(section string, region Region, vpn string, lines ...string) Block {
+		return Block{Section: section, Region: region, VPN: vpn, Lines: lines}
+	}
+	blocks := []Block{
+		blk(`Create All: "Message Vpns"`, RegionVPNCreate, "acme", `create message-vpn "acme"`, "  exit"),
+		blk(`Create All: "Message Vpns"`, RegionVPNCreate, "default", `create message-vpn "default"`, "  exit"),
+		blk(`Create All: "Message Vpns"`, RegionVPNCreate, "empty-vpn", `create message-vpn "empty-vpn"`, "  exit"),
+		blk("Create logging", RegionBroker, "", `logging command "CLI" mode "config-cmds"`),
+		blk("Create Usernames", RegionBroker, "", `create username "ops" global-access-level admin`, "  exit"),
+		blk("Create console", RegionBroker, "", "create console"),
+		blk(`Create Client Username: "acme"`, RegionVPN, "acme", `client-username "app1" message-vpn "acme"`, "  exit"),
+		blk(`Create Client Username: "default"`, RegionVPN, "default", `client-username "app2" message-vpn "default"`, "  exit"),
+	}
+	sections, _ := planSections(blocks, BrokerSoftware)
+	p := &ImportPlan{
+		Capture:  &Capture{Preamble: []string{"home", "enable", "configure"}, Blocks: blocks, Type: BrokerSoftware},
+		Existing: []string{"acme"},
+		Sections: sections,
+		Target:   TargetState{VirtualHostnames: []string{"stale.example.test"}},
+	}
+	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
+		if matchCLI(argv, "export-teardown") {
+			return []byte(" ! BEGIN\n" + `message-vpn "acme" remove` + "\n"), nil
+		}
+		return nil, nil
+	}}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+
+	chunks, err := o.buildChunks(context.Background(), config.Primary, p, blocks, &ImportResult{})
+	if err != nil {
+		t.Fatalf("buildChunks: %v", err)
+	}
+
+	sec := func(name string) string { return chunkSectionPrefix + name }
+	want := []string{
+		"teardown acme",
+		"clear target-only objects",
+		"create message-vpns",
+		sec("logging"),
+		sec("Create Usernames"),
+		sec("broker"),
+		"message-vpn default",
+		"message-vpn acme",
+	}
+	if got := chunkNames(chunks); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("chunk order = %v, want %v", got, want)
+	}
+
+	byName := map[string]chunk{}
+	for _, c := range chunks {
+		byName[c.Name] = c
+	}
+	if got := byName["teardown acme"].TearsDown; got != "acme" {
+		t.Errorf("the teardown chunk must record the VPN it destroys, got %q", got)
+	}
+	wantClear := strings.Join([]string{
+		"home", "no paging", "enable", "configure",
+		"service", `  no virtual-hostname "stale.example.test"`, "  exit",
+	}, "\n") + "\n"
+	if got := byName["clear target-only objects"].Body; got != wantClear {
+		t.Errorf("clear chunk body = %q, want the preamble then the scoped removals %q", got, wantClear)
+	}
+	users := byName[sec("Create Usernames")]
+	if !strings.Contains(users.Body, `create username "ops"`) || strings.Join(users.Sections, "|") != "Create Usernames" {
+		t.Errorf("the usernames chunk must carry that section alone, got sections %v:\n%s", users.Sections, users.Body)
+	}
+	for _, other := range []string{sec("logging"), sec("broker")} {
+		if strings.Contains(byName[other].Body, "create username") {
+			t.Errorf("%s shares a chunk with the section that rewrites the admin password:\n%s", other, byName[other].Body)
+		}
+	}
+}
+
+// --- applying: what the report says, and what never runs ------------------------------
+
+// TestImportOpsImportApplyClearsTargetOnlyObjectsBeforeAnythingIsApplied is the same
+// ordering seen through the generated driver, which is what actually runs against the
+// broker. An object only the TARGET carries has no create line to sit beside, so its
+// removal travels as a chunk of its own -- after the teardown capture and before the first
+// section -- and its body opens its own scope.
+func TestImportOpsImportApplyClearsTargetOnlyObjectsBeforeAnythingIsApplied(t *testing.T) {
+	o, ft, plan := newTeardownApplyFixture(t)
+	plan.Target = TargetState{VirtualHostnames: []string{"stale.example.test"}}
+
+	res, err := o.ImportApply(context.Background(), config.Primary, plan)
+	if err != nil {
+		t.Fatalf("ImportApply: %v", err)
+	}
+	driver := ft.uploadBody(t, importDriverDest)
+	want := "teardown acme|clear target-only objects|" + chunkSectionPrefix + "logging|" + chunkSectionPrefix + "broker"
+	if got := strings.Join(driverChunkNames(driver), "|"); got != want {
+		t.Fatalf("driver chunks = %q, want %q", got, want)
+	}
+	// driverChunkBody hands back the heredoc without the newline that precedes the
+	// delimiter, so the closing `exit` is the last thing in it.
+	body := driverChunkBody(t, driver, "clear target-only objects")
+	if !strings.Contains(body, "service\n  no virtual-hostname \"stale.example.test\"\n  exit") {
+		t.Errorf("the removal must open its own `service` scope, got:\n%s", body)
+	}
+	if strings.Join(res.Applied, ",") != "Create logging,Create console" || len(res.TornDown) != 1 {
+		t.Errorf("result = %+v, want the two sections applied and the one VPN torn down", res)
+	}
+}
+
+// TestImportOpsImportApplyWithNothingToApplyRunsNoDriver covers an artifact whose every
+// section import skips -- a broker-only export of nothing but skipped sections, say. There
+// is no chunk to run, so no driver is rendered, uploaded or exec'd, and the result still
+// says what it did: nothing torn down, nothing applied, and the skipped sections named so the
+// report can explain why a successful import changed nothing.
+func TestImportOpsImportApplyWithNothingToApplyRunsNoDriver(t *testing.T) {
+	blocks := []Block{{Section: "Configure Config Sync", Region: RegionBroker, Kind: "config-sync",
+		Lines: []string{"config-sync shutdown"}}}
+	sections, _ := planSections(blocks, BrokerSoftware)
+	plan := &ImportPlan{
+		Capture:  &Capture{Preamble: []string{"home", "enable", "configure"}, Blocks: blocks, Type: BrokerSoftware},
+		Sections: sections,
+	}
+	ft := &fakeTransport{}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+
+	res, err := o.ImportApply(context.Background(), config.Primary, plan)
+	if err != nil {
+		t.Fatalf("ImportApply: %v", err)
+	}
+	if !res.Rebuilt {
+		t.Error("with nothing to apply the import is complete, so Rebuilt must be true")
+	}
+	if len(res.Skipped) != 1 || res.Skipped[0].Name != "Configure Config Sync" {
+		t.Errorf("Skipped = %+v, want the one section import left out", res.Skipped)
+	}
+	if len(res.Applied) != 0 || len(res.TornDown) != 0 {
+		t.Errorf("result = %+v, want nothing applied and nothing torn down", res)
+	}
+	if len(ft.uploads) != 0 || len(ft.outputs) != 0 || len(ft.runs) != 0 {
+		t.Errorf("no driver may be uploaded or run, got uploads=%v outputs=%v runs=%v", ft.uploads, ft.outputs, ft.runs)
+	}
+}
+
+// TestImportOpsImportApplyFailedTeardownCaptureStopsBeforeAnythingRuns proves a teardown
+// that cannot be captured ends the import before the driver exists. The capture is a read
+// the broker has to answer, so nothing has been applied to the VPN yet -- and the report must
+// say so: no VPN torn down, nothing rebuilt, and the cause kept for the operator.
+func TestImportOpsImportApplyFailedTeardownCaptureStopsBeforeAnythingRuns(t *testing.T) {
+	o, ft, plan := newTeardownApplyFixture(t)
+	boom := errors.New("connection reset")
+	ft.responder = func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
+		if matchCLI(argv, "export-teardown") {
+			return nil, boom
+		}
+		return nil, nil
+	}
+
+	res, err := o.ImportApply(context.Background(), config.Primary, plan)
+	if !errors.Is(err, boom) || !strings.Contains(err.Error(), `capture the teardown for message-VPN "acme"`) {
+		t.Fatalf("err = %v, want the teardown named and the cause kept", err)
+	}
+	if len(res.TornDown) != 0 || res.Rebuilt {
+		t.Errorf("result = %+v, want nothing torn down and nothing rebuilt", res)
+	}
+	if ft.hasUpload(importDriverDest) {
+		t.Error("no driver may be uploaded once a teardown capture has failed")
+	}
+	for _, o := range ft.outputs {
+		if len(o.argv) > 0 && o.argv[0] == "sh" {
+			t.Errorf("the driver was run after a failed teardown capture: %v", o.argv)
+		}
+	}
+}
+
+// TestImportOpsImportApplyRefusesAChunkThatCarriesTheDriverDelimiter is the injection
+// boundary on the generated script. Each chunk body is written through a quoted heredoc, so
+// a line that is the delimiter ends the heredoc early and whatever follows runs as shell in
+// the broker's jail. Nothing in a real `show current-config` looks like the delimiter, so an
+// artifact carrying it is not what it claims to be: refused before anything is uploaded,
+// let alone run.
+func TestImportOpsImportApplyRefusesAChunkThatCarriesTheDriverDelimiter(t *testing.T) {
+	blocks := []Block{{Section: "Create console", Region: RegionBroker, Kind: "console",
+		Lines: []string{"create console", heredocDelim, "  idle-timeout 100"}}}
+	sections, _ := planSections(blocks, BrokerSoftware)
+	plan := &ImportPlan{
+		Capture:  &Capture{Preamble: []string{"home", "enable", "configure"}, Blocks: blocks, Type: BrokerSoftware},
+		Sections: sections,
+	}
+	ft := &fakeTransport{}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+
+	res, err := o.ImportApply(context.Background(), config.Primary, plan)
+	if err == nil || !strings.Contains(err.Error(), "heredoc delimiter") {
+		t.Fatalf("err = %v, want the heredoc delimiter named", err)
+	}
+	if res.Rebuilt {
+		t.Error("an import that refused to start must not claim to have rebuilt anything")
+	}
+	if len(ft.uploads) != 0 || len(ft.outputs) != 0 {
+		t.Errorf("nothing may reach the broker, got uploads=%v outputs=%v", ft.uploads, ft.outputs)
+	}
+}
+
+// TestImportOpsImportApplyUploadFailureRunsNothing covers a driver that cannot be uploaded.
+// The script that would have applied the whole configuration never reached the broker, so
+// nothing is exec'd, and the error names the step and keeps the cause.
+func TestImportOpsImportApplyUploadFailureRunsNothing(t *testing.T) {
+	blocks := []Block{{Section: "Create console", Region: RegionBroker, Kind: "console",
+		Lines: []string{"create console"}}}
+	sections, _ := planSections(blocks, BrokerSoftware)
+	plan := &ImportPlan{
+		Capture:  &Capture{Preamble: []string{"home", "enable", "configure"}, Blocks: blocks, Type: BrokerSoftware},
+		Sections: sections,
+	}
+	boom := errors.New("upload boom")
+	ut := &uploadErrTransport{fakeTransport: &fakeTransport{}, err: boom}
+	o := &Ops{T: ut, Cfg: &config.Config{}, Out: &bytes.Buffer{}}
+
+	_, err := o.ImportApply(context.Background(), config.Primary, plan)
+	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "upload the import driver") {
+		t.Fatalf("err = %v, want the upload named and the cause kept", err)
+	}
+	if len(ut.fakeTransport.outputs) != 0 {
+		t.Errorf("nothing may be exec'd after a failed upload, got %v", ut.fakeTransport.outputs)
+	}
+}
+
+// TestImportOpsImportApplyRefusesATruncatedDriverOutputAndRemovesTheDriver covers a
+// transport that drops the tail of the driver's output after a chunk was reported applied.
+// The completion marker is the only proof the driver ran to the end, so the parse refuses the
+// output as cut short: the apply fails naming the truncation, claims no rebuild, invents no
+// rejected chunk out of a missing marker, and the uploaded driver -- which carries the whole
+// configuration, credentials included -- is still removed from the broker.
+func TestImportOpsImportApplyRefusesATruncatedDriverOutputAndRemovesTheDriver(t *testing.T) {
+	o, ft, plan := newTeardownApplyFixture(t)
+	base := ft.responder
+	cutShort := []byte(markerChunkOK + " 0\n")
+	ft.responder = func(role config.Role, argv []string, in []byte) ([]byte, error) {
+		if len(argv) > 0 && argv[0] == "sh" {
+			return cutShort, nil
+		}
+		return base(role, argv, in)
+	}
+
+	res, err := o.ImportApply(context.Background(), config.Primary, plan)
+	if err == nil || !strings.Contains(err.Error(), "cut short") {
+		t.Fatalf("err = %v, want the truncation named", err)
+	}
+	if res.Rebuilt || res.Failed != "" {
+		t.Errorf("result = %+v, want not rebuilt and no rejected chunk: a missing marker is not a rejection", res)
+	}
+	if !ft.removed(importDriverDest) {
+		t.Errorf("the driver must be removed even when its output was cut short, runs = %v", ft.runs)
+	}
+}
+
+// TestImportOpsImportApplyTreatsANonZeroExitAfterARejectedChunkAsTheRejection is the
+// shape a real rejection arrives in. The driver prints the detail and the FAIL marker for the
+// chunk and then `exit 1`s, so the exec itself reports failure alongside perfectly good
+// output. That non-zero status EXPLAINS nothing -- it is what a rejection looks like -- so it
+// must not be reported as "the driver did not run" or "its own run failed": the answer is the
+// rejected chunk, named, with the broker's tail, after the chunk that did apply.
+func TestImportOpsImportApplyTreatsANonZeroExitAfterARejectedChunkAsTheRejection(t *testing.T) {
+	o, ft, plan := newTeardownApplyFixture(t)
+	base := ft.responder
+	exit := errors.New("exit status 1")
+	ft.responder = func(role config.Role, argv []string, in []byte) ([]byte, error) {
+		if len(argv) > 0 && argv[0] == "sh" {
+			return driverFailAt(ft.uploadBody(t, importDriverDest), 1, "error: invalid command"), exit
+		}
+		return base(role, argv, in)
+	}
+
+	res, err := o.ImportApply(context.Background(), config.Primary, plan)
+	if err == nil || !strings.Contains(err.Error(), `rejected a line in chunk "`+chunkSectionPrefix+`logging"`) {
+		t.Fatalf("err = %v, want the rejected chunk named", err)
+	}
+	for _, not := range []string{"did not run", "exited non-zero"} {
+		if strings.Contains(err.Error(), not) {
+			t.Errorf("err = %v, a rejection must not be worded as %q", err, not)
+		}
+	}
+	if res.Failed != chunkSectionPrefix+"logging" || res.FailedDetail != "error: invalid command" {
+		t.Errorf("Failed = %q, FailedDetail = %q, want the chunk and the broker's tail", res.Failed, res.FailedDetail)
+	}
+	if strings.Join(res.TornDown, ",") != "acme" || res.Rebuilt {
+		t.Errorf("result = %+v, want the teardown that applied reported and no rebuild claimed", res)
+	}
+}
+
+// TestImportOpsImportApplyDriverExitingNonZeroAfterEveryChunkIsItsOwnFailure is the opposite
+// reading of the same status. When every chunk reported OK and the run still exited non-zero,
+// nothing was rejected: the script itself broke after the last chunk. The error says so and
+// keeps the cause, the report still lists everything that did apply -- and the import is not
+// declared rebuilt, because the driver's own verdict on the run was a failure.
+func TestImportOpsImportApplyDriverExitingNonZeroAfterEveryChunkIsItsOwnFailure(t *testing.T) {
+	o, ft, plan := newTeardownApplyFixture(t)
+	base := ft.responder
+	exit := errors.New("exit status 3")
+	ft.responder = func(role config.Role, argv []string, in []byte) ([]byte, error) {
+		if len(argv) > 0 && argv[0] == "sh" {
+			return driverAllOK(ft.uploadBody(t, importDriverDest)), exit
+		}
+		return base(role, argv, in)
+	}
+
+	res, err := o.ImportApply(context.Background(), config.Primary, plan)
+	if !errors.Is(err, exit) || !strings.Contains(err.Error(), "its own run failed rather than the configuration") {
+		t.Fatalf("err = %v, want the driver's own failure named and the cause kept", err)
+	}
+	if res.Failed != "" {
+		t.Errorf("Failed = %q, want no rejected chunk: every one reported OK", res.Failed)
+	}
+	if strings.Join(res.Applied, ",") != "Create logging,Create console" || strings.Join(res.TornDown, ",") != "acme" {
+		t.Errorf("result = %+v, want everything that was reported applied listed", res)
+	}
+	if res.Rebuilt {
+		t.Error("an import whose driver exited non-zero must not be declared rebuilt")
+	}
+}

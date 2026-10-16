@@ -806,3 +806,354 @@ func TestTargetOnlyRemovalsWhenTheArtifactCreatesNone(t *testing.T) {
 		t.Errorf("removals = %q, want none when the target has no virtual hostnames", r)
 	}
 }
+
+// --- nested clears without a real capture -------------------------------------------
+//
+// Every test above that reaches clearNestedObjects starts from tpsCapture or
+// loadRealCapture, and semp/ is gitignored: on a fresh clone they all skip, so the
+// function that places the removals -- and the intersection that decides which names
+// get one -- never runs there at all. The tests below build the artifact by hand
+// instead, in the shape a real capture has (a column-0 parent scope with the creates
+// indented inside it), so the clears are exercised wherever the suite runs.
+
+// covBlock builds one broker-level block from the section comment the broker prints
+// above it, the column-0 scope it opens, and its lines.
+func covBlock(section, kind string, lines ...string) Block {
+	return Block{Section: section, Region: RegionBroker, Kind: kind, Lines: lines}
+}
+
+// covNestedBlocks is the hand-built artifact: two client CAs, a domain CA, an LDAP
+// profile and two virtual hostnames -- one quoted, one bare, since a capture may write
+// either -- each created inside the parent scope its real section opens, plus a block
+// that creates nothing nested. Block 0 is the client CAs, 1 the domain CA, 2 the LDAP
+// profile, 3 the virtual hostnames and 4 the console.
+func covNestedBlocks() []Block {
+	return []Block{
+		covBlock(`Create Client Certificate Authority: "G2-inter"`, "authentication",
+			"authentication",
+			`  create client-certificate-authority "G2-inter"`,
+			"    certificate-url http://pki.example.test/g2-inter.pem",
+			"    exit",
+			`  create client-certificate-authority "G2-root"`,
+			"    exit",
+			"  exit"),
+		covBlock(`Create Domain Certificate Authority: "corp-root"`, "ssl",
+			"ssl",
+			`  create domain-certificate-authority "corp-root"`,
+			"    certificate-url http://pki.example.test/corp-root.pem",
+			"    exit",
+			"  exit"),
+		covBlock(`Create LDAP Profile: "corp-ldap"`, "authentication",
+			"authentication",
+			`  create ldap-profile "corp-ldap"`,
+			"    exit",
+			"  exit"),
+		covBlock("Configure Virtual Hostnames", "service",
+			"service",
+			`  create virtual-hostname "a.example.test"`,
+			"    exit",
+			"  create virtual-hostname b.example.test",
+			"    exit",
+			"  exit"),
+		covBlock("Create console", "console",
+			"create console",
+			"  idle-timeout 100",
+			"  exit"),
+	}
+}
+
+// covAllLines flattens blocks to their lines, so a whole artifact compares as one string.
+func covAllLines(blocks []Block) string {
+	var all []string
+	for _, b := range blocks {
+		all = append(all, b.Lines...)
+	}
+	return strings.Join(all, "\n")
+}
+
+// covRemovals lists, in artifact order, the trimmed `no <verb> ...` lines blocks carry.
+func covRemovals(blocks []Block, verb string) []string {
+	var out []string
+	for _, b := range blocks {
+		for _, l := range b.Lines {
+			if strings.HasPrefix(strings.TrimSpace(l), "no "+verb+" ") {
+				out = append(out, strings.TrimSpace(l))
+			}
+		}
+	}
+	return out
+}
+
+// TestClearNestedObjectsPlacesEachRemovalBesideItsOwnCreate pins the placement rule
+// clearNestedObjects exists for. Each removal goes IMMEDIATELY BEFORE its own create,
+// copying that create's indentation and its operand exactly as the artifact wrote it
+// (quoted or bare, an LDAP group's escaped commas included): that is the only placement
+// correct at every nesting depth and the only spelling the broker is known to accept.
+// A name nobody asked to clear gets nothing, a block with no create of the verb passes
+// through untouched, and the caller's blocks are never edited in place -- the plan's own
+// artifact is what ImportVerify diffs the target against, so a removal leaking into it
+// would be demanded of the target afterwards.
+func TestClearNestedObjectsPlacesEachRemovalBesideItsOwnCreate(t *testing.T) {
+	blocks := covNestedBlocks()
+	before := covAllLines(blocks)
+
+	got := clearNestedObjects(blocks, verbClientCA, []string{"G2-inter"})
+	want := strings.Join([]string{
+		"authentication",
+		`  no client-certificate-authority "G2-inter"`,
+		`  create client-certificate-authority "G2-inter"`,
+		"    certificate-url http://pki.example.test/g2-inter.pem",
+		"    exit",
+		`  create client-certificate-authority "G2-root"`,
+		"    exit",
+		"  exit",
+	}, "\n")
+	if g := strings.Join(got[0].Lines, "\n"); g != want {
+		t.Errorf("client CA block =\n%s\nwant\n%s", g, want)
+	}
+	for i := 1; i < len(blocks); i++ {
+		if strings.Join(got[i].Lines, "\n") != strings.Join(blocks[i].Lines, "\n") {
+			t.Errorf("block %d creates no client CA and must pass through untouched, got %v", i, got[i].Lines)
+		}
+	}
+	if covAllLines(blocks) != before {
+		t.Error("clearNestedObjects edited the caller's blocks in place")
+	}
+
+	t.Run("a bare operand is mirrored bare", func(t *testing.T) {
+		got := clearNestedObjects(covNestedBlocks(), verbVirtualHostname, []string{"b.example.test"})
+		lines := got[3].Lines
+		at := -1
+		for i, l := range lines {
+			if l == "  create virtual-hostname b.example.test" {
+				at = i
+			}
+		}
+		if at < 1 || lines[at-1] != "  no virtual-hostname b.example.test" {
+			t.Errorf("want the bare removal immediately before the bare create, got %v", lines)
+		}
+		if strings.Contains(strings.Join(lines, "\n"), `no virtual-hostname "a.example.test"`) {
+			t.Errorf("a.example.test was not asked for and must not be cleared: %v", lines)
+		}
+	})
+
+	// An LDAP authorisation group sits at indent 6, inside authentication > access-level
+	// > ldap, which is the depth case the placement rule was written for. No production
+	// caller clears groups (operator-confirmed), so the helper is driven directly with the
+	// verb: what is pinned is that the indent and the escaped commas survive intact.
+	t.Run("indent and escaped commas are carried through", func(t *testing.T) {
+		const dn = `CN=*Ops\\, Team,OU=Groups,DC=example,DC=test`
+		create := `      create group "` + dn + `"`
+		deep := []Block{covBlock(`Create Authentication: "x"`, "authentication",
+			"authentication",
+			"  access-level",
+			"    ldap",
+			create,
+			"        exit",
+			"      exit",
+			"    exit",
+			"  exit")}
+		lines := clearNestedObjects(deep, "group", []string{dn})[0].Lines
+		wantRemoval := `      no group "` + dn + `"`
+		if lines[3] != wantRemoval || lines[4] != create {
+			t.Errorf("want the removal at the create's own indent, operand verbatim, got %v", lines)
+		}
+	})
+}
+
+// TestClearNestedObjectsIsIdempotentAcrossARerun is the guard a failed import's own
+// recovery depends on: re-running is the documented way out, so the second attempt has
+// to build the same script as the first. A removal that did not recognise its own earlier
+// output would be inserted again on every pass.
+//
+// The one-block literal further down is the case the guard's `i == 0` arm is for: a
+// create that is the very first line of its block has no previous line to inspect, so
+// the removal always goes in -- and on the next pass it IS that previous line.
+func TestClearNestedObjectsIsIdempotentAcrossARerun(t *testing.T) {
+	names := []string{"G2-inter", "G2-root"}
+	once := clearNestedObjects(covNestedBlocks(), verbClientCA, names)
+	twice := clearNestedObjects(once, verbClientCA, names)
+	if covAllLines(twice) != covAllLines(once) {
+		t.Errorf("a second pass changed the script:\n%s\n--- first pass ---\n%s", covAllLines(twice), covAllLines(once))
+	}
+	if n := len(covRemovals(twice, verbClientCA)); n != 2 {
+		t.Errorf("got %d client CA removals after two passes, want exactly one per create (2)", n)
+	}
+
+	first := []Block{{Lines: []string{`create client-certificate-authority "G2-inter"`, "  exit"}}}
+	a := clearNestedObjects(first, verbClientCA, []string{"G2-inter"})
+	if len(a[0].Lines) != 3 || a[0].Lines[0] != `no client-certificate-authority "G2-inter"` {
+		t.Fatalf("a create on a block's first line must get its removal ahead of it, got %v", a[0].Lines)
+	}
+	if b := clearNestedObjects(a, verbClientCA, []string{"G2-inter"}); len(b[0].Lines) != len(a[0].Lines) {
+		t.Errorf("a re-run grew the block from %d to %d lines", len(a[0].Lines), len(b[0].Lines))
+	}
+}
+
+// TestClearExistingNestedClearsOnlyWhatBothSidesCarry is the intersection rule across all
+// three verbs, on a hand-built artifact so it runs without a real capture.
+//
+// A removal is valid only for a name the TARGET has, or it is itself an error; and it is
+// safe only for a name this ARTIFACT re-creates, or the import deletes trust material, an
+// LDAP bind or an authorisation the target's own operator added and nobody asked about.
+// So G2-root (the artifact's, absent on the target) gets nothing, and neither do the two
+// target-only names, which have no create to sit beside and must not be invented one. An
+// empty target clears nothing at all, and a second pass changes nothing.
+func TestClearExistingNestedClearsOnlyWhatBothSidesCarry(t *testing.T) {
+	target := TargetState{
+		ClientCAs:    []string{"G2-inter", "target-only-ca"},
+		DomainCAs:    []string{"corp-root"},
+		LDAPProfiles: []string{"corp-ldap", "target-only-ldap"},
+	}
+	got := ClearExistingNested(covNestedBlocks(), target)
+
+	for _, tc := range []struct {
+		verb string
+		want []string
+	}{
+		{verbClientCA, []string{`no client-certificate-authority "G2-inter"`}},
+		{verbDomainCA, []string{`no domain-certificate-authority "corp-root"`}},
+		{verbLDAPProfile, []string{`no ldap-profile "corp-ldap"`}},
+	} {
+		if g := covRemovals(got, tc.verb); strings.Join(g, "|") != strings.Join(tc.want, "|") {
+			t.Errorf("%s removals = %v, want %v", tc.verb, g, tc.want)
+		}
+	}
+	all := covAllLines(got)
+	for _, never := range []string{"target-only-ca", "target-only-ldap", `no client-certificate-authority "G2-root"`} {
+		if strings.Contains(all, never) {
+			t.Errorf("%q must not be cleared: the target lacks it or the artifact never mentions it", never)
+		}
+	}
+
+	if covAllLines(ClearExistingNested(covNestedBlocks(), TargetState{})) != covAllLines(covNestedBlocks()) {
+		t.Error("a target with none of these objects must leave the artifact exactly as it was")
+	}
+	if covAllLines(ClearExistingNested(got, target)) != all {
+		t.Error("a second pass changed the script; a re-run after a failed import must build the same one")
+	}
+}
+
+// TestClearTargetVirtualHostnamesClearsEveryNameItFindsACreateFor is the OPPOSITE rule to
+// the client CAs, on a hand-built artifact: a virtual hostname is a DNS name resolving to
+// this broker, so every name the target has is cleared, artifact or not.
+//
+// It takes two mechanisms because a removal has to be issued in the scope its object lives
+// in. A name the artifact re-creates gets its removal beside that create; a name with no
+// create (the target's leftover) has nothing to sit before, so TargetOnlyRemovals renders it
+// under its own `service` scope. A name only the ARTIFACT has is left alone -- the target
+// has nothing to remove, and a removal for an absent object is itself an error.
+func TestClearTargetVirtualHostnamesClearsEveryNameItFindsACreateFor(t *testing.T) {
+	blocks := covNestedBlocks()
+	target := []string{"a.example.test", "stale.example.test"}
+
+	got := ClearTargetVirtualHostnames(blocks, target)
+	removals := covRemovals(got, verbVirtualHostname)
+	if len(removals) != 1 || removals[0] != `no virtual-hostname "a.example.test"` {
+		t.Fatalf("removals = %v, want exactly the one for the name the artifact re-creates", removals)
+	}
+	lines := got[3].Lines
+	if lines[1] != `  no virtual-hostname "a.example.test"` || lines[2] != `  create virtual-hostname "a.example.test"` {
+		t.Errorf("the removal must sit immediately before its own create, got %v", lines)
+	}
+
+	orphans := TargetOnlyRemovals(blocks, TargetState{VirtualHostnames: target})
+	wantOrphans := []string{"service", `  no virtual-hostname "stale.example.test"`, "  exit"}
+	if strings.Join(orphans, "|") != strings.Join(wantOrphans, "|") {
+		t.Errorf("target-only removals = %q, want %q -- and a.example.test must not be repeated there",
+			orphans, wantOrphans)
+	}
+}
+
+// TestNestedNamesSkipsEmptyAndRepeatedOperands covers the two operands the scan must not
+// report: an empty one, which would otherwise become a removal of a name that does not
+// exist, and one already seen, which would otherwise be listed -- and so cleared -- twice.
+func TestNestedNamesSkipsEmptyAndRepeatedOperands(t *testing.T) {
+	c := &Capture{Blocks: []Block{
+		covBlock("Create Client Certificate Authority", "authentication",
+			"authentication",
+			`  create client-certificate-authority ""`,
+			`  create client-certificate-authority "G2-root"`,
+			"  exit"),
+		covBlock("Create Client Certificate Authority", "authentication",
+			"authentication",
+			`  create client-certificate-authority "G2-root"`,
+			`  create client-certificate-authority "G2-inter"`,
+			"  exit"),
+	}}
+	got := c.nestedNames(verbClientCA)
+	if strings.Join(got, ",") != "G2-root,G2-inter" {
+		t.Errorf("nestedNames = %q, want [G2-root G2-inter]: first-seen order, no empty name, no repeat", got)
+	}
+}
+
+// TestIntersectKeepsOnlySharedNamesInTheFirstListsOrder pins the helper both nested clears
+// rest on: the names the artifact creates, narrowed to those the target also has, in the
+// artifact's order. Either list empty means nothing is shared, never everything.
+func TestIntersectKeepsOnlySharedNamesInTheFirstListsOrder(t *testing.T) {
+	got := intersect([]string{"c", "a", "b"}, []string{"b", "a", "x"})
+	if strings.Join(got, ",") != "a,b" {
+		t.Errorf("intersect = %q, want [a b]", got)
+	}
+	if got := intersect(nil, []string{"a"}); len(got) != 0 {
+		t.Errorf("an empty first list shares nothing, got %q", got)
+	}
+	if got := intersect([]string{"a"}, nil); len(got) != 0 {
+		t.Errorf("an empty second list shares nothing, got %q", got)
+	}
+}
+
+// TestOpenerIndexOfACommentOnlyBlockIsZero covers the fallback: a block holding nothing
+// but held `!` lines has no opener to find, and the answer is index 0 rather than the
+// slice length, so a caller that adds one to it still lands inside the block.
+func TestOpenerIndexOfACommentOnlyBlockIsZero(t *testing.T) {
+	lines := []string{"! pragma:interpreter:ignore-already-exists", "! a held comment"}
+	if got := openerIndex(lines); got != 0 {
+		t.Errorf("openerIndex of a comment-only block = %d, want 0", got)
+	}
+	got := insertAfterOpener(lines, "  shutdown")
+	if len(got) != 3 || got[1] != "  shutdown" {
+		t.Errorf("insertAfterOpener = %q, want the line placed after index 0", got)
+	}
+}
+
+// TestPrepareForApplyIsIdempotentOnASyntheticArtifact is the whole-pipeline safety net on
+// a hand-built artifact, so it runs where TestPrepareForApplyIsIdempotentOnTheRealCapture
+// skips.
+//
+// Several of these rules INSERT, and an insert that does not recognise its own earlier
+// output grows the script on every pass -- which on a re-run after a failed import would
+// apply a different configuration than the first attempt did. The target here carries one
+// object for every clear, so each must actually fire (a no-op run twice is identical in a
+// way that proves nothing), and each must then settle after the first pass.
+func TestPrepareForApplyIsIdempotentOnASyntheticArtifact(t *testing.T) {
+	syslog := Block{Section: `Create Syslog: "central"`, Region: RegionBroker, Kind: kindSyslog,
+		Name: "central", Create: true, Lines: []string{`create syslog "central"`, "  exit"}}
+	blocks := append([]Block{syslog}, covNestedBlocks()...)
+	target := TargetState{
+		Syslogs:          []string{"central"},
+		ClientCAs:        []string{"G2-inter"},
+		VirtualHostnames: []string{"a.example.test"},
+		DomainCAs:        []string{"corp-root"},
+		LDAPProfiles:     []string{"corp-ldap"},
+	}
+
+	once := PrepareForApply(blocks, target)
+	twice := PrepareForApply(once, target)
+
+	for _, verb := range []string{kindSyslog, verbClientCA, verbDomainCA, verbLDAPProfile, verbVirtualHostname} {
+		first, second := len(covRemovals(once, verb)), len(covRemovals(twice, verb))
+		if first != 1 {
+			t.Errorf("the %s clear inserted %d removals, want exactly 1 -- a 0 means it took its no-op path", verb, first)
+		}
+		if second != first {
+			t.Errorf("the %s clear is not idempotent: %d removals after one pass, %d after two", verb, first, second)
+		}
+	}
+	if len(twice) != len(once) {
+		t.Errorf("PrepareForApply is not idempotent: %d blocks after one pass, %d after two", len(once), len(twice))
+	}
+	if covAllLines(twice) != covAllLines(once) {
+		t.Errorf("PrepareForApply is not idempotent; the second pass built a different script:\n%s", covAllLines(twice))
+	}
+}

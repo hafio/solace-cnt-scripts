@@ -30,6 +30,9 @@ type fixtureRunner struct {
 	// need a broker CR shape broker-cr.json does not carry (no conditions, a
 	// failing one) rather than the healthy capture every other test shares.
 	brokerFile string
+	// raw answers a kind with this literal JSON instead of a fixture, for the shapes no
+	// capture carries: a workload that shares the namespace, or two brokers in it.
+	raw map[string]string
 }
 
 func (f *fixtureRunner) Run(context.Context, string, ...string) error              { return nil }
@@ -62,6 +65,9 @@ func (f *fixtureRunner) Output(_ context.Context, _ string, args ...string) ([]b
 		}
 		if f.missing[a] {
 			return []byte(`{"items":[]}`), nil
+		}
+		if body, ok := f.raw[a]; ok {
+			return []byte(body), nil
 		}
 		if name, ok := file[a]; ok {
 			return os.ReadFile(filepath.Join("testdata", name))
@@ -486,5 +492,150 @@ func TestBrokerReportReadsEachKindOnce(t *testing.T) {
 		if strings.Contains(call, "get pvc") {
 			t.Errorf("the default report should not read claims: %v", f2.calls)
 		}
+	}
+}
+
+// TestBrokerReportOmitsWorkloadsThatAreNotTheBrokers: a namespace is often shared, so every list
+// the report reads holds objects that are not this broker's, and none of them may appear as one.
+// A pod is the broker's own only when the operator's podsList claims it -- a workload whose name
+// merely carries the `-pubsubplus-` infix is still not a broker pod -- while services,
+// StatefulSets and claims are told by name. Each section here is listed with an impostor beside
+// the broker's own object.
+func TestBrokerReportOmitsWorkloadsThatAreNotTheBrokers(t *testing.T) {
+	f := &fixtureRunner{raw: map[string]string{
+		"pods": `{"items":[
+			{"metadata":{"name":"dev-broker-pubsubplus-p-0"},"status":{"phase":"Running","containerStatuses":[{"ready":true}]}},
+			{"metadata":{"name":"cache-pubsubplus-proxy-0"},"status":{"phase":"Running"}},
+			{"metadata":{"name":"metrics-exporter-0"},"status":{"phase":"Running"}}
+		]}`,
+		"svc": `{"items":[
+			{"metadata":{"name":"dev-broker-pubsubplus"},"spec":{"type":"ClusterIP","clusterIP":"10.0.0.1"}},
+			{"metadata":{"name":"metrics-exporter"},"spec":{"type":"ClusterIP","clusterIP":"10.0.0.2"}}
+		]}`,
+		"statefulsets": `{"items":[
+			{"metadata":{"name":"dev-broker-pubsubplus-p"},"spec":{"replicas":1},"status":{"readyReplicas":1}},
+			{"metadata":{"name":"metrics-exporter"},"spec":{"replicas":1},"status":{"readyReplicas":1}}
+		]}`,
+		"pvc": `{"items":[
+			{"metadata":{"name":"data-dev-broker-pubsubplus-p-0"},"status":{"phase":"Bound"}},
+			{"metadata":{"name":"data-metrics-exporter-0"},"status":{"phase":"Bound"}}
+		]}`,
+	}}
+	c, buf := reportCluster(t, f)
+	if err := c.BrokerReport(context.Background(), true); err != nil {
+		t.Fatalf("BrokerReport --detail: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"=== Pods", "=== Services", "=== StatefulSets", "=== Storage"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing the section %q:\n%s", want, out)
+		}
+	}
+	for _, want := range []string{"dev-broker-pubsubplus-p-0", "data-dev-broker-pubsubplus-p-0"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the broker's own object %q is missing from the report:\n%s", want, out)
+		}
+	}
+	for _, never := range []string{"cache-pubsubplus-proxy-0", "metrics-exporter"} {
+		if strings.Contains(out, never) {
+			t.Errorf("an object that is not this broker's appeared in the report (%q):\n%s", never, out)
+		}
+	}
+}
+
+// TestBrokerReportOrdersPodsOfTheSameRoleByName: two broker resources can share a namespace, each
+// with its own primary, and role order alone cannot sort them. The tie is broken by name, so the
+// listing is the same on every run whatever order the cluster happened to return the pods in --
+// a report that reshuffled between runs would read as something having changed.
+func TestBrokerReportOrdersPodsOfTheSameRoleByName(t *testing.T) {
+	f := &fixtureRunner{raw: map[string]string{
+		"pubsubpluseventbrokers": `{"items":[
+			{"metadata":{"name":"qa-broker","namespace":"solace"},"status":{"podsList":["qa-broker-pubsubplus-p-0"]}},
+			{"metadata":{"name":"dev-broker","namespace":"solace"},"status":{"podsList":["dev-broker-pubsubplus-p-0"]}}
+		]}`,
+		"pods": `{"items":[
+			{"metadata":{"name":"qa-broker-pubsubplus-p-0"},"status":{"phase":"Running","containerStatuses":[{"ready":true}]}},
+			{"metadata":{"name":"dev-broker-pubsubplus-p-0"},"status":{"phase":"Running","containerStatuses":[{"ready":true}]}}
+		]}`,
+	}}
+	c, buf := reportCluster(t, f)
+	if err := c.BrokerReport(context.Background(), false); err != nil {
+		t.Fatalf("BrokerReport: %v", err)
+	}
+	out := buf.String()
+	dev, qa := strings.Index(out, "dev-broker-pubsubplus-p-0"), strings.Index(out, "qa-broker-pubsubplus-p-0")
+	if dev < 0 || qa < 0 || dev > qa {
+		t.Errorf("pods of one role should read in name order (dev at %d, qa at %d):\n%s", dev, qa, out)
+	}
+}
+
+// TestOperatorReportWhenTheDeploymentListIsEmpty: the read succeeding with nothing in it is a
+// different answer from the read failing -- the namespace was reachable and holds no operator --
+// and it is reported as such, in the namespace that was looked in, rather than as an error or as
+// a section with no rows that reads like a pass.
+func TestOperatorReportWhenTheDeploymentListIsEmpty(t *testing.T) {
+	c, buf := reportCluster(t, &fixtureRunner{missing: map[string]bool{"deployment": true}})
+	if err := c.OperatorReport(context.Background()); err != nil {
+		t.Fatalf("an operator that is not there is a report line, not an error: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"[WARN] installed", "not found in namespace solace-operator"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "controller") {
+		t.Errorf("no controller row may be shown for an operator that is not there:\n%s", out)
+	}
+}
+
+// TestBrokerReportPreviewStopsAtAnUnapprovedCommand: a preview echoes the reads it would make, and
+// the execution guard still applies to them -- an env file naming a command nobody approved
+// fails the preview with the guard's own message and echoes nothing, rather than printing a
+// `+ microk8s kubectl get ...` line that reads as something this tool would have run.
+func TestBrokerReportPreviewStopsAtAnUnapprovedCommand(t *testing.T) {
+	var buf bytes.Buffer
+	c := NewCluster(engine.Echo{W: &buf}, unapprovedCfg(), nil, &buf)
+	err := c.BrokerReport(context.Background(), true)
+	if err == nil || !strings.Contains(err.Error(), "--allow-command microk8s") {
+		t.Fatalf("BrokerReport under Echo err = %v, want the guard to name the escape hatch", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a refused command must echo nothing, got:\n%s", buf.String())
+	}
+}
+
+// TestClusterReportDetailAddsTheBrokerImage: `status broker --all --detail` adds the broker image,
+// the column that tells apart brokers an operator sees side by side in different namespaces. It
+// sits ahead of STATE so the verdict still ends the line, and the default listing carries neither
+// the column nor the value.
+func TestClusterReportDetailAddsTheBrokerImage(t *testing.T) {
+	const image = "registry.example.com/solace/solace-pubsub-enterprise:10.26.0.8755" // broker-cr.json's brokerImage
+	c, buf := reportCluster(t, &fixtureRunner{})
+	if err := c.ClusterReport(context.Background(), true); err != nil {
+		t.Fatalf("ClusterReport --detail: %v", err)
+	}
+	var header, row string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		switch {
+		case strings.Contains(line, "NAMESPACE"):
+			header = line
+		case strings.Contains(line, "dev-broker"):
+			row = line
+		}
+	}
+	if !strings.Contains(header, "IMAGE") || strings.Index(header, "IMAGE") > strings.Index(header, "STATE") {
+		t.Errorf("--detail header = %q, want an IMAGE column ahead of STATE", header)
+	}
+	if !strings.Contains(row, image) || strings.Index(row, image) > strings.Index(row, "ready") {
+		t.Errorf("--detail row = %q, want the broker image ahead of its state", row)
+	}
+
+	plain, plainBuf := reportCluster(t, &fixtureRunner{})
+	if err := plain.ClusterReport(context.Background(), false); err != nil {
+		t.Fatalf("ClusterReport: %v", err)
+	}
+	if got := plainBuf.String(); strings.Contains(got, "IMAGE") || strings.Contains(got, image) {
+		t.Errorf("the default listing must not carry the image:\n%s", got)
 	}
 }

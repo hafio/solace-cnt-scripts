@@ -412,10 +412,11 @@ func (c *Cluster) verifyRows(ctx context.Context, rep *checkReport) {
 	// verdict wants its WATCH_NAMESPACE and the version row its running image, both off
 	// the same object -- and each used to fetch it for itself, so every healthy
 	// `validate` and `check deploy` paid for a full cluster-wide list twice. The error
-	// is threaded rather than swallowed, because "could not be read" and "no operator
-	// installed" are different answers and the verdict says which.
-	dep, depErr := c.findOperatorDeployment(ctx)
-	c.operatorRows(ctx, rep, dep, depErr)
+	// and the searched scope are threaded rather than swallowed, because "could not be
+	// read", "not in the operator namespace, and the rest could not be listed" and "no
+	// operator installed" are different answers and the verdict says which.
+	dep, onlyNS, depErr := c.findOperatorDeployment(ctx)
+	c.operatorRows(ctx, rep, dep, onlyNS, depErr)
 	c.storageRows(ctx, rep)
 }
 
@@ -436,10 +437,15 @@ const installKey = "operator install"
 // (watchBrokerNs: false), and it installs a SECOND operator when the running one lives in
 // another namespace.
 //
+// onlyNS is set when the cluster-wide list was refused and only that namespace was read.
+// Finding nothing there is then NOT "no operator is installed": an operator elsewhere is
+// invisible, and advising `operator deploy` as if it were certain would walk the reader
+// into installing a second one. So that answer is `unknown`, and names both ways out.
+//
 // Every verdict is [ OK ] or [WARN], never [FAIL]: an operator that does not cover this
 // namespace yet is fixed by the next command, and `validate` is also what you run before
 // installing anything.
-func (c *Cluster) operatorInstallRow(opNS string, dep *deploymentItem, depErr error) checkRow {
+func (c *Cluster) operatorInstallRow(opNS string, dep *deploymentItem, onlyNS string, depErr error) checkRow {
 	ns := c.ns()
 	if depErr != nil {
 		return warnRow(installKey, "unknown -- the operator Deployment could not be read: %v", depErr)
@@ -452,6 +458,11 @@ func (c *Cluster) operatorInstallRow(opNS string, dep *deploymentItem, depErr er
 	}
 	if desired := desiredWatch(c.Cfg); len(desired) > 0 && !containsString(desired, ns) {
 		fixes = append(fixes, fmt.Sprintf("add %q to kubernetes.operator.watchNamespaces (watchBrokerNs is false)", ns))
+	}
+	if dep == nil && onlyNS != "" {
+		return warnRow(installKey, "unknown -- no operator in %s, and the rest of the cluster could not be "+
+			"listed; if one runs in another namespace, set kubernetes.operator.namespace to it; otherwise %s",
+			onlyNS, installSteps(fixes, "installs it"))
 	}
 	if dep == nil {
 		return warnRow(installKey, "required -- no operator is installed; %s", installSteps(fixes, "installs it"))
@@ -536,10 +547,10 @@ func storageInfoRows(cfg *config.Config) []checkRow {
 
 // operatorRows takes the already-fetched operator Deployment rather than looking it up:
 // verifyRows reads it once for both the install verdict and the version row.
-func (c *Cluster) operatorRows(ctx context.Context, rep *checkReport, dep *deploymentItem, depErr error) {
+func (c *Cluster) operatorRows(ctx context.Context, rep *checkReport, dep *deploymentItem, onlyNS string, depErr error) {
 	ns, origin := c.operatorNSOrigin(ctx)
 	rep.operator = append(rep.operator, okRow("namespace", "%s (%s)", ns, origin))
-	rep.setInstall(c.operatorInstallRow(ns, dep, depErr))
+	rep.setInstall(c.operatorInstallRow(ns, dep, onlyNS, depErr))
 	if depErr != nil || dep == nil {
 		return
 	}

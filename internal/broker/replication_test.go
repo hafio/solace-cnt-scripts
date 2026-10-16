@@ -751,3 +751,208 @@ func TestRealApplianceCaptureMateRoundTrips(t *testing.T) {
 			"--- rendered ---\n%s\n--- capture ---\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
+
+// --- renderer and reader boundaries --------------------------------------------------
+
+// TestRenderMateRefusesAnUnknownTransportOnEitherPlatform proves a transport the schema
+// does not know is refused by name on BOTH renderers, rather than rendered as plain text by
+// default -- which would point replication at the right address over the wrong, unencrypted
+// transport. The refusal also stops the render, so no partial line list reaches the caller.
+func TestRenderMateRefusesAnUnknownTransportOnEitherPlatform(t *testing.T) {
+	m := MateConfig{VirtualRouterName: "v:b", Endpoints: []config.ReplEndpoint{
+		{Host: "h", Port: 55443, Transport: "encrypted"},
+	}}
+	for _, bt := range []BrokerType{BrokerSoftware, BrokerAppliance} {
+		got, err := RenderMate(bt, m)
+		if err == nil || !strings.Contains(err.Error(), `"encrypted"`) {
+			t.Errorf("%s: RenderMate = %v, %v; want a refusal naming the transport", bt, got, err)
+		}
+		if got != nil {
+			t.Errorf("%s: a refused render must return no lines, got %v", bt, got)
+		}
+	}
+}
+
+// TestRenderMateApplianceRefusesTwoHostsWhoseTransportsDiffer is the other half of the
+// appliance's one-address rule. The two-hosts case in TestRenderMateApplianceRefusesUnrenderable
+// trips the one-port-per-transport check first, because both of its endpoints are ssl. Here the
+// transports differ, so only the host count can refuse it -- and it must, naming every host,
+// since silently keeping one would point replication at an address the operator never chose
+// for that transport.
+func TestRenderMateApplianceRefusesTwoHostsWhoseTransportsDiffer(t *testing.T) {
+	m := MateConfig{VirtualRouterName: "v:b", Endpoints: []config.ReplEndpoint{
+		{Host: "host-a", Port: 55555},
+		{Host: "host-b", Port: 55443, Transport: config.TransportSSL},
+	}}
+	_, err := RenderMate(BrokerAppliance, m)
+	if err == nil {
+		t.Fatal("an appliance reaches its mate at ONE address; two hosts must be refused")
+	}
+	for _, want := range []string{"ONE address", "2 distinct hosts", "host-a, host-b"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q must mention %q", err, want)
+		}
+	}
+}
+
+// TestRenderMateRemovalsApplianceClearsPlainTextWithTheBareForm covers the one appliance
+// removal with no transport word: the grammar has no `plain-text` keyword, so a bare
+// `no replication mate connect-port` IS the plain-text clear -- and it must clear only that,
+// not the compressed and ssl ports the wanted mate still carries.
+func TestRenderMateRemovalsApplianceClearsPlainTextWithTheBareForm(t *testing.T) {
+	have := mateAppliance()
+	want := MateConfig{VirtualRouterName: "v:appl-b", Endpoints: have.Endpoints[1:]}
+	got, err := RenderMateRemovals(BrokerAppliance, have, want)
+	wantLines(t, got, err, `no replication mate connect-port`)
+}
+
+// TestRenderMateRemovalsRefusesWhatItCannotRender covers the two states the removal grammar
+// cannot be written for: an endpoint whose transport this tool does not know, and a broker
+// type that was never read. Either is an error rather than a guess, since a removal line the
+// broker rejects leaves the old mate address in place with nothing saying so.
+func TestRenderMateRemovalsRefusesWhatItCannotRender(t *testing.T) {
+	odd := MateConfig{VirtualRouterName: "v:b", Endpoints: []config.ReplEndpoint{
+		{Host: "h", Port: 55443, Transport: "encrypted"},
+	}}
+	if _, err := RenderMateRemovals(BrokerSoftware, odd, MateConfig{VirtualRouterName: "v:b"}); err == nil ||
+		!strings.Contains(err.Error(), `"encrypted"`) {
+		t.Errorf("an endpoint with an unknown transport must be refused by name, got %v", err)
+	}
+
+	have := mateSoftware()
+	want := MateConfig{VirtualRouterName: "v:broker-b", Endpoints: have.Endpoints[:1]}
+	got, err := RenderMateRemovals(BrokerUnknown, have, want)
+	if err == nil || !strings.Contains(err.Error(), "unknown broker type") {
+		t.Errorf("RenderMateRemovals without a broker type = %v, %v; want a refusal", got, err)
+	}
+}
+
+// TestParseShowReplicationRejectsAnUnreadableAddressOrPort covers the reports that carry an
+// address or port this reader cannot make sense of. Each must fail naming what it saw rather
+// than yield a mate with a silently missing endpoint -- a caller would then converge the
+// broker onto a smaller mate than the one it reported.
+func TestParseShowReplicationRejectsAnUnreadableAddressOrPort(t *testing.T) {
+	cases := []struct {
+		name string
+		bt   BrokerType
+		in   string
+		want string
+	}{
+		{"software continuation line is not host:port", BrokerSoftware,
+			"Replication Mate:    v:broker-b\n    SSL:    broker-b:55443\n            not-an-address\n",
+			"which is not host:port"},
+		{"software port is not a number", BrokerSoftware,
+			"Replication Mate:    v:broker-b\n    SSL:    broker-b:abc\n",
+			"whose port is not a number"},
+		{"appliance port is not a number", BrokerAppliance,
+			"Replication Mate:   v:appl-b\n  Connect-Via:   10.0.0.9\n  Connect-Ports:\n    Plain Text:   fifty\n",
+			`"fifty" as the Plain Text port`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseShowReplication(tc.bt, []byte(tc.in))
+			if err == nil {
+				t.Fatalf("parsed to %+v, want an error containing %q", got, tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseShowReplicationApplianceSkipsAnUnlabelledPortLine proves a line with no label
+// inside Connect-Ports is neither an error nor the end of the group: the ports after it are
+// still read. Treating it as the end would drop a configured transport without a word.
+func TestParseShowReplicationApplianceSkipsAnUnlabelledPortLine(t *testing.T) {
+	const report = "Replication Mate:   v:appl-b\n  Connect-Via:   10.0.0.9\n  Connect-Ports:\n" +
+		"    (none configured)\n    SSL:   55443\n"
+	got, err := ParseShowReplication(BrokerAppliance, []byte(report))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want := []config.ReplEndpoint{{Host: "10.0.0.9", Port: 55443, Transport: config.TransportSSL}}
+	if !SameEndpoints(got.Endpoints, want) {
+		t.Errorf("endpoints = %+v, want %+v: a line with no label is not the end of the group",
+			got.Endpoints, want)
+	}
+}
+
+// TestParseVPNReplicationRejectsTooFewColumns proves a table with only a name and one flag
+// column is refused, not read: the admin state and the role are both needed, and reading one
+// of them out of a two-column table would report it as the other.
+func TestParseVPNReplicationRejectsTooFewColumns(t *testing.T) {
+	_, err := ParseVPNReplication([]byte("Message VPN  A\n-----------  -\ndefault      U\n"))
+	if err == nil || !strings.Contains(err.Error(), "2 columns") {
+		t.Errorf("err = %v, want it to say the report has 2 columns where 3 are the minimum", err)
+	}
+}
+
+// TestParseVPNReplicationToleratesAHeaderShorterThanTheRule proves a header line that stops
+// before the rule's last columns is read as having no flag columns there -- the refusal an
+// operator can act on -- rather than panicking while slicing past the end of the header.
+func TestParseVPNReplicationToleratesAHeaderShorterThanTheRule(t *testing.T) {
+	_, err := ParseVPNReplication([]byte("Message VPN\n-----------  - - -\ndefault      U A -\n"))
+	if err == nil || !strings.Contains(err.Error(), "no A (Admin State)") {
+		t.Errorf("err = %v, want the missing-columns refusal for a header that stops short", err)
+	}
+}
+
+// TestParseVPNReplicationSkipsARowWithNoName proves a row whose name column is blank is not
+// a VPN. Its flags are real and its columns line up, so the length and gutter checks both
+// pass -- only the empty name says it is a wrapped fragment, and a VPN keyed by "" would be
+// quoted into a CLI script as an operand that names nothing.
+func TestParseVPNReplicationSkipsARowWithNoName(t *testing.T) {
+	const head = "Message VPN                      A C B R Q S M T\n" +
+		"-------------------------------- - - - - - - - -\n"
+	nameless := strings.Repeat(" ", 33) + "U A - D D N Y A\n"
+	defaultRow := "default" + strings.Repeat(" ", 26) + "U A - D D N Y A\n"
+	in := head + nameless + defaultRow
+
+	got, err := ParseVPNReplication([]byte(in))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("got %+v, want only default: a row whose name column is blank is not a VPN", got)
+	}
+	if got["default"] != (VPNRepl{Admin: AdminEnabled, Role: RoleActive, Queue: QueueDown}) {
+		t.Errorf("default = %+v", got["default"])
+	}
+}
+
+// TestParseVPNReplicationRejectsABlankFlag proves an empty flag cell is a refusal, not a
+// default. The cell is one character wide or it is not a flag at all, and guessing it
+// disabled would let a switch skip a VPN it cannot see.
+func TestParseVPNReplicationRejectsABlankFlag(t *testing.T) {
+	row := "default" + strings.Repeat(" ", 9) + "A\n"
+	in := "Message VPN   A C\n-----------   - -\n" + row
+
+	_, err := ParseVPNReplication([]byte(in))
+	if err == nil || !strings.Contains(err.Error(), `reports admin state ""`) {
+		t.Errorf("err = %v, want a refusal naming the blank admin state", err)
+	}
+}
+
+// TestGutterClearAndSliceSpanBoundaries covers the column helpers' edges, which the table
+// parser's own length checks keep a real report from ever reaching -- so nothing else
+// exercises them until a report is shaped to slip past those checks. A first column has no
+// gutter, a column that starts past the end of the line cannot be a column of it, and the
+// last column of a short row is cut at the line's end rather than read past it.
+func TestGutterClearAndSliceSpanBoundaries(t *testing.T) {
+	if !gutterClear("anything", colSpan{0, 3}) {
+		t.Error("the first column starts at 0 and has no gutter to inspect")
+	}
+	if gutterClear("ab", colSpan{5, 6}) {
+		t.Error("a column starting past the end of the line is not a column of that line")
+	}
+	if !gutterClear("a b", colSpan{2, 3}) || gutterClear("ab", colSpan{1, 2}) {
+		t.Error("the character before a column must be a space for it to be a column of the row")
+	}
+	if got := sliceSpan("abc", colSpan{5, 7}); got != "" {
+		t.Errorf("sliceSpan past the end = %q, want empty", got)
+	}
+	if got := sliceSpan("abcdef", colSpan{4, 9}); got != "ef" {
+		t.Errorf("sliceSpan of a short last column = %q, want it cut at the end of the line", got)
+	}
+}
