@@ -475,6 +475,58 @@ func validDNSLabel(field, value string) error {
 	return nil
 }
 
+// secretKeyRE is the charset Kubernetes allows in a Secret (or ConfigMap) data key.
+var secretKeyRE = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
+
+// validSecretKey checks one Secret data key against the rule the API itself applies
+// (IsConfigMapKey): that charset, at most the subdomain length, and neither '.' nor
+// anything starting with '..'. Unlike the DNS checks above it does not skip an empty
+// value -- its one caller has already required it.
+func validSecretKey(field, value string) error {
+	if len(value) > maxDNSSubdomainLen || !secretKeyRE.MatchString(value) ||
+		value == "." || strings.HasPrefix(value, "..") {
+		return fmt.Errorf("%s %q is invalid: must be a Kubernetes Secret data key -- letters, digits, "+
+			"'-', '_' and '.', not '.' and not starting with '..', at most %d characters",
+			field, value, maxDNSSubdomainLen)
+	}
+	return nil
+}
+
+// CheckSecretKeyRef holds one Kubernetes Secret reference -- the namespace, name and data
+// key a `kubectl get secret <name> -n <namespace> -o jsonpath={.data.<key>}` is built
+// from -- to the grammar the API gives each. A value outside it never names a Secret that
+// exists, and is worse than a failed read: a dash-led name or namespace is parsed by
+// kubectl as a flag (`-A`, `--kubeconfig=/x`), and the key is spliced into a jsonpath
+// expression. It is "config text must not choose what executes" applied to the
+// arguments rather than to argv[0], and like CheckCommand it is enforced twice from this
+// one definition: in Validate for replication.sites[].via.semp.passSecret, and again by
+// internal/k8s's secret reader immediately before argv is built.
+//
+// prefix is prepended verbatim to each value's name, so it carries its own separator:
+// Validate passes "replication.sites[1].via.semp.passSecret." and reports
+// "replication.sites[1].via.semp.passSecret.namespace", while the reader, which has no
+// field path, passes "secret " and reports "secret namespace".
+func CheckSecretKeyRef(prefix, namespace, name, key string) error {
+	for _, f := range []struct{ field, value string }{
+		{"namespace", namespace},
+		{"name", name},
+		{"key", key},
+	} {
+		if strings.TrimSpace(f.value) == "" {
+			return fmt.Errorf("%s%s must be set", prefix, f.field)
+		}
+	}
+	// A namespace is a single LABEL and a Secret name the looser SUBDOMAIN, the same
+	// split validateK8s makes for kubernetes.namespace and the Secret names it carries.
+	if err := validDNSLabel(prefix+"namespace", namespace); err != nil {
+		return err
+	}
+	if err := validDNSSubdomain(prefix+"name", name); err != nil {
+		return err
+	}
+	return validSecretKey(prefix+"key", key)
+}
+
 // maxPortNameLen is the Kubernetes Service port name limit -- shorter than the
 // general 63-character object-name bound above, which is why it gets its own
 // cap rather than sharing validDNSLabel's.
@@ -1141,14 +1193,9 @@ func validateReplViaSEMP(field string, s *ReplViaSEMP) error {
 			"so which value reaches the mate is never a precedence question", field)
 	}
 	if s.PassSecret != nil {
-		for _, f := range []struct{ key, value string }{
-			{"namespace", s.PassSecret.Namespace},
-			{"name", s.PassSecret.Name},
-			{"key", s.PassSecret.Key},
-		} {
-			if strings.TrimSpace(f.value) == "" {
-				return fmt.Errorf("%s.via.semp.passSecret.%s must be set", field, f.key)
-			}
+		if err := CheckSecretKeyRef(field+".via.semp.passSecret.", s.PassSecret.Namespace,
+			s.PassSecret.Name, s.PassSecret.Key); err != nil {
+			return err
 		}
 	}
 	// Same reasoning as validateCredentialChars: this value reaches a curl config on

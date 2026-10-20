@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -203,6 +204,92 @@ func TestValidateReplicationRejects(t *testing.T) {
 			want := strings.Join(strings.Fields(tc.want), " ")
 			if !strings.Contains(got, want) {
 				t.Errorf("error = %q, want it to mention %q", got, want)
+			}
+		})
+	}
+}
+
+// TestValidateReplicationPassSecretGrammar holds passSecret to the grammar Kubernetes gives
+// each value, because the three become kubectl argv and a jsonpath expression: a dash-led
+// name or namespace is parsed as a flag, and a key outside the data-key charset can close
+// the expression. Each refusal names the field path, the value and the rule. The accepted
+// cases sit at the grammar's legal edges, so a rule tightened past the API fails here too.
+func TestValidateReplicationPassSecretGrammar(t *testing.T) {
+	const (
+		label     = "must be a Kubernetes DNS-1123 label"
+		subdomain = "must be a Kubernetes DNS-1123 subdomain"
+		dataKey   = "must be a Kubernetes Secret data key"
+	)
+	type grammarCase struct {
+		field, value string
+		want         string // the rule the error names; "" means the value is accepted
+	}
+	cases := []grammarCase{
+		{"namespace", "-A", label},
+		{"namespace", "--kubeconfig=/x", label},
+		{"namespace", "Solace-DR", label},
+		{"namespace", "a/b", label},
+		// A namespace is one LABEL, so the dot a Secret name may carry is refused here.
+		{"namespace", "solace.dr", label},
+		{"namespace", "}", label},
+		{"namespace", "", "must be set"},
+		{"name", "-A", subdomain},
+		{"name", "--kubeconfig=/x", subdomain},
+		{"name", "DR-Creds", subdomain},
+		{"name", "a/b", subdomain},
+		{"name", "}", subdomain},
+		{"name", "  ", "must be set"},
+		{"key", "a/b", dataKey},
+		{"key", "}", dataKey},
+		{"key", ".", dataKey},
+		{"key", "..data", dataKey},
+		{"key", strings.Repeat("k", 254), dataKey},
+		{"key", "", "must be set"},
+		{"name", "prod.dr-creds", ""},
+		// A dash-led or mixed-case KEY is legal: Kubernetes accepts it, and it reaches
+		// only the jsonpath, never a flag position.
+		{"key", "-Admin_pass.v2", ""},
+		{"key", strings.Repeat("k", 253), ""},
+	}
+	for _, bc := range controlCharCases {
+		cases = append(cases,
+			grammarCase{"namespace", bc.value, label},
+			grammarCase{"name", bc.value, subdomain},
+			grammarCase{"key", bc.value, dataKey})
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%s %.12q", tc.field, tc.value), func(t *testing.T) {
+			ps := ReplPassSecret{Namespace: "solace-dr", Name: "dr-creds", Key: "username_admin_password"}
+			switch tc.field {
+			case "namespace":
+				ps.Namespace = tc.value
+			case "name":
+				ps.Name = tc.value
+			case "key":
+				ps.Key = tc.value
+			}
+			r := validReplication()
+			r.Sites[1].Via.SEMP.PassEnv = ""
+			r.Sites[1].Via.SEMP.PassSecret = &ps
+			err := replConfig(r).Validate(K8s)
+			if tc.want == "" {
+				if err != nil {
+					t.Errorf("passSecret.%s %q is legal Kubernetes and must be accepted: %v", tc.field, tc.value, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("passSecret.%s %q must be refused", tc.field, tc.value)
+			}
+			path := "replication.sites[1].via.semp.passSecret." + tc.field
+			want := []string{path, tc.want}
+			if strings.TrimSpace(tc.value) != "" {
+				want = append(want, fmt.Sprintf("%s %q is invalid", path, tc.value))
+			}
+			for _, w := range want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error = %q, want it to name %q", err, w)
+				}
 			}
 		})
 	}

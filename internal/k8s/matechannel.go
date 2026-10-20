@@ -126,6 +126,13 @@ func ReadSecretKey(r engine.Runner, cfg *config.Config, site config.ReplSite,
 // directive. So a control character is refused here, naming its position and never the
 // value.
 func readSecretKey(r engine.Runner, cmd config.Command, namespace, name, key, whose string) (string, error) {
+	// Checked here as well as in Validate, from config's one definition: this reader is
+	// handed values straight from a *config.Config and must not assume Load ran -- the
+	// reason every executor re-runs the command guard. Unchecked, a dash-led name or
+	// namespace is a kubectl flag, and the key is spliced into the jsonpath below.
+	if err := config.CheckSecretKeyRef("secret ", namespace, name, key); err != nil {
+		return "", fmt.Errorf("refusing to read a secret for %s: %w", whose, err)
+	}
 	// The key is a JSON object member, so a name carrying a dot has to be escaped or
 	// jsonpath reads it as a path step and silently returns nothing.
 	jsonpath := fmt.Sprintf(`{.data.%s}`, strings.ReplaceAll(key, ".", `\.`))

@@ -1107,6 +1107,9 @@ function validateRepl(M, err) {
       const ways = [v.pass !== '', !!v.passEnv, !!(v.sns || v.sname || v.skey)].filter(Boolean).length;
       if (ways !== 1) err(f + '.via.semp', 'needs exactly one of pass, passEnv or passSecret');
       if ((v.sns || v.sname || v.skey) && !(v.sns && v.sname && v.skey)) err(f + '.via.semp.passSecret', 'needs namespace, name and key');
+      if (v.sns && (!dnsLabelRE.test(v.sns) || v.sns.length > 63)) err(f + '.via.semp.passSecret.namespace', `${goQuote(v.sns)}: a lowercase DNS label, at most 63 characters`);
+      if (v.sname && (!dnsSubdomainRE.test(v.sname) || v.sname.length > 253)) err(f + '.via.semp.passSecret.name', `${goQuote(v.sname)}: a lowercase DNS subdomain`);
+      if (v.skey && (!/^[-._a-zA-Z0-9]+$/.test(v.skey) || v.skey.length > 253 || v.skey === '.' || v.skey.startsWith('..'))) err(f + '.via.semp.passSecret.key', `${goQuote(v.skey)}: a Secret data key -- letters, digits, '-', '_' and '.', not '.' or starting with '..'`);
     }
   });
   if (vrns[0] && vrns[0] === vrns[1]) err('replication.sites', 'the two virtual router names must differ');

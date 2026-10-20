@@ -67,7 +67,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-90 test files, 1638 test functions. Three of those are not tests. Two are os/exec
+90 test files, 1641 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -78,10 +78,10 @@ launched from.
 
 | Package | Files | Tests |
 | --- | --- | --- |
-| internal/k8s | 20 | 280 |
+| internal/k8s | 20 | 282 |
 | internal/broker | 24 | 504 |
 | internal/cli | 13 | 257 |
-| internal/config | 16 | 240 |
+| internal/config | 16 | 241 |
 | internal/container | 8 | 196 |
 | internal/convert | 1 | 40 |
 | internal/render | 2 | 51 |
@@ -90,7 +90,7 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **90** | **1638** |
+| **Total** | **90** | **1641** |
 
 
 ## Coverage
@@ -366,7 +366,7 @@ type behind the platform CLI overrides and the execution guard that decides what
 `Command` may be, the scaling block that sizes the broker on every platform, and the
 platform vocabulary the CLI resolves against, the host-path rules every file-valued
 key is held to, the grammar every value written as-is into an artifact is held to, and
-the two storage stories a Kubernetes deployment may tell. 239 tests across 16 files.
+the two storage stories a Kubernetes deployment may tell. 241 tests across 16 files.
 
 ### command_test.go
 
@@ -731,6 +731,7 @@ generates one. `adminCfg(name, pass)` is the shared fixture.
 | `TestValidateReplicationValid` | The complete DR-pair fixture passes, so every rejection below fails for the reason it names rather than because the baseline was broken |
 | `TestValidateReplicationAbsent` | The whole `replication:` section is optional: most deployments have no DR pair, and an omitted block must not make every other command fail to load |
 | `TestValidateReplicationRejects` | Every way the block can be wrong, each message naming the field: not exactly 2 sites, a missing or duplicated `virtualRouterName`, missing/empty/overlapping `routerNames`, no endpoints, an empty host, a port outside 1-65535, `transport: encrypted` (refused by name, pointing at `ssl`), an unknown transport, three endpoints on one transport, a `via` declaring both mechanisms, each missing `via.kubernetes` field, `via.semp` without a host or with a bad port, zero or two credential sources, an incomplete `passSecret`, a nameless or duplicated VPN, and an `activeAt` naming nothing or naming a ROUTER name instead of a virtual-router name |
+| `TestValidateReplicationPassSecretGrammar` | `passSecret`'s three values become kubectl argv and a jsonpath, so each is held to its Kubernetes grammar at load: a dash-led, flag-shaped, uppercase, slashed, brace or control-character value is refused (a dotted namespace too, since a namespace is one label), as are a key of `.`, one starting with `..` and one over 253 characters, each message naming the field path, the value and the rule. The legal edges load -- a dotted name, a dash-led mixed-case key, a 253-character key |
 | `TestValidateReplicationEmptyViaAccepted` | A site with no `via` still loads. The block says how to reach a site when it is the MATE and only the switch command needs it, so requiring it at load would refuse a file that configures replication perfectly well for the local-only command |
 | `TestReplicationLocate` | A broker finds itself by ANY of its site's router names -- the HA backup node reports its own name, not the primary's -- and both non-happy paths are errors: no match prints what was read beside every declared name, and an overlap refuses rather than resolving to whichever site came first |
 | `TestSiteCommandGuarded` | A replication site's cluster CLI is re-checked when the command is fetched, not only at load: a binary off the kubernetes allowlist and one carrying a metacharacter are both refused, `Validate` names `replication.sites[0].via.kubernetes.command` rather than the top-level `kubernetes.command` (the two now differ only by prefix, which makes the distinction sharper than before the rename), a site reached over SEMP says so, and an unknown `virtualRouterName` is refused |
@@ -2015,7 +2016,7 @@ operator, day-2 ops, secrets, and the pod transport, plus the operator's watch-l
 algebra and the namespace occupancy gate, plus the mate channel that reaches a
 replication site in another cluster, and the Secret read that supplies a mate's
 password -- or this broker's own admin password, when the env file does not carry it.
-233 tests across 20 files.
+282 tests across 20 files.
 
 ### adminsecret_test.go
 
@@ -2030,6 +2031,7 @@ would leave nobody holding it. `operatorManagedCfg()` is `haCfg()` in the latter
 | `TestReadAdminPasswordArgvAndDecoding` | In both states the read is one key by jsonpath from that Secret, with this env file's cluster CLI, decoded with the trailing newline dropped |
 | `TestReadAdminPasswordNamesTheNextStep` | A failed read keeps kubectl's cause and adds the next step for whichever Secret it was -- create it, or deploy first -- and the `get secrets` permission it needs |
 | `TestReadAdminPasswordGuardsTheCommand` | The execution guard refuses a `kubernetes.command` outside the allowlist before anything runs |
+| `TestReadAdminPasswordRefusesAMalformedReference` | The admin read shares the mate reader's reference check: a flag-shaped `kubernetes.namespace` or `kubernetes.adminSecret` on a config that skipped Load is refused with no call made, naming the value |
 | `TestAdminPasswordPreflight` | The deploy guard refuses exactly two deploys -- a running broker whose CR names an admin Secret the new CR would drop, and this broker's data PVC with no broker -- and passes a named Secret (no calls), a broker already on the operator's Secret, a first deploy, and a runner that answers nothing. Its two `list` reads are permission-probed first, so a refused grant stops before any read with the preflight's own message; a CR that cannot be read (most often the CRD not installed yet) is not fatal alone, and the data claims decide, the refusal naming the failed read |
 
 ### matechannel_test.go
@@ -2050,6 +2052,7 @@ would leave nobody holding it. `operatorManagedCfg()` is `haCfg()` in the latter
 | `TestReadSecretKeyGuardsTheCommand` | The execution guard runs on this path too, and stops BEFORE exec: the read is built straight from a `*config.Config` and must not assume `Validate` ever ran |
 | `TestReadSecretKeyRefusesAControlCharacter` | A value read from a cluster skipped config's credential checks and goes on to a `curl -K -` config, where an embedded line break starts a new directive: refused naming the byte position and none of the value |
 | `TestReadSecretKeyRefusesALineBreakOnlyValue` | A value that was only a line break decodes to nothing once the trailing newline is dropped, and is refused rather than returned as an empty password that would fail a login and count towards the lockout |
+| `TestReadSecretKeyRefusesAMalformedReference` | The sink half of the `passSecret` grammar, since the reader must not assume Load ran: a dash-led, flag-shaped, uppercase, slashed, brace, newline or empty namespace, name or key is refused before argv is built -- no kubectl call at all -- naming the value and the site; a dotted name and a dash-led mixed-case key still read, the key verbatim in the jsonpath with its dot escaped |
 
 ### names_test.go
 

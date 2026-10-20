@@ -114,6 +114,37 @@ func TestReadAdminPasswordGuardsTheCommand(t *testing.T) {
 	}
 }
 
+// TestReadAdminPasswordRefusesAMalformedReference: the admin read goes through the same
+// reader as a mate's passSecret, so it gets the same refusal. Load already holds
+// kubernetes.namespace and kubernetes.adminSecret to these rules; this config skips Load,
+// which is the case the reader's own check exists for.
+func TestReadAdminPasswordRefusesAMalformedReference(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(*config.Config)
+		want  string
+	}{
+		{"namespace", func(c *config.Config) { c.K8s.Namespace = "--kubeconfig=/x" }, `secret namespace "--kubeconfig=/x" is invalid`},
+		{"adminSecret", func(c *config.Config) { c.K8s.AdminSecret = "-A" }, `secret name "-A" is invalid`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := operatorManagedCfg()
+			tc.apply(cfg)
+			r := &recRunner{out: []byte("czNjcmV0Cg==")}
+			_, err := ReadAdminPassword(r, cfg)
+			if err == nil {
+				t.Fatal("a reference kubectl would parse as a flag must be refused")
+			}
+			if len(r.calls) != 0 {
+				t.Errorf("the refusal must come before exec, but %d call(s) ran: %+v", len(r.calls), r.calls)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to name %q", err, tc.want)
+			}
+		})
+	}
+}
+
 const brokerListJSON = `{"items":[{"metadata":{"name":"dev-broker"},"spec":{"adminCredentialsSecret":%q}}]}`
 
 // TestAdminPasswordPreflight pins the deploy guard: it refuses exactly the two deploys

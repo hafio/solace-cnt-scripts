@@ -6,9 +6,9 @@
     "semantic_hash": ""
   },
   "solace-yaml-generator.html": {
-    "mtime": 1792145075.5247602,
-    "seen": 1792145099.8596625,
-    "ast_hash": "ca93a34ce83cdb92f15a05b80694ebbf",
+    "mtime": 1792485359.5264235,
+    "seen": 1792485433.4803512,
+    "ast_hash": "addeb1742abbb8b285511e7b160f82d4",
     "semantic_hash": ""
   },
   "CLAUDE.md": {
@@ -150,9 +150,9 @@
     "semantic_hash": ""
   },
   "internal/config/validate.go": {
-    "mtime": 1790787959.116416,
-    "seen": 1790818779.1356223,
-    "ast_hash": "4fc16bf60eb5fdfbd93bc406eaf465c0",
+    "mtime": 1792485235.483034,
+    "seen": 1792485433.4802392,
+    "ast_hash": "25c25b316d5942434999911280556f5c",
     "semantic_hash": ""
   },
   "internal/container/manager.go": {
@@ -408,9 +408,9 @@
     "semantic_hash": ""
   },
   "docs/test.md": {
-    "mtime": 1792476665.6380427,
-    "seen": 1792483338.3304517,
-    "ast_hash": "ab2a25638e8d90305f9ee48b36df5ce4",
+    "mtime": 1792485353.1466532,
+    "seen": 1792485433.4803445,
+    "ast_hash": "5a33e88c320397ea29bb377c55a2288c",
     "semantic_hash": ""
   },
   "internal/cli/commanddoc_test.go": {
@@ -642,9 +642,9 @@
     "semantic_hash": ""
   },
   "docs/configuration.md": {
-    "mtime": 1792476665.6340892,
-    "seen": 1792483338.3304472,
-    "ast_hash": "cddd1ae9abd8874bbee5a8514fe3890d",
+    "mtime": 1792485341.9602268,
+    "seen": 1792485433.4803402,
+    "ast_hash": "0510a26864e7ce2cbc7180904a5cd7e4",
     "semantic_hash": ""
   },
   "docs/developer.md": {
@@ -1032,9 +1032,9 @@
     "semantic_hash": ""
   },
   "internal/config/replication_test.go": {
-    "mtime": 1789542907.6363306,
-    "seen": 1789551828.0434055,
-    "ast_hash": "f90424d9f23807965477bf9f4b8131e4",
+    "mtime": 1792485305.4908183,
+    "seen": 1792485433.480229,
+    "ast_hash": "b7915c6e175fb63c87cf4ee8c0e773bc",
     "semantic_hash": ""
   },
   "internal/broker/replication.go": {
@@ -1062,15 +1062,15 @@
     "semantic_hash": ""
   },
   "internal/k8s/matechannel.go": {
-    "mtime": 1790234095.7300773,
-    "seen": 1790475033.3145373,
-    "ast_hash": "98cec533006b24b72a48d79cd0ed846a",
+    "mtime": 1792485235.6420357,
+    "seen": 1792485433.4802835,
+    "ast_hash": "30f3cd188b3e77b1c3ec9b90f7700ada",
     "semantic_hash": ""
   },
   "internal/k8s/matechannel_test.go": {
-    "mtime": 1790234212.9227302,
-    "seen": 1790475033.3145385,
-    "ast_hash": "9c7aef1e24baa4852b705f2a550a4f82",
+    "mtime": 1792485305.8068218,
+    "seen": 1792485433.4802845,
+    "ast_hash": "768347e2af041bd411c822f73a3c7a19",
     "semantic_hash": ""
   },
   "internal/broker/switchplan.go": {
@@ -1212,9 +1212,9 @@
     "semantic_hash": ""
   },
   "internal/k8s/adminsecret_test.go": {
-    "mtime": 1790234159.133872,
-    "seen": 1790475033.3145244,
-    "ast_hash": "483cfd63f83b6d319ed2a2bfe052f5f0",
+    "mtime": 1792485305.9628234,
+    "seen": 1792485433.48027,
+    "ast_hash": "b58686cf8eb9809325b06ec703f8c1fe",
     "semantic_hash": ""
   },
   "internal/config/artifactvalues.go": {

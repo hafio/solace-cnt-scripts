@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -408,6 +409,81 @@ func TestReadSecretKeyRefusesALineBreakOnlyValue(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "empty once its trailing line break is dropped") {
 		t.Errorf("err = %v, want an empty value refused rather than returned", err)
 	}
+}
+
+// TestReadSecretKeyRefusesAMalformedReference is the sink half of the passSecret grammar.
+// The reader is handed a *config.Config straight from code and must not assume Load ran,
+// so a value kubectl would parse as a flag, or one that would close the jsonpath, is
+// refused before argv is built -- no call at all, rather than a call that fails. The
+// grammar's legal edges still read.
+func TestReadSecretKeyRefusesAMalformedReference(t *testing.T) {
+	cases := []struct{ field, value string }{
+		{"namespace", "-A"},
+		{"namespace", "--kubeconfig=/x"},
+		{"namespace", "Solace-DR"},
+		{"namespace", "a/b"},
+		{"namespace", "}"},
+		{"namespace", "ns\nx"},
+		{"namespace", ""},
+		{"name", "-A"},
+		{"name", "--kubeconfig=/x"},
+		{"name", "DR-Creds"},
+		{"name", "a/b"},
+		{"name", "}"},
+		{"name", "creds\nx"},
+		{"name", ""},
+		{"key", "k}"},
+		{"key", "a/b"},
+		{"key", "k\nx"},
+		{"key", ""},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%s %q", tc.field, tc.value), func(t *testing.T) {
+			ref := config.ReplPassSecret{Namespace: "solace-dr", Name: "dr-creds", Key: "adminpass"}
+			switch tc.field {
+			case "namespace":
+				ref.Namespace = tc.value
+			case "name":
+				ref.Name = tc.value
+			case "key":
+				ref.Key = tc.value
+			}
+			r := &recRunner{out: []byte("czNjcmV0Cg==")}
+			_, err := ReadSecretKey(r, replCfg(t), replSite(), &ref)
+			if err == nil {
+				t.Fatalf("secret %s %q must be refused", tc.field, tc.value)
+			}
+			if len(r.calls) != 0 {
+				t.Errorf("the refusal must come before exec, but %d call(s) ran: %+v", len(r.calls), r.calls)
+			}
+			want := []string{"secret " + tc.field, `replication site "v:sol-dr"`}
+			if tc.value != "" {
+				want = append(want, fmt.Sprintf("secret %s %q is invalid", tc.field, tc.value))
+			}
+			for _, w := range want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error = %q, want it to name %q", err, w)
+				}
+			}
+		})
+	}
+
+	t.Run("legal edges", func(t *testing.T) {
+		r := &recRunner{out: []byte("czNjcmV0Cg==")}
+		ref := &config.ReplPassSecret{Namespace: "solace-dr", Name: "prod.dr-creds", Key: "-Admin_pass.v2"}
+		if _, err := ReadSecretKey(r, replCfg(t), replSite(), ref); err != nil {
+			t.Fatalf("a dotted name and a dash-led, mixed-case key are legal Kubernetes: %v", err)
+		}
+		if len(r.calls) != 1 {
+			t.Fatalf("made %d calls, want exactly one read: %+v", len(r.calls), r.calls)
+		}
+		if got := operandOf(r.calls[0].args, "secret"); got != "prod.dr-creds" {
+			t.Errorf("secret name = %q, want the dotted name passed through", got)
+		}
+		if got := operandOf(r.calls[0].args, "-o"); got != `jsonpath={.data.-Admin_pass\.v2}` {
+			t.Errorf("jsonpath = %q, want the key verbatim with its dot escaped", got)
+		}
+	})
 }
 
 func hasPrefixArgv(got, want []string) bool {
