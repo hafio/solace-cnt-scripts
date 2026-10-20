@@ -174,6 +174,13 @@ func (c *Config) validateScaling() error {
 			"broker CPU is fixed by the tier, so a value between tiers has no published sizing to apply",
 			scalingTierList, c.Scaling.MaxConnections)
 	}
+	// The broker takes exactly these two sizes. Any other value used to load clean and
+	// reach the CR or the container env as-is, failing only at the broker once the
+	// deploy was already under way.
+	if m := c.Scaling.MaxGuaranteedMsgMB; m != 10 && m != 30 {
+		return fmt.Errorf("scaling.maxGuaranteedMsgMB must be 10 or 30 (got: %d); the broker accepts "+
+			"only those two sizes, in MB, and 30 needs broker 10.25.1 or later", m)
+	}
 	if c.Scaling.MaxPool != 0 {
 		// Removed rather than aliased: silently forwarding it would leave two keys
 		// for one setting, and an env file setting both would have no defined

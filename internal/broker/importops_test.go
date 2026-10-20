@@ -1677,7 +1677,10 @@ func TestImportOpsImportApplyUploadFailureRunsNothing(t *testing.T) {
 // The completion marker is the only proof the driver ran to the end, so the parse refuses the
 // output as cut short: the apply fails naming the truncation, claims no rebuild, invents no
 // rejected chunk out of a missing marker, and the uploaded driver -- which carries the whole
-// configuration, credentials included -- is still removed from the broker.
+// configuration, credentials included -- is still removed from the broker. The chunk that
+// DID report is still in the result: here that is the teardown, so the report names "acme"
+// as torn down and not rebuilt. It used to report no VPN torn down at all, while acme had
+// in fact been emptied.
 func TestImportOpsImportApplyRefusesATruncatedDriverOutputAndRemovesTheDriver(t *testing.T) {
 	o, ft, plan := newTeardownApplyFixture(t)
 	base := ft.responder
@@ -1696,8 +1699,40 @@ func TestImportOpsImportApplyRefusesATruncatedDriverOutputAndRemovesTheDriver(t 
 	if res.Rebuilt || res.Failed != "" {
 		t.Errorf("result = %+v, want not rebuilt and no rejected chunk: a missing marker is not a rejection", res)
 	}
+	if strings.Join(res.TornDown, ",") != "acme" || len(res.Applied) != 0 {
+		t.Errorf("result = %+v, want the teardown that reported listed, and nothing applied after it", res)
+	}
 	if !ft.removed(importDriverDest) {
 		t.Errorf("the driver must be removed even when its output was cut short, runs = %v", ft.runs)
+	}
+}
+
+// TestImportOpsImportApplyKeepsTheExecFailureBesideATruncation: output cut short AND a
+// failed exec is what a dropped connection looks like. Before the parse kept the chunks
+// that reported, this read as "the driver did not run" and named the exec error; now the
+// truncation is the verdict, and the exec error -- the likely reason for it -- is kept in
+// the chain rather than dropped. A non-zero exit after a REJECTED chunk is a different
+// shape, and stays the rejection alone (the test above).
+func TestImportOpsImportApplyKeepsTheExecFailureBesideATruncation(t *testing.T) {
+	o, ft, plan := newTeardownApplyFixture(t)
+	base := ft.responder
+	dropped := errors.New("connection reset")
+	ft.responder = func(role config.Role, argv []string, in []byte) ([]byte, error) {
+		if len(argv) > 0 && argv[0] == "sh" {
+			return []byte(markerChunkOK + " 0\n"), dropped
+		}
+		return base(role, argv, in)
+	}
+
+	res, err := o.ImportApply(context.Background(), config.Primary, plan)
+	if !errors.Is(err, dropped) || !strings.Contains(err.Error(), "cut short") {
+		t.Fatalf("err = %v, want the truncation named and the exec failure kept", err)
+	}
+	if strings.Contains(err.Error(), "did not run") {
+		t.Errorf("err = %v, a driver that reported a chunk must not be described as not having run", err)
+	}
+	if strings.Join(res.TornDown, ",") != "acme" || res.Rebuilt {
+		t.Errorf("result = %+v, want the teardown that reported listed and no rebuild claimed", res)
 	}
 }
 

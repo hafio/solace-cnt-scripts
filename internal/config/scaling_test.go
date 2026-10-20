@@ -215,6 +215,41 @@ func TestValidateScalingTierRejectsOffTier(t *testing.T) {
 	}
 }
 
+// TestValidateScalingMaxGuaranteedMsgMBIsTenOrThirty: the broker takes exactly 10 or 30, so
+// anything else fails at load on every platform, naming both sizes -- it used to load clean
+// and fail only at the broker, after the deploy had started.
+func TestValidateScalingMaxGuaranteedMsgMBIsTenOrThirty(t *testing.T) {
+	for _, v := range []int{10, 30} {
+		c := validK8sConfig()
+		c.Scaling.MaxGuaranteedMsgMB = v
+		if err := c.Validate(K8s); err != nil {
+			t.Errorf("maxGuaranteedMsgMB %d rejected on k8s: %v", v, err)
+		}
+		for _, p := range []Platform{Docker, Podman} {
+			cc := validContainerConfig(p, "true")
+			cc.Scaling.MaxGuaranteedMsgMB = v
+			if err := cc.Validate(p); err != nil {
+				t.Errorf("maxGuaranteedMsgMB %d rejected on %s: %v", v, p, err)
+			}
+		}
+	}
+	for _, v := range []int{-10, 1, 20, 31, 100} {
+		const want = "scaling.maxGuaranteedMsgMB must be 10 or 30"
+		c := validK8sConfig()
+		c.Scaling.MaxGuaranteedMsgMB = v
+		if err := c.Validate(K8s); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("maxGuaranteedMsgMB %d on k8s: want %q, got: %v", v, want, err)
+		}
+		for _, p := range []Platform{Docker, Podman} {
+			cc := validContainerConfig(p, "true")
+			cc.Scaling.MaxGuaranteedMsgMB = v
+			if err := cc.Validate(p); err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("maxGuaranteedMsgMB %d on %s: want %q, got: %v", v, p, want, err)
+			}
+		}
+	}
+}
+
 func TestValidateScalingTierAcceptsEveryTier(t *testing.T) {
 	for _, v := range tierOrder {
 		c := validK8sConfig()

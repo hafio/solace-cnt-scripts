@@ -586,9 +586,10 @@ func TestValidateK8sValid(t *testing.T) {
 
 func TestValidateK8sMissingMandatory(t *testing.T) {
 	c := &Config{Redundancy: Redundancy{Enabled: "true"}} // no defaults applied; all mandatory empty
-	// The scaling tier is checked ahead of the platform switch, so a hand-built
-	// config has to name one to reach the mandatory-field message under test.
+	// The scaling tier and message size are checked ahead of the platform switch, so a
+	// hand-built config has to name both to reach the mandatory-field message under test.
 	c.Scaling.MaxConnections = 100
+	c.Scaling.MaxGuaranteedMsgMB = 10
 	err := c.Validate(K8s)
 	if err == nil {
 		t.Fatal("expected error for missing mandatory k8s fields")
@@ -1304,7 +1305,9 @@ func TestValidateDockerComposeCommand(t *testing.T) {
 
 func TestValidateUnknownPlatform(t *testing.T) {
 	c := &Config{Redundancy: Redundancy{Enabled: "true"}}
-	c.Scaling.MaxConnections = 100 // reach the platform switch, not the tier check
+	// Reach the platform switch, not the scaling checks ahead of it.
+	c.Scaling.MaxConnections = 100
+	c.Scaling.MaxGuaranteedMsgMB = 10
 	err := c.Validate(Platform("nope"))
 	if err == nil || !strings.Contains(err.Error(), "unknown platform") {
 		t.Errorf("expected unknown platform error, got: %v", err)

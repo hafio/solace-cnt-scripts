@@ -132,9 +132,9 @@
     "semantic_hash": ""
   },
   "internal/config/config_test.go": {
-    "mtime": 1790924884.7029257,
-    "seen": 1790929008.304721,
-    "ast_hash": "7c5fd0f5df17b438d80c3592c648269d",
+    "mtime": 1792483285.400652,
+    "seen": 1792483338.3303072,
+    "ast_hash": "608bc70898c0259144398ae90a931ceb",
     "semantic_hash": ""
   },
   "internal/config/load.go": {
@@ -330,9 +330,9 @@
     "semantic_hash": ""
   },
   ".github/workflows/ci.yml": {
-    "mtime": 1789542907.5181375,
-    "seen": 1789551828.0434892,
-    "ast_hash": "c34cff83d9029177669b649c3b4e47c7",
+    "mtime": 1792470884.515286,
+    "seen": 1792483338.3304408,
+    "ast_hash": "7721421edf3a06e7c94d8e2a543e781b",
     "semantic_hash": ""
   },
   "env/sample.yaml": {
@@ -348,9 +348,9 @@
     "semantic_hash": ""
   },
   ".github/workflows/tag.yml": {
-    "mtime": 1790918520.2428586,
-    "seen": 1790929008.3048513,
-    "ast_hash": "2b8965c8c6456afbe5f07b39b5619918",
+    "mtime": 1792470884.516286,
+    "seen": 1792483338.330442,
+    "ast_hash": "f57c5fce7e35583d905cf0231ec415f0",
     "semantic_hash": ""
   },
   "internal/tools/vulnjudge/main.go": {
@@ -408,9 +408,9 @@
     "semantic_hash": ""
   },
   "docs/test.md": {
-    "mtime": 1792469998.2423587,
-    "seen": 1792470253.781657,
-    "ast_hash": "ba4fcbb0885501398b15a160a11269f7",
+    "mtime": 1792476665.6380427,
+    "seen": 1792483338.3304517,
+    "ast_hash": "ab2a25638e8d90305f9ee48b36df5ce4",
     "semantic_hash": ""
   },
   "internal/cli/commanddoc_test.go": {
@@ -498,15 +498,15 @@
     "semantic_hash": ""
   },
   "internal/config/scaling.go": {
-    "mtime": 1790513123.3528242,
-    "seen": 1790514208.50989,
-    "ast_hash": "faa8cdf891d4b6439e689c7e511f13ac",
+    "mtime": 1792476624.797584,
+    "seen": 1792483338.3303382,
+    "ast_hash": "73325d0cd5008b3219611a7ee1586794",
     "semantic_hash": ""
   },
   "internal/config/scaling_test.go": {
-    "mtime": 1790783492.5743852,
-    "seen": 1790818779.1356182,
-    "ast_hash": "761626a24b82c473dcd38abff02dc013",
+    "mtime": 1792476625.0682337,
+    "seen": 1792483338.3303397,
+    "ast_hash": "6a56519a3d19c5816627af77cf746baa",
     "semantic_hash": ""
   },
   "internal/cli/completion.go": {
@@ -642,9 +642,9 @@
     "semantic_hash": ""
   },
   "docs/configuration.md": {
-    "mtime": 1792129719.0427492,
-    "seen": 1792132740.4574533,
-    "ast_hash": "a6d395578be4793722aaf0fc9a269cca",
+    "mtime": 1792476665.6340892,
+    "seen": 1792483338.3304472,
+    "ast_hash": "cddd1ae9abd8874bbee5a8514fe3890d",
     "semantic_hash": ""
   },
   "docs/developer.md": {
@@ -654,9 +654,9 @@
     "semantic_hash": ""
   },
   "docs/operations.md": {
-    "mtime": 1792469973.106077,
-    "seen": 1792470253.7816553,
-    "ast_hash": "104ade53cffeb2645da9f9a2ff65ee71",
+    "mtime": 1792476665.6337297,
+    "seen": 1792483338.330451,
+    "ast_hash": "41c8d2ab921465a0bef9ee8fed28df32",
     "semantic_hash": ""
   },
   "internal/abbrev/abbrev.go": {
@@ -924,9 +924,9 @@
     "semantic_hash": ""
   },
   "internal/broker/importops.go": {
-    "mtime": 1789542907.6293304,
-    "seen": 1789551828.043319,
-    "ast_hash": "26f2f1617c4d865f019a442913967c8a",
+    "mtime": 1792476507.1247022,
+    "seen": 1792483338.3302011,
+    "ast_hash": "a0792bf5f38f6812112128dbd2b5ad83",
     "semantic_hash": ""
   },
   "internal/broker/inject.go": {
@@ -966,9 +966,9 @@
     "semantic_hash": ""
   },
   "internal/broker/importops_test.go": {
-    "mtime": 1792138983.8135257,
-    "seen": 1792145099.8594627,
-    "ast_hash": "d8a9b301f915f11e6699405df1e1185f",
+    "mtime": 1792476546.9854295,
+    "seen": 1792483338.3302045,
+    "ast_hash": "8cdd4928750f772645dba4dbc154dc1e",
     "semantic_hash": ""
   },
   "internal/broker/inject_test.go": {
@@ -1002,15 +1002,15 @@
     "semantic_hash": ""
   },
   "internal/broker/driver.go": {
-    "mtime": 1789542907.6290307,
-    "seen": 1789551828.043316,
-    "ast_hash": "d58c2a187d1e0125e25effaa819d1364",
+    "mtime": 1792476507.1243346,
+    "seen": 1792483338.3301926,
+    "ast_hash": "15840f222c283f3772b7355b83a71c03",
     "semantic_hash": ""
   },
   "internal/broker/driver_test.go": {
-    "mtime": 1789542907.6290307,
-    "seen": 1789551828.0433173,
-    "ast_hash": "5f9b78c0edd4899b58909c74d248a128",
+    "mtime": 1792476546.9849195,
+    "seen": 1792483338.330196,
+    "ast_hash": "fa9cce6e83a86bd85b190ca4102ae8df",
     "semantic_hash": ""
   },
   "internal/broker/transform.go": {

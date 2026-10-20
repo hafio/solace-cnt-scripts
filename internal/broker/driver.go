@@ -247,6 +247,13 @@ var driverMarkerRE = regexp.MustCompile(`^(` + markerChunkOK + `|` + markerChunk
 // end, which the truncation check alone cannot see. Any of those reported as "fine"
 // would certify an import that did not happen -- a dropped OK for a TEARDOWN chunk in
 // particular would omit a destroyed VPN from the report.
+//
+// An error does not discard what WAS reported, though. Every marker read is a fact --
+// the driver prints a chunk's marker only once that chunk has run and its tail has been
+// checked -- so each error path hands back those results (reportedOnce) alongside the
+// verdict. Returning nil there made a truncated run report nothing applied and no VPN
+// torn down, while chunks had in fact run: the error said "unknown outcome", and the
+// report beside it claimed a known one.
 func parseDriverOutput(out []byte, chunks []chunk) ([]chunkResult, error) {
 	var (
 		results  []chunkResult
@@ -276,7 +283,7 @@ func parseDriverOutput(out []byte, chunks []chunk) ([]chunkResult, error) {
 		}
 		i, err := strconv.Atoi(m[2])
 		if err != nil || i < 0 || i >= len(chunks) {
-			return nil, fmt.Errorf("the import driver reported chunk %q, which is not one of the "+
+			return reportedOnce(results), fmt.Errorf("the import driver reported chunk %q, which is not one of the "+
 				"%d chunks it was given; treat this run as having an unknown outcome and re-export "+
 				"before retrying", m[2], len(chunks))
 		}
@@ -295,7 +302,7 @@ func parseDriverOutput(out []byte, chunks []chunk) ([]chunkResult, error) {
 	// A failing chunk stops the driver, so a run that ends without the terminator is
 	// only correct when the last thing reported was that failure.
 	if !done && results[len(results)-1].OK {
-		return nil, fmt.Errorf("the import driver's output ended after chunk %q with no completion "+
+		return reportedOnce(results), fmt.Errorf("the import driver's output ended after chunk %q with no completion "+
 			"marker, so it was cut short; the broker may be part-configured -- re-run the import",
 			results[len(results)-1].Name)
 	}
@@ -305,17 +312,32 @@ func parseDriverOutput(out []byte, chunks []chunk) ([]chunkResult, error) {
 	// must appear exactly once, in order.
 	if done {
 		if len(results) != len(chunks) {
-			return nil, fmt.Errorf("the import driver reported %d chunk result(s) but was given %d "+
+			return reportedOnce(results), fmt.Errorf("the import driver reported %d chunk result(s) but was given %d "+
 				"chunks; treat this run as having an unknown outcome and re-export before retrying",
 				len(results), len(chunks))
 		}
 		for i, r := range results {
 			if r.Index != i {
-				return nil, fmt.Errorf("the import driver reported chunk %d where chunk %d was "+
+				return reportedOnce(results), fmt.Errorf("the import driver reported chunk %d where chunk %d was "+
 					"expected next -- a marker was skipped, duplicated or reordered; treat this run "+
 					"as having an unknown outcome and re-export before retrying", r.Index, i)
 			}
 		}
 	}
 	return results, nil
+}
+
+// reportedOnce is what a failed parse still hands back: every chunk the driver reported,
+// once each, in the order reported. A repeated marker is kept once, so a duplicated line
+// cannot list a chunk's sections, or its torn-down VPN, twice.
+func reportedOnce(results []chunkResult) []chunkResult {
+	seen := make(map[int]bool, len(results))
+	var out []chunkResult
+	for _, r := range results {
+		if !seen[r.Index] {
+			seen[r.Index] = true
+			out = append(out, r)
+		}
+	}
+	return out
 }

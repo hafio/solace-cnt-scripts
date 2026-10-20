@@ -1279,6 +1279,13 @@ Nothing else from the apply comes back: a transcript of applying a configuration
 repeats every credential in it, so a successful chunk's output never leaves the
 broker, and the script deletes every file it wrote even if it is interrupted.
 
+When the driver's output itself is incomplete -- cut short, or with a chunk's marker
+missing or out of order -- the run fails as having an unknown outcome, but the report
+still lists every chunk the driver did report. A marker is printed only once its chunk
+has run and passed the transcript check, so a VPN the report names as torn down was
+torn down. If the exec also failed, as a dropped connection does, that error is named
+beside the truncation.
+
 Because a failure stops the run, **re-running the same import is the recovery** --
 the chunks that already applied are applied again, which is safe, and the one that
 failed is retried. Nothing resumes from a high-water mark.

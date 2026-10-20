@@ -883,6 +883,12 @@ func (o *Ops) runDriver(ctx context.Context, role config.Role, chunks []chunk) (
 	if parseErr != nil {
 		// Otherwise the parse failure is the more informative of the two: a non-zero
 		// status is the EXPECTED shape of a rejected chunk, so it explains nothing.
+		// Unless the output was cut short: a dropped connection is then the likely
+		// reason it was, and it was the only thing said before the parse kept the
+		// chunks that did report, so it is kept beside the parse failure.
+		if runErr != nil && !hasFailedChunk(results) {
+			return results, fmt.Errorf("%w (the exec itself also failed: %w)", parseErr, runErr)
+		}
 		return results, parseErr
 	}
 	if runErr != nil && !hasFailedChunk(results) {

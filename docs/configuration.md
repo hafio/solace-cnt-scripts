@@ -370,6 +370,8 @@ many, and it takes its own default from the same tier.
 
 Defaults are identical across platforms except `maxConnections` (100 on Kubernetes, 1000 on
 containers) and `maxSpoolUsageMB` (10000 on Kubernetes, 100000 on containers).
+`maxGuaranteedMsgMB` must be `10` or `30`, the only sizes the broker accepts (30 needs broker
+10.25.1 or later); any other value fails to load.
 
 ### Scaling tiers
 

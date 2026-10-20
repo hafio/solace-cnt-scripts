@@ -67,7 +67,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-90 test files, 1636 test functions. Three of those are not tests. Two are os/exec
+90 test files, 1638 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -79,9 +79,9 @@ launched from.
 | Package | Files | Tests |
 | --- | --- | --- |
 | internal/k8s | 20 | 280 |
-| internal/broker | 24 | 503 |
+| internal/broker | 24 | 504 |
 | internal/cli | 13 | 257 |
-| internal/config | 16 | 239 |
+| internal/config | 16 | 240 |
 | internal/container | 8 | 196 |
 | internal/convert | 1 | 40 |
 | internal/render | 2 | 51 |
@@ -90,7 +90,7 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **90** | **1636** |
+| **Total** | **90** | **1638** |
 
 
 ## Coverage
@@ -581,6 +581,7 @@ setting.
 | `TestRetiredContainerKeysAreRefusedOnEveryPlatform` | The placement: platform-independent, like the renamed `docker.runtime`, so a shared env file resolved to kubernetes still hears about a dead key in its docker block |
 | `TestRetiredContainerKeyFailsThroughLoad` | The decode-path sibling: the sentinel survives the whole pipeline -- strict decode, `ApplyDefaults`, home expansion, `Validate` -- rather than only a hand-built `Config`. This is the test that fails if the retired defaults are ever repointed at their constants instead of deleted |
 | `TestValidateScalingTierRejectsOffTier` | An off-tier value fails on all three platforms with a message listing the five tiers -- the check sits ahead of the platform switch because every platform now renders a CPU limit from it |
+| `TestValidateScalingMaxGuaranteedMsgMBIsTenOrThirty` | `10` and `30` validate on all three platforms and anything else (`-10`, `1`, `20`, `31`, `100`) fails naming both sizes -- the broker accepts only those, and an off value used to load clean and fail at the broker after the deploy began |
 | `TestValidateScalingTierAcceptsEveryTier` | Every tier validates cleanly on every platform, so the enum cannot be narrower than the table |
 | `TestValidateK8sMsgNodeCPURemoved` | `kubernetes.msgNode.cpu` still decodes but fails validation, so the operator gets a reason naming `scaling.maxConnections` and noting `mem` is unaffected, rather than a bare unknown-field error |
 | `TestValidateMaxPoolRemoved` | `maxPool` would name the same broker setting as `maxSpoolUsageMB` under a platform-specific name; it is rejected on all three platforms naming the replacement, and an unset (zero) value does not trip the sentinel |
@@ -1550,7 +1551,8 @@ broker at all.
 | `TestImportOpsImportApplyFailedTeardownCaptureStopsBeforeAnythingRuns` | A teardown that cannot be captured ends the import before any driver exists: the VPN is named in the error with the cause kept, nothing is reported torn down or rebuilt, and no driver is uploaded or exec'd |
 | `TestImportOpsImportApplyRefusesAChunkThatCarriesTheDriverDelimiter` | The injection boundary on the generated script: a chunk body containing the heredoc delimiter would end its own heredoc and run the rest as shell, so it is refused before anything is uploaded or exec'd |
 | `TestImportOpsImportApplyUploadFailureRunsNothing` | A driver that cannot be uploaded is exec'd by no one: the error names the step and keeps the cause |
-| `TestImportOpsImportApplyRefusesATruncatedDriverOutputAndRemovesTheDriver` | A transport that drops the tail of the driver's output after a chunk was reported applied: the completion marker is the only proof the driver ran to the end, so the parse refuses the output as cut short -- the apply fails naming the truncation, claims no rebuild, invents no rejected chunk out of a missing marker, and the uploaded driver, which carries the whole configuration with its credentials, is still removed from the broker |
+| `TestImportOpsImportApplyRefusesATruncatedDriverOutputAndRemovesTheDriver` | A transport that drops the tail of the driver's output after a chunk was reported applied: the completion marker is the only proof the driver ran to the end, so the parse refuses the output as cut short -- the apply fails naming the truncation, claims no rebuild, invents no rejected chunk out of a missing marker, and the uploaded driver, which carries the whole configuration with its credentials, is still removed from the broker. The teardown that did report is still in the result, so the report names the VPN as torn down and not rebuilt -- it used to name none while the VPN had been emptied |
+| `TestImportOpsImportApplyKeepsTheExecFailureBesideATruncation` | Output cut short AND a failed exec -- a dropped connection: the truncation is the verdict, the exec error stays in the chain (`errors.Is`) rather than being dropped, the driver is not described as not having run, and the teardown that reported is listed with no rebuild claimed |
 | `TestImportOpsImportApplyTreatsANonZeroExitAfterARejectedChunkAsTheRejection` | The shape a real rejection arrives in: the exec fails alongside a FAIL marker. That non-zero status is not worded as the driver not running or its own failure; the answer is the rejected chunk, named, with the broker's tail, after the teardown that did apply |
 | `TestImportOpsImportApplyDriverExitingNonZeroAfterEveryChunkIsItsOwnFailure` | The opposite reading of the same status: every chunk reported OK and the run still exited non-zero, so the driver's own run failed -- cause kept, everything reported applied still listed, and the import not declared rebuilt |
 
@@ -1925,8 +1927,8 @@ production broker, so there is no second code path a test could exercise instead
 | `TestRenderDriverRefusesABodyCarryingTheDelimiter` | A chunk containing the delimiter is refused: it would close its own heredoc and the remainder would execute as shell |
 | `TestRenderDriverCleansUpEveryChunk` | The `trap` removes every chunk and the temp transcript on EXIT/INT/TERM, so an interrupted import leaves no credential-bearing configuration in `cliscripts` |
 | `TestRenderDriverSanitisesChunkNamesInComments` | A newline in a chunk name (which is a message-VPN name, so operator-controlled) cannot escape its `#` comment and become code |
-| `TestParseDriverOutputOutcomes` | The marker protocol and every way it can be wrong: all-applied, a failure with detail (legitimately no completion marker, since the driver exits there), output cut short, no markers at all, and a marker naming a chunk that was never sent. The last three are ERRORS -- read as success they would certify an import that did not happen |
-| `TestParseDriverOutputDetectsGapsAndDuplicates` | What the terminator alone cannot catch: `SOLACE-UTIL-DONE` is not proof every chunk was reported, since a marker dropped or reordered in the MIDDLE still leaves the last result intact and the terminator present. Fewer results than chunks and a gap between reported chunks both error on the count mismatch; a chunk 0 marker reported twice (count matches, 2 results for 2 chunks) is the case that independently exercises the per-position check rather than the count check -- missing either would let a dropped OK for a TEARDOWN chunk omit a destroyed VPN from the report |
+| `TestParseDriverOutputOutcomes` | The marker protocol and every way it can be wrong: all-applied, a failure with detail (legitimately no completion marker, since the driver exits there), output cut short, no markers at all, and a marker naming a chunk that was never sent. The last three are ERRORS -- read as success they would certify an import that did not happen -- and each error still hands back the chunks that did report (none when there were no markers), because those ran and the report has to say so |
+| `TestParseDriverOutputDetectsGapsAndDuplicates` | What the terminator alone cannot catch: `SOLACE-UTIL-DONE` is not proof every chunk was reported, since a marker dropped or reordered in the MIDDLE still leaves the last result intact and the terminator present. Fewer results than chunks and a gap between reported chunks both error on the count mismatch; a chunk 0 marker reported twice (count matches, 2 results for 2 chunks) is the case that independently exercises the per-position check rather than the count check -- missing either would let a dropped OK for a TEARDOWN chunk omit a destroyed VPN from the report. Each error still hands back every chunk that reported, a gap's far side included, and a duplicated marker once |
 | `TestParseDriverOutputSuccessCarriesNoDetail` | A successful chunk's result carries no transcript text; only a failure may, because applying a configuration repeats every credential in it |
 | `TestKeywordPatternEscapesEachPhrase` | Each failure phrase is regex-escaped before it reaches `grep -E`, so a keyword with a metacharacter cannot match the wrong thing |
 | `TestShQuoteHandlesASingleQuote` | POSIX single-quoting of an embedded quote (close, escape, reopen) -- there is no escape character inside single quotes |

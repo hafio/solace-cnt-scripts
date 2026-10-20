@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -153,6 +154,7 @@ func TestParseDriverOutputOutcomes(t *testing.T) {
 		wantLen  int
 		wantOK   []bool
 		wantDetl string
+		wantIdx  []int // on an error: the chunks still handed back, by index
 	}{
 		{
 			name:    "every chunk applied",
@@ -175,6 +177,7 @@ func TestParseDriverOutputOutcomes(t *testing.T) {
 			name:    "output cut short after a success",
 			out:     "SOLACE-UTIL-CHUNK-OK 0\n",
 			wantErr: "cut short",
+			wantIdx: []int{0},
 		},
 		{
 			name:    "no markers at all",
@@ -185,6 +188,7 @@ func TestParseDriverOutputOutcomes(t *testing.T) {
 			name:    "a marker naming a chunk that does not exist",
 			out:     "SOLACE-UTIL-CHUNK-OK 0\nSOLACE-UTIL-CHUNK-OK 7\nSOLACE-UTIL-DONE\n",
 			wantErr: "not one of the",
+			wantIdx: []int{0},
 		},
 	}
 
@@ -194,6 +198,11 @@ func TestParseDriverOutputOutcomes(t *testing.T) {
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err = %v, want it to mention %q", err, tc.wantErr)
+				}
+				// An error is the verdict on the run, not on the markers that did
+				// arrive: those chunks ran, and the report has to be able to say so.
+				if idx := resultIndexes(got); !reflect.DeepEqual(idx, tc.wantIdx) {
+					t.Errorf("results handed back = %v, want chunks %v", idx, tc.wantIdx)
 				}
 				return
 			}
@@ -232,6 +241,7 @@ func TestParseDriverOutputDetectsGapsAndDuplicates(t *testing.T) {
 		chunks  []chunk
 		out     string
 		wantErr string
+		wantIdx []int // the chunks still handed back, once each, as reported
 	}{
 		{
 			// The terminator arrives, but only 2 of the 3 given chunks ever reported.
@@ -239,6 +249,7 @@ func TestParseDriverOutputDetectsGapsAndDuplicates(t *testing.T) {
 			chunks:  []chunk{{Name: "one"}, {Name: "two"}, {Name: "three"}},
 			out:     "SOLACE-UTIL-CHUNK-OK 0\nSOLACE-UTIL-CHUNK-OK 1\nSOLACE-UTIL-DONE\n",
 			wantErr: "reported 2 chunk result(s) but was given 3",
+			wantIdx: []int{0, 1},
 		},
 		{
 			// Chunk 1's marker never arrived and chunk 2's did: a gap, not a
@@ -248,6 +259,7 @@ func TestParseDriverOutputDetectsGapsAndDuplicates(t *testing.T) {
 			chunks:  []chunk{{Name: "one"}, {Name: "two"}, {Name: "three"}},
 			out:     "SOLACE-UTIL-CHUNK-OK 0\nSOLACE-UTIL-CHUNK-OK 2\nSOLACE-UTIL-DONE\n",
 			wantErr: "reported 2 chunk result(s) but was given 3",
+			wantIdx: []int{0, 2},
 		},
 		{
 			// Chunk 0's marker arrived twice and chunk 1's never did. The count
@@ -257,17 +269,33 @@ func TestParseDriverOutputDetectsGapsAndDuplicates(t *testing.T) {
 			chunks:  []chunk{{Name: "one"}, {Name: "two"}},
 			out:     "SOLACE-UTIL-CHUNK-OK 0\nSOLACE-UTIL-CHUNK-OK 0\nSOLACE-UTIL-DONE\n",
 			wantErr: "chunk 0 where chunk 1 was expected",
+			wantIdx: []int{0},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := parseDriverOutput([]byte(tc.out), tc.chunks)
+			got, err := parseDriverOutput([]byte(tc.out), tc.chunks)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("err = %v, want it to mention %q", err, tc.wantErr)
 			}
+			// The chunks that DID report still come back -- a gap's far side
+			// included, since its marker is as much a fact as the near side's --
+			// and a duplicated marker comes back once, so nothing is listed twice.
+			if idx := resultIndexes(got); !reflect.DeepEqual(idx, tc.wantIdx) {
+				t.Errorf("results handed back = %v, want chunks %v", idx, tc.wantIdx)
+			}
 		})
 	}
+}
+
+// resultIndexes is the chunk indexes of results, in order; nil for none.
+func resultIndexes(results []chunkResult) []int {
+	var idx []int
+	for _, r := range results {
+		idx = append(idx, r.Index)
+	}
+	return idx
 }
 
 // TestParseDriverOutputSuccessCarriesNoDetail pins the credential rule from the
