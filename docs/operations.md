@@ -341,8 +341,15 @@ it reads the password from the admin Secret the broker uses -- the referenced
 helper scripts it uploads on every path out, and the in-broker archive once it is safely
 downloaded; a cleanup failure only warns rather than failing the collection, but a failed
 DOWNLOAD fails the command and leaves the bundle on the broker, naming the path to fetch it
-from -- deleting it there would destroy the only copy of what was asked for. `--pod` narrows
-collection to one node. `cli-script` and `shell-script` take the script's bare file name and
+from -- deleting it there would destroy the only copy of what was asked for. The bundle and
+the show-command zip are retrieved independently, so a failed zip still fetches the bundle;
+every node is attempted, and the failures are reported together at the end, naming each
+node and where what was collected went. `cli -Apes` exits 0 when the broker refuses
+gather-diagnostics, so a run whose output reports no saved bundle warns for that node
+instead of passing in silence. A reported bundle path that is not `logs/<file>`, or a host
+name that is not a plain name, is refused rather than used in a local file name or an
+in-broker `rm -rf`. A `cli-out` left by an earlier failed run is cleared before the new
+output is zipped. `--pod` narrows collection to one node. `cli-script` and `shell-script` take the script's bare file name and
 read it from `broker.cliScriptsDir` only -- the current directory is never searched, so
 `setup.cli` and `./setup.cli` cannot mean two different files. Any path is refused, even one
 into that folder or a subfolder of it: the in-broker name is the base name, so `a/x.cli` and

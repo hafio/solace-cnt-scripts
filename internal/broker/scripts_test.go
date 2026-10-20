@@ -276,6 +276,12 @@ func TestZipConfigsScript(t *testing.T) {
 	if !strings.Contains(got, "zip gather-configs.zip -q -r cli-out/*") {
 		t.Errorf("zipConfigsScript missing the zip command: %q", got)
 	}
+	// A cli-out left by an earlier failed run must go first: the mv would nest into it
+	// and the zip would carry that run's output as well.
+	rmAt, mvAt := strings.Index(got, "rm -rf cli-out gather-configs.zip"), strings.Index(got, "mv configs/cliout cli-out")
+	if rmAt < 0 || mvAt < 0 || rmAt > mvAt {
+		t.Errorf("zipConfigsScript must clear a stale cli-out before the mv: %q", got)
+	}
 }
 
 // TestEveryScriptTurnsPagingOffAfterHome is the invariant behind the parsers.

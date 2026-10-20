@@ -329,6 +329,8 @@ func TestDiagnosticsTwoRolesNoBundle(t *testing.T) {
 		return nil, nil
 	}}
 	o, _ := newTestOps(t, &config.Config{}, ft)
+	var logs []string
+	o.Log = func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
 	if err := o.Diagnostics(context.Background(), dest, "20260731", 5, config.Primary, config.Backup); err != nil {
 		t.Fatalf("Diagnostics error: %v", err)
 	}
@@ -339,6 +341,14 @@ func TestDiagnosticsTwoRolesNoBundle(t *testing.T) {
 	for _, d := range ft.downloads {
 		if d.remote != JailRoot+"/gather-configs.zip" {
 			t.Errorf("unexpected download remote %q", d.remote)
+		}
+	}
+	// `cli -Apes` exits 0 over a refused gather-diagnostics, so the missing line is the
+	// only sign -- and it used to pass in silence. Each node now warns by name.
+	joined := strings.Join(logs, "\n")
+	for _, role := range []config.Role{config.Primary, config.Backup} {
+		if !strings.Contains(joined, "[WARN] gather-diagnostics on the "+role.Word()+" node saved no bundle") {
+			t.Errorf("want a warning that the %s node saved no bundle, got %v", role.Word(), logs)
 		}
 	}
 }

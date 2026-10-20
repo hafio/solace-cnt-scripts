@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -288,10 +289,18 @@ func (o *Ops) Diagnostics(ctx context.Context, destDir, ts string, days int, rol
 	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		return fmt.Errorf("create diagnostics dir %q: %w", destDir, err)
 	}
+	// Every node is attempted. Each node's collection is independent, and returning on the
+	// first failure meant a refused primary left the backup and monitor ungathered -- on an
+	// HA group, the nodes most likely to hold the evidence.
+	var errs []error
 	for _, role := range roles {
 		if err := o.gatherNode(ctx, role, destDir, ts, days); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("%s node: %w", role.Word(), err))
 		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("diagnostics incomplete on %d of %d node(s); what was collected is in %s:\n%w",
+			len(errs), len(roles), destDir, errors.Join(errs...))
 	}
 	o.logf("Diagnostics written to %s", destDir)
 	return nil
@@ -324,38 +333,69 @@ func (o *Ops) gatherNode(ctx context.Context, role config.Role, destDir, ts stri
 	if err != nil {
 		return err
 	}
+	// The two archives are retrieved independently. The show-command zip used to come
+	// first and return on any failure, which left the diagnostics bundle -- the one this
+	// command exists for -- on the broker with nothing naming it.
+	return errors.Join(o.fetchConfigs(ctx, role, zipPath, destDir, ts), o.fetchBundle(ctx, role, destDir, string(out)))
+}
+
+// fetchConfigs zips the show-command output on the broker and downloads it as
+// gather-configs-<host>-<ts>.zip.
+func (o *Ops) fetchConfigs(ctx context.Context, role config.Role, zipPath, destDir, ts string) error {
 	if err := o.T.Run(ctx, role, "bash", zipPath); err != nil {
-		return err
+		return fmt.Errorf("zip the show-command output on the %s node: %w", role.Word(), err)
 	}
 
 	hostBytes, err := o.T.Output(ctx, role, "hostname")
 	if err != nil {
 		return err
 	}
+	// The host name comes from the broker and becomes part of a local file name, so it
+	// is held to the same plain-name rule as the bundle path below. Empty stays allowed,
+	// as it always was: it only shortens the name and cannot leave destDir.
 	host := strings.TrimSpace(string(hostBytes))
+	if err := validName("broker hostname", host); host != "" && err != nil {
+		return fmt.Errorf("name the show-command zip from the %s node: %w", role.Word(), err)
+	}
 	zipName := fmt.Sprintf("gather-configs-%s-%s.zip", host, ts)
 	if err := o.T.Download(ctx, role, JailRoot+"/gather-configs.zip", filepath.Join(destDir, zipName)); err != nil {
 		return err
 	}
-	if err := o.T.Run(ctx, role, "rm", "-rf", JailRoot+"/cli-out", JailRoot+"/gather-configs.zip"); err != nil {
-		return err
-	}
+	return o.T.Run(ctx, role, "rm", "-rf", JailRoot+"/cli-out", JailRoot+"/gather-configs.zip")
+}
 
-	if diag := field(string(out), "Diagnostics saved"); diag != "" {
-		local := strings.TrimPrefix(diag, "logs/")
-		remote := JailRoot + "/" + diag
-		// A FAILED download must not be followed by the delete. The bundle on the broker
-		// is the only copy, and this command exists to retrieve it -- removing it after
-		// the retrieval failed destroys exactly what was asked for, and the old code did
-		// that unconditionally while warning, then returned nil so nothing downstream
-		// noticed. Now the bundle stays put and the error names where to find it.
-		if err := o.T.Download(ctx, role, remote, filepath.Join(destDir, local)); err != nil {
-			return fmt.Errorf("download the diagnostics bundle from %q: %w\n"+
-				"(it is kept on the broker at %s -- retrieve it by hand before re-running)", role, err, remote)
-		}
-		if err := o.T.Run(ctx, role, "rm", "-rf", remote); err != nil {
-			o.progress().Warn("failed to remove the downloaded diagnostics bundle on %q: %v", role, err)
-		}
+// fetchBundle downloads the bundle gather-diagnostics reported in out, then removes it
+// from the broker.
+func (o *Ops) fetchBundle(ctx context.Context, role config.Role, destDir, out string) error {
+	diag := field(out, "Diagnostics saved")
+	if diag == "" {
+		// `cli -Apes` exits 0 over a refused line, so a missing line is the only sign the
+		// broker declined gather-diagnostics. It was silent: the run reported success.
+		o.progress().Warn("gather-diagnostics on the %s node saved no bundle -- only the show-command output was "+
+			"collected; run gather-diagnostics in the broker CLI by hand to see why", role.Word())
+		return nil
+	}
+	// The path comes from broker output and reaches both a local file name and an
+	// `rm -rf` on the broker, so it is held to the one shape gather-diagnostics writes:
+	// a plain file under logs/. `logs/../x` would land outside destDir, and `logs/`
+	// alone would remove the broker's whole logs directory.
+	local, ok := strings.CutPrefix(diag, "logs/")
+	if !ok || validName("diagnostics bundle", local) != nil {
+		return fmt.Errorf("gather-diagnostics on the %s node reported its bundle at %q, which is not a logs/<file> path; "+
+			"it was neither downloaded nor removed -- retrieve it from the broker by hand", role.Word(), diag)
+	}
+	remote := JailRoot + "/" + diag
+	// A FAILED download must not be followed by the delete. The bundle on the broker
+	// is the only copy, and this command exists to retrieve it -- removing it after
+	// the retrieval failed destroys exactly what was asked for, and the old code did
+	// that unconditionally while warning, then returned nil so nothing downstream
+	// noticed. Now the bundle stays put and the error names where to find it.
+	if err := o.T.Download(ctx, role, remote, filepath.Join(destDir, local)); err != nil {
+		return fmt.Errorf("download the diagnostics bundle from %q: %w\n"+
+			"(it is kept on the broker at %s -- retrieve it by hand before re-running)", role, err, remote)
+	}
+	if err := o.T.Run(ctx, role, "rm", "-rf", remote); err != nil {
+		o.progress().Warn("failed to remove the downloaded diagnostics bundle on %q: %v", role, err)
 	}
 	return nil
 }

@@ -67,7 +67,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-90 test files, 1633 test functions. Three of those are not tests. Two are os/exec
+90 test files, 1636 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -79,7 +79,7 @@ launched from.
 | Package | Files | Tests |
 | --- | --- | --- |
 | internal/k8s | 20 | 280 |
-| internal/broker | 24 | 500 |
+| internal/broker | 24 | 503 |
 | internal/cli | 13 | 257 |
 | internal/config | 16 | 239 |
 | internal/container | 8 | 196 |
@@ -90,7 +90,7 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **90** | **1633** |
+| **Total** | **90** | **1636** |
 
 
 ## Coverage
@@ -1418,7 +1418,7 @@ Branch coverage for the paths the happy-path tests in `broker_test.go` cannot re
 | `TestServerCertBundleReadError` | Unreadable cert/key files error |
 | `TestServerCertCAReadError` | An unreadable CA file errors |
 | `TestDomainCertsAcceptsAPathWithSpaces` | The certificate value is a full host path, not an in-broker filename and not a CLI operand, so a path with a space (already gated by `config.CheckHostPath` at load) must be ACCEPTED here, not rejected |
-| `TestDiagnosticsTwoRolesNoBundle` | Output with no "Diagnostics saved" line pulls only the configs zip, once per role |
+| `TestDiagnosticsTwoRolesNoBundle` | Output with no "Diagnostics saved" line pulls only the configs zip, once per role, and warns naming each node -- `cli -Apes` exits 0 over a refused gather-diagnostics, so that line is the only sign, and it used to pass in silence |
 | `TestDiagnosticsRunError` | A transport `Run` failure surfaces |
 | `TestLeaderReadError` | A failing `show redundancy` read is returned as is -- no poll retries it, nothing is asserted or shown |
 | `TestLeaderNotLocalActive` | "Check once": a node that is not Local Active (a standby primary, a primary with no Activity line, a standby backup) is refused after ONE read, with the transcript shown and a remedy worded for that node, and nothing is asserted |
@@ -1717,7 +1717,7 @@ Pins the generated broker CLI script text -- these strings are what the broker e
 | `TestParseVPNNamesKeepsAMultiWordName` | The name column's width is read from the rule rather than cut at a hardcoded column 32, and the whole column is the name rather than each whitespace field of it. `A VPN WITH LONG NAME AND SPACES` used to arrive as six VPNs matching nothing, so the real VPN's default client-username was never shut down and nothing said so |
 | `TestParseVPNNamesNoSeparator` | Output without a separator row yields no names |
 | `TestGatherConfigsScript` | Prefix, first show command, `gather-diagnostics` with days substituted, and one line per configured show |
-| `TestZipConfigsScript` | The zip command is present |
+| `TestZipConfigsScript` | The zip command is present, and a stale `cli-out` is cleared before the `mv` -- otherwise the mv nests into it and the zip carries an earlier failed run's output |
 | `TestEveryScriptTurnsPagingOffAfterHome` | Every script generator emits `no paging` immediately after every `home`. A paginated report re-prints its column header and rule partway down, and the rule then reads as a data row of all dashes -- which is how `show message-vpn * replication` grew a phantom VPN named after its own separator. The parsers tolerate a repeat as a backstop; turning paging off at the source is the fix. It walks every generator rather than the ones that came to mind, because the gap it closes was exactly a set of scripts written with `home` and without `no paging` |
 
 ### sections_test.go
@@ -1974,15 +1974,18 @@ because a hand-made input is exactly what missed these rules for so long.
 
 ### verify_ops_test.go
 
-The failure branches of `verify_ops.go` that `broker_test.go` and `coverage_test.go` leave open: a redundancy poll whose `show redundancy` read itself fails, and every step of the diagnostics gather after its scripts reach the broker.
+The failure branches of `verify_ops.go` that `broker_test.go` and `coverage_test.go` leave open: a redundancy poll whose `show redundancy` read itself fails, every step of the diagnostics gather after its scripts reach the broker, a node failing among several, and the broker-reported names the gather turns into file paths.
 
 | Test | What it covers |
 | --- | --- |
 | `TestReleaseToBackupStopsWhenAPollReadFails` | A `show redundancy` read that fails inside either poll of `releaseToBackup` is returned as itself, not retried into a timeout, and stops the sequence there: no no-release after a failed release read, and the no-release already sent stays on record |
 | `TestRevertToPrimaryStopsWhenThePollReadFails` | The same distinction for the final poll: an unreadable redundancy pair after the revert was sent is the read failure, not 'timeout waiting for Primary to become active' |
 | `TestGatherNodeUploadFailureReturnsTheErrorAndRunsNothing` | Either of a node's two gather-script uploads failing ends that node's collection with the upload's own error before anything is run on the broker |
-| `TestGatherNodeReturnsTheFailureOfEachStepAndStillCleansUp` | The CLI gather, the zip, the hostname read and the intermediate-file removal each fail the node with their own error, and each still removes both uploaded scripts on the way out |
+| `TestGatherNodeReturnsTheFailureOfEachStepAndStillCleansUp` | The CLI gather, the zip, the hostname read and the intermediate-file removal each fail the node with their own error, and each still removes both uploaded scripts on the way out. A failure in the show-command zip's steps still downloads the bundle -- returning first left it on the broker, unnamed -- and only a failed CLI gather, which produced nothing, fetches none |
 | `TestGatherNodeCleanupFailureOnlyWarns` | A failed removal of the uploaded gather scripts is a warning, not a failure of a gather that already succeeded |
+| `TestDiagnosticsGathersEveryNodeDespiteAFailure` | A primary whose gather fails no longer stops the backup and monitor: both are still gathered (zip and bundle), and the error names the primary, says 1 of 3, and says where what was collected went |
+| `TestGatherNodeRefusesAnUnexpectedBundlePath` | A reported bundle path that is not a plain `logs/<file>` (`logs/../x`, `logs/`, `/etc/x`, `other/x`, a space, a subdirectory) is refused quoting the value, neither downloaded nor removed -- it is broker output reaching a local file name and an in-broker `rm -rf` -- while the show-command zip is still collected |
+| `TestGatherNodeRefusesAnUnsafeHostname` | A broker host name that is not a plain name (`../x`, `a/b`, a space) is refused before it becomes part of the local zip's file name, and nothing is downloaded |
 
 ### config_ops_test.go
 

@@ -48,21 +48,21 @@
     "semantic_hash": ""
   },
   "internal/broker/coverage_test.go": {
-    "mtime": 1790909489.5523052,
-    "seen": 1790910673.9353175,
-    "ast_hash": "75cdc9a92fed06cbe7f9be054cc4b1b4",
+    "mtime": 1792469959.943815,
+    "seen": 1792470253.7813253,
+    "ast_hash": "df1a0f0016da9bfd74f5dfe32413b1e2",
     "semantic_hash": ""
   },
   "internal/broker/scripts.go": {
-    "mtime": 1790909381.453127,
-    "seen": 1790910673.9353466,
-    "ast_hash": "8f618785d13f4f5007581acb6e628fff",
+    "mtime": 1792469868.4359045,
+    "seen": 1792470253.781358,
+    "ast_hash": "2e61fcff706c47e9f25ae643b86b370c",
     "semantic_hash": ""
   },
   "internal/broker/scripts_test.go": {
-    "mtime": 1790909517.824521,
-    "seen": 1790910673.935348,
-    "ast_hash": "c534b4b7444fdd5805f6a27f113718fc",
+    "mtime": 1792469965.032734,
+    "seen": 1792470253.78136,
+    "ast_hash": "3ddad87691ae616d0e6d71c94f4f7f1e",
     "semantic_hash": ""
   },
   "internal/broker/transport.go": {
@@ -84,9 +84,9 @@
     "semantic_hash": ""
   },
   "internal/broker/verify_ops.go": {
-    "mtime": 1790910412.1760385,
-    "seen": 1790910673.9353735,
-    "ast_hash": "a2348d72f03b39afb085d091b31831ba",
+    "mtime": 1792469914.440757,
+    "seen": 1792470253.781387,
+    "ast_hash": "5dc4e0fa851aa2f5946cd6254cd480dd",
     "semantic_hash": ""
   },
   "internal/cli/cli_test.go": {
@@ -408,9 +408,9 @@
     "semantic_hash": ""
   },
   "docs/test.md": {
-    "mtime": 1792145204.0912004,
-    "seen": 1792160440.3014977,
-    "ast_hash": "3aec7bc49124cb972257d33fda69d537",
+    "mtime": 1792469998.2423587,
+    "seen": 1792470253.781657,
+    "ast_hash": "ba4fcbb0885501398b15a160a11269f7",
     "semantic_hash": ""
   },
   "internal/cli/commanddoc_test.go": {
@@ -654,9 +654,9 @@
     "semantic_hash": ""
   },
   "docs/operations.md": {
-    "mtime": 1792132233.0879095,
-    "seen": 1792132740.4574609,
-    "ast_hash": "29d2bfe23ea420f2ba86042e51b7ce01",
+    "mtime": 1792469973.106077,
+    "seen": 1792470253.7816553,
+    "ast_hash": "104ade53cffeb2645da9f9a2ff65ee71",
     "semantic_hash": ""
   },
   "internal/abbrev/abbrev.go": {
@@ -1242,9 +1242,9 @@
     "semantic_hash": ""
   },
   "internal/broker/verify_ops_test.go": {
-    "mtime": 1792136802.8460963,
-    "seen": 1792145099.8594928,
-    "ast_hash": "c5a7d55252b4487521152fdf1c22f333",
+    "mtime": 1792469998.243417,
+    "seen": 1792470253.7813888,
+    "ast_hash": "1782ab939c29f1d12acb4e33cc8642f3",
     "semantic_hash": ""
   },
   "internal/cli/ops_k8s_test.go": {

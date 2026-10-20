@@ -378,12 +378,13 @@ func gatherConfigsScript(days int) string {
 }
 
 // zipConfigsScript is the in-broker helper that zips the collected show output
-// (069 lines 163-169).
+// (069 lines 163-169). It clears a cli-out an earlier failed run left behind: the
+// mv would otherwise nest into it and the zip would carry that run's output too.
 func zipConfigsScript() string {
 	return `#!/bin/bash
 
 cd /usr/sw/jail
-rm -f gather-configs.zip
+rm -rf cli-out gather-configs.zip
 mv configs/cliout cli-out
 zip gather-configs.zip -q -r cli-out/*
 `
