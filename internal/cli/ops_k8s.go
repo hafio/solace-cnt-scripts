@@ -403,11 +403,15 @@ func opK8sVerifyRedundancy(a *App) error { return k8sOps(a).Redundancy(bg()) }
 // everywhere else. podRoles is the same narrowing the server-cert and product-key steps
 // already take, and it announces what it narrowed.
 func opK8sVerifyDiagnostics(a *App) error {
+	opts, err := diagnosticsOptions(a)
+	if err != nil {
+		return err
+	}
 	roles, err := podRoles(a, k8s.HARoles(a.Cfg))
 	if err != nil {
 		return err
 	}
-	return k8sOps(a).Diagnostics(bg(), a.Cfg.Broker.HostDiagnosticDir, nowStamp(), a.days, roles...)
+	return k8sOps(a).Diagnostics(bg(), a.Cfg.Broker.HostDiagnosticDir, nowStamp(), opts, roles...)
 }
 
 func opK8sVerifyLogin(a *App, role config.Role) error {

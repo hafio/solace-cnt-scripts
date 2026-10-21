@@ -228,6 +228,9 @@ func TestOpsK8sABadPodIsRefusedBeforeAnythingRuns(t *testing.T) {
 	none := func(*App) {}
 	remove := func(a *App) { a.flagRemove = true }
 	enable := func(a *App) { a.flagEnable = true }
+	// The App is built without cobra, so --days' default of 1 never lands; without it the
+	// --days refusal would answer first and the --pod one would go untested.
+	days := func(a *App) { a.days = 1 }
 	cases := []struct {
 		name string
 		cfg  func(*testing.T) *config.Config
@@ -247,7 +250,7 @@ func TestOpsK8sABadPodIsRefusedBeforeAnythingRuns(t *testing.T) {
 		{"import-config", ha, none, func(a *App) error { return opK8sImportConfig(a, "export.cli") }},
 		{"copy from", ha, none, func(a *App) error { return opK8sCopyFrom(a, []string{"msgrates.log"}) }},
 		{"copy into", ha, none, func(a *App) error { return opK8sCopyInto(a, []string{"notes.txt"}) }},
-		{"gather-diagnostics", ha, none, opK8sVerifyDiagnostics},
+		{"gather-diagnostics", ha, days, opK8sVerifyDiagnostics},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -682,17 +685,19 @@ func TestOpsK8sHardeningLeavesAskOnlyBeforeDisturbingClients(t *testing.T) {
 // TestOpsK8sGatherDiagnosticsCoversEveryNodeOrTheOneNamed: --pod used to be registered and
 // ignored, so every run gathered the whole group whatever it said. It now narrows exactly as
 // the server-certificate and product-key steps do, and announces what it left out. Each
-// node's bundle is downloaded into broker.hostDiagnosticDir, which is created on the way,
-// and --days reaches the script the broker runs.
+// node's show output is downloaded into broker.hostDiagnosticDir as a .tgz, the dir created on
+// the way, and --days and --encrypt reach the script the broker runs -- the day count bare.
 func TestOpsK8sGatherDiagnosticsCoversEveryNodeOrTheOneNamed(t *testing.T) {
 	cases := []struct {
 		name     string
 		pod      string
+		encrypt  bool
 		wantPods string
 		stderr   string
 	}{
-		{"no --pod gathers from every node", "", "pbm", ""},
-		{"--pod narrows it to that node and says so", "backup", "b", "--pod b narrows this to 1 of 3 node(s)"},
+		{"no --pod gathers from every node", "", false, "pbm", ""},
+		{"--pod narrows it to that node and says so", "backup", false, "b", "--pod b narrows this to 1 of 3 node(s)"},
+		{"--encrypt drops no-encrypt", "", true, "pbm", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -705,7 +710,7 @@ func TestOpsK8sGatherDiagnosticsCoversEveryNodeOrTheOneNamed(t *testing.T) {
 				}
 				return nil
 			}}
-			a := &App{Cfg: cfg, Platform: config.K8s, Runner: rr, pod: tc.pod, days: 3}
+			a := &App{Cfg: cfg, Platform: config.K8s, Runner: rr, pod: tc.pod, days: 3, encrypt: tc.encrypt}
 			_, errOut, err := opsK8sRun(t, func() error { return opK8sVerifyDiagnostics(a) })
 			if err != nil {
 				t.Fatalf("gather-diagnostics err = %v, want nil", err)
@@ -716,13 +721,18 @@ func TestOpsK8sGatherDiagnosticsCoversEveryNodeOrTheOneNamed(t *testing.T) {
 			if fi, statErr := os.Stat(diag); statErr != nil || !fi.IsDir() {
 				t.Errorf("the diagnostics directory %s was not created: %v", diag, statErr)
 			}
+			wantGather := "gather-diagnostics days-of-history 3 no-encrypt\n"
+			if tc.encrypt {
+				wantGather = "gather-diagnostics days-of-history 3\n"
+			}
 			gathers, downloads := 0, 0
 			for _, c := range rr.calls {
-				if c.method == "RunInput" && strings.Contains(c.stdin, "gather-diagnostics days-of-history '3' no-encrypt") {
+				if c.method == "RunInput" && strings.Contains(c.stdin, wantGather) {
 					gathers++
 				}
 				if c.method == "Run" && len(c.args) > 0 && c.args[0] == "cp" &&
-					strings.HasPrefix(c.args[len(c.args)-1], filepath.Join(diag, "gather-configs-pod-host-")) {
+					strings.HasPrefix(c.args[len(c.args)-1], filepath.Join(diag, "gather-configs-pod-host-")) &&
+					strings.HasSuffix(c.args[len(c.args)-1], ".tgz") {
 					downloads++
 				}
 			}

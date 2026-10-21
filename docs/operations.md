@@ -337,19 +337,26 @@ request was made and answered, and the answer was no. On Kubernetes without `sem
 it reads the password from the admin Secret the broker uses -- the referenced
 `kubernetes.adminSecret`, or the operator's generated `<kubernetes.name>-pubsubplus-admin-creds`
 -- which needs `get secrets` in the namespace; see
-[The admin Secret](configuration.md#the-admin-secret). `gather-diagnostics` deletes the
+[The admin Secret](configuration.md#the-admin-secret). `gather-diagnostics` asks the broker
+for one day of history and a readable `.tgz` bundle by default; `--days N` (at least 1, refused
+as a usage error otherwise) widens the history, and `--encrypt` produces the `.tgz.p7m` only
+Solace support can open, which is what Solace recommends for anything sent out. Each node's
+show-command output arrives beside its bundle as `gather-configs-<host>-<timestamp>.tgz`,
+which unpacks to a directory of the same name, so the archives of an HA group extract side
+by side. `gather-diagnostics` deletes the
 helper scripts it uploads on every path out, and the in-broker archive once it is safely
 downloaded; a cleanup failure only warns rather than failing the collection, but a failed
 DOWNLOAD fails the command and leaves the bundle on the broker, naming the path to fetch it
 from -- deleting it there would destroy the only copy of what was asked for. The bundle and
-the show-command zip are retrieved independently, so a failed zip still fetches the bundle;
+the show-command archive are retrieved independently, so a failed archive still fetches the bundle;
 every node is attempted, and the failures are reported together at the end, naming each
 node and where what was collected went. `cli -Apes` exits 0 when the broker refuses
 gather-diagnostics, so a run whose output reports no saved bundle warns for that node
 instead of passing in silence. A reported bundle path that is not `logs/<file>`, or a host
 name that is not a plain name, is refused rather than used in a local file name or an
-in-broker `rm -rf`. A `cli-out` left by an earlier failed run is cleared before the new
-output is zipped. `--pod` narrows collection to one node. `cli-script` and `shell-script` take the script's bare file name and
+in-broker `rm -rf`. Whatever an earlier failed run left -- the staging directory, the
+archive, or an older version's `cli-out` and zip -- is cleared before the new output is
+archived. `--pod` narrows collection to one node. `cli-script` and `shell-script` take the script's bare file name and
 read it from `broker.cliScriptsDir` only -- the current directory is never searched, so
 `setup.cli` and `./setup.cli` cannot mean two different files. Any path is refused, even one
 into that folder or a subfolder of it: the in-broker name is the base name, so `a/x.cli` and

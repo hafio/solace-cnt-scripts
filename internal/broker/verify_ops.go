@@ -281,10 +281,18 @@ func (o *Ops) showRDPair(ctx context.Context) (primary, backup string, err error
 	return primary, backup, err
 }
 
+// DiagnosticsOptions is what one gather-diagnostics run asks the broker for: Days of
+// history, and whether the bundle is Encrypted for Solace support (.tgz.p7m) rather than
+// left readable (.tgz, the default).
+type DiagnosticsOptions struct {
+	Days    int
+	Encrypt bool
+}
+
 // Diagnostics runs the show-command sweep and gather-diagnostics on each of
-// roles, then downloads the zipped output and the diagnostics bundle into
-// destDir, porting 069. ts is the timestamp stamped into the local zip name.
-func (o *Ops) Diagnostics(ctx context.Context, destDir, ts string, days int, roles ...config.Role) error {
+// roles, then downloads the archived output and the diagnostics bundle into
+// destDir, porting 069. ts is the timestamp stamped into the local archive name.
+func (o *Ops) Diagnostics(ctx context.Context, destDir, ts string, opts DiagnosticsOptions, roles ...config.Role) error {
 	// Owner-only: the bundles hold the broker's configuration.
 	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		return fmt.Errorf("create diagnostics dir %q: %w", destDir, err)
@@ -294,7 +302,7 @@ func (o *Ops) Diagnostics(ctx context.Context, destDir, ts string, days int, rol
 	// HA group, the nodes most likely to hold the evidence.
 	var errs []error
 	for _, role := range roles {
-		if err := o.gatherNode(ctx, role, destDir, ts, days); err != nil {
+		if err := o.gatherNode(ctx, role, destDir, ts, opts); err != nil {
 			errs = append(errs, fmt.Errorf("%s node: %w", role.Word(), err))
 		}
 	}
@@ -308,23 +316,23 @@ func (o *Ops) Diagnostics(ctx context.Context, destDir, ts string, days int, rol
 
 // gatherNode runs the diagnostics collection for a single node and pulls the
 // resulting archives back to destDir.
-func (o *Ops) gatherNode(ctx context.Context, role config.Role, destDir, ts string, days int) error {
+func (o *Ops) gatherNode(ctx context.Context, role config.Role, destDir, ts string, opts DiagnosticsOptions) error {
 	o.logf("Gathering diagnostics for %q node...", role)
-	zipPath := JailRoot + "/zip-configs.sh"
+	archivePath := JailRoot + "/archive-configs.sh"
 	if err := o.T.Run(ctx, role, "mkdir", "-p", JailRoot+"/configs/cliout"); err != nil {
 		return err
 	}
-	if err := o.T.Upload(ctx, role, []byte(gatherConfigsScript(days)), cliScriptPath(cliGatherConfigs)); err != nil {
+	if err := o.T.Upload(ctx, role, []byte(gatherConfigsScript(opts)), cliScriptPath(cliGatherConfigs)); err != nil {
 		return err
 	}
-	if err := o.T.Upload(ctx, role, []byte(zipConfigsScript()), zipPath); err != nil {
+	if err := o.T.Upload(ctx, role, []byte(archiveConfigsScript()), archivePath); err != nil {
 		return err
 	}
 	// Deferred the moment they exist, on every path out. These two were removed inside
 	// the "Diagnostics saved" branch below, so a run whose CLI output did not carry that
 	// field -- or that failed anywhere after the upload -- left both scripts behind.
 	defer func() {
-		if err := o.rmPaths(ctx, role, cliScriptPath(cliGatherConfigs), zipPath); err != nil {
+		if err := o.rmPaths(ctx, role, cliScriptPath(cliGatherConfigs), archivePath); err != nil {
 			o.progress().Warn("cleanup of the gather scripts on %q failed: %v", role, err)
 		}
 	}()
@@ -333,35 +341,40 @@ func (o *Ops) gatherNode(ctx context.Context, role config.Role, destDir, ts stri
 	if err != nil {
 		return err
 	}
-	// The two archives are retrieved independently. The show-command zip used to come
+	// The two archives are retrieved independently. The show-command archive used to come
 	// first and return on any failure, which left the diagnostics bundle -- the one this
 	// command exists for -- on the broker with nothing naming it.
-	return errors.Join(o.fetchConfigs(ctx, role, zipPath, destDir, ts), o.fetchBundle(ctx, role, destDir, string(out)))
+	return errors.Join(o.fetchConfigs(ctx, role, archivePath, destDir, ts), o.fetchBundle(ctx, role, destDir, string(out)))
 }
 
-// fetchConfigs zips the show-command output on the broker and downloads it as
-// gather-configs-<host>-<ts>.zip.
-func (o *Ops) fetchConfigs(ctx context.Context, role config.Role, zipPath, destDir, ts string) error {
-	if err := o.T.Run(ctx, role, "bash", zipPath); err != nil {
-		return fmt.Errorf("zip the show-command output on the %s node: %w", role.Word(), err)
-	}
-
+// fetchConfigs archives the show-command output on the broker and downloads it as
+// gather-configs-<host>-<ts>.tgz, which unpacks to a directory of the same name.
+func (o *Ops) fetchConfigs(ctx context.Context, role config.Role, archivePath, destDir, ts string) error {
+	// The name is read before anything is archived, because the directory inside the
+	// archive carries it.
 	hostBytes, err := o.T.Output(ctx, role, "hostname")
 	if err != nil {
 		return err
 	}
-	// The host name comes from the broker and becomes part of a local file name, so it
-	// is held to the same plain-name rule as the bundle path below. Empty stays allowed,
-	// as it always was: it only shortens the name and cannot leave destDir.
+	// The host name comes from the broker and becomes part of a local file name and the
+	// in-broker directory, so it is held to the same plain-name rule as the bundle path
+	// below. Empty stays allowed, as it always was: it only shortens the name and cannot
+	// leave destDir.
 	host := strings.TrimSpace(string(hostBytes))
 	if err := validName("broker hostname", host); host != "" && err != nil {
-		return fmt.Errorf("name the show-command zip from the %s node: %w", role.Word(), err)
+		return fmt.Errorf("name the show-command archive from the %s node: %w", role.Word(), err)
 	}
-	zipName := fmt.Sprintf("gather-configs-%s-%s.zip", host, ts)
-	if err := o.T.Download(ctx, role, JailRoot+"/gather-configs.zip", filepath.Join(destDir, zipName)); err != nil {
+	base := fmt.Sprintf("gather-configs-%s-%s", host, ts)
+	if err := validName("show-command archive name", base); err != nil {
+		return fmt.Errorf("name the show-command archive from the %s node: %w", role.Word(), err)
+	}
+	if err := o.T.Run(ctx, role, "bash", archivePath, base); err != nil {
+		return fmt.Errorf("archive the show-command output on the %s node: %w", role.Word(), err)
+	}
+	if err := o.T.Download(ctx, role, JailRoot+"/gather-configs.tgz", filepath.Join(destDir, base+".tgz")); err != nil {
 		return err
 	}
-	return o.T.Run(ctx, role, "rm", "-rf", JailRoot+"/cli-out", JailRoot+"/gather-configs.zip")
+	return o.T.Run(ctx, role, "rm", "-rf", JailRoot+"/configs-out", JailRoot+"/gather-configs.tgz")
 }
 
 // fetchBundle downloads the bundle gather-diagnostics reported in out, then removes it

@@ -11,7 +11,8 @@ import (
 // Registrar and reader live together on purpose: a flag whose value is interpreted
 // somewhere other than where it was declared is how a default drifts from what the help
 // text promises. So addRemoveFlags sits beside nothing, addApplyRemoveFlags beside
-// wantRemove, addDisableEnableFlags beside wantEnable, addExportFlags beside exportScope.
+// wantRemove, addDisableEnableFlags beside wantEnable, addExportFlags beside exportScope,
+// addDiagnosticsFlags beside diagnosticsOptions.
 //
 // The paired direction flags (--apply/--remove, --disable/--enable) are the reason the
 // readers return an error rather than a bool: each leaf has a DEFAULT direction and a flag
@@ -125,6 +126,27 @@ func exportScope(a *App) ([]string, bool, error) {
 		}
 	}
 	return a.vpns, a.brokerOnly, nil
+}
+
+// addDiagnosticsFlags wires what `broker perform gather-diagnostics` asks the broker for:
+// one day of history and a readable .tgz unless --days or --encrypt say otherwise.
+func addDiagnosticsFlags(c *cobra.Command, app *App) {
+	c.Flags().IntVar(&app.days, "days", 1, "days of logs/diagnostics to gather (at least 1)")
+	registerFlagCompletion(c, "days", cobra.NoFileCompletions)
+	c.Flags().BoolVar(&app.encrypt, "encrypt", false,
+		"encrypt the bundle for Solace support (.tgz.p7m); by default it is gathered unencrypted (.tgz)")
+}
+
+// diagnosticsOptions reads the two diagnostics flags. --days is checked here, at the flag,
+// because the broker's refusal of a bad value is invisible: `cli -Apes` exits 0 over it, so
+// a --days 0 would only surface as a saved-no-bundle warning on every node. There is no
+// upper bound -- Solace documents none, and the broker remains the judge of one.
+func diagnosticsOptions(a *App) (broker.DiagnosticsOptions, error) {
+	if a.days < 1 {
+		return broker.DiagnosticsOptions{}, usagef("--days must be at least 1 (got: %d): it is how many "+
+			"days of history gather-diagnostics collects", a.days)
+	}
+	return broker.DiagnosticsOptions{Days: a.days, Encrypt: a.encrypt}, nil
 }
 
 // addOutFlags wires --out/-o (and the --no-prompt that answers its one question) onto a

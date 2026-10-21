@@ -115,20 +115,20 @@ func TestRevertToPrimaryStopsWhenThePollReadFails(t *testing.T) {
 // scripts is not something to execute.
 func TestGatherNodeUploadFailureReturnsTheErrorAndRunsNothing(t *testing.T) {
 	boom := errors.New("upload boom")
-	zipDest := JailRoot + "/zip-configs.sh"
+	archiveDest := JailRoot + "/archive-configs.sh"
 	for _, tc := range []struct {
 		name string
 		dest string
 	}{
 		{"the gather script", cliScriptPath(cliGatherConfigs)},
-		{"the zip script", zipDest},
+		{"the archive script", archiveDest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ft := &fakeTransport{}
 			ut := &covUploadFailsTo{fakeTransport: ft, dest: tc.dest, err: boom}
 			o := &Ops{T: ut, Cfg: &config.Config{}, Out: &bytes.Buffer{}}
 
-			err := o.Diagnostics(context.Background(), filepath.Join(t.TempDir(), "diag"), "ts", 3, config.Primary)
+			err := o.Diagnostics(context.Background(), filepath.Join(t.TempDir(), "diag"), "ts", DiagnosticsOptions{Days: 3}, config.Primary)
 			if !errors.Is(err, boom) {
 				t.Fatalf("err = %v, want the upload failure itself", err)
 			}
@@ -140,22 +140,22 @@ func TestGatherNodeUploadFailureReturnsTheErrorAndRunsNothing(t *testing.T) {
 }
 
 // TestGatherNodeReturnsTheFailureOfEachStepAndStillCleansUp covers the steps that run once
-// the scripts are on the broker: the CLI gather, the zip, the hostname read that names the
-// local archive, and the removal of the intermediate files. Each failure is the node's
-// failure -- a gather that stopped halfway is not a collection -- and each still removes the
-// two uploaded scripts, which is what the deferral exists for: before it, a failure anywhere
-// after the upload left both behind on the broker. A failure in the show-command zip's own
-// steps no longer costs the bundle: it is still downloaded, because returning first left it
-// on the broker with nothing naming it. Only a failed CLI gather, which produced nothing,
-// fetches no bundle.
+// the scripts are on the broker: the CLI gather, the hostname read that names the archive
+// and the directory inside it, the archive, and the removal of the intermediate files. Each
+// failure is the node's failure -- a gather that stopped halfway is not a collection -- and
+// each still removes the two uploaded scripts, which is what the deferral exists for: before
+// it, a failure anywhere after the upload left both behind on the broker. A failure in the
+// show-command archive's own steps no longer costs the bundle: it is still downloaded,
+// because returning first left it on the broker with nothing naming it. Only a failed CLI
+// gather, which produced nothing, fetches no bundle.
 func TestGatherNodeReturnsTheFailureOfEachStepAndStillCleansUp(t *testing.T) {
 	boom := errors.New("step failed")
 	isGather := func(argv []string) bool { return matchCLI(argv, cliGatherConfigs) }
 	isHostname := func(argv []string) bool { return len(argv) == 1 && argv[0] == "hostname" }
-	isZip := func(argv []string) bool { return len(argv) > 0 && argv[0] == "bash" }
+	isArchive := func(argv []string) bool { return len(argv) > 0 && argv[0] == "bash" }
 	isArchiveRemoval := func(argv []string) bool {
 		return len(argv) > 1 && argv[0] == "rm" && argv[1] == "-rf" &&
-			strings.Contains(strings.Join(argv, " "), "gather-configs.zip")
+			strings.Contains(strings.Join(argv, " "), "gather-configs.tgz")
 	}
 	const bundle = JailRoot + "/logs/diag-node1.tgz"
 	cases := []struct {
@@ -165,8 +165,8 @@ func TestGatherNodeReturnsTheFailureOfEachStepAndStillCleansUp(t *testing.T) {
 		wantBundle bool
 	}{
 		{name: "the CLI gather", failOut: isGather},
-		{name: "the zip", failRun: isZip, wantBundle: true},
 		{name: "the hostname read", failOut: isHostname, wantBundle: true},
+		{name: "the archive", failRun: isArchive, wantBundle: true},
 		{name: "the removal of the intermediate files", failRun: isArchiveRemoval, wantBundle: true},
 	}
 	for _, tc := range cases {
@@ -188,11 +188,11 @@ func TestGatherNodeReturnsTheFailureOfEachStepAndStillCleansUp(t *testing.T) {
 			}}
 			o := &Ops{T: rt, Cfg: &config.Config{}, Out: &bytes.Buffer{}}
 
-			err := o.Diagnostics(context.Background(), filepath.Join(t.TempDir(), "diag"), "ts", 3, config.Primary)
+			err := o.Diagnostics(context.Background(), filepath.Join(t.TempDir(), "diag"), "ts", DiagnosticsOptions{Days: 3}, config.Primary)
 			if !errors.Is(err, boom) {
 				t.Fatalf("err = %v, want the failed step itself", err)
 			}
-			if !ranContains(ft, "rm", "-f", cliScriptPath(cliGatherConfigs), JailRoot+"/zip-configs.sh") {
+			if !ranContains(ft, "rm", "-f", cliScriptPath(cliGatherConfigs), JailRoot+"/archive-configs.sh") {
 				t.Errorf("both uploaded scripts must be removed on the way out of a failure, runs = %v", ft.runs)
 			}
 			fetched := false
@@ -225,7 +225,7 @@ func TestGatherNodeCleanupFailureOnlyWarns(t *testing.T) {
 		Log: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}
 
 	dest := filepath.Join(t.TempDir(), "diag")
-	if err := o.Diagnostics(context.Background(), dest, "20260731", 3, config.Primary); err != nil {
+	if err := o.Diagnostics(context.Background(), dest, "20260731", DiagnosticsOptions{Days: 3}, config.Primary); err != nil {
 		t.Fatalf("a failed removal of the gather scripts must not fail a gather that succeeded: %v", err)
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "[WARN] cleanup of the gather scripts") {
@@ -253,7 +253,7 @@ func TestDiagnosticsGathersEveryNodeDespiteAFailure(t *testing.T) {
 	o, _ := newTestOps(t, &config.Config{}, ft)
 	dest := filepath.Join(t.TempDir(), "diag")
 
-	err := o.Diagnostics(context.Background(), dest, "ts", 3, config.Primary, config.Backup, config.Monitor)
+	err := o.Diagnostics(context.Background(), dest, "ts", DiagnosticsOptions{Days: 3}, config.Primary, config.Backup, config.Monitor)
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the primary's failure itself", err)
 	}
@@ -269,7 +269,7 @@ func TestDiagnosticsGathersEveryNodeDespiteAFailure(t *testing.T) {
 				got[d.remote] = true
 			}
 		}
-		if !got[JailRoot+"/gather-configs.zip"] || !got[JailRoot+"/logs/diag-"+role.Word()+".tgz"] {
+		if !got[JailRoot+"/gather-configs.tgz"] || !got[JailRoot+"/logs/diag-"+role.Word()+".tgz"] {
 			t.Errorf("the %s node must still be gathered after the primary failed; downloads = %v", role.Word(), ft.downloads)
 		}
 	}
@@ -279,7 +279,7 @@ func TestDiagnosticsGathersEveryNodeDespiteAFailure(t *testing.T) {
 // reaches both a local file name and an `rm -rf` on the broker. Anything but a plain
 // logs/<file> is refused by value, neither downloaded nor removed -- `logs/../x` would land
 // outside the diagnostics dir and `logs/` would remove the broker's whole logs directory --
-// while the show-command zip, which does not depend on it, is still collected.
+// while the show-command archive, which does not depend on it, is still collected.
 func TestGatherNodeRefusesAnUnexpectedBundlePath(t *testing.T) {
 	for _, diag := range []string{"logs/../x", "logs/", "/etc/x", "other/x", "logs/a b", "logs/sub/x"} {
 		t.Run(diag, func(t *testing.T) {
@@ -294,12 +294,12 @@ func TestGatherNodeRefusesAnUnexpectedBundlePath(t *testing.T) {
 			}}
 			o, _ := newTestOps(t, &config.Config{}, ft)
 
-			err := o.Diagnostics(context.Background(), filepath.Join(t.TempDir(), "diag"), "ts", 3, config.Primary)
+			err := o.Diagnostics(context.Background(), filepath.Join(t.TempDir(), "diag"), "ts", DiagnosticsOptions{Days: 3}, config.Primary)
 			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%q", diag)) {
 				t.Fatalf("err = %v, want a refusal quoting %q", err, diag)
 			}
-			if len(ft.downloads) != 1 || ft.downloads[0].remote != JailRoot+"/gather-configs.zip" {
-				t.Errorf("only the show-command zip may be downloaded, got %v", ft.downloads)
+			if len(ft.downloads) != 1 || ft.downloads[0].remote != JailRoot+"/gather-configs.tgz" {
+				t.Errorf("only the show-command archive may be downloaded, got %v", ft.downloads)
 			}
 			for _, r := range ft.runs {
 				if len(r.argv) > 2 && r.argv[0] == "rm" && strings.Contains(strings.Join(r.argv, " "), JailRoot+"/"+diag) {
@@ -310,27 +310,75 @@ func TestGatherNodeRefusesAnUnexpectedBundlePath(t *testing.T) {
 	}
 }
 
-// TestGatherNodeRefusesAnUnsafeHostname: the broker's host name becomes part of the local
-// zip's file name, so one that is not a plain name is refused rather than joined onto the
-// diagnostics dir. An empty one stays allowed, as it always was -- it cannot leave the dir.
-func TestGatherNodeRefusesAnUnsafeHostname(t *testing.T) {
-	for _, host := range []string{"../x", "a/b", "a b"} {
-		t.Run(host, func(t *testing.T) {
+// TestGatherNodeRefusesAnUnsafeArchiveName: the broker's host name and the timestamp name
+// both the local archive and the directory the in-broker script moves the output into, so a
+// name that is not plain is refused before anything is archived, rather than joined onto
+// the diagnostics dir or handed to a `mv`. An empty host name stays allowed, as it always
+// was -- it only shortens the name and cannot leave the dir.
+func TestGatherNodeRefusesAnUnsafeArchiveName(t *testing.T) {
+	for _, tc := range []struct{ host, ts, want string }{
+		{"../x", "ts", "broker hostname"},
+		{"a/b", "ts", "broker hostname"},
+		{"a b", "ts", "broker hostname"},
+		{"node1", "../x", "show-command archive name"},
+	} {
+		t.Run(tc.host+" "+tc.ts, func(t *testing.T) {
 			ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
 				if len(argv) == 1 && argv[0] == "hostname" {
-					return []byte(host + "\n"), nil
+					return []byte(tc.host + "\n"), nil
 				}
 				return nil, nil
 			}}
 			o, _ := newTestOps(t, &config.Config{}, ft)
 
-			err := o.Diagnostics(context.Background(), filepath.Join(t.TempDir(), "diag"), "ts", 3, config.Primary)
-			if err == nil || !strings.Contains(err.Error(), "broker hostname") {
-				t.Fatalf("err = %v, want a refusal naming the broker hostname", err)
+			err := o.Diagnostics(context.Background(), filepath.Join(t.TempDir(), "diag"), tc.ts, DiagnosticsOptions{Days: 3}, config.Primary)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want a refusal naming the %s", err, tc.want)
 			}
 			if len(ft.downloads) != 0 {
 				t.Errorf("nothing may be downloaded under an unsafe name, got %v", ft.downloads)
 			}
+			for _, r := range ft.runs {
+				if len(r.argv) > 0 && r.argv[0] == "bash" {
+					t.Errorf("nothing may be archived under an unsafe name, ran %v", r.argv)
+				}
+			}
 		})
+	}
+}
+
+// TestDiagnosticsFetchesAnEncryptedBundle: --encrypt drops no-encrypt from the broker's
+// command, and the bundle it reports -- a .tgz.p7m only Solace support can open -- is
+// downloaded under its own name and removed from the broker like a readable one.
+func TestDiagnosticsFetchesAnEncryptedBundle(t *testing.T) {
+	ft := &fakeTransport{responder: func(_ config.Role, argv []string, _ []byte) ([]byte, error) {
+		switch {
+		case matchCLI(argv, cliGatherConfigs):
+			return []byte("Diagnostics saved: logs/diag-node1.tgz.p7m\n"), nil
+		case len(argv) == 1 && argv[0] == "hostname":
+			return []byte("node1\n"), nil
+		}
+		return nil, nil
+	}}
+	o, _ := newTestOps(t, &config.Config{}, ft)
+	dest := filepath.Join(t.TempDir(), "diag")
+
+	if err := o.Diagnostics(context.Background(), dest, "ts", DiagnosticsOptions{Days: 2, Encrypt: true}, config.Primary); err != nil {
+		t.Fatalf("Diagnostics: %v", err)
+	}
+	body := ft.uploadBody(t, cliScriptPath(cliGatherConfigs))
+	if !strings.Contains(body, "gather-diagnostics days-of-history 2\n") || strings.Contains(body, "no-encrypt") {
+		t.Errorf("an encrypted gather must not carry no-encrypt:\n%s", body)
+	}
+	remote := JailRoot + "/logs/diag-node1.tgz.p7m"
+	fetched := false
+	for _, d := range ft.downloads {
+		fetched = fetched || (d.remote == remote && d.local == filepath.Join(dest, "diag-node1.tgz.p7m"))
+	}
+	if !fetched {
+		t.Errorf("the encrypted bundle was not downloaded under its own name; downloads = %v", ft.downloads)
+	}
+	if !ranContains(ft, "rm", "-rf", remote) {
+		t.Errorf("the downloaded bundle must be removed from the broker, runs = %v", ft.runs)
 	}
 }

@@ -366,27 +366,46 @@ func parseVPNNames(output string) []string {
 }
 
 // gatherConfigsScript is the ~110-command show + gather-diagnostics run collected
-// by 069 (lines 38-161). days sets days-of-history for gather-diagnostics.
-func gatherConfigsScript(days int) string {
+// by 069 (lines 38-161). opts sets days-of-history, and whether the bundle is left
+// unencrypted (no-encrypt, a readable .tgz) or encrypted for Solace support (.tgz.p7m).
+//
+// The number is bare. 069 wrote this script inside a single-quoted echo, so its
+// '${DAYS}' was bash closing and reopening the quote around the expansion -- the broker
+// got a plain number. Copied literally, the quotes reached the broker as `'1'`, which
+// it refuses; `cli -Apes` exits 0 over a refused line, so no bundle was ever gathered
+// and the run reported success.
+func gatherConfigsScript(opts DiagnosticsOptions) string {
 	var b strings.Builder
 	b.WriteString(cliHome + "\n! some commands for specific to appliance vs software\n\n")
 	for _, cmd := range gatherShowCommands {
 		fmt.Fprintf(&b, "show %s > configs/cliout/show-%s.out\n", cmd.args, cmd.out)
 	}
-	fmt.Fprintf(&b, "\n! gather diagnostics '%d' days\nend\n"+cliHome+"enable\nadmin\ngather-diagnostics days-of-history '%d' no-encrypt\n", days, days)
+	gather := fmt.Sprintf("gather-diagnostics days-of-history %d", opts.Days)
+	if !opts.Encrypt {
+		gather += " no-encrypt"
+	}
+	// home, not 069's `end` before it: home alone returns the session to the top level,
+	// and from there it is enable, admin, then the gather.
+	fmt.Fprintf(&b, "\n! gather diagnostics %d days\n"+cliHome+"enable\nadmin\n%s\n", opts.Days, gather)
 	return b.String()
 }
 
-// zipConfigsScript is the in-broker helper that zips the collected show output
-// (069 lines 163-169). It clears a cli-out an earlier failed run left behind: the
-// mv would otherwise nest into it and the zip would carry that run's output too.
-func zipConfigsScript() string {
+// archiveConfigsScript is the in-broker helper that packs the collected show output
+// (069 lines 163-169) into gather-configs.tgz. $1 is the directory the archive unpacks
+// to -- the archive's own base name, so the per-node archives extract side by side the
+// way gather-diagnostics bundles do, rather than all into one cli-out/. The output is
+// staged under configs-out, and that, the archive and an older version's cli-out and
+// gather-configs.zip are cleared first: a mv into a directory an earlier failed run left
+// behind would nest into it and archive that run's output too.
+func archiveConfigsScript() string {
 	return `#!/bin/bash
+set -e
 
 cd /usr/sw/jail
-rm -rf cli-out gather-configs.zip
-mv configs/cliout cli-out
-zip gather-configs.zip -q -r cli-out/*
+rm -rf configs-out gather-configs.tgz cli-out gather-configs.zip
+mkdir configs-out
+mv configs/cliout "configs-out/$1"
+tar -czf gather-configs.tgz -C configs-out "$1"
 `
 }
 

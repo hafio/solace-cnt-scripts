@@ -553,8 +553,7 @@ const performGatherDiagnosticsLong = "Runs the broker's full diagnostic sweep an
 func newPerformGatherDiagnosticsCmd(app *App) *cobra.Command {
 	c := withLong(dispatchLeaf(app, "gather-diagnostics", "Gather a support bundle into broker.hostDiagnosticDir",
 		platformOps(opK8sVerifyDiagnostics, opCtrVerifyDiagnostics)), performGatherDiagnosticsLong)
-	c.Flags().IntVar(&app.days, "days", 1, "days of logs/diagnostics to gather")
-	registerFlagCompletion(c, "days", cobra.NoFileCompletions)
+	addDiagnosticsFlags(c, app)
 	addPodFlag(c, app, config.K8s)
 	return c
 }

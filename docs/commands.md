@@ -788,7 +788,8 @@ Also available as: gd
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
-| `--days` | `1` | days of logs/diagnostics to gather |
+| `--days` | `1` | days of logs/diagnostics to gather (at least 1) |
+| `--encrypt` | `false` | encrypt the bundle for Solace support (.tgz.p7m); by default it is gathered unencrypted (.tgz) |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 
 

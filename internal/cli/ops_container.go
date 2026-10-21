@@ -325,7 +325,11 @@ func opCtrVerifyRedundancy(a *App) error {
 // opCtrVerifyDiagnostics gathers show-command output and a diagnostics bundle from
 // this host's broker into the configured diagnostics dir.
 func opCtrVerifyDiagnostics(a *App) error {
-	return ctrOps(a).Diagnostics(bg(), a.Cfg.Broker.HostDiagnosticDir, nowStamp(), a.days, config.Primary)
+	opts, err := diagnosticsOptions(a)
+	if err != nil {
+		return err
+	}
+	return ctrOps(a).Diagnostics(bg(), a.Cfg.Broker.HostDiagnosticDir, nowStamp(), opts, config.Primary)
 }
 
 // ctrLogin tests a SEMP login as the configured admin user against this host's

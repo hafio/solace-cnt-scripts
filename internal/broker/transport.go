@@ -73,6 +73,6 @@ func certPath(filename string) string { return CertsDir + "/" + filename }
 // to: a hidden file at the jail root, NOT in the cliscripts dir. Keeping the two apart
 // matters -- the CLI reads every `.*.cli` in cliscripts relative to its own working
 // directory, so a bash script parked there is one typo away from being fed to the
-// Solace CLI. The jail root is where the diagnostics helper (zip-configs.sh) already
+// Solace CLI. The jail root is where the diagnostics helper (archive-configs.sh) already
 // lands, so this follows an existing convention rather than inventing a location.
 func shellScriptPath(name string) string { return JailRoot + "/." + name }

@@ -1143,17 +1143,23 @@ func TestDiagnostics(t *testing.T) {
 		return nil, nil
 	}}
 	o, _ := newTestOps(t, &config.Config{}, ft)
-	if err := o.Diagnostics(context.Background(), dest, "20260731", 3, config.Primary); err != nil {
+	opts := DiagnosticsOptions{Days: 3}
+	if err := o.Diagnostics(context.Background(), dest, "20260731", opts, config.Primary); err != nil {
 		t.Fatalf("Diagnostics error: %v", err)
 	}
 	if _, err := os.Stat(dest); err != nil {
 		t.Errorf("Diagnostics did not create dest dir: %v", err)
 	}
-	if body := ft.uploadBody(t, cliScriptPath("gather-configs")); body != gatherConfigsScript(3) {
+	if body := ft.uploadBody(t, cliScriptPath("gather-configs")); body != gatherConfigsScript(opts) {
 		t.Error("gather-configs body mismatch")
 	}
+	// The archive is told the directory to unpack to: its own base name, so the per-node
+	// archives extract side by side.
+	if !ranContains(ft, "bash", JailRoot+"/archive-configs.sh", "gather-configs-node1-20260731") {
+		t.Errorf("the archive must be built around gather-configs-node1-20260731, runs = %v", ft.runs)
+	}
 	wantDownloads := map[string]string{
-		JailRoot + "/gather-configs.zip":  filepath.Join(dest, "gather-configs-node1-20260731.zip"),
+		JailRoot + "/gather-configs.tgz":  filepath.Join(dest, "gather-configs-node1-20260731.tgz"),
 		JailRoot + "/logs/diag-node1.tgz": filepath.Join(dest, "diag-node1.tgz"),
 	}
 	if len(ft.downloads) != len(wantDownloads) {

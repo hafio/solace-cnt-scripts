@@ -67,7 +67,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-90 test files, 1641 test functions. Three of those are not tests. Two are os/exec
+90 test files, 1643 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -79,8 +79,8 @@ launched from.
 | Package | Files | Tests |
 | --- | --- | --- |
 | internal/k8s | 20 | 282 |
-| internal/broker | 24 | 504 |
-| internal/cli | 13 | 257 |
+| internal/broker | 24 | 505 |
+| internal/cli | 13 | 258 |
 | internal/config | 16 | 241 |
 | internal/container | 8 | 196 |
 | internal/convert | 1 | 40 |
@@ -90,7 +90,7 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **90** | **1641** |
+| **Total** | **90** | **1643** |
 
 
 ## Coverage
@@ -780,7 +780,7 @@ without a live broker;
 fixtures stand in for a captured `show current-config` transcript; and
 `exportconfigReadCounter` wraps `App.PromptIn` to prove a confirmation prompt was never
 actually read, not merely that the command did not block.
-210 tests across 12 files.
+258 tests across 13 files.
 
 Because the platform is a flag rather than the first word of a command, the
 invocations here name it explicitly (`--platform docker`) rather than relying on
@@ -801,7 +801,8 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 | `TestTreeStructure` | A representative set of command paths exists in the one unified tree, covering a top-level leaf, a group's child, and each applicability class |
 | `TestEveryRunnableCommandIsWired` | The wiring that replaced the two `PersistentPreRunE` hooks: every command with a `RunE` (bar `convert`, `examples`, `version`, `completion`) carries the shared pre-run and the `--allow-command` flag. Missing either is invisible until that one command is run, so it is checked structurally |
 | `TestGroupCommandsPrintHelpAndDoNothing` | The no-implicit-actions rule: a verb that owns objects (`check`, `smoke`, `prepare`, `deploy`, `config`, `start`, `stop`, `restart`, `status`, `logs`, `copy`, `generate`, `remove`, and `config`'s own `apply`/`delete`/`disable`) carries no `RunE`, so running it bare prints its own help and touches nothing -- proven by succeeding with no `--env` at all, since a runnable leaf would instead fail resolving the missing default env file |
-| `TestFlagsRegistered` | Per-command flags are registered where expected: `--restart` and `--pod` on `broker deploy`; `--delete-data`/`--no-prompt` on `broker remove`; `--delete-crd`/`--no-prompt` on `operator remove`; `--days` on `broker perform gather-diagnostics`; `--pod`/`--no-prompt` on `broker perform assert-leader` (the silencer for the backup-host question); `--pod` on `broker cli`, `broker perform cli-script` and `broker perform shell-script`; `--pod` on `broker copy from`; `--pod`/`--dir` on `broker copy into`; `--all`/`--detail`/`--pod` on `broker status`; `--detail` on `operator status`; `--out`/`--no-prompt` on `examples`, `broker generate`, `operator generate` and `convert` -- every command whose output is an artifact you keep takes the same pair; `--apply`/`--remove`/`--no-prompt` on `broker configure server-certs` and `broker configure product-keys`, the two `configure` leaves with an outage on the other side of their removal (TLS down, and an unlicensed broker) and therefore the two that ask |
+| `TestFlagsRegistered` | Per-command flags are registered where expected: `--restart` and `--pod` on `broker deploy`; `--delete-data`/`--no-prompt` on `broker remove`; `--delete-crd`/`--no-prompt` on `operator remove`; `--days`/`--encrypt` on `broker perform gather-diagnostics`; `--pod`/`--no-prompt` on `broker perform assert-leader` (the silencer for the backup-host question); `--pod` on `broker cli`, `broker perform cli-script` and `broker perform shell-script`; `--pod` on `broker copy from`; `--pod`/`--dir` on `broker copy into`; `--all`/`--detail`/`--pod` on `broker status`; `--detail` on `operator status`; `--out`/`--no-prompt` on `examples`, `broker generate`, `operator generate` and `convert` -- every command whose output is an artifact you keep takes the same pair; `--apply`/`--remove`/`--no-prompt` on `broker configure server-certs` and `broker configure product-keys`, the two `configure` leaves with an outage on the other side of their removal (TLS down, and an unlicensed broker) and therefore the two that ask |
+| `TestOpsGatherDiagnosticsRefusesDaysBelowOne` | `--days` 0 or -1 is a usage error naming the value on both platforms, before anything runs and before the diagnostics dir is created -- the broker's own refusal is invisible, since `cli -Apes` exits 0 over it |
 | `TestHelpNoConfig` | `--help` short-circuits before config load, so no env file is needed |
 | `TestGenerateWired` | `generate`'s leaves, none of which contact the cluster or the container engine: `broker generate` renders what `broker deploy` would apply on EITHER family (the CR's `apiVersion:` on kubernetes, `services:`/`[Unit]` on docker/podman), plus `broker generate` on both and `operator generate` on kubernetes. A plain `runRoot` with no echo seam is enough since nothing here executes |
 | `TestCtrWiredDryRun` | Every container command safe to run against the HA sample drives clean over the echo seam, echoing the expected runtime/systemctl/mkdir command |
@@ -1189,7 +1190,7 @@ The Kubernetes handlers of `ops_k8s.go`, driven directly over `opRunner` rather 
 | `TestOpsK8sProductKeysGoToTheLicensedNodesOnly` | `broker configure product-keys` applies and revokes on the primary and backup, never the monitor; `--remove` is confirmed in every outcome and narrows with `--pod`; keys travel on stdin and never in an argv |
 | `TestOpsK8sProductKeysRefuseALineBreakingKeyBeforeUploading` | a product key carrying a line break is refused with a control-character error in both directions before anything is uploaded, even for a Config that never went through `config.Load` |
 | `TestOpsK8sHardeningLeavesAskOnlyBeforeDisturbingClients` | `default-vpn` and `default-users`: the disable direction is confirmed (yes, no, unanswerable, `--no-prompt`) and issues only the disable script; `--enable` runs without a question and issues only the enable script; a declined run reaches no node |
-| `TestOpsK8sGatherDiagnosticsCoversEveryNodeOrTheOneNamed` | `broker perform gather-diagnostics` gathers from every node or only the `--pod` one (announced), creates `broker.hostDiagnosticDir`, downloads each node's bundle into it and passes `--days` to the broker script |
+| `TestOpsK8sGatherDiagnosticsCoversEveryNodeOrTheOneNamed` | `broker perform gather-diagnostics` gathers from every node or only the `--pod` one (announced), creates `broker.hostDiagnosticDir`, downloads each node's show-command `.tgz` into it, and passes `--days` to the broker script as a bare number, with `no-encrypt` unless `--encrypt` drops it |
 | `TestOpsK8sStatusBrokerStopsAtTheFirstFailedRead` | `broker status` ends at an unreadable broker resource before any other read, and under `--detail` at a failed pod description before the load balancer is described |
 | `TestOpsK8sStatusOperatorRefusesAClusterCommandTheGuardRejects` | the executor-side re-check of the execution guard, reached through `operator status`: a `sudo kubectl` cluster command fails naming `kubernetes.command` and nothing is issued |
 | `TestOpsK8sLogsPreviousComesAfterTheSharedTokens` | `broker logs --previous` appends `-p` after the shared log tokens on the resolved pod, and only when asked for |
@@ -1259,7 +1260,7 @@ Broker CLI operations over an injected transport: script generation, config step
 state machines, the primary-driven container HA variants, the SEMP mate channel, and the
 config-export/import feature's block parser, marker layer, section classification, shutdown
 injection, verification diff, replay transformations and the generated apply
-driver, and the replication mate renderers and readers. 421 tests across 22 files.
+driver, and the replication mate renderers and readers. 505 tests across 24 files.
 
 `blocks_test.go`, `sections_test.go`, `inject_test.go`, `diff_test.go`, `annotate_test.go`
 and `importops_test.go` share one fixture: `testdata/currentconfig_sample.cli`, a
@@ -1392,7 +1393,7 @@ fixture itself.
 | `TestLeaderRefusesTheMonitor` | The monitor is an invalid operation, refused before any transport call |
 | `TestRedundancySuccess` | The full failover handshake walks its scripted primary and backup sequences to completion |
 | `TestRedundancyStandaloneSkips` | Redundancy makes no calls in standalone mode |
-| `TestDiagnostics` | The dest dir is created, the gather script matches, and both the configs zip and the diagnostics bundle are downloaded under their expected names |
+| `TestDiagnostics` | The dest dir is created, the gather script matches, the archive script is handed `gather-configs-<host>-<ts>` as the directory to unpack to, and both the configs `.tgz` and the diagnostics bundle are downloaded under their expected names |
 | `TestServerCertBundleOrder` | What the bundle CONTAINS and in what order, with no transport involved -- so the container platforms and the CLI path are compared against one definition rather than against each other's behaviour: the key, the certificate, then the `tls.cas` chain in the order listed (two CAs, so the order is pinned). It is what `broker deploy` mounts on docker/podman and what `configure server-certs` loads, so both present the same chain |
 | `TestServerCertBundleRequiresBothHalves` | The guard including the asymmetric cases: a certificate with no key cannot produce a usable bundle, and neither can a key with no certificate |
 | `TestServerCertBundleReportsAnUnreadableFile` | The error names the path, one case per file -- certificate, key, and a `tls.cas` entry (named by its index) -- so whichever is missing is the one reported rather than whichever happens to be read first |
@@ -1420,7 +1421,7 @@ Branch coverage for the paths the happy-path tests in `broker_test.go` cannot re
 | `TestServerCertBundleReadError` | Unreadable cert/key files error |
 | `TestServerCertCAReadError` | An unreadable CA file errors |
 | `TestDomainCertsAcceptsAPathWithSpaces` | The certificate value is a full host path, not an in-broker filename and not a CLI operand, so a path with a space (already gated by `config.CheckHostPath` at load) must be ACCEPTED here, not rejected |
-| `TestDiagnosticsTwoRolesNoBundle` | Output with no "Diagnostics saved" line pulls only the configs zip, once per role, and warns naming each node -- `cli -Apes` exits 0 over a refused gather-diagnostics, so that line is the only sign, and it used to pass in silence |
+| `TestDiagnosticsTwoRolesNoBundle` | Output with no "Diagnostics saved" line pulls only the configs archive, once per role, and warns naming each node -- `cli -Apes` exits 0 over a refused gather-diagnostics, so that line is the only sign, and it used to pass in silence |
 | `TestDiagnosticsRunError` | A transport `Run` failure surfaces |
 | `TestLeaderReadError` | A failing `show redundancy` read is returned as is -- no poll retries it, nothing is asserted or shown |
 | `TestLeaderNotLocalActive` | "Check once": a node that is not Local Active (a standby primary, a primary with no Activity line, a standby backup) is refused after ONE read, with the transcript shown and a remedy worded for that node, and nothing is asserted |
@@ -1719,8 +1720,8 @@ Pins the generated broker CLI script text -- these strings are what the broker e
 | `TestParseVPNNamesSkipsARepeatedRule` | The regression the column-width rewrite nearly shipped. Reading the rule once and treating every later line as data means a REPEATED rule -- what a paginated report prints partway down -- is read as a row: its name column trims to a run of dashes, so a VPN literally named `-----...` joins the list. `ParseVPNReplication` documents the identical hazard, and this skips the repeated rule and the repeated header the same way |
 | `TestParseVPNNamesKeepsAMultiWordName` | The name column's width is read from the rule rather than cut at a hardcoded column 32, and the whole column is the name rather than each whitespace field of it. `A VPN WITH LONG NAME AND SPACES` used to arrive as six VPNs matching nothing, so the real VPN's default client-username was never shut down and nothing said so |
 | `TestParseVPNNamesNoSeparator` | Output without a separator row yields no names |
-| `TestGatherConfigsScript` | Prefix, first show command, `gather-diagnostics` with days substituted, and one line per configured show |
-| `TestZipConfigsScript` | The zip command is present, and a stale `cli-out` is cleared before the `mv` -- otherwise the mv nests into it and the zip carries an earlier failed run's output |
+| `TestGatherConfigsScript` | Prefix, first show command, one line per configured show, and a closing `home`, `no paging`, `enable`, `admin` (no `end`) reaching `gather-diagnostics days-of-history N` with the number BARE -- quoted, as a literal copy of 069's bash quote-splice sent it, the broker refuses it and `cli -Apes` still exits 0 -- carrying `no-encrypt` by default and not under `Encrypt` |
+| `TestArchiveConfigsScript` | The show output is packed with `tar -czf` around a directory named by `$1`, so per-node archives unpack side by side; `set -e`, no `zip`, and the staging dir, the archive and an older version's `cli-out` and zip are cleared before the `mv` -- otherwise the mv nests into a leftover and the archive carries an earlier failed run's output |
 | `TestEveryScriptTurnsPagingOffAfterHome` | Every script generator emits `no paging` immediately after every `home`. A paginated report re-prints its column header and rule partway down, and the rule then reads as a data row of all dashes -- which is how `show message-vpn * replication` grew a phantom VPN named after its own separator. The parsers tolerate a repeat as a backstop; turning paging off at the source is the fix. It walks every generator rather than the ones that came to mind, because the gap it closes was exactly a set of scripts written with `home` and without `no paging` |
 
 ### sections_test.go
@@ -1984,11 +1985,12 @@ The failure branches of `verify_ops.go` that `broker_test.go` and `coverage_test
 | `TestReleaseToBackupStopsWhenAPollReadFails` | A `show redundancy` read that fails inside either poll of `releaseToBackup` is returned as itself, not retried into a timeout, and stops the sequence there: no no-release after a failed release read, and the no-release already sent stays on record |
 | `TestRevertToPrimaryStopsWhenThePollReadFails` | The same distinction for the final poll: an unreadable redundancy pair after the revert was sent is the read failure, not 'timeout waiting for Primary to become active' |
 | `TestGatherNodeUploadFailureReturnsTheErrorAndRunsNothing` | Either of a node's two gather-script uploads failing ends that node's collection with the upload's own error before anything is run on the broker |
-| `TestGatherNodeReturnsTheFailureOfEachStepAndStillCleansUp` | The CLI gather, the zip, the hostname read and the intermediate-file removal each fail the node with their own error, and each still removes both uploaded scripts on the way out. A failure in the show-command zip's steps still downloads the bundle -- returning first left it on the broker, unnamed -- and only a failed CLI gather, which produced nothing, fetches none |
+| `TestGatherNodeReturnsTheFailureOfEachStepAndStillCleansUp` | The CLI gather, the hostname read, the archive and the intermediate-file removal each fail the node with their own error, and each still removes both uploaded scripts on the way out. A failure in the show-command archive's steps still downloads the bundle -- returning first left it on the broker, unnamed -- and only a failed CLI gather, which produced nothing, fetches none |
 | `TestGatherNodeCleanupFailureOnlyWarns` | A failed removal of the uploaded gather scripts is a warning, not a failure of a gather that already succeeded |
-| `TestDiagnosticsGathersEveryNodeDespiteAFailure` | A primary whose gather fails no longer stops the backup and monitor: both are still gathered (zip and bundle), and the error names the primary, says 1 of 3, and says where what was collected went |
-| `TestGatherNodeRefusesAnUnexpectedBundlePath` | A reported bundle path that is not a plain `logs/<file>` (`logs/../x`, `logs/`, `/etc/x`, `other/x`, a space, a subdirectory) is refused quoting the value, neither downloaded nor removed -- it is broker output reaching a local file name and an in-broker `rm -rf` -- while the show-command zip is still collected |
-| `TestGatherNodeRefusesAnUnsafeHostname` | A broker host name that is not a plain name (`../x`, `a/b`, a space) is refused before it becomes part of the local zip's file name, and nothing is downloaded |
+| `TestDiagnosticsGathersEveryNodeDespiteAFailure` | A primary whose gather fails no longer stops the backup and monitor: both are still gathered (archive and bundle), and the error names the primary, says 1 of 3, and says where what was collected went |
+| `TestGatherNodeRefusesAnUnexpectedBundlePath` | A reported bundle path that is not a plain `logs/<file>` (`logs/../x`, `logs/`, `/etc/x`, `other/x`, a space, a subdirectory) is refused quoting the value, neither downloaded nor removed -- it is broker output reaching a local file name and an in-broker `rm -rf` -- while the show-command archive is still collected |
+| `TestGatherNodeRefusesAnUnsafeArchiveName` | A broker host name that is not a plain name (`../x`, `a/b`, a space), or a timestamp that would make the archive name one (`../x`), is refused before it names the local archive or the in-broker directory: nothing is archived and nothing downloaded |
+| `TestDiagnosticsFetchesAnEncryptedBundle` | Under `Encrypt` the gather carries no `no-encrypt`, and the `.tgz.p7m` the broker reports is downloaded under its own name and removed from the broker |
 
 ### config_ops_test.go
 

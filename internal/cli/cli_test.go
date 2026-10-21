@@ -725,7 +725,7 @@ func TestFlagsRegistered(t *testing.T) {
 		{[]string{"broker", "deploy"}, []string{"restart"}},
 		{[]string{"broker", "remove"}, []string{"delete-data", "no-prompt"}},
 		{[]string{"operator", "remove"}, []string{"delete-crd", "no-prompt"}},
-		{[]string{"broker", "perform", "gather-diagnostics"}, []string{"days"}},
+		{[]string{"broker", "perform", "gather-diagnostics"}, []string{"days", "encrypt"}},
 		// A backup host is asked before it asserts, so the silencer rides beside --pod.
 		{[]string{"broker", "perform", "assert-leader"}, []string{"pod", "no-prompt"}},
 		{[]string{"broker", "cli"}, []string{"pod"}},
@@ -757,6 +757,44 @@ func TestFlagsRegistered(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestOpsGatherDiagnosticsRefusesDaysBelowOne: the broker's refusal of a bad day count is
+// invisible -- `cli -Apes` exits 0 over it -- so --days below 1 is a usage error at the
+// flag, on both platforms, before anything runs and before the diagnostics dir is made.
+func TestOpsGatherDiagnosticsRefusesDaysBelowOne(t *testing.T) {
+	ops := []struct {
+		name     string
+		platform config.Platform
+		op       func(*App) error
+	}{
+		{"kubernetes", config.K8s, opK8sVerifyDiagnostics},
+		{"docker", config.Docker, opCtrVerifyDiagnostics},
+	}
+	for _, o := range ops {
+		for _, days := range []int{0, -1} {
+			t.Run(fmt.Sprintf("%s --days %d", o.name, days), func(t *testing.T) {
+				diag := filepath.Join(t.TempDir(), "diag")
+				cfg := &config.Config{}
+				cfg.Broker.HostDiagnosticDir = diag
+				rr := &opRunner{}
+				a := &App{Cfg: cfg, Platform: o.platform, Runner: rr, days: days}
+				err := o.op(a)
+				if code := ExitCode(err); code != exitUsage {
+					t.Fatalf("err = %v (exit %d), want a usage error (exit %d)", err, code, exitUsage)
+				}
+				if want := fmt.Sprintf("--days must be at least 1 (got: %d)", days); !strings.Contains(err.Error(), want) {
+					t.Errorf("err = %v, want it to name %q", err, want)
+				}
+				if len(rr.calls) != 0 {
+					t.Errorf("nothing may run on a refused --days, got:\n%s", rr.dump())
+				}
+				if _, statErr := os.Stat(diag); !os.IsNotExist(statErr) {
+					t.Errorf("the diagnostics dir must not be created on a refused --days: %v", statErr)
+				}
+			})
+		}
 	}
 }
 

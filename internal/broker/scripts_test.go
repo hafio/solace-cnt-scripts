@@ -255,32 +255,65 @@ func TestParseVPNNamesNoSeparator(t *testing.T) {
 	}
 }
 
+// TestGatherConfigsScript pins the gather. The day count is bare: quoted, as a literal copy
+// of 069's bash quote-splice once sent it, the broker refuses `'1'` and `cli -Apes` still
+// exits 0, so no bundle was ever gathered. no-encrypt is the default and --encrypt drops it.
 func TestGatherConfigsScript(t *testing.T) {
-	got := gatherConfigsScript(7)
-	if !strings.HasPrefix(got, "home\nno paging\n") {
-		t.Errorf("gatherConfigsScript prefix: %q", got[:40])
-	}
-	if !strings.Contains(got, "show acl-profile * > configs/cliout/show-aclprofiles.out\n") {
-		t.Error("gatherConfigsScript missing the first show command")
-	}
-	if !strings.Contains(got, "gather-diagnostics days-of-history '7' no-encrypt\n") {
-		t.Error("gatherConfigsScript missing gather-diagnostics with days substituted")
-	}
-	if n := strings.Count(got, "> configs/cliout/show-"); n != len(gatherShowCommands) {
-		t.Errorf("gatherConfigsScript emitted %d show lines, want %d", n, len(gatherShowCommands))
+	for _, tc := range []struct {
+		name string
+		opts DiagnosticsOptions
+		want string
+	}{
+		{"unencrypted by default", DiagnosticsOptions{Days: 7}, "gather-diagnostics days-of-history 7 no-encrypt\n"},
+		{"encrypted", DiagnosticsOptions{Days: 7, Encrypt: true}, "gather-diagnostics days-of-history 7\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := gatherConfigsScript(tc.opts)
+			if !strings.HasPrefix(got, "home\nno paging\n") {
+				t.Errorf("gatherConfigsScript prefix: %q", got[:40])
+			}
+			if !strings.Contains(got, "show acl-profile * > configs/cliout/show-aclprofiles.out\n") {
+				t.Error("gatherConfigsScript missing the first show command")
+			}
+			// The gather is reached as home, enable, admin -- no `end` -- and is the last line.
+			if tail := cliHome + "enable\nadmin\n" + tc.want; !strings.HasSuffix(got, tail) {
+				t.Errorf("gatherConfigsScript must end with %q, got %q", tail, got[len(got)-80:])
+			}
+			if strings.Contains(got, "\nend\n") {
+				t.Error("gatherConfigsScript must not carry an end before home")
+			}
+			if tc.opts.Encrypt && strings.Contains(got, "no-encrypt") {
+				t.Error("an encrypted gather must not carry no-encrypt")
+			}
+			if strings.Contains(got, "'7'") {
+				t.Error("the day count must reach the broker bare, not quoted")
+			}
+			if n := strings.Count(got, "> configs/cliout/show-"); n != len(gatherShowCommands) {
+				t.Errorf("gatherConfigsScript emitted %d show lines, want %d", n, len(gatherShowCommands))
+			}
+		})
 	}
 }
 
-func TestZipConfigsScript(t *testing.T) {
-	got := zipConfigsScript()
-	if !strings.Contains(got, "zip gather-configs.zip -q -r cli-out/*") {
-		t.Errorf("zipConfigsScript missing the zip command: %q", got)
+// TestArchiveConfigsScript pins the show-output archive: a .tgz built around a directory
+// named by $1, so the per-node archives unpack side by side. Anything an earlier failed run
+// left -- the staging dir, the archive, an older version's cli-out and zip -- goes before
+// the mv, which would otherwise nest into it and archive that run's output too.
+func TestArchiveConfigsScript(t *testing.T) {
+	got := archiveConfigsScript()
+	if !strings.Contains(got, "\nset -e\n") {
+		t.Errorf("archiveConfigsScript must stop at its first failed step: %q", got)
 	}
-	// A cli-out left by an earlier failed run must go first: the mv would nest into it
-	// and the zip would carry that run's output as well.
-	rmAt, mvAt := strings.Index(got, "rm -rf cli-out gather-configs.zip"), strings.Index(got, "mv configs/cliout cli-out")
+	if !strings.Contains(got, `tar -czf gather-configs.tgz -C configs-out "$1"`) {
+		t.Errorf("archiveConfigsScript missing the tar command: %q", got)
+	}
+	if strings.Contains(got, "zip ") {
+		t.Errorf("archiveConfigsScript must not need zip: %q", got)
+	}
+	rmAt := strings.Index(got, "rm -rf configs-out gather-configs.tgz cli-out gather-configs.zip")
+	mvAt := strings.Index(got, `mv configs/cliout "configs-out/$1"`)
 	if rmAt < 0 || mvAt < 0 || rmAt > mvAt {
-		t.Errorf("zipConfigsScript must clear a stale cli-out before the mv: %q", got)
+		t.Errorf("archiveConfigsScript must clear what an earlier run left before the mv: %q", got)
 	}
 }
 
@@ -312,7 +345,7 @@ func TestEveryScriptTurnsPagingOffAfterHome(t *testing.T) {
 		"enableDefaultUsers":      enableDefaultUsersScript([]string{"default"}),
 		"productKeys":             productKeysScript([]string{"key"}),
 		"removeProductKeys":       removeProductKeysScript([]string{"key"}),
-		"gatherConfigs":           gatherConfigsScript(1),
+		"gatherConfigs":           gatherConfigsScript(DiagnosticsOptions{Days: 1}),
 		"currentConfigAll":        currentConfigScript("", false),
 		"currentConfigVPN":        currentConfigScript("default", true),
 	}

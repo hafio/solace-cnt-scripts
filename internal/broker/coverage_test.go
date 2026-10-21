@@ -331,15 +331,15 @@ func TestDiagnosticsTwoRolesNoBundle(t *testing.T) {
 	o, _ := newTestOps(t, &config.Config{}, ft)
 	var logs []string
 	o.Log = func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
-	if err := o.Diagnostics(context.Background(), dest, "20260731", 5, config.Primary, config.Backup); err != nil {
+	if err := o.Diagnostics(context.Background(), dest, "20260731", DiagnosticsOptions{Days: 5}, config.Primary, config.Backup); err != nil {
 		t.Fatalf("Diagnostics error: %v", err)
 	}
-	// Two roles, each pulling only the gather-configs.zip (no diagnostics bundle).
+	// Two roles, each pulling only the gather-configs.tgz (no diagnostics bundle).
 	if len(ft.downloads) != 2 {
-		t.Errorf("Diagnostics downloads = %v, want 2 (one zip per role)", ft.downloads)
+		t.Errorf("Diagnostics downloads = %v, want 2 (one archive per role)", ft.downloads)
 	}
 	for _, d := range ft.downloads {
-		if d.remote != JailRoot+"/gather-configs.zip" {
+		if d.remote != JailRoot+"/gather-configs.tgz" {
 			t.Errorf("unexpected download remote %q", d.remote)
 		}
 	}
@@ -357,7 +357,7 @@ func TestDiagnosticsRunError(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "diag")
 	rt := &runErrTransport{fakeTransport: &fakeTransport{}, err: errors.New("run boom")}
 	o := &Ops{T: rt, Cfg: &config.Config{}, Out: &bytes.Buffer{}, PollInterval: 0}
-	if err := o.Diagnostics(context.Background(), dest, "ts", 1, config.Primary); err == nil {
+	if err := o.Diagnostics(context.Background(), dest, "ts", DiagnosticsOptions{Days: 1}, config.Primary); err == nil {
 		t.Error("Diagnostics should surface a transport Run error")
 	}
 }
@@ -1045,7 +1045,7 @@ func TestDiagnosticsMkdirError(t *testing.T) {
 	writeFile(t, blocker, "not a directory\n")
 	destDir := filepath.Join(blocker, "sub") // a path component is a regular file
 	o, _ := newTestOps(t, &config.Config{}, &fakeTransport{})
-	err := o.Diagnostics(context.Background(), destDir, "ts", 1, config.Primary)
+	err := o.Diagnostics(context.Background(), destDir, "ts", DiagnosticsOptions{Days: 1}, config.Primary)
 	if err == nil || !strings.Contains(err.Error(), "create diagnostics dir") {
 		t.Errorf("Diagnostics mkdir error = %v, want wrapped %q", err, "create diagnostics dir")
 	}
@@ -1055,7 +1055,7 @@ func TestDiagnosticsMkdirError(t *testing.T) {
 
 // TestGatherNodeDownloadError closes gatherNode's main-archive Download
 // branch, otherwise untested anywhere in the package: a failed pull of the
-// main zip must fail the whole node's diagnostics rather than reporting
+// main archive must fail the whole node's diagnostics rather than reporting
 // success with no local file.
 func TestGatherNodeDownloadError(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "diag")
@@ -1067,12 +1067,12 @@ func TestGatherNodeDownloadError(t *testing.T) {
 	}}
 	dt := &downloadErrTransport{fakeTransport: ft, err: errors.New("download boom")}
 	o := &Ops{T: dt, Cfg: &config.Config{}, Out: &bytes.Buffer{}, PollInterval: 0}
-	if err := o.Diagnostics(context.Background(), dest, "20260731", 3, config.Primary); err == nil {
+	if err := o.Diagnostics(context.Background(), dest, "20260731", DiagnosticsOptions{Days: 3}, config.Primary); err == nil {
 		t.Error("Diagnostics should surface the main archive's Download error")
 	}
-	zipPath := filepath.Join(dest, "gather-configs-host-20260731.zip")
-	if _, statErr := os.Stat(zipPath); !os.IsNotExist(statErr) {
-		t.Errorf("no local zip should exist after a failed download, stat err = %v", statErr)
+	archivePath := filepath.Join(dest, "gather-configs-host-20260731.tgz")
+	if _, statErr := os.Stat(archivePath); !os.IsNotExist(statErr) {
+		t.Errorf("no local archive should exist after a failed download, stat err = %v", statErr)
 	}
 }
 
@@ -1095,7 +1095,7 @@ func TestGatherNodeBundleDownloadIsFatalAndKeepsTheBundle(t *testing.T) {
 	const remote = JailRoot + "/logs/diag-node1.tgz"
 	dt := &downloadErrTransport{fakeTransport: ft, err: errors.New("bundle download boom"), match: remote}
 	o := &Ops{T: dt, Cfg: &config.Config{}, Out: &bytes.Buffer{}, PollInterval: 0}
-	err := o.Diagnostics(context.Background(), dest, "20260731", 3, config.Primary)
+	err := o.Diagnostics(context.Background(), dest, "20260731", DiagnosticsOptions{Days: 3}, config.Primary)
 	if err == nil {
 		t.Fatal("a failed bundle download must fail the run rather than report success")
 	}
@@ -1143,7 +1143,7 @@ func TestGatherNodeBundleCleanupWarnsOnly(t *testing.T) {
 	var logs []string
 	o := &Ops{T: rt, Cfg: &config.Config{}, Out: &bytes.Buffer{}, PollInterval: 0,
 		Log: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}
-	if err := o.Diagnostics(context.Background(), dest, "20260731", 3, config.Primary); err != nil {
+	if err := o.Diagnostics(context.Background(), dest, "20260731", DiagnosticsOptions{Days: 3}, config.Primary); err != nil {
 		t.Fatalf("Diagnostics should still succeed when only the bundle cleanup fails: %v", err)
 	}
 	joined := strings.Join(logs, "\n")

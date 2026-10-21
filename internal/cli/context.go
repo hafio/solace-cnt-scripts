@@ -69,6 +69,7 @@ type App struct {
 	pod         string   // --pod role selector for cli/shell/copy/cli-script
 	destDir     string   // copy into --dir
 	days        int      // diagnostics --days
+	encrypt     bool     // diagnostics --encrypt (an encrypted .tgz.p7m instead of a readable .tgz)
 	restart     bool     // deploy broker --restart (bounce a running broker)
 	out         string   // --out/-o: write the rendered artifact here instead of stdout
 	follow      bool     // logs --follow/-f: keep streaming instead of printing a snapshot
