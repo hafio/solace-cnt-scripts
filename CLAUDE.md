@@ -155,7 +155,9 @@ and leaves the real field at zero. `internal/config/scaling.go` is the worked ex
 cannot drift per call site. Two voices, split by stream: **stderr narrates, stdout reports.** A
 stderr line is `==> <phase>` or `[TAG ] <msg>` and never both. stdout carries report bodies --
 `Section`, `KVBlock`, `KVRow`, `Table`. Plain ASCII, no ANSI colour: these lines are read in
-PowerShell 5.1, captured into dev-script logs, and grepped.
+PowerShell 5.1, captured into dev-script logs, and grepped. The one escape sequence is
+`--watch`'s screen clear (`internal/cli/watch.go`), and it is sent only to a terminal that
+takes it -- piped or redirected, a watch appends plain text instead.
 
 `Log` on `Cluster`/`Manager`/`Ops` is the **raw** line sink -- it emits a formatted line
 verbatim and the callee's own Sink adds the prefixes, so the CLI hands it `lineSink()` and

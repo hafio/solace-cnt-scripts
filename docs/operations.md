@@ -45,8 +45,9 @@ file, and no amount of waiting fixes it. So is a command or flag that does not a
 platform the file selected, a bad `--pod`/`--platform`/`--since` value,
 `--allow-command` on a command that renders without executing, a `podman.rootless`
 that disagrees with the account you ran as -- `true` under `sudo`, or `false` without it --
-and a `cli-script`/`shell-script` argument that is a path, or names no file in
-`broker.cliScriptsDir`.
+a `cli-script`/`shell-script` argument that is a path, or names no file in
+`broker.cliScriptsDir`, and a `--interval` that is not a duration, is below 1s, or comes
+without `--watch`.
 
 **One documented exception:** a mistyped *top-level* command exits **1**, not 2
 (`solace-util depoy broker`). Cobra produces that error before this tool can classify it,
@@ -59,6 +60,9 @@ a session inside the broker, so the exit status of whatever you ran last in ther
 this tool's exit status -- collapsing it to 1 would throw away the answer you asked for. No
 other command does this: everything else runs kubectl or a container engine as an
 implementation detail, and leaking those codes would make the table above meaningless.
+
+**A `--watch` ends with 0 on Ctrl-C** -- that is how a watch stops, not a failure -- and a
+refresh that fails mid-watch is shown and retried rather than ending it.
 
 ## The preflight
 
@@ -469,6 +473,17 @@ counter instead -- this deployment's unit is not their unit. `--detail` adds the
 `inspect` dump on top. The container's **environment is never printed** on either platform:
 on docker the compose secrets are environment-sourced, so secrets appear only as the mount
 paths that name them.
+
+**`--watch` keeps the report on screen.** `broker status` (with or without `--all` and
+`--detail`) and `operator status` take `--watch`, which re-runs the same report every
+`--interval` (default `5s`, at least `1s`) until Ctrl-C. On a terminal each refresh clears
+the screen and redraws under a header naming the command, the interval and the time; on
+Windows the console is first asked to interpret the escape sequence, and an old console
+that refuses falls back to appending. Piped or redirected -- into a log, through `tee`, or
+under Git Bash, whose terminal is a pipe -- nothing is cleared: each report is appended under
+its own timestamped `===` line, so the output stays plain text. A refresh that fails, such
+as an unreachable cluster or engine, prints its error on stderr and the watch carries on;
+the screen clears before each read, so it stays blank for as long as the read takes.
 
 `broker logs --previous` is Kubernetes only, because a container engine keeps no prior-run
 log to read; `--since` is re-serialised through Go's duration parser before it reaches

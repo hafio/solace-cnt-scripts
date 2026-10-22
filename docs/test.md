@@ -67,7 +67,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-90 test files, 1643 test functions. Three of those are not tests. Two are os/exec
+91 test files, 1652 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -80,7 +80,7 @@ launched from.
 | --- | --- | --- |
 | internal/k8s | 20 | 282 |
 | internal/broker | 24 | 505 |
-| internal/cli | 13 | 258 |
+| internal/cli | 14 | 267 |
 | internal/config | 16 | 241 |
 | internal/container | 8 | 196 |
 | internal/convert | 1 | 40 |
@@ -90,14 +90,17 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **90** | **1643** |
+| **Total** | **91** | **1652** |
 
 
 ## Coverage
 
-Last recorded run, from `scripts/logs/cov.log` (2026-10-16), total **97.9%**. Re-run `cov`
+Last recorded run, from `scripts/logs/cov.log` (2026-10-22), total **97.9%**. Re-run `cov`
 after any change; these figures go stale the moment tests move, and the previous total is
 the floor the next run has to hold.
+
+**97.9% held through `--watch`.** `internal/cli` 97.5% -> 97.6% from `watch_test.go`; the
+Windows-only `enableVT` (`watch_windows.go`) is not in a Linux profile.
 
 **93.5% -> 97.9%, a coverage pass with no production change.** 162 tests across 16 files,
 aimed at the largest uncovered blocks the previous profile listed. `internal/cli` 85.3% ->
@@ -314,7 +317,7 @@ path that actually runs.
 | internal/container | 95.6% |
 | internal/k8s | 99.0% |
 | internal/broker | 98.7% |
-| internal/cli | 97.5% |
+| internal/cli | 97.6% |
 | internal/examples | 90.0% |
 | internal/engine | see below |
 
@@ -780,7 +783,7 @@ without a live broker;
 fixtures stand in for a captured `show current-config` transcript; and
 `exportconfigReadCounter` wraps `App.PromptIn` to prove a confirmation prompt was never
 actually read, not merely that the command did not block.
-258 tests across 13 files.
+267 tests across 14 files.
 
 Because the platform is a flag rather than the first word of a command, the
 invocations here name it explicitly (`--platform docker`) rather than relying on
@@ -801,7 +804,7 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 | `TestTreeStructure` | A representative set of command paths exists in the one unified tree, covering a top-level leaf, a group's child, and each applicability class |
 | `TestEveryRunnableCommandIsWired` | The wiring that replaced the two `PersistentPreRunE` hooks: every command with a `RunE` (bar `convert`, `examples`, `version`, `completion`) carries the shared pre-run and the `--allow-command` flag. Missing either is invisible until that one command is run, so it is checked structurally |
 | `TestGroupCommandsPrintHelpAndDoNothing` | The no-implicit-actions rule: a verb that owns objects (`check`, `smoke`, `prepare`, `deploy`, `config`, `start`, `stop`, `restart`, `status`, `logs`, `copy`, `generate`, `remove`, and `config`'s own `apply`/`delete`/`disable`) carries no `RunE`, so running it bare prints its own help and touches nothing -- proven by succeeding with no `--env` at all, since a runnable leaf would instead fail resolving the missing default env file |
-| `TestFlagsRegistered` | Per-command flags are registered where expected: `--restart` and `--pod` on `broker deploy`; `--delete-data`/`--no-prompt` on `broker remove`; `--delete-crd`/`--no-prompt` on `operator remove`; `--days`/`--encrypt` on `broker perform gather-diagnostics`; `--pod`/`--no-prompt` on `broker perform assert-leader` (the silencer for the backup-host question); `--pod` on `broker cli`, `broker perform cli-script` and `broker perform shell-script`; `--pod` on `broker copy from`; `--pod`/`--dir` on `broker copy into`; `--all`/`--detail`/`--pod` on `broker status`; `--detail` on `operator status`; `--out`/`--no-prompt` on `examples`, `broker generate`, `operator generate` and `convert` -- every command whose output is an artifact you keep takes the same pair; `--apply`/`--remove`/`--no-prompt` on `broker configure server-certs` and `broker configure product-keys`, the two `configure` leaves with an outage on the other side of their removal (TLS down, and an unlicensed broker) and therefore the two that ask |
+| `TestFlagsRegistered` | Per-command flags are registered where expected: `--restart` and `--pod` on `broker deploy`; `--delete-data`/`--no-prompt` on `broker remove`; `--delete-crd`/`--no-prompt` on `operator remove`; `--days`/`--encrypt` on `broker perform gather-diagnostics`; `--pod`/`--no-prompt` on `broker perform assert-leader` (the silencer for the backup-host question); `--pod` on `broker cli`, `broker perform cli-script` and `broker perform shell-script`; `--pod` on `broker copy from`; `--pod`/`--dir` on `broker copy into`; `--all`/`--detail`/`--pod`/`--watch`/`--interval` on `broker status`; `--detail`/`--watch`/`--interval` on `operator status`; `--out`/`--no-prompt` on `examples`, `broker generate`, `operator generate` and `convert` -- every command whose output is an artifact you keep takes the same pair; `--apply`/`--remove`/`--no-prompt` on `broker configure server-certs` and `broker configure product-keys`, the two `configure` leaves with an outage on the other side of their removal (TLS down, and an unlicensed broker) and therefore the two that ask |
 | `TestOpsGatherDiagnosticsRefusesDaysBelowOne` | `--days` 0 or -1 is a usage error naming the value on both platforms, before anything runs and before the diagnostics dir is created -- the broker's own refusal is invisible, since `cli -Apes` exits 0 over it |
 | `TestHelpNoConfig` | `--help` short-circuits before config load, so no env file is needed |
 | `TestGenerateWired` | `generate`'s leaves, none of which contact the cluster or the container engine: `broker generate` renders what `broker deploy` would apply on EITHER family (the CR's `apiVersion:` on kubernetes, `services:`/`[Unit]` on docker/podman), plus `broker generate` on both and `operator generate` on kubernetes. A plain `runRoot` with no echo seam is enough since nothing here executes |
@@ -1035,7 +1038,7 @@ still runs them.
 | `TestNoArgsLeafOffersNoFiles` | A command built by `leaf` offers nothing, stopping cobra's filename fallback across the tree. The file-path commands (`broker copy from`/`into`, `convert`) are excluded, since a path is exactly what they take; `cli-script`/`shell-script` take a name and have their own test (`TestScriptCommandsOfferNoFiles`) |
 | `TestScriptCommandsOfferNoFiles` | `broker perform cli-script` and `shell-script` offer nothing and the no-file directive: their operand is a name in `broker.cliScriptsDir`, which completion cannot read, and the shell's working-directory listing would coach the refused form |
 | `TestAllowCommandOffersNoFiles` | `--allow-command` offers no files: the value is a bare binary name, and paths are what its own help text warns against |
-| `TestFlagCompletionsRegistered` | The drift gate: every flag that should have a completion function still has one, since a renamed flag silently reverts to filename completion at a TAB press and no other test would notice |
+| `TestFlagCompletionsRegistered` | The drift gate: every flag that should have a completion function still has one (`--interval` on both status commands among them), since a renamed flag silently reverts to filename completion at a TAB press and no other test would notice |
 | `TestCompletionHelpKeepsTheLoadingInstructions` | The one thing this command exists to tell you, which has gone missing before: a completion script is useless without the line that loads it, and that line differs per shell in a way nobody remembers. Pins that each shell shows BOTH the current-shell one-liner and the permanent form, that each actually shows a command rather than just promising one (the powershell help said "source it from your profile" for a while without giving the line), and that the parent lists the permanent form for all four so one help screen is enough. No other completion test would notice: they drive the generator and check the SCRIPT, which is unaffected by the help around it |
 
 ### examples_test.go
@@ -1201,6 +1204,22 @@ The Kubernetes handlers of `ops_k8s.go`, driven directly over `opRunner` rather 
 | `TestOpsK8sRemoveBrokerStopsWhenASecretWillNotDelete` | `broker remove` ends at a failed Secret delete with the cause preserved, leaving the namespace unlisted, unoffered and undeleted |
 | `TestOpsK8sRemoveNamespaceIfEmptyKeepsTheNamespaceInDoubt` | `removeNamespaceIfEmpty` never removes a Kubernetes namespace and keeps one it cannot list, even under `--no-prompt`; an empty namespace is deleted only on a yes, and a no or an unanswerable prompt keeps it |
 | `TestOpsK8sClusterConfirmIsTheDowngradeGateWithNoWayAround` | `k8sCluster` wires `Cluster.Confirm` to `confirmDowngrade`: only a typed yes proceeds, `--no-prompt` neither answers it nor lets an unattended run through, and an unanswered question refuses and says to re-run interactively |
+
+### watch_test.go
+
+`--watch` on `broker status` and `operator status` (watch.go), driven through the real commands with the `App.Sleep` seam counting refreshes and the `App.Terminal` seam choosing redraw or append.
+
+| Test | What it covers |
+| --- | --- |
+| `TestWatchRedrawsInPlaceOnATerminal` | On a terminal each refresh clears the screen and prints the `Every <interval>: solace-util <command>` header before rerunning the same report -- twice here, waiting the `--interval` asked for |
+| `TestWatchAppendsWhenNotATerminal` | Piped or redirected, no escape byte is written; each report is appended under its own timestamped `===` line, at the 5s default |
+| `TestWatchKeepsGoingAfterAFailedRefresh` | A refresh the engine refuses is shown on stderr with the retry, and the next refresh still runs |
+| `TestWatchEndsQuietlyWhenInterrupted` | A read that fails because Ctrl-C cancelled the watch ends it with nil, after one run and with no retry message |
+| `TestWatchSleepHonoursCtrlC` | The real timer waits out an interval, and returns `context.Canceled` at once when the context is already cancelled |
+| `TestWatchNeverRedrawsIntoAPipe` | With no seam, stdout being a pipe means no redraw, so escape bytes never land in a pipe |
+| `TestWatchIntervalIsValidated` | `--interval` below 1s, not a duration, or given without `--watch` is a usage error (exit 2) refused before anything runs |
+| `TestStatusWithoutWatchRunsOnce` | Without `--watch` the report runs exactly once and never waits |
+| `TestOperatorStatusWatches` | `operator status --detail --watch` refreshes the same way, its header naming `--detail` |
 
 ## internal/convert
 
@@ -3077,6 +3096,8 @@ Override them on the struct after construction:
 | `Manager.Resolve` | `net.LookupHost` | internal/container -- DNS probes in `Check`/`PrepHost` |
 | `Manager.Geteuid` | `os.Geteuid` | internal/container -- the executor-side rootless/rootful guard (returns -1 on Windows, which skips it) |
 | `App.Geteuid` | `nil` (`os.Geteuid`) | internal/cli -- the euid `prepare` hands `container.GuardPodmanEUID`. A test driving a podman command through a NON-Echo runner must set it, or the outcome depends on which account runs the suite |
+| `App.Sleep` | `nil` (a real timer that Ctrl-C cancels) | internal/cli -- waits one `--watch` interval, or ends the watch by returning an error; a test counts refreshes and stops after N without waiting |
+| `App.Terminal` | `nil` (stdout is a terminal that takes escape sequences) | internal/cli -- whether a `--watch` refresh clears the screen or appends; a test's stdout is a pipe, so it says which it wants |
 | `Manager.Getenv` / `Manager.Setenv` | `os.Getenv` / `os.Setenv` | internal/container -- `ensureUserSession`'s `XDG_RUNTIME_DIR` / `DBUS_SESSION_BUS_ADDRESS` derivation. A seam rather than `t.Setenv` because the code WRITES the environment: a real `os.Setenv` would leak into every test after it, and `newCapMgr` installs an inert pair so no test can reach the real one by accident |
 | `Ops.Hostname` | `os.Hostname` | internal/broker -- node-role detection in `LocalRole` |
 | `Ops.Platform` | `""` (zero value) | internal/broker -- resolves the mate's SEMP port from the bridge network.ports mapping (`sempPort`); set by `ctrOps`, left zero on k8s, which never uses the SEMP channel |

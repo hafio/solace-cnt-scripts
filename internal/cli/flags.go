@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"time"
+
 	"github.com/spf13/cobra"
 
 	"solace/internal/broker"
@@ -147,6 +149,45 @@ func diagnosticsOptions(a *App) (broker.DiagnosticsOptions, error) {
 			"days of history gather-diagnostics collects", a.days)
 	}
 	return broker.DiagnosticsOptions{Days: a.days, Encrypt: a.encrypt}, nil
+}
+
+// addWatchFlags wires --watch and --interval onto a status command: the report re-runs
+// every --interval until Ctrl-C (withWatch, watch.go).
+//
+// --interval registers with an EMPTY default rather than "5s" so that watchInterval can
+// tell an --interval given without --watch from one left alone; the help text names the
+// default instead.
+func addWatchFlags(c *cobra.Command, app *App) {
+	c.Flags().BoolVar(&app.watch, "watch", false,
+		"re-run the report every --interval until Ctrl-C; on a terminal the screen is redrawn in place")
+	c.Flags().StringVar(&app.interval, "interval", "",
+		"how often --watch refreshes, as a duration such as 5s or 1m (default 5s, at least 1s)")
+	registerFlagCompletion(c, "interval", cobra.NoFileCompletions)
+}
+
+// defaultWatchInterval is how often --watch refreshes when --interval is not given.
+const defaultWatchInterval = 5 * time.Second
+
+// watchInterval reads --interval. It is refused without --watch -- a script passing it
+// alone expects a watch it would not get -- and below 1s, since every refresh re-reads the
+// cluster or the engine. Each refusal is a usage error: a different command line fixes it.
+func watchInterval(a *App) (time.Duration, error) {
+	if a.interval == "" {
+		return defaultWatchInterval, nil
+	}
+	if !a.watch {
+		return 0, usagef("--interval %q sets how often --watch refreshes, so it means nothing without "+
+			"--watch: add --watch, or drop --interval", a.interval)
+	}
+	d, err := time.ParseDuration(a.interval)
+	if err != nil {
+		return 0, usagef("--interval %q is not a duration: use a number with a unit, like 5s, 30s or 1m", a.interval)
+	}
+	if d < time.Second {
+		return 0, usagef("--interval %q is below 1s: every refresh re-reads the cluster or the engine, "+
+			"so it must be at least 1s", a.interval)
+	}
+	return d, nil
 }
 
 // addOutFlags wires --out/-o (and the --no-prompt that answers its one question) onto a

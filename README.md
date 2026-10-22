@@ -281,7 +281,7 @@ The full surface -- every command, argument, and flag with its default -- is
 | `broker deploy` | all | Prerequisites and the broker, idempotent (`--restart` on docker/podman, `--pod` names this host) |
 | `broker remove` | all | Remove the broker. Data kept unless `--delete-data`; the namespace only if nothing else is in it |
 | `broker generate` | all | Print what `broker deploy` would apply, without applying it |
-| `broker status` | all | Pods/services/statefulset, or the local container. `--all`, `--detail`, `--pod` |
+| `broker status` | all | Pods/services/statefulset, or the local container. `--all`, `--detail`, `--pod`, `--watch`/`--interval` |
 | `broker logs` | all | Read the broker's logs. `--follow`, `--tail`, `--since`, `--pod` |
 | `broker cli` / `broker shell` | all | Open an interactive Solace CLI or shell (`--pod` picks the pod) |
 | `broker copy from` / `into` | all | Copy files out of or into the broker |

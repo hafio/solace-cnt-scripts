@@ -733,8 +733,8 @@ func TestFlagsRegistered(t *testing.T) {
 		{[]string{"broker", "perform", "shell-script"}, []string{"pod"}},
 		{[]string{"broker", "copy", "from"}, []string{"pod"}},
 		{[]string{"broker", "copy", "into"}, []string{"pod", "dir"}},
-		{[]string{"broker", "status"}, []string{"all", "detail", "pod"}},
-		{[]string{"operator", "status"}, []string{"detail"}},
+		{[]string{"broker", "status"}, []string{"all", "detail", "pod", "watch", "interval"}},
+		{[]string{"operator", "status"}, []string{"detail", "watch", "interval"}},
 		// Every `broker configure` leaf whose disable/remove direction acts on a live
 		// broker asks first, so all five carry the silencer.
 		{[]string{"broker", "configure", "server-certs"}, []string{"apply", "remove", "no-prompt"}},

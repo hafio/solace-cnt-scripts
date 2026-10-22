@@ -558,6 +558,8 @@ func TestFlagCompletionsRegistered(t *testing.T) {
 		{[]string{"broker", "logs"}, "since"},
 		{[]string{"operator", "logs"}, "tail"},
 		{[]string{"operator", "logs"}, "since"},
+		{[]string{"broker", "status"}, "interval"},
+		{[]string{"operator", "status"}, "interval"},
 	}
 	for _, tc := range cases {
 		cmd := findCmd(t, root, tc.path...)

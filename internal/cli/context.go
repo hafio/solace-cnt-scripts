@@ -2,9 +2,11 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -79,6 +81,8 @@ type App struct {
 	previous    bool     // logs broker --previous: the PREVIOUS container's logs (kubernetes only)
 	vpns        []string // export-config --vpn: capture only these message-VPNs (repeatable)
 	brokerOnly  bool     // export-config --broker-only: broker-level configuration only
+	watch       bool     // status --watch: re-run the report until Ctrl-C
+	interval    string   // status --interval: how often --watch refreshes ("" = the 5s default)
 
 	// The `broker configure` direction flags. Each leaf has a DEFAULT direction and a
 	// flag for the other one, so `configure domain-certs` applies and
@@ -114,6 +118,15 @@ type App struct {
 	// which account it runs as than rename the machine, so a podman command driven
 	// through a NON-Echo runner would otherwise pass or fail on who ran `go test`.
 	Geteuid func() int
+
+	// Sleep and Terminal are --watch's seams (watch.go), in the spirit of
+	// Interactive/PromptIn. Sleep waits one interval, or ends the watch by returning an
+	// error; nil is a real timer that Ctrl-C cancels. Terminal says whether a refresh may
+	// clear the screen; nil is stdout being a terminal that takes escape sequences.
+	// Only tests set either: a test cannot sit through a real interval, and its stdout is
+	// a pipe.
+	Sleep    func(ctx context.Context, d time.Duration) error
+	Terminal func() bool
 
 	// kubeContext is the kubeconfig context announceKubeContext resolved at load,
 	// repeated by every destructive Kubernetes prompt (k8sWhat). Empty when it

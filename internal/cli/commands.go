@@ -217,7 +217,8 @@ func newBrokerRestartCmd(app *App) *cobra.Command {
 
 const brokerStatusLong = "Reports pod/container state, plus the operator's CR conditions on\n" +
 	"Kubernetes.\n\n" +
-	"--all is how to find a broker whose env file you have lost."
+	"--all is how to find a broker whose env file you have lost. --watch redraws\n" +
+	"the report every --interval (5s) until Ctrl-C."
 
 func newBrokerStatusCmd(app *App) *cobra.Command {
 	c := wireExec(app, &cobra.Command{
@@ -227,9 +228,12 @@ func newBrokerStatusCmd(app *App) *cobra.Command {
 		Args:              noRolePositional,
 		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return dispatch(platformOps(withPodRole(opK8sStatusBroker), opCtrStatusBroker), app)
+			return withWatch("broker status", func(a *App) error {
+				return dispatch(platformOps(withPodRole(opK8sStatusBroker), opCtrStatusBroker), a)
+			})(app)
 		},
 	})
+	addWatchFlags(c, app)
 	c.Flags().BoolVar(&app.all, "all", false,
 		"report every Solace broker found, not just the one this env file describes "+
 			"(Kubernetes: across all namespaces; docker/podman: every Solace container on this host)")
@@ -756,11 +760,13 @@ func newOperatorRestartCmd(app *App) *cobra.Command {
 }
 
 const operatorStatusLong = "Reads the controller Deployment and its pods to report the running\n" +
-	"version and the namespaces it watches."
+	"version and the namespaces it watches.\n\n" +
+	"--watch redraws the report every --interval (5s) until Ctrl-C."
 
 func newOperatorStatusCmd(app *App) *cobra.Command {
 	c := onlyOn(withLong(leaf(app, "status", "Report the operator's controller status",
-		opK8sStatusOperator), operatorStatusLong), config.K8s)
+		withWatch("operator status", opK8sStatusOperator)), operatorStatusLong), config.K8s)
+	addWatchFlags(c, app)
 	c.Flags().BoolVar(&app.detail, "detail", false,
 		"include the full description of the operator deployment")
 	return c
