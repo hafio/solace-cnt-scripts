@@ -2376,16 +2376,34 @@ func TestOpK8sRemoveAborts(t *testing.T) {
 	for _, st := range steps {
 		t.Run(st.name+" fails -> the namespace is never inspected", func(t *testing.T) {
 			cfg := writeK8sDeployAllEnv(t, "false")
-			rr := &opRunner{fail: opFailOnCount("delete", st.n)}
+			// The permission probes ask about deleting and delete nothing, and the removal now
+			// asks every one of them first -- so the failure is injected on the n-th REAL delete,
+			// and only real deletes are counted, or it would land in the probes and prove nothing.
+			failNth := opFailOnCount("delete", st.n)
+			rr := &opRunner{fail: func(c opCall) error {
+				if opCanI(c) {
+					return nil
+				}
+				return failNth(c)
+			}}
 			a := &App{Cfg: cfg, Platform: config.K8s, Runner: rr, noPrompt: true}
 			var err error
 			captureStdout(t, func() { err = opK8sRemoveBroker(a) })
 			if err == nil {
 				t.Fatalf("opK8sRemoveBroker = nil, want the injected %s failure to abort", st.name)
 			}
-			if got := rr.callCount("delete"); got != st.n {
+			deletes := 0
+			for _, c := range rr.calls {
+				if !opCanI(c) && opArgvMatch(c, "delete") {
+					deletes++
+				}
+				if opArgvMatch(c, "persistentvolumeclaims,secrets,configmaps") {
+					t.Errorf("the namespace was inspected after %s failed:\n%s", st.name, rr.dump())
+				}
+			}
+			if deletes != st.n {
 				t.Errorf("opK8sRemoveBroker issued %d delete command(s) after %s failed, want exactly %d",
-					got, st.name, st.n)
+					deletes, st.name, st.n)
 			}
 		})
 	}

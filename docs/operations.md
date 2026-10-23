@@ -15,6 +15,7 @@ surface see [commands.md](commands.md); for the env file see
 
 - [Exit codes](#exit-codes)
 - [The preflight](#the-preflight)
+- [Permissions](#permissions)
 - [Version floors](#version-floors)
 - [Bringing up a fresh cluster](#bringing-up-a-fresh-cluster)
 - [Post-deployment configuration order](#post-deployment-configuration-order)
@@ -71,12 +72,18 @@ first, using the same command the real work will use:
 
 | Platform | Probe | Answers |
 | --- | --- | --- |
-| Kubernetes | `<runtime> auth can-i <verb> <resource> -n <namespace>` | Is the context live, and may this identity do the thing? |
+| Kubernetes | `<runtime> auth can-i <verb> <resource> -n <namespace>` (`--all-namespaces` for a cluster-scoped kind or a cluster-wide question) | Is the context live, and may this identity do the thing? |
 | Docker / Podman | `<runtime> info` | Is the daemon up and reachable as this user? |
 
 If it fails, the command stops nonzero **before the first byte is written**, passes the
 CLI's own error through, and adds one line saying what to do -- log in, ask for a role
-binding, start the daemon. It never logs you in or starts anything on your behalf, and
+binding (a cluster role binding for a cluster-wide question, which a role binding cannot
+grant), start the daemon. kubectl spells a refusal `no`, `no - <reason>` or
+`no (<evaluation error>)`, and all three are read as the refusal they are. `broker deploy`
+asks whether it may create every kind it writes before its first write, and `broker remove`
+about every kind it will delete before its first delete, so a refused grant cannot stop
+either halfway. (A re-deploy's `kubectl apply` also patches what already exists; `patch` is
+not asked about in advance.) It never logs you in or starts anything on your behalf, and
 there is no flag to skip it: previewing a command's effect without touching a cluster is
 what `generate` is for, and a render-only command never runs the preflight because it never
 runs anything.
@@ -85,6 +92,86 @@ On podman one check precedes even that probe. The declared `podman.rootless` is 
 with the account running the command, and a mismatch is refused before `podman info` can
 run as the wrong one -- a rootful `info` succeeding as root says nothing true about the
 rootless user's session. `generate` alone does not check, because it renders from anywhere.
+
+## Permissions
+
+A command asks for the permissions its own work uses, and no more. Broader reads -- a
+cluster-wide listing, a cluster-scoped kind, a guard that is not part of the work -- are made
+when the identity may make them and otherwise turn into a warning or a `[SKIP]` row saying
+what was not checked and which grant would check it; they never stop the command. What a
+command cannot do without stays a hard failure, before anything is written. So an identity
+bound only inside the broker namespace can deploy, report on and remove its broker:
+
+| Command | Needs, in the broker namespace | Used when allowed; otherwise a warning |
+| --- | --- | --- |
+| `broker deploy` | `get`, `create`, `patch` on the broker resource and on Secrets -- `create` and the CR's `get` are asked before the first write, `patch` (a re-deploy) is not; `create namespaces` only when the namespace does not exist yet | `get` on the namespace itself; `get` on PVCs (the [admin-password data check](configuration.md#the-admin-secret)); `get` on pods (the restart offer after a renewed certificate) |
+| `validate`, `broker validate` | `create` on the broker resource (a `[FAIL]` row) | Deployments listed cluster-wide (else the operator namespace is read by name); StorageClasses, which are cluster-scoped (else `[SKIP]`) |
+| `broker status` | `get` on the broker resource | `get` on pods, Services, StatefulSets and, with `--detail`, PVCs -- each section this identity may not read is a `[SKIP]` row |
+| `broker status --all` | `list` on the broker resource in every namespace | -- |
+| `broker remove` | `delete` on the broker resource, on the Secrets this env file owns and, with `--delete-data`, on PVCs -- all asked before the first delete | listing what is left in the namespace, and `delete namespaces` -- otherwise the namespace is kept |
+| `broker cli`, `shell`, `copy`, `configure`, `perform` | `create` on `pods/exec`, `get` on pods; `get` on Secrets where the admin password is read back; `configure server-certs` also `get` and `patch` on the TLS Secret | -- |
+| `broker logs` | `get` on pods and `pods/log` | -- |
+| `broker start`, `stop`, `restart` | scaling the StatefulSets (`statefulsets/scale`, start and stop), `delete` on pods (restart), `get` and `watch` on StatefulSets to follow the rollout | -- |
+| `operator status` | -- | `get` on Deployments in the operator namespace (else a `[SKIP]` row) |
+| `operator deploy`, `remove` | Cluster-wide: CRDs (`remove` only with `--delete-crd`, which also lists the broker resource in every namespace), ClusterRoles and ClusterRoleBindings; in the operator namespace: ServiceAccounts, Roles, RoleBindings, Deployments, and the image-pull Secret when credentials are set | Deployments listed cluster-wide (else the operator namespace is read by name) |
+
+The built-in `admin` and `edit` roles do **not** cover the broker resource: they grant only
+what ClusterRoles labelled `aggregate-to-admin`/`aggregate-to-edit` add, and the operator
+bundle ships none. So bind `edit` for the core kinds and add a Role for the broker resource
+beside it -- for example, for an identity `solace-deployer` in namespace `solace`:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: solace-util-broker
+  namespace: solace
+rules:
+  - apiGroups: ["pubsubplus.solace.com"]
+    resources: ["pubsubpluseventbrokers"]
+    verbs: ["get", "create", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: solace-util-broker
+  namespace: solace
+subjects:
+  - kind: ServiceAccount
+    name: solace-deployer
+    namespace: solace
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: solace-util-broker
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: solace-util-edit
+  namespace: solace
+subjects:
+  - kind: ServiceAccount
+    name: solace-deployer
+    namespace: solace
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: edit
+```
+
+Check what an identity holds before relying on it with
+`kubectl auth can-i --list -n solace --as=system:serviceaccount:solace:solace-deployer`.
+
+- **`pods/exec` is the real boundary.** Every broker-side command runs the Solace CLI or SEMP
+  inside a broker pod, as its admin, so an identity that may exec into a broker pod is that
+  broker's administrator and can read whatever the pod mounts. `edit` grants it; `view` does not.
+- **The probe itself needs the default binding.** `auth can-i` creates a
+  SelfSubjectAccessReview, which every authenticated identity may do through the built-in
+  `system:basic-user` binding. A cluster that removed it fails every probe as "could not check".
+- **Installing the operator is a cluster admin's job.** Its CRDs, ClusterRole and
+  ClusterRoleBinding are cluster-scoped, so `operator deploy` and `operator remove` need
+  cluster-wide grants whatever else is in place.
 
 ## Version floors
 
@@ -141,6 +228,10 @@ The rest of the report only runs once the cluster answers: an unreachable cluste
 everything after it `[SKIP]` rather than reporting checks it never made. From there it
 checks permission to create the broker resource, gives the **operator install** verdict, and
 checks the target StorageClass's volume-binding mode and whether it allows volume expansion.
+StorageClasses are cluster-scoped, so an identity confined to its namespace may not read them:
+that row is then `[SKIP]`, not checked, naming the grant that would check it and the two
+settings a cluster admin can confirm instead -- never a `[FAIL]` of a deploy that does not
+read them either. `operator validate` makes neither broker-side check.
 
 The verdict reads the operator that is running -- its `WATCH_NAMESPACE` against this env
 file's `kubernetes.namespace` -- and says `required`, `not required` or `unknown`, with what
@@ -180,10 +271,18 @@ solace-util broker perform assert-leader -e dev.yaml     # HA only, once the pri
 ```
 
 On Kubernetes, `broker deploy` reads the CR back after applying it, since `kubectl apply`
-exiting 0 does not prove the object actually exists. Before it applies anything,
+exiting 0 does not prove the object actually exists. It creates the namespace only when it is
+missing: a namespace that exists -- the usual case for an identity confined to it -- is read
+by name and left alone, so `create namespaces`, which only a cluster-wide grant gives, is
+asked for only when there is a namespace to create. An identity that may neither read the
+namespace nor create one is warned and goes on; the permission checks of the steps after it
+stop the deploy before anything is written if the namespace is not there. Before it applies anything,
 `operator deploy` also checks permission for every resource kind the bundle needs -- not
 just the CRD -- so a missing permission is caught before the apply is half done rather than
-partway through it; an operator already watching every namespace is left alone rather than
+partway through it. The operator namespace is planned the same way as the broker's: one that
+exists is not re-applied, an absent one needs `create namespaces`, and one this identity can
+neither read nor create stops the deploy before anything is applied, since the bundle's
+cluster-scoped documents would otherwise land first; an operator already watching every namespace is left alone rather than
 narrowed, and when the watch list comes out unchanged the rendered controller Deployment is
 byte-identical, so it is not rolled for nothing.
 
@@ -450,7 +549,11 @@ project name -- for instance to adopt containers an earlier deployment created u
 directory-derived name.
 
 **`broker status` reports health and restarts.** (On Kubernetes the same command instead
-reports the operator's CR conditions, then pods, Services and StatefulSets.) The `ps` line above it is deliberately
+reports the operator's CR conditions, then pods, Services and StatefulSets -- read by name,
+only this env file's broker and the objects the operator builds for it, so `get` on each kind
+is enough; a section this identity may not read is a `[SKIP]` row and the report goes on.
+`--all` lists every broker resource in the cluster, so it needs `list` on them in every
+namespace and fails, naming that grant, without it.) The `ps` line above it is deliberately
 narrowed to NAMES, IMAGE and STATUS: a broker publishes a dozen or more ports, and the
 engine's default PORTS column spends most of a terminal line listing both host bindings of
 each one, wrapping every other column into illegibility on the one report whose job is to
@@ -968,11 +1071,11 @@ secret-free variant to reach for -- the `generate secrets` sub-tree was removed 
 because splitting the stream in two made the ordering the operator's problem. Treat that
 output exactly like the env file it came from.
 
-`operator deploy` issues three applies when registry credentials are configured
+`operator deploy` issues up to three applies when registry credentials are configured
 (`image.user`/`image.pass`, or their `*Env` equivalents) -- the operator namespace, then the
-fixed-name `regcred` image-pull secret into it, then the rest of the bundle -- and two
+fixed-name `regcred` image-pull secret into it, then the rest of the bundle -- and up to two
 otherwise (namespace, then bundle; there is no `regcred` to apply without credentials to
-build it from). Everything it applies is byte-for-byte what `operator generate` prints, and
+build it from). The namespace is applied only when it is not there yet. Everything it applies is byte-for-byte what `operator generate` prints, and
 the ordering is what makes a first install work -- the secret is namespaced, and the
 namespace only exists in the bundle.
 
@@ -991,7 +1094,7 @@ container matches the data keys of the equivalent Kubernetes Secret:
 | `semp.additionalUsers[].password` | `/mnt/secrets/username_<username>_password` | `<container.name>-user-<username>-password` |
 | `redundancy.psk` (HA) | `/mnt/secrets/redundancy_authentication_presharedkey_key` | `<container.name>-redundancy-psk` |
 | `tls.certPassphrase` | `/mnt/secrets/tls_servercertificate_passphrase` | `<container.name>-tls-passphrase` |
-| `tls.cert` + `tls.certKey` (+ `tls.cas`) | `/mnt/certs/server/tls.pem` | `<container.name>-tls-servercertificate` (one file: the key, the certificate, then the chain) |
+| `tls.cert` + `tls.certKey` (+ `tls.cas`) | `/mnt/certs/server/tls.pem` | `<container.name>-tls-servercertificate` (one file: the key, the certificate, then the chain, each starting on a line of its own) |
 
 The host-side name carries `container.name` (default `solace`) so two brokers on one host
 never share a podman store entry or a compose variable. On Kubernetes the operator mounts
@@ -1024,8 +1127,10 @@ Deleting the CRDs is the sharper of the two layers, because they are cluster-wid
 cascade-deletes **every** PubSubPlusEventBroker in the cluster, including ones this env file
 has never heard of. So `--delete-crd` refuses outright while any PubSubPlusEventBroker still
 exists anywhere -- each is named `<namespace>/<name>` in the refusal, and a failure to even
-list them refuses too. Only the CRD layer is refused; the operator's controller Deployment is
-removed either way.
+list them refuses too, as does an identity that may not list them in every namespace. The
+refusal comes **before anything is deleted**: the operator stays installed and the error says
+so, so a retry once the brokers are gone does the whole job. Without `--delete-crd` the CRDs
+are kept and nothing about them is asked or required.
 
 ### The layer flag raises the question
 
@@ -1101,6 +1206,11 @@ another team put there, and this tool may not have created it in the first place
   there is not permission to proceed. That direction is the whole safety property -- a
   namespace wrongly reported empty gets cascade-deleted, while one wrongly reported occupied
   merely stays.
+- **An empty namespace is offered only to an identity that may delete it.** Deleting a
+  namespace needs `delete namespaces`, which only a cluster-wide grant gives, so for an
+  identity confined to the namespace it is kept with a warning naming the
+  `kubectl delete namespace` a cluster admin can run -- asked about before the question, so
+  neither a prompt nor `--no-prompt` turns a finished removal into a refusal.
 
 **Docker and Podman have their own teardown wrinkles**, on top of the `--delete-data` layer.
 The sequence is: stop the container, remove it, remove the compose file or quadlet unit,
@@ -1869,5 +1979,7 @@ line is expected for such an identity, not a failure. What it costs, and the
 [Bringing up a fresh cluster](#bringing-up-a-fresh-cluster). `operator remove` also lists
 broker resources cluster-wide first, to decide whether the CRDs may go, and kubectl prints
 its own Forbidden for that list too; a failed list keeps the CRDs -- with `--delete-crd` the
-deletion is refused -- which is the safe direction. `broker status --all` is cluster-wide by
-design and needs that list outright.
+removal is refused before anything is deleted -- which is the safe direction.
+`broker status --all` is cluster-wide by design and needs that list outright; `broker status`
+without it needs only the namespace. What each command needs, and what only warns, is in
+[Permissions](#permissions).

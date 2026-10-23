@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -27,20 +28,94 @@ func (c *Cluster) out() io.Writer {
 // Confirm func seam rather than a writer. Every other confirmation lives in
 // internal/cli, which owns the terminal.
 
-// namespaceManifest is a minimal core/v1 Namespace. Applying it on stdin is the
-// idempotent equivalent of the bash `create ns --dry-run=client -o yaml | apply -f -`
-// (011:15): apply creates it if absent and no-ops if it already exists.
+// namespaceManifest is a minimal core/v1 Namespace, the equivalent of the bash
+// `create ns --dry-run=client -o yaml | apply -f -` (011:15). It is applied only to a
+// namespace that is not there: applying it over one that exists is not the no-op it
+// looks like -- kubectl PATCHes a namespace that lacks its last-applied annotation, and
+// that needs `patch` on namespaces, which the built-in admin and edit roles do not grant.
 func namespaceManifest(ns string) []byte {
 	return []byte("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: " + ns + "\n")
 }
 
-// CreateNamespace applies the broker namespace (011). Idempotent via `apply`.
-func (c *Cluster) CreateNamespace(ctx context.Context) error {
-	if err := c.Preflight(ctx, "create", "namespaces"); err != nil {
+// namespaceState is what a deploy knows about the namespace it is about to write into.
+type namespaceState int
+
+const (
+	namespaceUnknown namespaceState = iota // the read failed: no answer either way
+	namespaceExists
+	namespaceAbsent
+)
+
+// readNamespace asks whether ns exists, BY NAME. That is a question a namespace-scoped
+// identity can answer: a RoleBinding in ns whose role reads namespaces -- the built-in
+// view, edit and admin all do -- authorizes `get namespace <ns>`, because a request about
+// one namespace is evaluated in that namespace. `create namespaces` never is; only a
+// cluster-wide grant covers it, so asking for it when the namespace was already there
+// refused exactly the identity this tool most often runs as.
+//
+// Only the exact `namespace/<ns>` line counts as existing and only an empty answer as
+// absent; a failed read, or anything else on stdout, is unknown and leaves the decision
+// to the create probe. Under the Echo runner the read is echoed and answers nothing, so a
+// preview takes the first-deploy path.
+func (c *Cluster) readNamespace(ctx context.Context, ns string) namespaceState {
+	out, err := c.kubectlOutput(ctx, "get", "namespace", ns, "--ignore-not-found", "-o", "name")
+	if err != nil {
+		return namespaceUnknown
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "namespace/" + ns:
+		return namespaceExists
+	case "":
+		return namespaceAbsent
+	}
+	return namespaceUnknown
+}
+
+// missingNamespace words a failed create probe for a namespace known to be absent. The
+// namespace has to exist before anything can be deployed into it, so a refusal also says
+// who can create it, not only which grant was missing.
+func missingNamespace(ns string, err error) error {
+	if !errors.Is(err, errNotAllowed) {
 		return err
 	}
-	c.logf("creating namespace %s", c.ns())
-	return c.apply(ctx, namespaceManifest(c.ns()))
+	return fmt.Errorf("namespace %q does not exist, and this identity may not create it (%w).\n"+
+		"  Or have a cluster admin create it: kubectl create namespace %s", ns, err, ns)
+}
+
+// CreateNamespace makes sure the broker namespace exists before the first namespaced
+// write (011), asking for no more permission than that takes:
+//
+//   - it exists: nothing to create and nothing to ask, which is what lets an identity
+//     confined to the namespace deploy into it.
+//   - it is absent: creating it is genuinely needed, so a refusal stops the deploy before
+//     anything is written and says who can fix it.
+//   - its existence could not be read: the create probe decides. Permitted, the manifest
+//     is applied. Refused, the deploy goes on with a warning: the namespace most likely
+//     exists, and if it does not, the namespaced permission checks of the steps that
+//     follow stop the deploy before their first write.
+func (c *Cluster) CreateNamespace(ctx context.Context) error {
+	ns := c.ns()
+	switch c.readNamespace(ctx, ns) {
+	case namespaceExists:
+		c.logf("namespace %s exists", ns)
+		return nil
+	case namespaceAbsent:
+		if err := c.Preflight(ctx, "create", "namespaces"); err != nil {
+			return missingNamespace(ns, err)
+		}
+	default:
+		if err := c.Preflight(ctx, "create", "namespaces"); err != nil {
+			if !errors.Is(err, errNotAllowed) {
+				return err
+			}
+			c.progress().Warn("could not confirm namespace %s exists (that read needs get on namespaces in %s), "+
+				"and this identity may not create namespaces; continuing -- the next steps' permission checks "+
+				"stop the deploy before it writes anything if the namespace is missing", ns, ns)
+			return nil
+		}
+	}
+	c.logf("creating namespace %s", ns)
+	return c.apply(ctx, namespaceManifest(ns))
 }
 
 // protectedNamespaces are the Kubernetes system namespaces DeleteNamespace
@@ -260,6 +335,11 @@ func (c *Cluster) DeleteSecrets(ctx context.Context) error {
 // it. So this is the persistence half of `broker configure server-certs`, and the
 // CLI load that follows it there (broker.Ops.ServerCert) is what swaps the
 // certificate into the running broker. No pod is restarted here.
+//
+// The probe asks for what `kubectl apply` actually sends over an existing Secret -- a GET,
+// then a PATCH -- rather than `update`, which apply never uses: asking for `update` refused
+// a Role granting exactly get and patch, and passed one granting update alone that then
+// failed inside the apply.
 func (c *Cluster) UpdateServerCertSecret(ctx context.Context) error {
 	name := c.Cfg.TLSServerSecretName()
 	if name == "" {
@@ -272,7 +352,7 @@ func (c *Cluster) UpdateServerCertSecret(ctx context.Context) error {
 			"  Rotate it where it is managed (kubectl, cert-manager), or set tls.cert and tls.certKey to hand this tool the pair",
 			name)
 	}
-	if err := c.Preflight(ctx, "update", "secrets"); err != nil {
+	if err := c.PreflightAll(ctx, probe{verb: "get", resource: "secrets"}, probe{verb: "patch", resource: "secrets"}); err != nil {
 		return err
 	}
 	manifest, err := TLSSecret(c.Cfg)
@@ -322,10 +402,20 @@ func (c *Cluster) ServerCertChanged(ctx context.Context) (bool, error) {
 // "a broker is already running" means to a deploy deciding whether a renewed
 // certificate needs a restart. A runner that answers nothing answers false, so a
 // preview never offers one.
+//
+// A read that fails answers false too -- no restart is offered for a pod nobody could see
+// -- but not silently: the renewed certificate is then in the Secret while a running broker
+// keeps serving the old one, so the warning says so and names the way to finish.
 func (c *Cluster) BrokerPodsExist(ctx context.Context) bool {
-	out, err := c.kubectlOutput(ctx, "get", "pod", podName(c.Cfg, config.Primary), "-n", c.ns(),
-		"--ignore-not-found", "-o", "name")
-	return err == nil && strings.TrimSpace(string(out)) != ""
+	pod := podName(c.Cfg, config.Primary)
+	out, err := c.kubectlOutput(ctx, "get", "pod", pod, "-n", c.ns(), "--ignore-not-found", "-o", "name")
+	if err != nil {
+		c.progress().Warn("could not read pod %s (that needs get on pods in %s), so no restart is offered for "+
+			"the renewed server certificate; if the broker is running it serves the previous one until its pods "+
+			"restart -- run `broker restart`, or hot-swap it with `broker configure server-certs`", pod, c.ns())
+		return false
+	}
+	return strings.TrimSpace(string(out)) != ""
 }
 
 // GenBroker renders everything `broker deploy` applies, in the order it applies it:

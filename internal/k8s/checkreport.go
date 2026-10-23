@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -202,8 +203,10 @@ func (c *Cluster) validate(ctx context.Context, scope validateScope) error {
 		// What it cannot do is decode an answer, so each cluster-backed row says
 		// it was skipped rather than being quietly omitted.
 		_ = c.Reachable(ctx)
-		_ = c.Preflight(ctx, "create", brokerResource)
-		_, _ = c.resolveStorageClass(ctx)
+		if scope.wantsBroker() {
+			_ = c.Preflight(ctx, "create", brokerResource)
+			_, _ = c.resolveStorageClass(ctx)
+		}
 		rep.deployment = append(rep.deployment,
 			skipRow("api server", "skipped (preview)"),
 			skipRow("permission", "skipped (preview)"))
@@ -213,7 +216,7 @@ func (c *Cluster) validate(ctx context.Context, scope validateScope) error {
 		return nil
 	}
 
-	c.verifyRows(ctx, rep)
+	c.verifyRows(ctx, rep, scope)
 	rep.render(c.report(), scope)
 
 	if n := rep.failed(scope); n > 0 {
@@ -391,7 +394,12 @@ func (c *Cluster) configRows(rep *checkReport) {
 // verifyRows runs the checks that need a cluster. Reachability comes first: with
 // no API server every other probe would fail for the same reason, and three
 // identical failures are less useful than one plus three honest skips.
-func (c *Cluster) verifyRows(ctx context.Context, rep *checkReport) {
+//
+// Only the checks the scope renders are made. `operator validate` shows neither the
+// broker's permission row nor its StorageClass, so it does not ask for them: an identity
+// managing only the operator would otherwise trip reads it cannot make -- StorageClasses
+// are cluster-scoped -- and see kubectl's refusals for rows it was never shown.
+func (c *Cluster) verifyRows(ctx context.Context, rep *checkReport, scope validateScope) {
 	if err := c.Reachable(ctx); err != nil {
 		rep.deployment = append(rep.deployment, failRow("api server", "%v", err))
 		const why = "skipped (cluster unreachable)"
@@ -402,10 +410,12 @@ func (c *Cluster) verifyRows(ctx context.Context, rep *checkReport) {
 	}
 	rep.deployment = append(rep.deployment, okRow("api server", "reachable"))
 
-	if err := c.Preflight(ctx, "create", brokerResource); err != nil {
-		rep.deployment = append(rep.deployment, failRow("permission", "%v", err))
-	} else {
-		rep.deployment = append(rep.deployment, okRow("permission", "create %s", brokerResource))
+	if scope.wantsBroker() {
+		if err := c.Preflight(ctx, "create", brokerResource); err != nil {
+			rep.deployment = append(rep.deployment, failRow("permission", "%v", err))
+		} else {
+			rep.deployment = append(rep.deployment, okRow("permission", "create %s", brokerResource))
+		}
 	}
 
 	// ONE cluster-wide `get deployment --all-namespaces`, read twice. The install
@@ -417,7 +427,9 @@ func (c *Cluster) verifyRows(ctx context.Context, rep *checkReport) {
 	// operator installed" are different answers and the verdict says which.
 	dep, onlyNS, depErr := c.findOperatorDeployment(ctx)
 	c.operatorRows(ctx, rep, dep, onlyNS, depErr)
-	c.storageRows(ctx, rep)
+	if scope.wantsBroker() {
+		c.storageRows(ctx, rep)
+	}
 }
 
 // installKey is the operator-install verdict's key.
@@ -612,7 +624,8 @@ func (c *Cluster) storageRows(ctx context.Context, rep *checkReport) {
 	}
 	name, err := c.resolveStorageClass(ctx)
 	if err != nil {
-		rep.broker = append(rep.broker, failRow("storage class", "%v", err))
+		rep.broker = append(rep.broker, c.storageReadRow(ctx, err,
+			probe{verb: "list", resource: "storageclasses"}, "the default StorageClass"))
 		return
 	}
 	if name == "" {
@@ -624,7 +637,8 @@ func (c *Cluster) storageRows(ctx context.Context, rep *checkReport) {
 	}
 	binding, expansion, err := c.storageClassAttrs(ctx, name)
 	if err != nil {
-		rep.broker = append(rep.broker, failRow("storage class", "%v", err))
+		rep.broker = append(rep.broker, c.storageReadRow(ctx, err,
+			probe{verb: "get", resource: "storageclasses", name: name}, "StorageClass "+name))
 		return
 	}
 	// Report what was actually found, not a summary of what was wanted: when a
@@ -635,6 +649,24 @@ func (c *Cluster) storageRows(ctx context.Context, rep *checkReport) {
 		return
 	}
 	rep.broker = append(rep.broker, okRow("storage class", "%s", value))
+}
+
+// storageReadRow is the row for a StorageClass read that failed. StorageClasses are
+// cluster-scoped, so an identity confined to its namespace may not read them at all -- and
+// that is no reason to fail a report about a deploy that never reads them either: the
+// operator binds the claims, under its own grants. So a read the cluster REFUSED is [SKIP],
+// not checked, as when the cluster is unreachable, naming the grant that would check it and
+// what a cluster admin can confirm instead. Everything else stays [FAIL]: a verdict (more than
+// one default class), a class that is not there, or a permission question nobody answered.
+func (c *Cluster) storageReadRow(ctx context.Context, err error, p probe, what string) checkRow {
+	if !errors.Is(err, errMultipleDefaultClasses) {
+		if allowed, answered := c.canI(ctx, p); answered && !allowed {
+			return skipRow("storage class", "not checked -- this identity may not %s %s (cluster-scoped), so %s "+
+				"could not be read. Grant get and list on storageclasses, or have a cluster admin confirm it has "+
+				"volumeBindingMode=WaitForFirstConsumer and allowVolumeExpansion=true", p.verb, p.target(), what)
+		}
+	}
+	return failRow("storage class", "%v", err)
 }
 
 // adminSecretRow says which of config.Config.AdminSecretName's three states this env file

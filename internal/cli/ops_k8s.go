@@ -85,6 +85,11 @@ func opK8sDeploy(a *App) error {
 	if err != nil {
 		return err
 	}
+	// Every write's permission before the first write, so a refusal cannot leave half a
+	// deployment behind.
+	if err := c.PreflightDeploy(ctx); err != nil {
+		return err
+	}
 	if err := c.CreateNamespace(ctx); err != nil {
 		return err
 	}
@@ -596,8 +601,10 @@ func opK8sOperatorRemove(a *App) error {
 	// then: without the flag the CRDs are kept with a warning naming the brokers; with
 	// it the request goes straight to OperatorDelete's refusal, which lists them --
 	// prompting first would invite a "yes" this tool will not honour. A listing failure
-	// is not fatal here: OperatorDelete's own preflight reports a permission problem
-	// better than a query the operator never asked for.
+	// is not fatal here and does not settle the answer, so the question is still asked --
+	// but with --delete-crd it is said rather than swallowed: OperatorDelete probes the
+	// same cluster-wide list and runs the cascade gate before it deletes anything, and an
+	// identity that may not read it is refused there with the operator still installed.
 	refs, listErr := c.BrokerCRs(bg())
 	brokersExist := listErr == nil && len(refs) > 0
 	deleteCRDs := false
@@ -605,6 +612,10 @@ func opK8sOperatorRemove(a *App) error {
 	case a.deleteLayer && brokersExist:
 		deleteCRDs = true
 	case a.deleteLayer:
+		if listErr != nil {
+			warn("could not list the broker resources across the cluster (%v); --delete-crd needs that list to "+
+				"prove no broker would be cascade-deleted, so it is checked again before anything is removed", listErr)
+		}
 		deleteCRDs = confirmLayer(a, layerCRD)
 	case brokersExist:
 		warn("%d broker resource(s) still exist, so the operator CRDs are kept "+
@@ -701,8 +712,12 @@ func opK8sRemoveBroker(a *App) error {
 	c := k8sCluster(a)
 	ctx := bg()
 	// The layer question is asked once, before any of the work, so a removal cannot get
-	// halfway through and then stop to ask something.
+	// halfway through and then stop to ask something -- and every permission the removal
+	// will use is asked about next, so it cannot get halfway through and then be refused.
 	purge := confirmLayer(a, layerData)
+	if err := c.PreflightRemoval(ctx, purge); err != nil {
+		return err
+	}
 	if err := c.DeleteBroker(ctx, purge); err != nil {
 		return err
 	}
@@ -763,6 +778,12 @@ func removeNamespaceIfEmpty(a *App, c *k8s.Cluster) error {
 	}
 	if len(contents) > 0 {
 		c.ReportNamespaceOccupied(contents)
+		return nil
+	}
+	// Asked before the question, not after the answer: a yes this identity cannot carry out
+	// is not worth asking for, and under --no-prompt it turned a finished removal into a
+	// failure over the one step it did not need.
+	if !c.NamespaceDeletable(bg()) {
 		return nil
 	}
 	if !confirmDelete(a, "the now-empty namespace "+a.Cfg.K8s.Namespace+k8sContext(a)) {

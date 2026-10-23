@@ -33,6 +33,9 @@ type fixtureRunner struct {
 	// raw answers a kind with this literal JSON instead of a fixture, for the shapes no
 	// capture carries: a workload that shares the namespace, or two brokers in it.
 	raw map[string]string
+	// refuse answers `auth can-i` no for these resources and yes for every other, so a
+	// section's failed read can be told apart as a refusal rather than a fault.
+	refuse map[string]bool
 }
 
 func (f *fixtureRunner) Run(context.Context, string, ...string) error              { return nil }
@@ -46,6 +49,14 @@ func (f *fixtureRunner) OutputInput(context.Context, []byte, string, ...string) 
 func (f *fixtureRunner) Output(_ context.Context, _ string, args ...string) ([]byte, error) {
 	joined := strings.Join(args, " ")
 	f.calls = append(f.calls, joined)
+	for i, a := range args {
+		if a == "can-i" && i+2 < len(args) {
+			if f.refuse[args[i+2]] {
+				return []byte("no\n"), nil
+			}
+			return []byte("yes\n"), nil
+		}
+	}
 	file := map[string]string{
 		"pubsubpluseventbrokers": "broker-cr.json",
 		"pods":                   "pods.json",
@@ -188,15 +199,34 @@ func TestBrokerReportWithNoBrokerDeployed(t *testing.T) {
 // TestBrokerReportSurfacesAReadFailure is the successor to
 // TestShowAllReportsAndContinuesOnGetError. The old passthrough continued past a
 // kind it could not list; this report fails loud instead, and deliberately: a
-// health report that quietly omitted the pods would read as "no problems found".
+// health report that quietly omitted the pods would read as "no problems found". The
+// one exception is a read the cluster refused -- TestBrokerReportShowsARefusedSection.
 func TestBrokerReportSurfacesAReadFailure(t *testing.T) {
 	c, _ := reportCluster(t, &fixtureRunner{failOn: "pods"})
 	err := c.BrokerReport(context.Background(), false)
 	if err == nil {
 		t.Fatal("a failed pod read must surface, not be silently skipped")
 	}
-	if !strings.Contains(err.Error(), "listing pods") || !strings.Contains(err.Error(), "solace") {
+	if !strings.Contains(err.Error(), "reading pods") || !strings.Contains(err.Error(), "solace") {
 		t.Errorf("error = %v, want it to name the read and the namespace", err)
+	}
+}
+
+// TestBrokerReportShowsARefusedSection: an identity granted the broker but not its pods is
+// not a fault, and a report that stopped there would hide the services and StatefulSets it
+// could read. So a read the cluster refused draws the section with one [SKIP] row naming the
+// grant, every later section still renders, and the report succeeds -- the section visibly
+// missing rather than quietly absent.
+func TestBrokerReportShowsARefusedSection(t *testing.T) {
+	c, buf := reportCluster(t, &fixtureRunner{failOn: "pods", refuse: map[string]bool{"pods": true}})
+	if err := c.BrokerReport(context.Background(), false); err != nil {
+		t.Fatalf("a refused section must not fail the report: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"=== Pods", "[SKIP] pods", "may not get pods in solace", "=== Services", "=== StatefulSets"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -230,15 +260,24 @@ func TestOperatorReportNamesTheRunningVersion(t *testing.T) {
 	}
 }
 
-// TestOperatorReportWhenNotInstalled covers the first-install case: a warning that
-// names the command which fixes it, not an error.
-func TestOperatorReportWhenNotInstalled(t *testing.T) {
+// TestOperatorReportWhenTheOperatorCannotBeRead: a read that FAILS is not an operator that
+// is missing. An identity confined to the broker namespace most often may not read the
+// operator's at all, and telling it to install an operator that is already running would
+// send it the wrong way. So the row says not read, names the grant that reads it, and
+// advises no install -- still a report line, not an error.
+func TestOperatorReportWhenTheOperatorCannotBeRead(t *testing.T) {
 	c, buf := reportCluster(t, &fixtureRunner{failOn: "deployment"})
 	if err := c.OperatorReport(context.Background()); err != nil {
-		t.Fatalf("a missing operator is a report line, not an error: %v", err)
+		t.Fatalf("an unreadable operator is a report line, not an error: %v", err)
 	}
-	if !strings.Contains(buf.String(), "deploy operator") {
-		t.Errorf("the warning should name the command that installs it:\n%s", buf.String())
+	out := buf.String()
+	for _, want := range []string{"[SKIP] installed", "not read", "needs get on deployments in solace-operator"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "installs it") {
+		t.Errorf("an unreadable operator must not be reported as one to install:\n%s", out)
 	}
 }
 
@@ -377,29 +416,42 @@ func TestReportsDegradeRatherThanFalselyAlarm(t *testing.T) {
 			t.Errorf("no claims should be INFO:\n%s", buf.String())
 		}
 	})
-	for kind, wantIn := range map[string]string{
-		"svc":          "listing services",
-		"statefulsets": "listing statefulsets",
-		"pvc":          "listing persistent volume claims",
+	for _, tc := range []struct{ kind, resource, wantErr, wantRow string }{
+		{"svc", "services", "reading services", "[SKIP] services"},
+		{"statefulsets", "statefulsets", "reading statefulsets", "[SKIP] statefulsets"},
+		{"pvc", "persistentvolumeclaims", "reading persistent volume claims", "[SKIP] claims"},
 	} {
-		t.Run("a failed "+kind+" read surfaces", func(t *testing.T) {
-			c, _ := reportCluster(t, &fixtureRunner{failOn: kind})
+		t.Run("a failed "+tc.kind+" read surfaces", func(t *testing.T) {
+			c, _ := reportCluster(t, &fixtureRunner{failOn: tc.kind})
 			err := c.BrokerReport(context.Background(), true)
-			if err == nil || !strings.Contains(err.Error(), wantIn) {
-				t.Errorf("err = %v, want it to name %q", err, wantIn)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("err = %v, want it to name %q", err, tc.wantErr)
+			}
+		})
+		t.Run("a refused "+tc.kind+" read is shown, not fatal", func(t *testing.T) {
+			c, buf := reportCluster(t, &fixtureRunner{failOn: tc.kind, refuse: map[string]bool{tc.resource: true}})
+			if err := c.BrokerReport(context.Background(), true); err != nil {
+				t.Fatalf("BrokerReport --detail: %v", err)
+			}
+			if !strings.Contains(buf.String(), tc.wantRow) || !strings.Contains(buf.String(), "may not get "+tc.resource) {
+				t.Errorf("report should carry %q naming the grant:\n%s", tc.wantRow, buf.String())
 			}
 		})
 	}
 	t.Run("a failed broker read surfaces", func(t *testing.T) {
 		c, _ := reportCluster(t, &fixtureRunner{failOn: "pubsubpluseventbrokers"})
-		if err := c.BrokerReport(context.Background(), false); err == nil {
-			t.Error("a failed CR read must surface")
+		err := c.BrokerReport(context.Background(), false)
+		if err == nil || !strings.Contains(err.Error(), "needs get on "+brokerResource) {
+			t.Errorf("err = %v: a failed CR read ends the report, naming what reading it needs", err)
 		}
 	})
 	t.Run("a failed cluster-wide read surfaces", func(t *testing.T) {
 		c, _ := reportCluster(t, &fixtureRunner{failOn: "pubsubpluseventbrokers"})
-		if err := c.ClusterReport(context.Background(), false); err == nil {
-			t.Error("a failed --all read must surface")
+		err := c.ClusterReport(context.Background(), false)
+		for _, want := range []string{"listing brokers across the cluster", "cluster role binding", "without --all"} {
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("err = %v: a failed --all read fails the command, and should say %q", err, want)
+			}
 		}
 	})
 	t.Run("malformed JSON names the command to run by hand", func(t *testing.T) {
@@ -495,6 +547,31 @@ func TestBrokerReportReadsEachKindOnce(t *testing.T) {
 	}
 }
 
+// TestBrokerReportReadsOnlyWhatTheEnvFileNames: every read names its objects -- this env
+// file's broker CR, then one pod, StatefulSet and claim per role and the load-balancer and
+// discovery services, all from the env file -- so the report needs only `get` on each kind,
+// where listing the namespace needed `list`, and a namespace shared with other workloads
+// contributes nothing of theirs. --ignore-not-found makes a missing object an absence the
+// section reports rather than a failed read.
+func TestBrokerReportReadsOnlyWhatTheEnvFileNames(t *testing.T) {
+	f := &fixtureRunner{}
+	c, _ := reportCluster(t, f)
+	if err := c.BrokerReport(context.Background(), true); err != nil {
+		t.Fatalf("BrokerReport --detail: %v", err)
+	}
+	const tail = " -n solace --ignore-not-found -o json"
+	want := []string{
+		"get pubsubpluseventbrokers dev-broker" + tail,
+		"get pods dev-broker-pubsubplus-p-0" + tail,
+		"get svc dev-broker-pubsubplus dev-broker-pubsubplus-discovery" + tail,
+		"get statefulsets dev-broker-pubsubplus-p" + tail,
+		"get pvc data-dev-broker-pubsubplus-p-0" + tail,
+	}
+	if strings.Join(f.calls, "\n") != strings.Join(want, "\n") {
+		t.Errorf("reads =\n%s\nwant\n%s", strings.Join(f.calls, "\n"), strings.Join(want, "\n"))
+	}
+}
+
 // TestBrokerReportOmitsWorkloadsThatAreNotTheBrokers: a namespace is often shared, so every list
 // the report reads holds objects that are not this broker's, and none of them may appear as one.
 // A pod is the broker's own only when the operator's podsList claims it -- a workload whose name
@@ -579,7 +656,7 @@ func TestOperatorReportWhenTheDeploymentListIsEmpty(t *testing.T) {
 		t.Fatalf("an operator that is not there is a report line, not an error: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"[WARN] installed", "not found in namespace solace-operator"} {
+	for _, want := range []string{"[WARN] installed", "not found in namespace solace-operator", "operator deploy installs it"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report missing %q:\n%s", want, out)
 		}

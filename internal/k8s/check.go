@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -66,6 +67,12 @@ func storageClassSuitable(name, binding, expansion string) error {
 	return nil
 }
 
+// errMultipleDefaultClasses is resolveStorageClass's one VERDICT, as opposed to a read that
+// failed: the read worked and found more than one default class, which no grant changes.
+// storageRows tells the two apart, because a read this identity may not make is reported
+// as not checked while a verdict never is.
+var errMultipleDefaultClasses = errors.New("multiple default StorageClasses found")
+
 // resolveStorageClass returns the configured class if set, else the cluster default
 // resolved by annotation (009:18). Multiple defaults are an error rather than a
 // silent pick, since the choice would be non-deterministic.
@@ -79,7 +86,7 @@ func (c *Cluster) resolveStorageClass(ctx context.Context) (string, error) {
 	}
 	fields := strings.Fields(string(out))
 	if len(fields) > 1 {
-		return "", fmt.Errorf("multiple default StorageClasses found (%s); set kubernetes.storage.class explicitly", strings.Join(fields, ", "))
+		return "", fmt.Errorf("%w (%s); set kubernetes.storage.class explicitly", errMultipleDefaultClasses, strings.Join(fields, ", "))
 	}
 	if len(fields) == 1 {
 		return fields[0], nil

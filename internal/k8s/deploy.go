@@ -95,6 +95,56 @@ func (c *Cluster) ConfirmBrokerApplied(ctx context.Context) error {
 		name, c.ns())
 }
 
+// deletesClaims reports whether a removal deletes any data claim at all: only with purge,
+// and never a custom volume mount's, so a purge whose every node mounts one deletes none
+// and must not demand the permission to.
+func (c *Cluster) deletesClaims(purge bool) bool {
+	if !purge {
+		return false
+	}
+	for _, role := range HARoles(c.Cfg) {
+		if _, ok := c.Cfg.K8s.Storage.CustomMountFor(role); !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// PreflightDeploy asks, before `broker deploy` writes anything, whether it may create what it
+// writes: create and get on the broker resource, and create on Secrets when this env file
+// builds one -- the same questions each step asks just before its own write, asked up front
+// so a refusal lands before the FIRST write. (The patch a re-deploy's apply sends over an
+// existing object is not asked about, here or in the steps.) Without it, an identity bound to the
+// built-in edit role but not to the broker resource -- which edit does not cover -- had its
+// Secrets written and was then refused at the CR, leaving half a deployment behind. The
+// namespace is not asked about here: whether creating one is needed at all is known only
+// once it has been read (CreateNamespace).
+func (c *Cluster) PreflightDeploy(ctx context.Context) error {
+	probes := []probe{{verb: "create", resource: brokerResource}, {verb: "get", resource: brokerResource}}
+	if len(ownedSecretNames(c.Cfg)) > 0 {
+		probes = append(probes, probe{verb: "create", resource: "secrets"})
+	}
+	return c.PreflightAll(ctx, probes...)
+}
+
+// PreflightRemoval asks, before `broker remove` deletes anything, for every permission the
+// removal will use: delete on the broker CR, on the data claims when the purge really
+// deletes one, and on the Secrets this env file owns. Each step still probes its own kinds;
+// this is what makes a refusal land BEFORE the first delete instead of halfway through. A
+// `delete secrets` refused once the CR -- and with --delete-data the data -- was already
+// gone used to end the removal there, leaving the TLS private key and the admin password
+// behind and a half-removed broker for the next run to make sense of.
+func (c *Cluster) PreflightRemoval(ctx context.Context, purge bool) error {
+	probes := []probe{{verb: "delete", resource: brokerResource}}
+	if c.deletesClaims(purge) {
+		probes = append(probes, probe{verb: "delete", resource: "persistentvolumeclaims"})
+	}
+	if len(ownedSecretNames(c.Cfg)) > 0 {
+		probes = append(probes, probe{verb: "delete", resource: "secrets"})
+	}
+	return c.PreflightAll(ctx, probes...)
+}
+
 // DeleteBroker removes the broker CR (120:55) via `delete -f - --ignore-not-found`
 // of the rendered manifest, so a repeat teardown is a no-op. When purge is set it
 // then deletes the per-role data PVCs (data-<name>-pubsubplus-<role>-0; 120:65-69),
@@ -112,7 +162,7 @@ func (c *Cluster) DeleteBroker(ctx context.Context, purge bool) error {
 	// The claims are probed only when they will actually be deleted, so a removal
 	// that keeps the data does not demand a permission it never uses.
 	probes := []probe{{verb: "delete", resource: brokerResource}}
-	if purge {
+	if c.deletesClaims(purge) {
 		probes = append(probes, probe{verb: "delete", resource: "persistentvolumeclaims"})
 	}
 	if err := c.PreflightAll(ctx, probes...); err != nil {

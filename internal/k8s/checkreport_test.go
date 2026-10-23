@@ -333,8 +333,9 @@ func TestStorageRows(t *testing.T) {
 			!strings.Contains(rep.broker[0].Value, "resolving default StorageClass") {
 			t.Fatalf("storageRows = %+v, want it to wrap \"resolving default StorageClass\"", rep.broker)
 		}
-		if len(rr.calls) != 1 {
-			t.Errorf("storageRows should stop at the failing default-resolution query; got %d calls", len(rr.calls))
+		// The query, then the one permission question that tells a refusal from a fault.
+		if len(rr.calls) != 2 || !isCanI(rr.calls[1].args) {
+			t.Errorf("storageRows should stop at the failing default-resolution query and its probe; got %+v", rr.calls)
 		}
 	})
 	t.Run("first attribute read fails", func(t *testing.T) {
@@ -348,8 +349,8 @@ func TestStorageRows(t *testing.T) {
 			!strings.Contains(rep.broker[0].Value, `reading StorageClass "fast"`) {
 			t.Fatalf(`storageRows = %+v, want it to wrap reading StorageClass "fast"`, rep.broker)
 		}
-		if len(rr.calls) != 1 {
-			t.Errorf("storageRows should stop at the first failing column read; got %d calls", len(rr.calls))
+		if len(rr.calls) != 2 || !isCanI(rr.calls[1].args) {
+			t.Errorf("storageRows should stop at the first failing column read and its probe; got %+v", rr.calls)
 		}
 	})
 	// The other real, reachable half of the two-read sequence: volumeBindingMode
@@ -369,10 +370,100 @@ func TestStorageRows(t *testing.T) {
 			!strings.Contains(rep.broker[0].Value, `reading StorageClass "fast"`) {
 			t.Fatalf(`storageRows = %+v, want it to wrap reading StorageClass "fast"`, rep.broker)
 		}
-		if len(rr.calls) != 2 {
-			t.Errorf("storageRows should have attempted both attribute reads; got %d calls", len(rr.calls))
+		if len(rr.calls) != 3 || !isCanI(rr.calls[2].args) {
+			t.Errorf("storageRows should have attempted both attribute reads, then the probe; got %+v", rr.calls)
 		}
 	})
+	// StorageClasses are cluster-scoped, so a namespace-scoped identity may not read them.
+	// That refusal is "not checked" -- [SKIP], naming the grant and what an admin can confirm
+	// instead -- never a [FAIL] of a report about a deploy that does not read them either.
+	t.Run("a refused read is not checked, not failed", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, class, wantProbe string
+		}{
+			{"the default lookup", "", "list storageclasses"},
+			{"a configured class", "fast", "get storageclasses/fast"},
+		} {
+			cfg := haCfg()
+			cfg.K8s.Storage.Class = tc.class
+			rr := &recRunner{outErr: errFake, canIByResource: map[string]string{"storageclasses": "no"}}
+			c := NewCluster(rr, cfg, nil, &bytes.Buffer{})
+			rep := &checkReport{}
+			c.storageRows(context.Background(), rep)
+			if len(rep.broker) != 1 || rep.broker[0].Level != output.LevelSkip {
+				t.Fatalf("%s: storageRows = %+v, want one SKIP row", tc.name, rep.broker)
+			}
+			for _, want := range []string{"not checked", "may not " + tc.wantProbe, "WaitForFirstConsumer"} {
+				if !strings.Contains(rep.broker[0].Value, want) {
+					t.Errorf("%s: row = %q, want it to contain %q", tc.name, rep.broker[0].Value, want)
+				}
+			}
+		}
+	})
+	t.Run("an unanswered permission question keeps the failure", func(t *testing.T) {
+		cfg := haCfg()
+		cfg.K8s.Storage.Class = "fast"
+		rr := &recRunner{outErr: errFake, canIErr: errFake}
+		c := NewCluster(rr, cfg, nil, &bytes.Buffer{})
+		rep := &checkReport{}
+		c.storageRows(context.Background(), rep)
+		if len(rep.broker) != 1 || rep.broker[0].Level != output.LevelFail {
+			t.Fatalf("storageRows = %+v, want a FAIL row: only a refusal is not a fault", rep.broker)
+		}
+	})
+	// More than one default is the read WORKING and finding a problem no grant fixes.
+	t.Run("more than one default is a verdict, never skipped", func(t *testing.T) {
+		rr := &recRunner{out: []byte("a b\n"), canIByResource: map[string]string{"storageclasses": "no"}}
+		c := NewCluster(rr, haCfg(), nil, &bytes.Buffer{})
+		rep := &checkReport{}
+		c.storageRows(context.Background(), rep)
+		if len(rep.broker) != 1 || rep.broker[0].Level != output.LevelFail ||
+			!strings.Contains(rep.broker[0].Value, "multiple default StorageClasses found (a, b)") {
+			t.Fatalf("storageRows = %+v, want the multiple-defaults FAIL", rep.broker)
+		}
+		for _, call := range rr.calls {
+			if isCanI(call.args) {
+				t.Errorf("a verdict needs no permission question: %+v", call)
+			}
+		}
+	})
+}
+
+// TestValidatePassesWhenTheStorageClassCannotBeRead is the user-visible end of the above:
+// with every other check passing, a StorageClass this identity may not read leaves
+// `validate` exiting cleanly, the row saying it was not checked.
+func TestValidatePassesWhenTheStorageClassCannotBeRead(t *testing.T) {
+	cfg := loadK8s(t)
+	cfg.K8s.Storage.Class = "fast"
+	cfg.K8s.Storage.CustomVolumeMount = nil
+	// Reachable's `version` read, the cluster-wide operator list (empty: none installed),
+	// then the StorageClass read the cluster refuses. `auth can-i` bypasses both queues.
+	rr := &recRunner{
+		outQueue:       [][]byte{nil, []byte(`{"items":[]}`)},
+		outErrQueue:    []error{nil, nil, errFake},
+		canIByResource: map[string]string{"storageclasses": "no"},
+	}
+	buf := &bytes.Buffer{}
+	if err := NewCluster(rr, cfg, nil, buf).Validate(context.Background()); err != nil {
+		t.Fatalf("Validate = %v, want nil: a StorageClass nobody may read is not a failure\n%s", err, buf)
+	}
+	if !strings.Contains(buf.String(), "[SKIP] storage class") {
+		t.Errorf("the storage class row must say it was not checked:\n%s", buf)
+	}
+}
+
+// TestOperatorValidateAsksNothingAboutTheBroker: `operator validate` renders neither the
+// broker's permission row nor its StorageClass, so it makes neither check -- an identity that
+// manages only the operator would otherwise trip reads it may not make, for rows it never sees.
+func TestOperatorValidateAsksNothingAboutTheBroker(t *testing.T) {
+	rr := &recRunner{}
+	_ = NewCluster(rr, loadK8s(t), nil, &bytes.Buffer{}).ValidateOperator(context.Background())
+	for _, call := range rr.calls {
+		argv := strings.Join(call.args, " ")
+		if strings.Contains(argv, brokerResource) || strings.HasPrefix(argv, "get sc") {
+			t.Errorf("operator validate made a broker-only check: %s", argv)
+		}
+	}
 }
 
 // TestValidateReportsResolvedPorts covers M11 (second half): an operator
@@ -752,7 +843,7 @@ func TestValidateUnderADeniedClusterWideListReadsTheOperatorNamespace(t *testing
 			rr := &recRunner{outQueue: [][]byte{nil, nil, named}, outErrQueue: []error{nil, errListDenied, nil}}
 			c := NewCluster(rr, cfg, nil, &bytes.Buffer{})
 			rep := &checkReport{}
-			c.verifyRows(context.Background(), rep)
+			c.verifyRows(context.Background(), rep, scopeAll)
 			if rep.install == nil {
 				t.Fatal("no operator-install verdict was recorded")
 			}

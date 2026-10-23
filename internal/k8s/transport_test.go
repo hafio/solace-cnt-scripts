@@ -43,6 +43,12 @@ type recRunner struct {
 	// yes and `escalate` answered no in the same run. A verb it does not name falls back
 	// to canI.
 	canIByVerb map[string]string
+	// canIByResource answers the probes about one resource differently, keyed on the
+	// resource word `auth can-i` is asked about with a named probe's `/name` dropped: a
+	// run that may list a namespace's contents but not delete the namespace needs
+	// `namespaces` refused while every namespaced probe is permitted. It wins over
+	// canIByVerb; a resource it does not name falls back to that, then to canI.
+	canIByResource map[string]string
 }
 
 // isCanI reports whether an argv is the Preflight probe. Matched on the token
@@ -63,6 +69,9 @@ func (r *recRunner) canIAnswer(args []string) ([]byte, error) {
 	if v, ok := r.canIByVerb[canIVerb(args)]; ok {
 		answer = v
 	}
+	if v, ok := r.canIByResource[canIResource(args)]; ok {
+		answer = v
+	}
 	if answer == "" {
 		return []byte("yes\n"), r.canIErr
 	}
@@ -75,6 +84,18 @@ func canIVerb(args []string) string {
 	for i, a := range args {
 		if a == "can-i" && i+1 < len(args) {
 			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// canIResource is the resource an `auth can-i` argv asks about, the token after the
+// verb, with a named probe's `/name` dropped so one entry answers both shapes.
+func canIResource(args []string) string {
+	for i, a := range args {
+		if a == "can-i" && i+2 < len(args) {
+			res, _, _ := strings.Cut(args[i+2], "/")
+			return res
 		}
 	}
 	return ""
@@ -378,6 +399,22 @@ func (r *recRunner) afterPreflights(t *testing.T, want ...probe) []rrCall {
 		}
 	}
 	return r.calls[i:]
+}
+
+// withoutNamespaceStage drops the namespace planning a deploy does before its first write
+// -- the by-name read of ns and the `auth can-i create namespaces` that may follow it -- so
+// a test about the rest of the sequence keeps counting only the calls it was written for.
+// TestOperatorApplyPlansItsNamespace and the CreateNamespace tests pin the stage itself.
+func withoutNamespaceStage(calls []rrCall, ns string) []rrCall {
+	read := []string{"get", "namespace", ns, "--ignore-not-found", "-o", "name"}
+	out := make([]rrCall, 0, len(calls))
+	for _, c := range calls {
+		if eqArgs(c.args, read) || (isCanI(c.args) && canIVerb(c.args) == "create" && canIResource(c.args) == "namespaces") {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // probedNamespace returns the -n value of the leading probe for verb/resource, or ""

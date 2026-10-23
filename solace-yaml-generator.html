@@ -597,6 +597,19 @@ function concatBytes(...parts) {
   for (const p of parts) { out.set(p, at); at += p.length; }
   return out;
 }
+// joinPEM is broker.JoinPEM: PEM files joined so each starts on a line of its own, a
+// newline added only where the previous file lacks one -- so files that already end with
+// one join byte for byte, and the digest over them does not move.
+function joinPEM(...parts) {
+  const out = [];
+  let size = 0, last = 0;
+  for (const p of parts) {
+    if (size > 0 && last !== 0x0a) { out.push(new Uint8Array([0x0a])); size++; last = 0x0a; }
+    out.push(p);
+    if (p.length) { size += p.length; last = p[p.length - 1]; }
+  }
+  return concatBytes(...out);
+}
 function b64(bytes) {
   let bin = '';
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
@@ -1331,7 +1344,7 @@ async function genSecrets(C) {
       // TLSSecret refuses half a pair, which fails `broker generate` outright.
       docs.push('# broker generate fails here: tls.cert and tls.certKey must both be set\n');
     } else {
-      const crt = concatBytes(C.tls.certBytes, ...C.tls.caBytes), key = C.tls.keyBytes;
+      const crt = joinPEM(C.tls.certBytes, ...C.tls.caBytes), key = C.tls.keyBytes;
       try {
         docs.push(secretManifest(tlsSecretName(C), C.namespace, 'kubernetes.io/tls',
           { 'solace-util.sha256': await sha256hex(concatBytes(key, crt)) }, { 'tls.crt': crt, 'tls.key': key }));

@@ -2,9 +2,18 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// errNotAllowed marks a permission question the API server ANSWERED with a refusal, as
+// opposed to one nobody could answer -- an expired login, an unreachable server, a reply
+// that could not be read. preflightOne wraps it into its refusal, so a caller that may
+// degrade a guard to a warning when the identity merely lacks a grant can tell the two
+// apart with errors.Is, and still fails loud on everything else. The message text is the
+// same either way.
+var errNotAllowed = errors.New("not allowed")
 
 // Preflight is the read-only probe every mutating operation runs first. It asks the
 // cluster one question -- may this identity create this resource here -- using the
@@ -52,9 +61,11 @@ func (c *Cluster) PreflightAll(ctx context.Context, probes ...probe) error {
 
 func (c *Cluster) preflightOne(ctx context.Context, p probe) error {
 	verb, resource := p.verb, p.target()
-	where := c.nsFor(p)
+	where, binding := c.nsFor(p), "role binding"
 	if where == "" {
-		where = "the cluster"
+		// A RoleBinding cannot grant anything outside its own namespace, so advising one
+		// for a cluster-wide question would send the operator to ask for the wrong thing.
+		where, binding = "the cluster", "cluster role binding"
 	}
 	args := c.canIArgs(p)
 	if c.isEcho() {
@@ -72,12 +83,12 @@ func (c *Cluster) preflightOne(ctx context.Context, p probe) error {
 	switch {
 	case err == nil && answer == "yes":
 		return nil
-	case answer == "no":
+	case canIRefused(answer):
 		// Reached the API server and got a real answer: this is RBAC, not auth.
 		// kubectl already printed its own explanation to stderr; add the one line
 		// that says what to ask for.
-		return fmt.Errorf("not allowed to %s %s in %s: ask a cluster admin for a role binding "+
-			"granting %s on %s there, then re-run", verb, resource, where, verb, resource)
+		return fmt.Errorf("%w to %s %s in %s: ask a cluster admin for a %s "+
+			"granting %s on %s there, then re-run", errNotAllowed, verb, resource, where, binding, verb, resource)
 	case err != nil:
 		// No usable answer: an expired token, no context, an unreachable API
 		// server. kubectl's own message is on stderr and wrapped in here too.
@@ -107,6 +118,43 @@ func canIAnswer(out []byte) string {
 		}
 	}
 	return ""
+}
+
+// canIRefused reports whether an `auth can-i` verdict is a refusal. kubectl spells one
+// answer three ways: a bare `no`, `no - <reason>` when the authorizer gave a reason, and
+// `no (<evaluation error>)`. Only the bare form used to count, so a reasoned refusal fell
+// into the could-not-check branch and sent the operator off to log in again. Anything
+// else that merely starts with "no" -- a wrapper printing "no such host" -- is not one.
+func canIRefused(answer string) bool {
+	return answer == "no" || strings.HasPrefix(answer, "no - ") || strings.HasPrefix(answer, "no (")
+}
+
+// canI asks one permission question WITHOUT failing on the answer, for a caller choosing
+// between two paths rather than refusing to start: whether to offer a removal at all,
+// whether a report row that could not be read was refused or broken. allowed is the
+// verdict; answered is false when there was none to read -- an expired login, an
+// unreachable server, a reply that was neither yes nor no -- which every caller must treat
+// as unknown, never as either answer.
+//
+// Under the Echo runner it echoes the probe and answers yes, exactly as preflightOne
+// passes, so a preview shows the question and then takes the path a permitted run takes.
+func (c *Cluster) canI(ctx context.Context, p probe) (allowed, answered bool) {
+	args := c.canIArgs(p)
+	if c.isEcho() {
+		if err := c.kubectl(ctx, args...); err != nil {
+			return false, false
+		}
+		return true, true
+	}
+	out, err := c.kubectlOutput(ctx, args...)
+	switch answer := canIAnswer(out); {
+	case err == nil && answer == "yes":
+		return true, true
+	case canIRefused(answer):
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 // brokerResource is the CRD the operator reconciles -- the thing every broker
@@ -152,6 +200,12 @@ type probe struct {
 	// an identity granted exactly enough. Only name a probe whose real request carries the
 	// name -- a create does not, which is why the `escalate` probe leaves it empty.
 	name string
+	// allNamespaces asks about a NAMESPACED kind across every namespace, which is the
+	// question a cluster-wide list raises. Only the CRD cascade gate needs it: it has to see
+	// every PubSubPlusEventBroker before the CRDs go. Adding that kind to clusterScoped
+	// instead would turn every broker probe into a cluster-wide one and refuse each
+	// namespace-scoped identity this tool otherwise serves.
+	allNamespaces bool
 }
 
 // target is what the probe asks about: the resource, or `resource/name` for a named probe.
@@ -165,9 +219,9 @@ func (p probe) target() string {
 }
 
 // nsFor is the namespace a probe asks about: its own, else the broker's, and none at
-// all for a cluster-scoped resource.
+// all for a cluster-scoped resource or a question asked across every namespace.
 func (c *Cluster) nsFor(p probe) string {
-	if clusterScoped[p.resource] {
+	if clusterScoped[p.resource] || p.allNamespaces {
 		return ""
 	}
 	if p.ns != "" {

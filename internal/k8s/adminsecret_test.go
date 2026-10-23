@@ -239,16 +239,71 @@ func TestAdminPasswordPreflight(t *testing.T) {
 			t.Errorf("no broker can be running without its data, so a first deploy must pass: %v", err)
 		}
 	})
-	t.Run("a refused permission stops before any read", func(t *testing.T) {
+	t.Run("a refused CR permission stops before any read", func(t *testing.T) {
 		r := &recRunner{canI: "no"}
 		err := run(t, operatorManagedCfg(), r)
-		if err == nil || !strings.Contains(err.Error(), "not allowed to list") {
+		if err == nil || !strings.Contains(err.Error(), "not allowed to get "+brokerResource) {
 			t.Fatalf("err = %v, want the preflight's own permission refusal", err)
 		}
 		for _, c := range r.calls {
 			if !isCanI(c.args) {
 				t.Errorf("no read may run once a probe is refused: %+v", c)
 			}
+		}
+	})
+	t.Run("both reads are by name, so get is all they need", func(t *testing.T) {
+		r := &recRunner{}
+		if err := run(t, operatorManagedCfg(), r); err != nil {
+			t.Fatalf("AdminPasswordPreflight: %v", err)
+		}
+		var reads [][]string
+		for _, c := range r.calls {
+			if isCanI(c.args) {
+				if canIVerb(c.args) != "get" {
+					t.Errorf("probe %v asks for more than get", c.args)
+				}
+				continue
+			}
+			reads = append(reads, c.args)
+		}
+		want := [][]string{
+			{"get", brokerResource, "dev-broker", "-n", "solace", "--ignore-not-found", "-o", "json"},
+			{"get", "pvc", "data-dev-broker-pubsubplus-p-0", "data-dev-broker-pubsubplus-b-0",
+				"data-dev-broker-pubsubplus-m-0", "-n", "solace", "--ignore-not-found", "-o", "json"},
+		}
+		if len(reads) != len(want) || !eqArgs(reads[0], want[0]) || !eqArgs(reads[1], want[1]) {
+			t.Errorf("reads = %v, want %v", reads, want)
+		}
+	})
+	t.Run("a refused claims permission warns and lets the deploy proceed", func(t *testing.T) {
+		r := &recRunner{canIByResource: map[string]string{"persistentvolumeclaims": "no"},
+			outQueue: [][]byte{[]byte(`{"items":[]}`)}}
+		log, narration := logBuf()
+		c := NewCluster(r, operatorManagedCfg(), log, nil)
+		if err := c.AdminPasswordPreflight(context.Background()); err != nil {
+			t.Fatalf("reading claims is no part of a deploy; a refused grant must not stop it: %v", err)
+		}
+		for _, want := range []string{"not checked", "get persistentvolumeclaims", "semp.adminPass"} {
+			if !strings.Contains(narration.String(), want) {
+				t.Errorf("warning %q should mention %q", narration.String(), want)
+			}
+		}
+		if r.last().args[0] == "get" && r.last().args[1] == "pvc" {
+			t.Errorf("no claims read may follow a refused probe: %+v", r.calls)
+		}
+	})
+	t.Run("a refused claims permission never hides a running broker's Secret", func(t *testing.T) {
+		r := &recRunner{canIByResource: map[string]string{"persistentvolumeclaims": "no"},
+			outQueue: [][]byte{[]byte(strings.Replace(brokerListJSON, "%q", `"solace-admin-secret"`, 1))}}
+		if err := run(t, operatorManagedCfg(), r); err == nil || !strings.Contains(err.Error(), "solace-admin-secret") {
+			t.Errorf("err = %v, want the refusal for the dropped reference: the CR decides before the claims", err)
+		}
+	})
+	t.Run("an unanswered claims probe still stops the deploy", func(t *testing.T) {
+		r := &recRunner{canIByResource: map[string]string{"persistentvolumeclaims": "maybe"},
+			outQueue: [][]byte{[]byte(`{"items":[]}`)}}
+		if err := run(t, operatorManagedCfg(), r); err == nil || !strings.Contains(err.Error(), "could not read the answer") {
+			t.Errorf("err = %v, want the preflight's own unreadable-answer error: only a refusal degrades", err)
 		}
 	})
 	t.Run("a failed check refuses and says how to skip it", func(t *testing.T) {

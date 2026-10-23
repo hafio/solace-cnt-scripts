@@ -165,7 +165,7 @@ func TestConfirmNoDowngradeRefusesByDefault(t *testing.T) {
 	if err := c.OperatorApply(context.Background()); err == nil {
 		t.Fatal("a downgrade with no Confirm must be refused")
 	}
-	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
+	calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), defaultOperatorNS)
 	if len(calls) != 1 {
 		t.Fatalf("refused downgrade made %d calls after the probe, want 1 (the operator read only, no apply)", len(calls))
 	}
@@ -184,7 +184,7 @@ func TestConfirmNoDowngradeRefusedWhenConfirmDeclines(t *testing.T) {
 	if err := c.OperatorApply(context.Background()); err == nil {
 		t.Fatal("declining the confirm must refuse the downgrade")
 	}
-	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
+	calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), defaultOperatorNS)
 	if len(calls) != 1 {
 		t.Fatalf("declined downgrade made %d calls after the probe, want 1 (the operator read only, no apply)", len(calls))
 	}
@@ -211,7 +211,7 @@ func TestConfirmNoDowngradeProceedsWhenConfirmAccepts(t *testing.T) {
 	if len(asked) != 1 || asked[0] != "Downgrade the operator?" {
 		t.Errorf("asked %q, want exactly the downgrade question", asked)
 	}
-	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
+	calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), "op-ns")
 	if len(calls) != 4 {
 		t.Fatalf("accepted downgrade made %d calls after the probe, want 4 "+
 			"(operator read + namespace + regcred + bundle)", len(calls))
@@ -244,7 +244,7 @@ func TestConfirmNoDowngradeAsksNothingWhenNotADowngrade(t *testing.T) {
 			if asked {
 				t.Error("an upgrade or same-version apply must not ask at all")
 			}
-			calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
+			calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), "op-ns")
 			if len(calls) != 4 {
 				t.Fatalf("made %d calls after the probe, want 4 "+
 					"(operator read + namespace + regcred + bundle)", len(calls))

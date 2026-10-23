@@ -3,6 +3,7 @@ package broker
 import (
 	"bytes"
 	"context"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
@@ -1242,6 +1243,79 @@ func TestServerCertBundleOrder(t *testing.T) {
 	}
 	if want := "KEYBYTES\nCERTBYTES\nINTERBYTES\nROOTBYTES\n"; string(got) != want {
 		t.Errorf("bundle = %q, want %q (key, certificate, then the chain in order)", got, want)
+	}
+}
+
+// TestServerCertBundleStartsEachFileOnANewLine is the regression for a bundle that glued
+// its files together: a key, certificate or CA whose last line had no trailing newline
+// put the next file's -----BEGIN on the same line as its own -----END, and a PEM reader
+// then lost that block and the one glued to it. Every file now starts on a line of its
+// own, so all four blocks decode; the last file is left exactly as it was.
+func TestServerCertBundleStartsEachFileOnANewLine(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, label string) string {
+		p := filepath.Join(dir, name)
+		body := "-----BEGIN " + label + "-----\nc3R1Yg==\n-----END " + label + "-----"
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cfg := &config.Config{}
+	cfg.TLS.CertKey = write("tls.key", "PRIVATE KEY")
+	cfg.TLS.Cert = write("tls.crt", "CERTIFICATE")
+	cfg.TLS.CAs = []string{write("intermediate.pem", "CERTIFICATE"), write("root.pem", "CERTIFICATE")}
+
+	got, err := ServerCertBundle(cfg)
+	if err != nil {
+		t.Fatalf("ServerCertBundle: %v", err)
+	}
+	var types []string
+	for rest := got; ; {
+		b, r := pem.Decode(rest)
+		if b == nil {
+			break
+		}
+		types = append(types, b.Type)
+		rest = r
+	}
+	want := []string{"PRIVATE KEY", "CERTIFICATE", "CERTIFICATE", "CERTIFICATE"}
+	if strings.Join(types, ",") != strings.Join(want, ",") {
+		t.Errorf("bundle decodes to %q, want %q (each file on a line of its own):\n%s", types, want, got)
+	}
+	if bytes.HasSuffix(got, []byte("\n")) {
+		t.Errorf("the last file gained a newline it did not have:\n%q", got)
+	}
+}
+
+// TestJoinPEMAddsOnlyTheMissingNewlines: a part with no trailing newline gets one before
+// the next part starts, and nothing else changes -- parts that already end with a newline
+// (CRLF included) join byte for byte, so a digest computed over a bundle does not move for
+// anyone whose files were already well-formed, and a redeploy does not read an untouched
+// certificate as a renewed one. An empty part adds nothing, and the result never starts
+// with a blank line.
+func TestJoinPEMAddsOnlyTheMissingNewlines(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		parts []string
+		want  string
+	}{
+		{"all newline-terminated", []string{"A\n", "B\n", "C\n"}, "A\nB\nC\n"},
+		{"none newline-terminated", []string{"A", "B", "C"}, "A\nB\nC"},
+		{"mixed", []string{"A", "B\n", "C"}, "A\nB\nC"},
+		{"crlf left alone", []string{"A\r\n", "B"}, "A\r\nB"},
+		{"empty middle part", []string{"A", "", "B"}, "A\nB"},
+		{"empty first part", []string{"", "A"}, "A"},
+		{"single part", []string{"A"}, "A"},
+		{"nothing", nil, ""},
+	} {
+		parts := make([][]byte, len(tc.parts))
+		for i, p := range tc.parts {
+			parts[i] = []byte(p)
+		}
+		if got := string(JoinPEM(parts...)); got != tc.want {
+			t.Errorf("%s: JoinPEM(%q) = %q, want %q", tc.name, tc.parts, got, tc.want)
+		}
 	}
 }
 

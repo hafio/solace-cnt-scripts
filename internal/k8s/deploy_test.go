@@ -329,22 +329,132 @@ func TestDeleteBrokerLogsPVCOutcome(t *testing.T) {
 // not demand a permission it never uses.
 func TestDeleteBrokerProbesClaimsOnlyWhenPurging(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		purge bool
-		want  bool
+		name    string
+		purge   bool
+		mounted bool // every node on a custom volume mount, which a purge never deletes
+		want    bool
 	}{
-		{"purge asks about claims", true, true},
-		{"keeping data does not", false, false},
+		{"purge asks about claims", true, false, true},
+		{"keeping data does not", false, false, false},
+		{"a purge that deletes no claim does not", true, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rr := &recRunner{}
-			c := NewCluster(rr, haCfg(), nil, nil)
+			cfg := haCfg()
+			if tc.mounted {
+				cfg.K8s.Storage.CustomVolumeMount = map[string]string{"primary": "pvc-p", "backup": "pvc-b", "monitor": "pvc-m"}
+			}
+			c := NewCluster(rr, cfg, nil, nil)
 			if err := c.DeleteBroker(context.Background(), tc.purge); err != nil {
 				t.Fatalf("DeleteBroker: %v", err)
 			}
 			_, found := rr.probedNamespace("delete", "persistentvolumeclaims")
 			if found != tc.want {
 				t.Errorf("probed claims = %v, want %v", found, tc.want)
+			}
+		})
+	}
+}
+
+// TestPreflightDeployAsksForEveryWriteUpFront: `broker deploy` asks about every kind it will
+// write before it writes any -- the broker resource always (create, and the get its read-back
+// needs), Secrets only when this env file builds one -- so an identity bound to `edit` but
+// not to the broker resource is refused before its Secrets are applied, with nothing but
+// probes issued.
+func TestPreflightDeployAsksForEveryWriteUpFront(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		owned       bool
+		refuse      string
+		wantSecrets bool
+	}{
+		{"owned Secrets", true, "", true},
+		{"no Secret of its own", false, "", false},
+		{"the broker resource refused", true, brokerResource, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := haCfg()
+			if tc.owned {
+				cfg = adminCfg()
+			}
+			rr := &recRunner{canIByResource: map[string]string{}}
+			if tc.refuse != "" {
+				rr.canIByResource[tc.refuse] = "no"
+			}
+			err := NewCluster(rr, cfg, nil, nil).PreflightDeploy(context.Background())
+			if (err != nil) != (tc.refuse != "") {
+				t.Fatalf("PreflightDeploy err = %v, want a refusal: %v", err, tc.refuse != "")
+			}
+			if tc.refuse != "" && !strings.Contains(err.Error(), "not allowed to create "+tc.refuse) {
+				t.Errorf("err = %v, want the refused create named", err)
+			}
+			for _, call := range rr.calls {
+				if !isCanI(call.args) {
+					t.Errorf("a preflight issues probes only, got %+v", call)
+				}
+			}
+			if _, ok := rr.probedNamespace("create", brokerResource); !ok {
+				t.Error("creating the broker resource must be asked about")
+			}
+			if _, ok := rr.probedNamespace("create", "secrets"); ok != tc.wantSecrets {
+				t.Errorf("probed secrets = %v, want %v", ok, tc.wantSecrets)
+			}
+		})
+	}
+}
+
+// TestPreflightRemovalAsksForEveryDeleteUpFront: `broker remove` asks about every kind it
+// will delete before it deletes any, so a refusal cannot land halfway -- a `delete secrets`
+// refused after the CR and the data were gone left the TLS key and the admin password
+// behind. It asks only for what this removal really deletes: claims only when the purge
+// deletes one (never a custom mount's), Secrets only when this env file owns one. A refusal
+// stops it with nothing but probes issued.
+func TestPreflightRemovalAsksForEveryDeleteUpFront(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		owned, purge, mounted bool
+		refuse                string // a resource whose probe answers no
+		wantClaims            bool
+		wantSecrets           bool
+	}{
+		{"keep the data, owned Secrets", true, false, false, "", false, true},
+		{"purge deletes the claims", true, true, false, "", true, true},
+		{"purge over custom mounts deletes no claim", true, true, true, "", false, true},
+		{"no Secret of its own", false, true, false, "", true, false},
+		{"a refused Secret delete", true, true, false, "secrets", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := haCfg()
+			if tc.owned {
+				cfg = adminCfg()
+			}
+			if tc.mounted {
+				cfg.K8s.Storage.CustomVolumeMount = map[string]string{"primary": "pvc-p", "backup": "pvc-b", "monitor": "pvc-m"}
+			}
+			rr := &recRunner{canIByResource: map[string]string{}}
+			if tc.refuse != "" {
+				rr.canIByResource[tc.refuse] = "no"
+			}
+			err := NewCluster(rr, cfg, nil, nil).PreflightRemoval(context.Background(), tc.purge)
+			if (err != nil) != (tc.refuse != "") {
+				t.Fatalf("PreflightRemoval err = %v, want a refusal: %v", err, tc.refuse != "")
+			}
+			if tc.refuse != "" && !strings.Contains(err.Error(), "not allowed to delete "+tc.refuse) {
+				t.Errorf("err = %v, want the refused delete named", err)
+			}
+			for _, call := range rr.calls {
+				if !isCanI(call.args) {
+					t.Errorf("a preflight issues probes only, got %+v", call)
+				}
+			}
+			if _, ok := rr.probedNamespace("delete", brokerResource); !ok {
+				t.Error("the broker CR delete must be asked about")
+			}
+			if _, ok := rr.probedNamespace("delete", "persistentvolumeclaims"); ok != tc.wantClaims {
+				t.Errorf("probed claims = %v, want %v", ok, tc.wantClaims)
+			}
+			if _, ok := rr.probedNamespace("delete", "secrets"); ok != tc.wantSecrets {
+				t.Errorf("probed secrets = %v, want %v", ok, tc.wantSecrets)
 			}
 		})
 	}

@@ -49,6 +49,12 @@ func lbServiceName(cfg *config.Config) string {
 	return cfg.K8s.Name + brokerSuffix
 }
 
+// discoveryServiceName returns the headless service the operator creates beside the
+// load-balancer one for the group's internal discovery: <name>-pubsubplus-discovery.
+func discoveryServiceName(cfg *config.Config) string {
+	return lbServiceName(cfg) + "-discovery"
+}
+
 // HARoles returns the broker roles present in this deployment: [primary] for a
 // standalone broker, [primary, backup, monitor] for a redundancy group. It bounds
 // the per-role resource operations (PVC deletion, replica scaling, diagnostics).

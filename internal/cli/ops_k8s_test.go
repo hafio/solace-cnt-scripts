@@ -751,10 +751,12 @@ func TestOpsK8sGatherDiagnosticsCoversEveryNodeOrTheOneNamed(t *testing.T) {
 }
 
 // TestOpsK8sStatusBrokerStopsAtTheFirstFailedRead: `status broker` is a sequence of reads,
-// and a read that fails is reported rather than skipped past. A broker resource that cannot
-// be read ends the report before any pod, service or StatefulSet is listed, and under
+// and the two a report cannot go on without end it when they fail. A broker resource that
+// cannot be read ends the report before any pod, service or StatefulSet is read, and under
 // --detail a pod description that fails ends it before the load balancer is described --
-// the report must never show a later section as though the earlier one had worked.
+// the report must never show a later section as though the earlier one had worked. (A
+// section whose read the cluster REFUSES is drawn with a [SKIP] row instead; internal/k8s's
+// TestBrokerReportShowsARefusedSection pins that.)
 func TestOpsK8sStatusBrokerStopsAtTheFirstFailedRead(t *testing.T) {
 	t.Run("an unreadable broker resource ends the report before any other read", func(t *testing.T) {
 		rr := &opRunner{fail: opFailOn("pubsubpluseventbrokers")}
@@ -961,9 +963,10 @@ func TestOpsK8sOperatorStopConfirmsBecauseItFreezesEveryNamespace(t *testing.T) 
 // remove` when brokers exist in the cluster, which deleting the CRDs would cascade-delete,
 // including brokers this env file has never heard of. A broker on the cluster fixes the
 // answer, so the question is not asked: with --delete-crd the request goes straight to
-// OperatorDelete's refusal, which names every broker, and without it the CRDs are kept with
-// a warning that does. Either way the rest of the install is still removed, and no CRD is
-// ever deleted. A broker listing that cannot be read is not permission to delete either.
+// OperatorDelete's refusal, which names every broker and comes before anything is deleted,
+// so the operator stays installed; without it the CRDs are kept with a warning that does,
+// and the rest of the install is removed. No CRD is ever deleted. A broker listing that
+// cannot be read is not permission to delete either, and is said rather than swallowed.
 func TestOpsK8sOperatorRemoveNeverDeletesCRDsOverLiveBrokers(t *testing.T) {
 	const brokers = `{"items":[` +
 		`{"metadata":{"name":"dev-broker","namespace":"solace"}},` +
@@ -990,7 +993,14 @@ func TestOpsK8sOperatorRemoveNeverDeletesCRDsOverLiveBrokers(t *testing.T) {
 			return nil
 		}}
 		if listFails {
-			rr.fail = opFailOn("pubsubpluseventbrokers")
+			// The read fails, not the permission probe: this is the listing that answers
+			// nothing, which the gate must refuse on its own.
+			rr.fail = func(c opCall) error {
+				if !opCanI(c) && opArgvMatch(c, "pubsubpluseventbrokers") {
+					return errors.New("injected listing failure")
+				}
+				return nil
+			}
 		}
 		return &App{Cfg: cfg, Platform: config.K8s, Runner: rr}, rr
 	}
@@ -1027,8 +1037,11 @@ func TestOpsK8sOperatorRemoveNeverDeletesCRDsOverLiveBrokers(t *testing.T) {
 		if crdsDeleted(rr) {
 			t.Errorf("the CRDs were deleted over live brokers:\n%s", rr.dump())
 		}
-		if !bundleDeleted(rr) {
-			t.Errorf("a refused CRD deletion must not look like the whole removal was skipped:\n%s", rr.dump())
+		if !strings.Contains(err.Error(), "Nothing was deleted: the operator is still installed") {
+			t.Errorf("err = %v, want it to say nothing was deleted", err)
+		}
+		if bundleDeleted(rr) {
+			t.Errorf("--delete-crd was refused before the first delete, so the operator must stay installed:\n%s", rr.dump())
 		}
 	})
 	t.Run("without --delete-crd the CRDs are kept and the brokers are named", func(t *testing.T) {
@@ -1054,12 +1067,15 @@ func TestOpsK8sOperatorRemoveNeverDeletesCRDsOverLiveBrokers(t *testing.T) {
 		a, rr := setup(t, true)
 		a.deleteLayer = true
 		a.noPrompt = true
-		_, _, err := opsK8sRun(t, func() error { return opK8sOperatorRemove(a) })
+		_, errOut, err := opsK8sRun(t, func() error { return opK8sOperatorRemove(a) })
 		if err == nil || !strings.Contains(err.Error(), "refusing to delete the operator CRDs") || !strings.Contains(err.Error(), "listing broker custom resources") {
 			t.Fatalf("opK8sOperatorRemove err = %v, want the CRD deletion refused for want of a listing", err)
 		}
-		if crdsDeleted(rr) {
-			t.Errorf("the CRDs were deleted without being able to see what they would take:\n%s", rr.dump())
+		if crdsDeleted(rr) || bundleDeleted(rr) {
+			t.Errorf("nothing may be deleted without being able to see what the CRDs would take:\n%s", rr.dump())
+		}
+		if !strings.Contains(errOut, "could not list the broker resources across the cluster") {
+			t.Errorf("stderr = %q, want the failed pre-check said rather than swallowed", errOut)
 		}
 	})
 }
@@ -1085,6 +1101,158 @@ func TestOpsK8sRemoveBrokerStopsWhenASecretWillNotDelete(t *testing.T) {
 	last := rr.calls[len(rr.calls)-1]
 	if len(last.args) < 2 || last.args[0] != "delete" || last.args[1] != "secret" {
 		t.Errorf("the last call = %v, want the failed secret delete: nothing may follow it, least of all the namespace question:\n%s", last.args, rr.dump())
+	}
+}
+
+// TestNamespaceScopedIdentityRunsTheBrokerLifecycle is the goal end to end: an identity bound
+// only inside its namespace -- every cluster-wide permission question answered no, every
+// cluster-wide or cluster-scoped read Forbidden, its own namespace readable by name --
+// deploys, validates, reports on and removes its broker, in the default no-admin-password
+// configuration. Each broader read it cannot make becomes a warning or a [SKIP] row and none
+// fails the command; it neither applies a Namespace it could not patch nor deletes one it
+// may not. Only `broker status --all`, which asks for the whole cluster, is refused.
+func TestNamespaceScopedIdentityRunsTheBrokerLifecycle(t *testing.T) {
+	newApp := func(t *testing.T) (*App, *opRunner) {
+		t.Helper()
+		cfg := loadDirect(t, "redundancy:\n  enabled: false\n"+
+			"image:\n  repo: solace-pubsub-standard\n  tag: \"10.10.1.128\"\n"+
+			"kubernetes:\n  name: dev-broker\n  namespace: solace\n  updateStrategy: automatedRolling\n"+
+			"  storage:\n    class: standard\n    msgNodeSize: 30Gi\n", config.K8s)
+		rr := &opRunner{
+			fail: func(c opCall) error {
+				if !opCanI(c) && (opArgvMatch(c, "--all-namespaces") ||
+					(len(c.args) > 1 && c.args[0] == "get" && c.args[1] == "sc")) {
+					return errors.New("Error from server (Forbidden)")
+				}
+				return nil
+			},
+			output: func(c opCall) []byte {
+				switch {
+				case opCanI(c) && opArgvMatch(c, "--all-namespaces"):
+					return []byte("no\n")
+				case len(c.args) > 2 && c.args[0] == "get" && c.args[1] == "namespace":
+					return []byte("namespace/solace\n")
+				}
+				return nil
+			},
+		}
+		a := &App{Cfg: cfg, Platform: config.K8s, Runner: rr}
+		opsK8sSilenced(a)
+		return a, rr
+	}
+	for _, tc := range []struct {
+		name string
+		run  func(*App) error
+		set  func(*App)
+	}{
+		{"broker deploy", opK8sDeploy, func(*App) {}},
+		{"broker validate", opK8sValidateBroker, func(*App) {}},
+		{"broker status", func(a *App) error { return opK8sStatusBroker(a, config.Primary) }, func(*App) {}},
+		{"broker remove --delete-data", opK8sRemoveBroker, func(a *App) { a.deleteLayer = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, rr := newApp(t)
+			tc.set(a)
+			_, _, err := opsK8sRun(t, func() error { return tc.run(a) })
+			if err != nil {
+				t.Fatalf("%s err = %v, want it to proceed on namespace rights alone:\n%s", tc.name, err, rr.dump())
+			}
+			for _, c := range rr.calls {
+				if c.method == "RunInput" && strings.Contains(c.stdin, "kind: Namespace") {
+					t.Errorf("%s applied a Namespace it may not patch:\n%s", tc.name, rr.dump())
+				}
+				if len(c.args) > 1 && c.args[0] == "delete" && c.args[1] == "namespace" {
+					t.Errorf("%s deleted a namespace it may not delete:\n%s", tc.name, rr.dump())
+				}
+			}
+		})
+	}
+	t.Run("broker status --all", func(t *testing.T) {
+		a, _ := newApp(t)
+		a.all = true
+		_, _, err := opsK8sRun(t, func() error { return opK8sStatusBroker(a, config.Primary) })
+		if err == nil || !strings.Contains(err.Error(), "without --all") {
+			t.Errorf("err = %v: --all asks for the whole cluster, so it is refused, pointing at the namespace view", err)
+		}
+	})
+}
+
+// TestOpsK8sDeployRefusesBeforeTheFirstWrite: every permission the deploy's writes use is
+// asked about before any write, so an identity that may create Secrets but not the broker
+// resource -- the built-in edit role alone -- is refused with nothing applied, rather than
+// after its Secrets were written.
+func TestOpsK8sDeployRefusesBeforeTheFirstWrite(t *testing.T) {
+	rr := &opRunner{output: func(c opCall) []byte {
+		if opCanI(c) && opArgvMatch(c, "pubsubpluseventbrokers") {
+			return []byte("no\n")
+		}
+		return nil
+	}}
+	a := &App{Cfg: writeK8sDeployAllEnv(t, "false"), Platform: config.K8s, Runner: rr, noPrompt: true}
+	_, _, err := opsK8sRun(t, func() error { return opK8sDeploy(a) })
+	if err == nil || !strings.Contains(err.Error(), "not allowed to create pubsubpluseventbrokers") {
+		t.Fatalf("opK8sDeploy err = %v, want the refused broker resource named", err)
+	}
+	for _, c := range rr.calls {
+		if !opCanI(c) {
+			t.Errorf("nothing but probes may run before the refusal, got %v:\n%s", c.args, rr.dump())
+		}
+	}
+}
+
+// TestOpsK8sRemoveBrokerRefusesBeforeTheFirstDelete: every permission the removal uses is
+// asked about before anything is deleted, so an identity that may delete the broker and its
+// data but not its Secrets is refused with all of them still in place -- not after the CR
+// and, with --delete-data, the data are gone and the TLS key and admin password are left
+// behind for a half-removed broker.
+func TestOpsK8sRemoveBrokerRefusesBeforeTheFirstDelete(t *testing.T) {
+	rr := &opRunner{output: func(c opCall) []byte {
+		if opCanI(c) && opArgvMatch(c, "secrets") {
+			return []byte("no\n")
+		}
+		return nil
+	}}
+	a := &App{Cfg: writeK8sDeployAllEnv(t, "false"), Platform: config.K8s, Runner: rr, noPrompt: true, deleteLayer: true}
+	_, _, err := opsK8sRun(t, func() error { return opK8sRemoveBroker(a) })
+	if err == nil || !strings.Contains(err.Error(), "not allowed to delete secrets") {
+		t.Fatalf("opK8sRemoveBroker err = %v, want the refused Secret delete named", err)
+	}
+	for _, c := range rr.calls {
+		if !opCanI(c) {
+			t.Errorf("nothing but probes may run before the refusal, got %v:\n%s", c.args, rr.dump())
+		}
+	}
+}
+
+// TestOpsK8sRemoveNamespaceIfEmptyKeepsANamespaceItMayNotDelete: an empty namespace is
+// offered only to an identity that may delete it. The namespace-scoped identity never may,
+// so even under --no-prompt it is kept with a warning naming the command a cluster admin
+// can run, nothing is asked, and the removal it ends still succeeds.
+func TestOpsK8sRemoveNamespaceIfEmptyKeepsANamespaceItMayNotDelete(t *testing.T) {
+	rr := &opRunner{output: func(c opCall) []byte {
+		if opCanI(c) && opArgvMatch(c, "namespaces") {
+			return []byte("no\n")
+		}
+		return nil
+	}}
+	a := &App{Cfg: writeK8sDeployAllEnv(t, "false"), Platform: config.K8s, Runner: rr}
+	opsK8sSilenced(a)
+	_, errOut, err := opsK8sRun(t, func() error { return removeNamespaceIfEmpty(a, k8sCluster(a)) })
+	if err != nil {
+		t.Fatalf("removeNamespaceIfEmpty err = %v, want nil: keeping the namespace is not a failure", err)
+	}
+	for _, c := range rr.calls {
+		if len(c.args) > 1 && c.args[0] == "delete" && c.args[1] == "namespace" {
+			t.Errorf("a namespace this identity may not delete was deleted:\n%s", rr.dump())
+		}
+	}
+	for _, want := range []string{"is empty but was kept", "kubectl delete namespace solace"} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("stderr = %q, want it to carry %q", errOut, want)
+		}
+	}
+	if strings.Contains(errOut, "Delete the now-empty namespace") {
+		t.Errorf("a deletion this identity cannot carry out must not be offered:\n%s", errOut)
 	}
 }
 

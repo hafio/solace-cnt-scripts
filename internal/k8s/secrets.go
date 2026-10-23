@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"solace/internal/broker"
 	"solace/internal/config"
 	"solace/internal/render"
 )
@@ -193,19 +194,23 @@ func TLSSecret(cfg *config.Config) ([]byte, error) {
 }
 
 // readTLSMaterial reads the TLS Secret's two entries off disk: the key, and the
-// certificate with every tls.cas file appended, which is the chain tls.crt holds.
+// certificate with every tls.cas file appended, which is the chain tls.crt holds. The
+// chain is joined by broker.JoinPEM, so a file without a trailing newline cannot glue the
+// next file's first line onto its last.
 func readTLSMaterial(cfg *config.Config) (key, crt []byte, err error) {
-	crt, err = os.ReadFile(cfg.TLS.Cert)
+	cert, err := os.ReadFile(cfg.TLS.Cert)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read tls.cert %q: %w", cfg.TLS.Cert, err)
 	}
+	chain := [][]byte{cert}
 	for _, ca := range cfg.TLS.CAs {
 		caBytes, err := os.ReadFile(ca)
 		if err != nil {
 			return nil, nil, fmt.Errorf("read tls CA %q: %w", ca, err)
 		}
-		crt = append(crt, caBytes...)
+		chain = append(chain, caBytes)
 	}
+	crt = broker.JoinPEM(chain...)
 	key, err = os.ReadFile(cfg.TLS.CertKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read tls.certKey %q: %w", cfg.TLS.CertKey, err)

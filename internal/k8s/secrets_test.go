@@ -3,6 +3,7 @@ package k8s
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/pem"
 	"flag"
 	"os"
 	"path/filepath"
@@ -602,6 +603,42 @@ func TestAdditionalUsersSecretRefusesAnEmptyPassword(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "appuser") {
 		t.Errorf("error %q should name the user, so the fix is readable off it", err)
+	}
+}
+
+// TestTLSSecretStartsEachCAOnANewLine: tls.crt chains the certificate and every tls.cas
+// file, and a file whose last line had no trailing newline used to glue the next file's
+// -----BEGIN onto its own -----END, so the chain stopped decoding at that point. Each
+// file now starts on a line of its own (broker.JoinPEM): both blocks decode, and the key
+// is carried exactly as it was read.
+func TestTLSSecretStartsEachCAOnANewLine(t *testing.T) {
+	dir := t.TempDir()
+	crt, key, ca := filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key"), filepath.Join(dir, "ca.crt")
+	const keyBody = "-----BEGIN PRIVATE KEY-----\nc3R1Yg==\n-----END PRIVATE KEY-----"
+	writeFile(t, crt, "-----BEGIN CERTIFICATE-----\nc3R1Yg==\n-----END CERTIFICATE-----")
+	writeFile(t, key, keyBody)
+	writeFile(t, ca, "-----BEGIN CERTIFICATE-----\nc3R1Yg==\n-----END CERTIFICATE-----")
+	cfg := haCfg()
+	cfg.TLS.Cert, cfg.TLS.CertKey, cfg.TLS.CAs = crt, key, []string{ca}
+
+	gotKey, gotCrt, err := readTLSMaterial(cfg)
+	if err != nil {
+		t.Fatalf("readTLSMaterial: %v", err)
+	}
+	if string(gotKey) != keyBody {
+		t.Errorf("tls.key must be the key file unchanged, got %q", gotKey)
+	}
+	blocks := 0
+	for rest := gotCrt; ; {
+		b, r := pem.Decode(rest)
+		if b == nil {
+			break
+		}
+		blocks++
+		rest = r
+	}
+	if blocks != 2 {
+		t.Errorf("tls.crt decodes to %d PEM block(s), want 2 (the certificate, then the CA):\n%s", blocks, gotCrt)
 	}
 }
 

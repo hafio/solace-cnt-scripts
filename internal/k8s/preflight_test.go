@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -35,6 +36,139 @@ func TestCanIAnswerReadsTheLastLine(t *testing.T) {
 				t.Errorf("canIAnswer(%q) = %q, want %q", tc.out, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCanIRefusedReadsEveryRefusalSpelling: kubectl prints a refusal as a bare `no`, as
+// `no - <reason>` when the authorizer gave one, and as `no (<evaluation error>)`. Only the
+// bare form used to count, so a reasoned refusal read as "could not check" and sent the
+// operator to log in again. Something that merely starts with "no" is not a verdict.
+func TestCanIRefusedReadsEveryRefusalSpelling(t *testing.T) {
+	for _, tc := range []struct {
+		answer string
+		want   bool
+	}{
+		{"no", true},
+		{"no - RBAC: access denied", true},
+		{"no (evaluation error: role not found)", true},
+		{"yes", false},
+		{"nope", false},
+		{"no such host", false},
+		{"", false},
+	} {
+		if got := canIRefused(tc.answer); got != tc.want {
+			t.Errorf("canIRefused(%q) = %v, want %v", tc.answer, got, tc.want)
+		}
+	}
+}
+
+// TestPreflightRefusalIsNotAllowed: a refusal -- in any of kubectl's spellings, and even
+// though kubectl exits non-zero with it -- wraps errNotAllowed, which is what lets a caller
+// degrade a guard only when the identity merely lacks a grant. A probe nobody could
+// answer does not wrap it and keeps its log-in advice. The advice names the binding that
+// can actually grant the permission: a RoleBinding for a namespaced kind, a cluster role
+// binding for a cluster-scoped one, since a RoleBinding cannot reach outside its namespace.
+func TestPreflightRefusalIsNotAllowed(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name     string
+		rr       *recRunner
+		p        probe
+		refusal  bool
+		contains []string
+		absent   string
+	}{
+		{"namespaced refusal", &recRunner{canI: "no"}, probe{verb: "create", resource: "secrets"},
+			true, []string{"not allowed to create secrets in solace", "a role binding granting"}, "cluster role binding"},
+		{"reasoned refusal with kubectl's exit status", &recRunner{canI: "no - RBAC: access denied", canIErr: errors.New("exit status 1")},
+			probe{verb: "create", resource: "secrets"}, true, []string{"not allowed to create secrets"}, "log in first"},
+		{"cluster-scoped refusal", &recRunner{canI: "no"}, probe{verb: "delete", resource: "namespaces"},
+			true, []string{"not allowed to delete namespaces in the cluster", "a cluster role binding granting"}, ""},
+		{"cluster-wide question about a namespaced kind", &recRunner{canI: "no"},
+			probe{verb: "list", resource: brokerResource, allNamespaces: true},
+			true, []string{"in the cluster", "a cluster role binding granting list"}, ""},
+		{"no answer at all", &recRunner{canIErr: errors.New("connection refused")}, probe{verb: "create", resource: "secrets"},
+			false, []string{"cannot check permission", "log in first"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := NewCluster(tc.rr, loadK8s(t), nil, nil).PreflightAll(ctx, tc.p)
+			if err == nil {
+				t.Fatal("the probe must fail")
+			}
+			if got := errors.Is(err, errNotAllowed); got != tc.refusal {
+				t.Errorf("errors.Is(err, errNotAllowed) = %v, want %v (err: %v)", got, tc.refusal, err)
+			}
+			for _, w := range tc.contains {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error = %v, want it to contain %q", err, w)
+				}
+			}
+			if tc.absent != "" && strings.Contains(err.Error(), tc.absent) {
+				t.Errorf("error = %v, must not contain %q", err, tc.absent)
+			}
+		})
+	}
+}
+
+// TestCanIAnswersWithoutFailing: canI is the path chooser, so it never errors -- it says
+// what the cluster answered, and that nobody answered when that is the truth. Every reply
+// that would refuse in Preflight is a refusal here, and every reply Preflight could not
+// read (an error with no verdict, an unreadable body) is unanswered, never a "no".
+func TestCanIAnswersWithoutFailing(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name              string
+		rr                *recRunner
+		allowed, answered bool
+	}{
+		{"yes", &recRunner{}, true, true},
+		{"warned yes", &recRunner{canI: "Warning: a\nyes"}, true, true},
+		{"no", &recRunner{canI: "no"}, false, true},
+		{"reasoned no", &recRunner{canI: "no - RBAC: access denied", canIErr: errors.New("exit status 1")}, false, true},
+		{"error with no verdict", &recRunner{canIErr: errors.New("connection refused")}, false, false},
+		{"unreadable", &recRunner{canI: "maybe"}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewCluster(tc.rr, loadK8s(t), nil, nil)
+			p := probe{verb: "delete", resource: "namespaces"}
+			allowed, answered := c.canI(ctx, p)
+			if allowed != tc.allowed || answered != tc.answered {
+				t.Errorf("canI = (%v, %v), want (%v, %v)", allowed, answered, tc.allowed, tc.answered)
+			}
+			// It asks the same question Preflight asks, so the two cannot drift apart.
+			if len(tc.rr.calls) != 1 || !eqArgs(tc.rr.calls[0].args, c.canIArgs(p)) {
+				t.Errorf("calls = %+v, want exactly the probe %v", tc.rr.calls, c.canIArgs(p))
+			}
+		})
+	}
+}
+
+// TestCanIIsPermittedUnderEcho: a preview shows the question and takes the path a
+// permitted run takes, exactly as Preflight passes under the Echo runner.
+func TestCanIIsPermittedUnderEcho(t *testing.T) {
+	var out strings.Builder
+	c := NewCluster(engine.Echo{W: &out}, loadK8s(t), nil, &out)
+	allowed, answered := c.canI(context.Background(), probe{verb: "delete", resource: "namespaces"})
+	if !allowed || !answered {
+		t.Errorf("canI under Echo = (%v, %v), want (true, true)", allowed, answered)
+	}
+	if !strings.Contains(out.String(), "auth can-i delete namespaces --all-namespaces") {
+		t.Errorf("the preview must show the probe:\n%s", out.String())
+	}
+}
+
+// TestCanIUnderEchoStillHonoursTheExecutionGuard: a preview answers yes only for a probe it
+// could echo. A cluster command nobody approved is refused before argv is built, so the
+// question was never asked -- unanswered, never a yes -- and nothing is echoed.
+func TestCanIUnderEchoStillHonoursTheExecutionGuard(t *testing.T) {
+	var out strings.Builder
+	c := NewCluster(engine.Echo{W: &out}, unapprovedCfg(), nil, &out)
+	allowed, answered := c.canI(context.Background(), probe{verb: "delete", resource: "namespaces"})
+	if allowed || answered {
+		t.Errorf("canI under Echo with an unapproved command = (%v, %v), want (false, false)", allowed, answered)
+	}
+	if out.Len() != 0 {
+		t.Errorf("a refused command must echo nothing, got:\n%s", out.String())
 	}
 }
 
@@ -117,6 +251,10 @@ func TestCanIArgsScopesByResourceKind(t *testing.T) {
 		// A named probe asks about the one object, and is scoped by its bare resource.
 		{probe{verb: "bind", resource: "clusterroles", name: operatorClusterRole},
 			[]string{"auth", "can-i", "bind", "clusterroles/" + operatorClusterRole, "--all-namespaces"}},
+		// A namespaced kind asked about across every namespace: the cluster-wide list the
+		// CRD cascade gate needs, without making the kind cluster-scoped for every probe.
+		{probe{verb: "list", resource: brokerResource, allNamespaces: true},
+			[]string{"auth", "can-i", "list", brokerResource, "--all-namespaces"}},
 	}
 	for _, tc := range cases {
 		got := c.canIArgs(tc.p)

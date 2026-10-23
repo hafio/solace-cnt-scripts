@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -197,7 +198,7 @@ func (c *Cluster) OperatorApply(ctx context.Context) error {
 	// meant an identity allowed to create custom resource definitions but not
 	// ClusterRoleBindings passed this check and died halfway through the apply --
 	// which is the exact state Preflight exists to prevent.
-	if err := c.PreflightAll(ctx, operatorProbes("create", opNS, c.Cfg.ManagesImagePullSecret())...); err != nil {
+	if err := c.PreflightAll(ctx, operatorProbes("create", opNS, c.Cfg.ManagesImagePullSecret(), true)...); err != nil {
 		return err
 	}
 	// ONE read of the operator already installed, shared by the downgrade gate and the
@@ -223,6 +224,13 @@ func (c *Cluster) OperatorApply(ctx context.Context) error {
 				"create that role and bind on it to bind it. Nothing was applied. If an operator already runs in "+
 				"another namespace, set kubernetes.operator.namespace to it instead", err, operatorClusterRole)
 		}
+	}
+	// Whether the bundle's Namespace document is applied at all, settled -- with any
+	// refusal -- before the downgrade question, so nobody answers a question for an install
+	// that then stops.
+	applyNS, err := c.planOperatorNamespace(ctx, opNS)
+	if err != nil {
+		return err
 	}
 	// Before anything is applied: the operator is cluster-scoped, and `apply`
 	// downgrades an image without comment, so a downgrade is asked about rather
@@ -250,8 +258,12 @@ func (c *Cluster) OperatorApply(ctx context.Context) error {
 		// to prevent.
 		return fmt.Errorf("operator bundle has no Namespace document to apply first")
 	}
-	if err := c.apply(ctx, ns); err != nil {
-		return fmt.Errorf("apply operator namespace: %w", err)
+	if applyNS {
+		if err := c.apply(ctx, ns); err != nil {
+			return fmt.Errorf("apply operator namespace: %w", err)
+		}
+	} else {
+		c.logf("operator namespace %s exists", opNS)
 	}
 	if c.Cfg.ManagesImagePullSecret() {
 		regcred, err := operatorRegcred(c.Cfg, opNS)
@@ -283,26 +295,57 @@ var yamlDocSepRE = regexp.MustCompile(`(?m)^---[ \t]*$`)
 //
 // The namespaced kinds carry opNS explicitly: the operator lives in its own namespace,
 // not the broker's, and a probe that asked about the broker's would answer a question
-// nobody was asking. The Namespace kind itself appears only on the apply side -- the
-// delete no longer removes it.
-func operatorProbes(verb, opNS string, withRegcred bool) []probe {
-	ps := []probe{
-		{verb: verb, resource: "customresourcedefinitions"}, // cluster-scoped
-		{verb: verb, resource: "clusterroles"},              // cluster-scoped
-		{verb: verb, resource: "clusterrolebindings"},       // cluster-scoped
-		{verb: verb, resource: "serviceaccounts", ns: opNS},
-		{verb: verb, resource: "roles", ns: opNS},
-		{verb: verb, resource: "rolebindings", ns: opNS},
-		{verb: verb, resource: "deployments", ns: opNS},
+// nobody was asking. The CRDs are asked about only when the operation touches them: an
+// apply always does, a delete only with --delete-crd, so a removal that keeps them does
+// not demand the grant to delete them. The Namespace kind is not here at all: whether it
+// is needed depends on whether the namespace already exists, which planOperatorNamespace
+// reads first, and the delete never removes it.
+func operatorProbes(verb, opNS string, withRegcred, withCRDs bool) []probe {
+	var ps []probe
+	if withCRDs {
+		ps = append(ps, probe{verb: verb, resource: "customresourcedefinitions"}) // cluster-scoped
 	}
-	if verb == "create" {
-		// Applying the bundle creates the namespace; deleting it does not remove one.
-		ps = append(ps, probe{verb: verb, resource: "namespaces"})
-	}
+	ps = append(ps,
+		probe{verb: verb, resource: "clusterroles"},        // cluster-scoped
+		probe{verb: verb, resource: "clusterrolebindings"}, // cluster-scoped
+		probe{verb: verb, resource: "serviceaccounts", ns: opNS},
+		probe{verb: verb, resource: "roles", ns: opNS},
+		probe{verb: verb, resource: "rolebindings", ns: opNS},
+		probe{verb: verb, resource: "deployments", ns: opNS},
+	)
 	if withRegcred {
 		ps = append(ps, probe{verb: verb, resource: "secrets", ns: opNS})
 	}
 	return ps
+}
+
+// planOperatorNamespace decides whether OperatorApply applies the bundle's own Namespace
+// document, by readNamespace's rule: a namespace that exists is left alone -- applying
+// over it would PATCH a namespace this tool may not have created -- an absent one needs
+// `create namespaces`, and one whose existence could not be read is applied only when the
+// create probe permits it.
+//
+// That last refusal is an ERROR here, unlike a broker deploy's warning: the bundle's
+// cluster-scoped documents land before anything namespaced, so going on into a namespace
+// that may not exist risks CRDs and RBAC installed for a controller that never starts.
+func (c *Cluster) planOperatorNamespace(ctx context.Context, opNS string) (apply bool, err error) {
+	switch c.readNamespace(ctx, opNS) {
+	case namespaceExists:
+		return false, nil
+	case namespaceAbsent:
+		if err := c.Preflight(ctx, "create", "namespaces"); err != nil {
+			return false, missingNamespace(opNS, err)
+		}
+		return true, nil
+	}
+	if err := c.Preflight(ctx, "create", "namespaces"); err != nil {
+		if errors.Is(err, errNotAllowed) {
+			return false, fmt.Errorf("could not confirm the operator namespace %q exists (that read needs get on "+
+				"namespaces in %s), and this identity may not create it (%w). Nothing was applied", opNS, opNS, err)
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // operatorEscalationProbes are the two questions the bundle's ClusterRole raises for an
@@ -393,8 +436,8 @@ func (c *Cluster) BrokerCRs(ctx context.Context) ([]string, error) {
 	return refs, nil
 }
 
-// refuseCRDDeleteIfBrokersExist is the guard OperatorDelete runs immediately
-// before it touches the CRD documents. Deleting the CRDs cascade-deletes EVERY
+// refuseCRDDeleteIfBrokersExist is the guard OperatorDelete runs before its first
+// delete and again immediately before it touches the CRD documents. Deleting the CRDs cascade-deletes EVERY
 // PubSubPlusEventBroker custom resource in EVERY namespace in the cluster -- not
 // just the one this env file describes -- and nothing else warns about that with
 // anything more than static prose. So this asks the cluster what actually exists
@@ -421,14 +464,14 @@ func (c *Cluster) refuseCRDDeleteIfBrokersExist(ctx context.Context) error {
 	}
 	return fmt.Errorf("refusing to delete the operator CRDs: %d PubSubPlusEventBroker custom resource(s) still "+
 		"exist in the cluster (%s) and deleting the CRDs would cascade-delete them; remove each one first "+
-		"(`remove broker` per deployment), then retry --delete-crd", len(refs), strings.Join(refs, ", "))
+		"(`broker remove` per deployment), then retry --delete-crd", len(refs), strings.Join(refs, ", "))
 }
 
 // OperatorDelete removes the operator by deleting the rendered bundle on stdin with
 // --ignore-not-found (110:2057) -- one mirrored path with OperatorApply, replacing the
 // separately-maintained delete manifest the legacy 110 shipped.
 //
-// deleteCRDs is the same retained-layer decision `remove broker` makes about PVCs:
+// deleteCRDs is the same retained-layer decision `broker remove` makes about PVCs:
 // the expensive-to-recreate, easy-to-regret part is kept unless it is asked for by
 // name. Here that is the CRDs, whose removal takes every broker in the cluster with
 // them. Either outcome is stated rather than left to be inferred.
@@ -442,10 +485,14 @@ func (c *Cluster) refuseCRDDeleteIfBrokersExist(ctx context.Context) error {
 // namespace in place would otherwise leave a registry credential behind after every
 // teardown.
 //
-// The operator Deployment/RBAC removal (rest) always runs before the CRD layer is
-// even considered, and its own error return is unaffected by whatever the CRD
-// layer decides -- a refused CRD deletion must never look like the whole removal
-// was skipped, and must never undo work the bundle delete already did.
+// With --delete-crd the CRD layer is settled BEFORE anything is deleted: the cascade gate
+// (refuseCRDDeleteIfBrokersExist) runs ahead of the first delete, and its cluster-wide
+// list is probed with everything else, so a broker anywhere in the cluster -- or a list
+// this identity may not read -- stops the whole removal with the operator still
+// installed, instead of after the Deployment and RBAC were already gone. The gate runs
+// once more right before the CRDs are deleted, so a broker deployed in between is not
+// cascaded away either. Without --delete-crd the CRDs are kept and nothing about them is
+// asked.
 // Before any of that, it decides whether the operator should be removed AT ALL. The
 // operator is shared: if it watches namespaces this env file does not account for, then
 // another broker depends on it, and removing it would stop that broker reconciling. So
@@ -454,12 +501,16 @@ func (c *Cluster) refuseCRDDeleteIfBrokersExist(ctx context.Context) error {
 // whole install is genuinely this env file's to remove.
 func (c *Cluster) OperatorDelete(ctx context.Context, deleteCRDs bool) error {
 	opNS := c.operatorNS(ctx)
-	// The same set the apply probes, with `delete`. The Namespace is absent because
-	// this command no longer deletes it.
-	if err := c.PreflightAll(ctx, operatorProbes("delete", opNS, c.Cfg.ManagesImagePullSecret())...); err != nil {
-		return err
+	// The same set the apply probes, with `delete` -- the CRDs only when they go. The
+	// Namespace is absent because this command no longer deletes it. The cascade gate's
+	// cluster-wide list rides along when it will run, so its refusal lands here too.
+	probes := operatorProbes("delete", opNS, c.Cfg.ManagesImagePullSecret(), deleteCRDs)
+	if deleteCRDs {
+		probes = append(probes, probe{verb: "list", resource: brokerResource, allNamespaces: true})
 	}
-	c.logf("deleting operator from namespace %s", opNS)
+	if err := c.PreflightAll(ctx, probes...); err != nil {
+		return fmt.Errorf("%w\n  Nothing was deleted: the operator is still installed", err)
+	}
 	// The watch value is irrelevant to a delete -- `delete -f -` matches documents by
 	// name and kind, not by field content -- so this renders what the env file describes
 	// purely to get the document SET to delete.
@@ -468,6 +519,12 @@ func (c *Cluster) OperatorDelete(ctx context.Context, deleteCRDs bool) error {
 		return err
 	}
 	crds, _, rest := splitOperatorBundle(manifest)
+	if deleteCRDs && len(crds) > 0 {
+		if err := c.refuseCRDDeleteIfBrokersExist(ctx); err != nil {
+			return fmt.Errorf("%w\n  Nothing was deleted: the operator is still installed", err)
+		}
+	}
+	c.logf("deleting operator from namespace %s", opNS)
 	// The regcred rides the SAME delete stream rather than a call of its own. It is
 	// applied separately by OperatorApply and used to disappear along with the
 	// namespace, so now that the namespace stays it has to be named explicitly -- and
@@ -498,6 +555,8 @@ func (c *Cluster) OperatorDelete(ctx context.Context, deleteCRDs bool) error {
 		c.logf("operator CRDs: none in the bundle, nothing to delete")
 		return nil
 	}
+	// Asked again right before the CRDs go: a broker deployed while the bundle was being
+	// deleted would otherwise be cascaded away with them.
 	if err := c.refuseCRDDeleteIfBrokersExist(ctx); err != nil {
 		return err
 	}

@@ -817,7 +817,8 @@ func TestOperatorReleaseDeletesTheOperatorWhenTheEnvFileCoversEveryNamespace(t *
 	})
 	t.Run("--delete-crd reaches the delete", func(t *testing.T) {
 		c, rr, buf := watchCluster("solace", "")
-		// The first read is the installed operator; the second is the broker listing that guards the CRDs.
+		// The first read is the installed operator; the second is the broker listing that guards the
+		// CRDs before anything is deleted, and the repeat of it right before they go reads empty too.
 		rr.out = nil
 		rr.outQueue = [][]byte{deployJSON("solace"), []byte(`{"items":[]}`)}
 		if err := c.OperatorRelease(context.Background(), true); err != nil {

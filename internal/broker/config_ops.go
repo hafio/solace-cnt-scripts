@@ -437,15 +437,41 @@ func ServerCertBundle(cfg *config.Config) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %q: %w", cfg.TLS.CertKey, err)
 	}
-	bundle := append(keyBytes, certBytes...)
+	parts := [][]byte{keyBytes, certBytes}
 	for i, ca := range cfg.TLS.CAs {
 		caBytes, err := os.ReadFile(ca)
 		if err != nil {
 			return nil, fmt.Errorf("read tls.cas[%d] %q: %w", i, ca, err)
 		}
-		bundle = append(bundle, caBytes...)
+		parts = append(parts, caBytes)
 	}
-	return bundle, nil
+	return JoinPEM(parts...), nil
+}
+
+// JoinPEM concatenates PEM files so that each one starts on a line of its own. A file
+// whose last line has no trailing newline -- a key pasted by hand, or one some tools
+// export that way -- would otherwise put the next file's -----BEGIN on the same line as
+// its own -----END, and a PEM reader then misses that block and every one after it: the
+// broker loses its chain, or its certificate, with nothing on the host side to say why.
+//
+// The newline is added only where it is missing, so files that already end with one join
+// byte for byte as they always have, and the digests computed over the result do not
+// change -- a redeploy does not mistake an untouched certificate for a renewed one. It
+// is the one concatenation rule for every place this tool chains certificate files:
+// ServerCertBundle here, and the Kubernetes TLS Secret's tls.crt (k8s.readTLSMaterial).
+func JoinPEM(parts ...[]byte) []byte {
+	n := 0
+	for _, p := range parts {
+		n += len(p) + 1
+	}
+	out := make([]byte, 0, n)
+	for _, p := range parts {
+		if len(out) > 0 && out[len(out)-1] != '\n' {
+			out = append(out, '\n')
+		}
+		out = append(out, p...)
+	}
+	return out
 }
 
 // keyPEMRE matches a PEM private-key header in any of the spellings openssl and its

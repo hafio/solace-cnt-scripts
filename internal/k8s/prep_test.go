@@ -581,7 +581,8 @@ func TestUpdateServerCertSecret(t *testing.T) {
 		if err := c.UpdateServerCertSecret(context.Background()); err == nil {
 			t.Error("UpdateServerCertSecret should fail when tls.certKey is not configured")
 		}
-		if calls := rr.afterPreflight(t, "update", "secrets"); len(calls) != 0 {
+		if calls := rr.afterPreflights(t, probe{verb: "get", resource: "secrets"},
+			probe{verb: "patch", resource: "secrets"}); len(calls) != 0 {
 			t.Errorf("no apply should run when TLSSecret fails to build; got %d calls after the probe", len(calls))
 		}
 	})
@@ -966,11 +967,20 @@ func TestBrokerPodsExist(t *testing.T) {
 		{"", errors.New("unreachable"), false},
 	} {
 		rr := &recRunner{out: []byte(tc.out), outErr: tc.err}
-		if got := NewCluster(rr, haCfg(), nil, nil).BrokerPodsExist(context.Background()); got != tc.want {
+		log, narration := logBuf()
+		c := NewCluster(rr, haCfg(), log, nil)
+		if got := c.BrokerPodsExist(context.Background()); got != tc.want {
 			t.Errorf("out=%q err=%v: BrokerPodsExist = %t, want %t", tc.out, tc.err, got, tc.want)
 		}
 		if call := rr.last(); !slices.Contains(call.args, "dev-broker-pubsubplus-p-0") {
 			t.Errorf("argv = %v, want the primary pod", call.args)
+		}
+		// A failed read answers false, but never silently: the renewed certificate is in
+		// the Secret while a running broker serves the old one, so the way to finish is named.
+		warned := strings.Contains(narration.String(), "get on pods in solace") &&
+			strings.Contains(narration.String(), "broker restart")
+		if warned != (tc.err != nil) {
+			t.Errorf("err=%v: warned = %t, narration %q", tc.err, warned, narration.String())
 		}
 	}
 }
@@ -999,13 +1009,100 @@ func TestCreateNamespaceStopsOnPreflightFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("CreateNamespace must fail when the permission probe answers no")
 	}
-	if !strings.Contains(err.Error(), "not allowed to create namespaces") {
-		t.Errorf("error = %v, want it to name the refused permission", err)
+	for _, want := range []string{"does not exist", "not allowed to create namespaces", "kubectl create namespace solace"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to contain %q", err, want)
+		}
 	}
 	for _, call := range rr.calls {
 		if call.method == "RunInput" {
 			t.Errorf("a refused create still applied a manifest: %+v", call)
 		}
+	}
+}
+
+// TestCreateNamespaceStopsWhenTheCreateProbeIsUnanswered: an absent namespace whose create
+// probe got no readable answer stops the deploy with the probe's own error -- what to check,
+// not a claim that the namespace may not be created -- and applies nothing.
+func TestCreateNamespaceStopsWhenTheCreateProbeIsUnanswered(t *testing.T) {
+	rr := &recRunner{canIByResource: map[string]string{"namespaces": "maybe"}}
+	err := newCluster(rr).CreateNamespace(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "could not read the answer") {
+		t.Fatalf("CreateNamespace err = %v, want the unreadable probe answer", err)
+	}
+	if strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("an unanswered probe is not a refusal: %v", err)
+	}
+	if rr.last().method == "RunInput" {
+		t.Errorf("nothing may be applied: %+v", rr.calls)
+	}
+}
+
+// TestCreateNamespaceSkipsANamespaceThatExists: an identity confined to the namespace can
+// read it by name but can never create one, and applying the manifest over an existing
+// namespace would PATCH it. So a namespace that is there is neither probed for nor applied
+// -- the one read is the whole step, even when `create namespaces` would be refused.
+func TestCreateNamespaceSkipsANamespaceThatExists(t *testing.T) {
+	rr := &recRunner{out: []byte("namespace/solace\n"), canI: "no"}
+	c := newCluster(rr)
+	if err := c.CreateNamespace(context.Background()); err != nil {
+		t.Fatalf("an existing namespace must not need create on namespaces: %v", err)
+	}
+	want := []string{"get", "namespace", "solace", "--ignore-not-found", "-o", "name"}
+	if len(rr.calls) != 1 || !eqArgs(rr.calls[0].args, want) {
+		t.Errorf("calls = %+v, want only the read %v", rr.calls, want)
+	}
+}
+
+// TestCreateNamespaceCreatesAnAbsentNamespace: an empty read is a namespace that is not
+// there, and creating it is genuinely needed -- so the read, then the probe, then the apply.
+func TestCreateNamespaceCreatesAnAbsentNamespace(t *testing.T) {
+	rr := &recRunner{}
+	c := newCluster(rr)
+	if err := c.CreateNamespace(context.Background()); err != nil {
+		t.Fatalf("CreateNamespace: %v", err)
+	}
+	if len(rr.calls) != 3 {
+		t.Fatalf("calls = %+v, want the read, the probe and the apply", rr.calls)
+	}
+	if rr.calls[0].args[0] != "get" || !isCanI(rr.calls[1].args) || rr.calls[2].method != "RunInput" {
+		t.Errorf("order = %+v, want the read, then `auth can-i create namespaces`, then the apply", rr.calls)
+	}
+}
+
+// TestCreateNamespaceDecidesByTheProbeWhenTheReadFails: an identity whose role does not
+// read namespaces cannot say whether its namespace exists, so the create probe decides.
+// Permitted, the manifest is applied. Refused, the deploy goes on with a warning naming the
+// grant that would have answered, because the namespaced checks after it stop the deploy
+// if the namespace is really missing. Unanswered, the deploy stops as it always did.
+func TestCreateNamespaceDecidesByTheProbeWhenTheReadFails(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		canI      string
+		canIErr   error
+		wantErr   bool
+		wantApply bool
+		wantWarn  string
+	}{
+		{"create permitted", "", nil, false, true, ""},
+		{"create refused", "no", nil, false, false, "get on namespaces in solace"},
+		{"no answer", "", errFake, true, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := &recRunner{outErrQueue: []error{errFake}, canI: tc.canI, canIErr: tc.canIErr}
+			log, narration := logBuf()
+			c := NewCluster(rr, haCfg(), log, nil)
+			err := c.CreateNamespace(context.Background())
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want an error: %v", err, tc.wantErr)
+			}
+			if applied := rr.last().method == "RunInput"; applied != tc.wantApply {
+				t.Errorf("applied = %v, want %v (calls %+v)", applied, tc.wantApply, rr.calls)
+			}
+			if tc.wantWarn != "" && !strings.Contains(narration.String(), tc.wantWarn) {
+				t.Errorf("narration = %q, want a warning naming %q", narration.String(), tc.wantWarn)
+			}
+		})
 	}
 }
 
@@ -1074,18 +1171,34 @@ func TestGenBrokerStopsWhenASecretCannotBeBuilt(t *testing.T) {
 	}
 }
 
-// TestUpdateServerCertSecretStopsOnPreflightFailure: a refused `auth can-i update secrets` stops the
+// TestUpdateServerCertSecretStopsOnPreflightFailure: a refused `auth can-i get secrets` stops the
 // rotation before it reads the certificate and private key off disk -- loading key material for a
 // cluster that will not accept it is work not worth doing -- and before any apply.
 func TestUpdateServerCertSecretStopsOnPreflightFailure(t *testing.T) {
 	rr := &recRunner{canI: "no"}
 	c := NewCluster(rr, tlsCfg(t), nil, nil)
 	err := c.UpdateServerCertSecret(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "not allowed to update secrets") {
+	if err == nil || !strings.Contains(err.Error(), "not allowed to get secrets") {
 		t.Fatalf("UpdateServerCertSecret err = %v, want the refused permission named", err)
 	}
 	if len(rr.calls) != 1 {
 		t.Errorf("%d calls after a refused probe, want only the probe itself: %+v", len(rr.calls), rr.calls)
+	}
+}
+
+// TestUpdateServerCertSecretProbesWhatApplyUses: rewriting an existing Secret with `kubectl
+// apply` is a GET then a PATCH -- never the PUT `update` names -- so those are the verbs
+// probed. Probing `update` refused a Role granting exactly get and patch, and passed one
+// granting update alone, which then failed inside the apply.
+func TestUpdateServerCertSecretProbesWhatApplyUses(t *testing.T) {
+	rr := &recRunner{canIByVerb: map[string]string{"update": "no"}}
+	c := NewCluster(rr, tlsCfg(t), nil, nil)
+	if err := c.UpdateServerCertSecret(context.Background()); err != nil {
+		t.Fatalf("a get+patch identity must be able to rotate the Secret: %v", err)
+	}
+	rest := rr.afterPreflights(t, probe{verb: "get", resource: "secrets"}, probe{verb: "patch", resource: "secrets"})
+	if len(rest) != 1 || rest[0].method != "RunInput" {
+		t.Errorf("after the probes, want only the apply: %+v", rest)
 	}
 }
 
