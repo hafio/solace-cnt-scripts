@@ -126,28 +126,6 @@ func (c *Cluster) ReportNamespaceOccupied(contents []string) {
 		"kubectl delete namespace %s", ns, ns)
 }
 
-// NamespaceDeletable asks whether this identity may delete the broker namespace, BEFORE
-// anyone is asked whether to. Deleting a namespace takes a cluster-wide grant that an
-// identity confined to the namespace never holds, so offering the deletion to one -- or,
-// under --no-prompt, attempting it -- ended a removal that had otherwise succeeded with a
-// refusal about the one step it did not need. Refused or unanswered, the namespace is kept
-// with a warning saying why and how it can still be removed, and the removal stands.
-func (c *Cluster) NamespaceDeletable(ctx context.Context) bool {
-	ns := c.ns()
-	allowed, answered := c.canI(ctx, probe{verb: "delete", resource: "namespaces"})
-	switch {
-	case allowed:
-		return true
-	case answered:
-		c.progress().Warn("namespace %q is empty but was kept: deleting a namespace needs delete on namespaces, "+
-			"which only a cluster-wide grant gives. A cluster admin can remove it: kubectl delete namespace %s", ns, ns)
-	default:
-		c.progress().Warn("namespace %q is empty but was kept: could not check whether this identity may delete it. "+
-			"Remove it by hand once you are sure nothing else needs it: kubectl delete namespace %s", ns, ns)
-	}
-	return false
-}
-
 // NamespaceIsProtected reports whether the broker namespace is one nothing should ever
 // delete. A misconfigured env file naming `kube-system` must not be one confirmed prompt
 // away from taking the cluster down, so this is checked before the question is asked

@@ -133,7 +133,9 @@ func (c *Cluster) PreflightDeploy(ctx context.Context) error {
 // this is what makes a refusal land BEFORE the first delete instead of halfway through. A
 // `delete secrets` refused once the CR -- and with --delete-data the data -- was already
 // gone used to end the removal there, leaving the TLS private key and the admin password
-// behind and a half-removed broker for the next run to make sense of.
+// behind and a half-removed broker for the next run to make sense of. The namespace is not
+// asked about: it is deleted, if at all, only once the removal has left it empty and that
+// has been confirmed, and DeleteNamespace probes it then.
 func (c *Cluster) PreflightRemoval(ctx context.Context, purge bool) error {
 	probes := []probe{{verb: "delete", resource: brokerResource}}
 	if c.deletesClaims(purge) {

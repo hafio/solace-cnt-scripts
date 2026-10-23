@@ -67,7 +67,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-91 test files, 1679 test functions. Three of those are not tests. Two are os/exec
+91 test files, 1677 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -78,9 +78,9 @@ launched from.
 
 | Package | Files | Tests |
 | --- | --- | --- |
-| internal/k8s | 20 | 303 |
+| internal/k8s | 20 | 302 |
 | internal/broker | 24 | 507 |
-| internal/cli | 14 | 271 |
+| internal/cli | 14 | 270 |
 | internal/config | 16 | 241 |
 | internal/container | 8 | 196 |
 | internal/convert | 1 | 40 |
@@ -90,7 +90,7 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **91** | **1679** |
+| **Total** | **91** | **1677** |
 
 
 ## Coverage
@@ -783,7 +783,7 @@ without a live broker;
 fixtures stand in for a captured `show current-config` transcript; and
 `exportconfigReadCounter` wraps `App.PromptIn` to prove a confirmation prompt was never
 actually read, not merely that the command did not block.
-271 tests across 14 files.
+270 tests across 14 files.
 
 Because the platform is a flag rather than the first word of a command, the
 invocations here name it explicitly (`--platform docker`) rather than relying on
@@ -1202,11 +1202,10 @@ The Kubernetes handlers of `ops_k8s.go`, driven directly over `opRunner` rather 
 | `TestOpsK8sOperatorStopConfirmsBecauseItFreezesEveryNamespace` | `operator stop` asks (naming what it freezes and the context) in all four outcomes: scaled to zero with no rollout wait when confirmed, no call at all when declined or unanswerable |
 | `TestOpsK8sOperatorRemoveNeverDeletesCRDsOverLiveBrokers` | `operator remove` with brokers in the cluster: `--delete-crd` goes straight to OperatorDelete's refusal naming every broker without a layer question, and -- refused before the first delete -- leaves the operator installed and says nothing was deleted; no flag keeps the CRDs with a warning and removes the rest of the install; an unreadable listing still refuses with nothing deleted, its failed pre-check said on stderr rather than swallowed; no CRD is ever deleted |
 | `TestOpsK8sRemoveBrokerStopsWhenASecretWillNotDelete` | `broker remove` ends at a failed Secret delete with the cause preserved, leaving the namespace unlisted, unoffered and undeleted |
-| `TestNamespaceScopedIdentityRunsTheBrokerLifecycle` | End to end for an identity bound only inside its namespace (every cluster-wide `auth can-i` answered no, every `--all-namespaces` and StorageClass read Forbidden, its namespace readable by name), in the default no-admin-password configuration: `broker deploy`, `broker validate`, `broker status` and `broker remove --delete-data --no-prompt` all succeed, no Namespace is applied and none deleted; only `broker status --all` is refused, pointing at the view without `--all` |
+| `TestNamespaceScopedIdentityRunsTheBrokerLifecycle` | End to end for an identity bound only inside its namespace (every cluster-wide `auth can-i` answered no, every `--all-namespaces` and StorageClass read Forbidden, its namespace readable by name), in the default no-admin-password configuration: `broker deploy`, `broker validate` and `broker status` succeed and no Namespace is applied; `broker remove --delete-data --no-prompt` deletes the broker and its data and then ends with the refused `delete namespaces` of the namespace it emptied, as before, without a delete call; `broker status --all` is refused, pointing at the view without `--all` |
 | `TestOpsK8sDeployRefusesBeforeTheFirstWrite` | An identity that may not create the broker resource is refused by `broker deploy` naming it, with only probes issued -- nothing applied, rather than its Secrets written first |
 | `TestOpsK8sRemoveBrokerRefusesBeforeTheFirstDelete` | Every permission `broker remove --delete-data` uses is asked before anything is deleted: an identity that may delete the broker and its data but not its Secrets is refused naming `delete secrets` with only probes issued, rather than after the CR and data are gone with the TLS key and admin password left behind |
 | `TestOpsK8sRemoveNamespaceIfEmptyKeepsTheNamespaceInDoubt` | `removeNamespaceIfEmpty` never removes a Kubernetes namespace and keeps one it cannot list, even under `--no-prompt`; an empty namespace is deleted only on a yes, and a no or an unanswerable prompt keeps it |
-| `TestOpsK8sRemoveNamespaceIfEmptyKeepsANamespaceItMayNotDelete` | An empty namespace is offered only to an identity that may delete it: with `delete namespaces` refused, even under `--no-prompt` nothing is asked or deleted, the warning names `kubectl delete namespace <ns>`, and the removal returns nil |
 | `TestOpsK8sClusterConfirmIsTheDowngradeGateWithNoWayAround` | `k8sCluster` wires `Cluster.Confirm` to `confirmDowngrade`: only a typed yes proceeds, `--no-prompt` neither answers it nor lets an unattended run through, and an unanswered question refuses and says to re-run interactively |
 
 ### watch_test.go
@@ -2043,7 +2042,7 @@ operator, day-2 ops, secrets, and the pod transport, plus the operator's watch-l
 algebra and the namespace occupancy gate, plus the mate channel that reaches a
 replication site in another cluster, and the Secret read that supplies a mate's
 password -- or this broker's own admin password, when the env file does not carry it.
-303 tests across 20 files.
+302 tests across 20 files.
 
 ### adminsecret_test.go
 
@@ -2134,7 +2133,6 @@ one wrongly reported occupied merely stays. The gate is built to fail toward "oc
 
 | Test | What it covers |
 | --- | --- |
-| `TestNamespaceDeletable` | Whether an empty namespace may be offered for deletion is one `auth can-i delete namespaces --all-namespaces`, asked before the question: only a yes offers it; a refusal and an unanswered probe keep it with a warning naming `kubectl delete namespace <ns>`; a yes warns nothing |
 | `TestNamespaceContentsDiscountsWhatKubernetesPutsThere` | Without this the prompt could never appear at all: Kubernetes puts a `default` ServiceAccount and a `kube-root-ca.crt` ConfigMap in every namespace, so counting either as occupancy means no namespace is ever empty -- and it would look like it worked, because "kept" is the safe outcome |
 | `TestNamespaceContentsIgnoresClusterPolicyObjects` | A LimitRange or ResourceQuota is stamped on by cluster policy without anyone asking, so refusing on one would mean never removing a namespace on a cluster that sets quotas |
 | `TestNamespaceContentsReportsRealOccupants` | The keep branch, including the group-qualified spelling `-o name` sometimes returns (`secrets.v1./x`) -- the suffix must not defeat the match |

@@ -780,12 +780,6 @@ func removeNamespaceIfEmpty(a *App, c *k8s.Cluster) error {
 		c.ReportNamespaceOccupied(contents)
 		return nil
 	}
-	// Asked before the question, not after the answer: a yes this identity cannot carry out
-	// is not worth asking for, and under --no-prompt it turned a finished removal into a
-	// failure over the one step it did not need.
-	if !c.NamespaceDeletable(bg()) {
-		return nil
-	}
 	if !confirmDelete(a, "the now-empty namespace "+a.Cfg.K8s.Namespace+k8sContext(a)) {
 		return nil
 	}

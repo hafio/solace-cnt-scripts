@@ -82,7 +82,8 @@ grant), start the daemon. kubectl spells a refusal `no`, `no - <reason>` or
 `no (<evaluation error>)`, and all three are read as the refusal they are. `broker deploy`
 asks whether it may create every kind it writes before its first write, and `broker remove`
 about every kind it will delete before its first delete, so a refused grant cannot stop
-either halfway. (A re-deploy's `kubectl apply` also patches what already exists; `patch` is
+either halfway. The namespace a removal empties is the exception: it is probed only when it
+is deleted, after the broker is gone. (A re-deploy's `kubectl apply` also patches what already exists; `patch` is
 not asked about in advance.) It never logs you in or starts anything on your behalf, and
 there is no flag to skip it: previewing a command's effect without touching a cluster is
 what `generate` is for, and a render-only command never runs the preflight because it never
@@ -108,7 +109,7 @@ bound only inside the broker namespace can deploy, report on and remove its brok
 | `validate`, `broker validate` | `create` on the broker resource (a `[FAIL]` row) | Deployments listed cluster-wide (else the operator namespace is read by name); StorageClasses, which are cluster-scoped (else `[SKIP]`) |
 | `broker status` | `get` on the broker resource | `get` on pods, Services, StatefulSets and, with `--detail`, PVCs -- each section this identity may not read is a `[SKIP]` row |
 | `broker status --all` | `list` on the broker resource in every namespace | -- |
-| `broker remove` | `delete` on the broker resource, on the Secrets this env file owns and, with `--delete-data`, on PVCs -- all asked before the first delete | listing what is left in the namespace, and `delete namespaces` -- otherwise the namespace is kept |
+| `broker remove` | `delete` on the broker resource, on the Secrets this env file owns and, with `--delete-data`, on PVCs -- all asked before the first delete; `delete namespaces` (cluster-wide) only when the removal leaves the namespace empty and its deletion is confirmed -- refused, the removal ends with that refusal, the broker already gone | listing what is left in the namespace (else the namespace is kept) |
 | `broker cli`, `shell`, `copy`, `configure`, `perform` | `create` on `pods/exec`, `get` on pods; `get` on Secrets where the admin password is read back; `configure server-certs` also `get` and `patch` on the TLS Secret | -- |
 | `broker logs` | `get` on pods and `pods/log` | -- |
 | `broker start`, `stop`, `restart` | scaling the StatefulSets (`statefulsets/scale`, start and stop), `delete` on pods (restart), `get` and `watch` on StatefulSets to follow the rollout | -- |
@@ -1206,11 +1207,6 @@ another team put there, and this tool may not have created it in the first place
   there is not permission to proceed. That direction is the whole safety property -- a
   namespace wrongly reported empty gets cascade-deleted, while one wrongly reported occupied
   merely stays.
-- **An empty namespace is offered only to an identity that may delete it.** Deleting a
-  namespace needs `delete namespaces`, which only a cluster-wide grant gives, so for an
-  identity confined to the namespace it is kept with a warning naming the
-  `kubectl delete namespace` a cluster admin can run -- asked about before the question, so
-  neither a prompt nor `--no-prompt` turns a finished removal into a refusal.
 
 **Docker and Podman have their own teardown wrinkles**, on top of the `--delete-data` layer.
 The sequence is: stop the container, remove it, remove the compose file or quadlet unit,

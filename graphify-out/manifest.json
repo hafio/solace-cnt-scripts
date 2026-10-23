@@ -114,9 +114,9 @@
     "semantic_hash": ""
   },
   "internal/cli/ops_k8s.go": {
-    "mtime": 1792736651.3790624,
-    "seen": 1792745529.1063838,
-    "ast_hash": "5fc52c05af2b1f1de2d688974f76b51d",
+    "mtime": 1792750020.2580833,
+    "seen": 1792779756.4489653,
+    "ast_hash": "c1c3784f951849e4a5889d6da43e40e9",
     "semantic_hash": ""
   },
   "internal/cli/root.go": {
@@ -216,9 +216,9 @@
     "semantic_hash": ""
   },
   "internal/k8s/deploy.go": {
-    "mtime": 1792738016.1797168,
-    "seen": 1792745529.1065056,
-    "ast_hash": "1fdc12126a5bd359adec81712896e240",
+    "mtime": 1792750075.522635,
+    "seen": 1792779756.4490724,
+    "ast_hash": "0e9c79f40202346864bc46f7fa579809",
     "semantic_hash": ""
   },
   "internal/k8s/deploy_test.go": {
@@ -408,9 +408,9 @@
     "semantic_hash": ""
   },
   "docs/test.md": {
-    "mtime": 1792736722.4069905,
-    "seen": 1792745529.10662,
-    "ast_hash": "f4ad766d053bafa768643aa6bb66feb2",
+    "mtime": 1792750063.8577628,
+    "seen": 1792779756.4491563,
+    "ast_hash": "48319e9f03a9e4e158d266ffeb6b96e9",
     "semantic_hash": ""
   },
   "internal/cli/commanddoc_test.go": {
@@ -654,9 +654,9 @@
     "semantic_hash": ""
   },
   "docs/operations.md": {
-    "mtime": 1792738016.1793792,
-    "seen": 1792745529.1066186,
-    "ast_hash": "f7e48a4e04a390a50d2be7778187f392",
+    "mtime": 1792750075.5223305,
+    "seen": 1792779756.4491553,
+    "ast_hash": "fc4affaaf6728c0abd520fd13f160596",
     "semantic_hash": ""
   },
   "internal/abbrev/abbrev.go": {
@@ -852,9 +852,9 @@
     "semantic_hash": ""
   },
   "internal/k8s/namespace.go": {
-    "mtime": 1792730993.137224,
-    "seen": 1792745529.1065211,
-    "ast_hash": "d7bc594195c7889c0c98a5aa7e6d4e47",
+    "mtime": 1792750020.2583113,
+    "seen": 1792779756.4490836,
+    "ast_hash": "9a79b50713df76b772c1716311a4a538",
     "semantic_hash": ""
   },
   "internal/k8s/watch.go": {
@@ -864,9 +864,9 @@
     "semantic_hash": ""
   },
   "internal/k8s/namespace_test.go": {
-    "mtime": 1792731078.8757763,
-    "seen": 1792745529.1065226,
-    "ast_hash": "afb990c6ac0b2001460d6a597c6206f8",
+    "mtime": 1792750020.258461,
+    "seen": 1792779756.4490855,
+    "ast_hash": "9abdd52c85d1e075c1b0473e298e14fe",
     "semantic_hash": ""
   },
   "internal/k8s/watch_test.go": {
@@ -1248,9 +1248,9 @@
     "semantic_hash": ""
   },
   "internal/cli/ops_k8s_test.go": {
-    "mtime": 1792736627.4319267,
-    "seen": 1792745529.106386,
-    "ast_hash": "6f9a4a339191c28d54e95f32b2415dca",
+    "mtime": 1792750044.2302685,
+    "seen": 1792779756.448968,
+    "ast_hash": "1f0f1cc791d36c99fa86da5862b0eb72",
     "semantic_hash": ""
   },
   "internal/cli/watch.go": {

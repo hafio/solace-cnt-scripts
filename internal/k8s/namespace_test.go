@@ -37,46 +37,6 @@ func occCluster(out string, err error) (*Cluster, *bytes.Buffer) {
 		Log: func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) }}, buf
 }
 
-// TestNamespaceDeletable: whether an empty namespace may be offered for deletion is asked
-// before anyone is asked whether to delete it. Only a yes offers it; a refusal -- the
-// namespace-scoped identity, which never holds the cluster-wide grant -- and an unanswered
-// probe both keep it, with a warning naming the command a cluster admin can run.
-func TestNamespaceDeletable(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		rr       *recRunner
-		want     bool
-		wantWarn string
-	}{
-		{"permitted", &recRunner{}, true, ""},
-		{"refused", &recRunner{canI: "no"}, false, "needs delete on namespaces"},
-		{"unanswered", &recRunner{canIErr: errors.New("connection refused")}, false, "could not check"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			buf := &bytes.Buffer{}
-			c := &Cluster{R: tc.rr, Cfg: occCfg(), Out: buf, Log: func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) }}
-			if got := c.NamespaceDeletable(context.Background()); got != tc.want {
-				t.Errorf("NamespaceDeletable = %v, want %v", got, tc.want)
-			}
-			if want := []string{"auth", "can-i", "delete", "namespaces", "--all-namespaces"}; len(tc.rr.calls) != 1 ||
-				!eqArgs(tc.rr.calls[0].args, want) {
-				t.Errorf("calls = %+v, want only the probe %v", tc.rr.calls, want)
-			}
-			if tc.wantWarn == "" {
-				if strings.Contains(buf.String(), "WARN") {
-					t.Errorf("a permitted delete warns nothing:\n%s", buf)
-				}
-				return
-			}
-			for _, w := range []string{tc.wantWarn, "is empty but was kept", "kubectl delete namespace solace"} {
-				if !strings.Contains(buf.String(), w) {
-					t.Errorf("warning = %q, want it to contain %q", buf, w)
-				}
-			}
-		})
-	}
-}
-
 // TestNamespaceContentsDiscountsWhatKubernetesPutsThere is the test without which the
 // prompt could never appear at all.
 //

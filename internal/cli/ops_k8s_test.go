@@ -1109,8 +1109,9 @@ func TestOpsK8sRemoveBrokerStopsWhenASecretWillNotDelete(t *testing.T) {
 // cluster-wide or cluster-scoped read Forbidden, its own namespace readable by name --
 // deploys, validates, reports on and removes its broker, in the default no-admin-password
 // configuration. Each broader read it cannot make becomes a warning or a [SKIP] row and none
-// fails the command; it neither applies a Namespace it could not patch nor deletes one it
-// may not. Only `broker status --all`, which asks for the whole cluster, is refused.
+// fails the command, and it never applies a Namespace it could not patch. `broker status
+// --all`, which asks for the whole cluster, is refused; so is deleting the namespace a
+// removal empties, which is attempted as always and takes a cluster-wide grant.
 func TestNamespaceScopedIdentityRunsTheBrokerLifecycle(t *testing.T) {
 	newApp := func(t *testing.T) (*App, *opRunner) {
 		t.Helper()
@@ -1148,7 +1149,6 @@ func TestNamespaceScopedIdentityRunsTheBrokerLifecycle(t *testing.T) {
 		{"broker deploy", opK8sDeploy, func(*App) {}},
 		{"broker validate", opK8sValidateBroker, func(*App) {}},
 		{"broker status", func(a *App) error { return opK8sStatusBroker(a, config.Primary) }, func(*App) {}},
-		{"broker remove --delete-data", opK8sRemoveBroker, func(a *App) { a.deleteLayer = true }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, rr := newApp(t)
@@ -1167,6 +1167,28 @@ func TestNamespaceScopedIdentityRunsTheBrokerLifecycle(t *testing.T) {
 			}
 		})
 	}
+	t.Run("broker remove --delete-data", func(t *testing.T) {
+		a, rr := newApp(t)
+		a.deleteLayer = true
+		_, _, err := opsK8sRun(t, func() error { return opK8sRemoveBroker(a) })
+		// The broker and its data go on namespace rights alone. The namespace that leaves empty
+		// is then deleted as it always was -- --no-prompt answers that question -- and that
+		// takes a cluster-wide grant, so the removal ends with the refusal, the namespace kept.
+		if err == nil || !strings.Contains(err.Error(), "not allowed to delete namespaces") {
+			t.Fatalf("err = %v, want the namespace delete refused once the broker is gone:\n%s", err, rr.dump())
+		}
+		var crDeleted, dataDeleted bool
+		for _, c := range rr.calls {
+			crDeleted = crDeleted || (c.method == "RunInput" && opArgvMatch(c, "delete"))
+			dataDeleted = dataDeleted || (len(c.args) > 1 && c.args[0] == "delete" && c.args[1] == "pvc")
+			if len(c.args) > 1 && c.args[0] == "delete" && c.args[1] == "namespace" {
+				t.Errorf("a refused namespace delete must stop at its probe:\n%s", rr.dump())
+			}
+		}
+		if !crDeleted || !dataDeleted {
+			t.Errorf("the broker and its data must be removed before the namespace step:\n%s", rr.dump())
+		}
+	})
 	t.Run("broker status --all", func(t *testing.T) {
 		a, _ := newApp(t)
 		a.all = true
@@ -1221,38 +1243,6 @@ func TestOpsK8sRemoveBrokerRefusesBeforeTheFirstDelete(t *testing.T) {
 		if !opCanI(c) {
 			t.Errorf("nothing but probes may run before the refusal, got %v:\n%s", c.args, rr.dump())
 		}
-	}
-}
-
-// TestOpsK8sRemoveNamespaceIfEmptyKeepsANamespaceItMayNotDelete: an empty namespace is
-// offered only to an identity that may delete it. The namespace-scoped identity never may,
-// so even under --no-prompt it is kept with a warning naming the command a cluster admin
-// can run, nothing is asked, and the removal it ends still succeeds.
-func TestOpsK8sRemoveNamespaceIfEmptyKeepsANamespaceItMayNotDelete(t *testing.T) {
-	rr := &opRunner{output: func(c opCall) []byte {
-		if opCanI(c) && opArgvMatch(c, "namespaces") {
-			return []byte("no\n")
-		}
-		return nil
-	}}
-	a := &App{Cfg: writeK8sDeployAllEnv(t, "false"), Platform: config.K8s, Runner: rr}
-	opsK8sSilenced(a)
-	_, errOut, err := opsK8sRun(t, func() error { return removeNamespaceIfEmpty(a, k8sCluster(a)) })
-	if err != nil {
-		t.Fatalf("removeNamespaceIfEmpty err = %v, want nil: keeping the namespace is not a failure", err)
-	}
-	for _, c := range rr.calls {
-		if len(c.args) > 1 && c.args[0] == "delete" && c.args[1] == "namespace" {
-			t.Errorf("a namespace this identity may not delete was deleted:\n%s", rr.dump())
-		}
-	}
-	for _, want := range []string{"is empty but was kept", "kubectl delete namespace solace"} {
-		if !strings.Contains(errOut, want) {
-			t.Errorf("stderr = %q, want it to carry %q", errOut, want)
-		}
-	}
-	if strings.Contains(errOut, "Delete the now-empty namespace") {
-		t.Errorf("a deletion this identity cannot carry out must not be offered:\n%s", errOut)
 	}
 }
 
