@@ -24,6 +24,7 @@ import (
 const (
 	healthyNrOpen           = "1048576\n"
 	healthySessionNoFile    = "1048576\n"
+	healthySessionCore      = "unlimited\n"
 	healthyUserManagerProps = "LimitNOFILE=1048576\nLimitNOFILESoft=1024\n" +
 		"LimitMEMLOCK=infinity\nLimitCORE=infinity\n" +
 		"DelegateControllers=cpu cpuset io memory pids\n"
@@ -313,7 +314,7 @@ func TestCheckLimitsRootlessRefusesAShortUserManager(t *testing.T) {
 		"LimitMEMLOCK", "8388608", "[Service]",
 		"LimitMEMLOCK=infinity", pamLimitsDropIn,
 		"/etc/systemd/system/user@1000.service.d/99-solace.conf",
-		"solace hard memlock unlimited", "solace hard nofile 1048576",
+		"solace hard memlock unlimited", "solace hard nofile 1048576", "solace hard core unlimited",
 		"systemctl daemon-reload", "loginctl terminate-user 1000",
 	} {
 		if !strings.Contains(err.Error(), want) {
@@ -361,7 +362,8 @@ func TestCheckLimitsRootlessCoreFloorFollowsTheConfiguredLimit(t *testing.T) {
 	if err == nil {
 		t.Fatal("a user manager below the configured core limit must fail")
 	}
-	for _, want := range []string{"LimitCORE is 0, needs 1073741824", "LimitCORE=1073741824"} {
+	// limits.conf counts core in KB, so the session grant is the same 1 GiB as 1048576.
+	for _, want := range []string{"LimitCORE is 0, needs 1073741824", "LimitCORE=1073741824", "solace hard core 1048576"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal should say %q, got: %v", want, err)
 		}
@@ -496,6 +498,122 @@ func TestCheckLimitsRootlessSessionNoFile(t *testing.T) {
 	}
 }
 
+// TestCheckLimitsRootlessSessionCore is the session's core-dump ceiling, the one hardened
+// baselines set to `* hard core 0`. The container starts under the user manager, but
+// `podman exec` hands what it starts the container's rlimits from this session, so every
+// broker command would fail with crun's `setrlimit RLIMIT_CORE: Operation not permitted`.
+// The refusal names both ways out: grant the core limit, or lower ulimits.core to the
+// session's and redeploy.
+func TestCheckLimitsRootlessSessionCore(t *testing.T) {
+	m, rr, buf := limitsMgr(t, config.Podman, true, healthyNrOpen)
+	healthy := rr.outFor
+	rr.outFor = func(name string, args []string) []byte {
+		if name == "sh" && slices.Contains(args, sessionCoreScript) {
+			return []byte("0\n")
+		}
+		return healthy(name, args)
+	}
+	err := m.checkLimits(context.Background(), true)
+	if err == nil {
+		t.Fatal("a session that cannot grant the core limit must refuse")
+	}
+	for _, want := range []string{
+		"session core is 0, needs infinity", "setrlimit RLIMIT_CORE", pamLimitsDropIn,
+		"solace hard core unlimited", "solace soft core unlimited",
+		"podman.container.ulimits.core to 0 or less", "loginctl terminate-user 1000",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal should name %q, got: %v", want, err)
+		}
+	}
+	if !strings.Contains(buf.String(), "session core: 0 (need infinity)") {
+		t.Errorf("the row must report what it found:\n%s", buf)
+	}
+	for _, c := range rr.calls {
+		if slices.Contains(c.args, pamLimitsDropIn) {
+			t.Errorf("this row only ever hands over instructions: %s %v", c.name, c.args)
+		}
+	}
+}
+
+// TestCheckLimitsRootlessSessionCoreFollowsTheConfiguredLimit: like the user manager's
+// LimitCORE, the session is held to what the unit asks for. A broker set to write no dumps
+// passes on a session granting none; one asking for 1 GiB is refused below it and told to
+// grant exactly that, in the KB limits.conf counts in; an unlimited session covers anything.
+func TestCheckLimitsRootlessSessionCoreFollowsTheConfiguredLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name, core, session string
+		wantErr             []string
+	}{
+		{"no dumps on a session granting none", "0", "0\n", nil},
+		{"1 GiB on an unlimited session", "1073741824", "unlimited\n", nil},
+		{"1 GiB on a 1 MiB session", "1073741824", "1048576\n",
+			[]string{"session core is 1048576, needs 1073741824", "solace hard core 1048576",
+				"podman.container.ulimits.core to 1048576 or less"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rr, _ := limitsMgr(t, config.Podman, true, healthyNrOpen)
+			m.Cfg.Podman.Container.Ulimits.Core = tc.core
+			healthy := rr.outFor
+			rr.outFor = func(name string, args []string) []byte {
+				if name == "sh" && slices.Contains(args, sessionCoreScript) {
+					return []byte(tc.session)
+				}
+				return healthy(name, args)
+			}
+			err := m.checkLimits(context.Background(), false)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("checkLimits: %v", err)
+				}
+				return
+			}
+			for _, want := range tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("the refusal should say %q, got: %v", want, err)
+				}
+			}
+		})
+	}
+}
+
+// TestCheckLimitsSessionCoreUnreadable: the core row's two non-answers split the way every
+// other probe's do -- nothing at all (no /proc, as on a host this cannot see into) is a
+// skip, a value that will not parse is a refusal.
+func TestCheckLimitsSessionCoreUnreadable(t *testing.T) {
+	for _, tc := range []struct {
+		name, answer string
+		wantErr      string
+	}{
+		{"empty", "", ""},
+		{"garbled", "lots\n", "cannot parse the limit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rr, buf := limitsMgr(t, config.Podman, true, healthyNrOpen)
+			healthy := rr.outFor
+			rr.outFor = func(name string, args []string) []byte {
+				if name == "sh" && slices.Contains(args, sessionCoreScript) {
+					return []byte(tc.answer)
+				}
+				return healthy(name, args)
+			}
+			err := m.checkLimits(context.Background(), false)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("an empty answer must skip, not refuse: %v", err)
+				}
+				if !strings.Contains(buf.String(), "session core: skipped") {
+					t.Errorf("the skip must be said out loud:\n%s", buf)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("a garbled answer must fail loud, got: %v", err)
+			}
+		})
+	}
+}
+
 // TestCheckLimitsRootlessUnparseableLimitFailsLoud: a property that IS reported
 // but in a shape this cannot read is an anomaly, not a limit to assume adequate.
 func TestCheckLimitsRootlessUnparseableLimitFailsLoud(t *testing.T) {
@@ -597,10 +715,10 @@ func TestCheckLimitsNrOpenAloneNeedsNoRestart(t *testing.T) {
 	}
 }
 
-// TestCheckLimitsSessionNoFileIsRootlessOnly: docker and rootful podman start the
+// TestCheckLimitsSessionRowsAreRootlessOnly: docker and rootful podman start the
 // container from a privileged daemon, so the shell that issued the command bounds
-// nothing it does and the probe must not run.
-func TestCheckLimitsSessionNoFileIsRootlessOnly(t *testing.T) {
+// nothing it does and neither session probe may run.
+func TestCheckLimitsSessionRowsAreRootlessOnly(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		p    config.Platform
@@ -610,8 +728,10 @@ func TestCheckLimitsSessionNoFileIsRootlessOnly(t *testing.T) {
 			if err := m.checkLimits(context.Background(), false); err != nil {
 				t.Fatalf("checkLimits: %v", err)
 			}
-			if hasCall(rr, "sh", []string{"-c", "ulimit -Hn"}) {
-				t.Errorf("a privileged daemon is not bounded by this shell:\n%+v", rr.calls)
+			for _, probe := range []string{"ulimit -Hn", sessionCoreScript} {
+				if hasCall(rr, "sh", []string{"-c", probe}) {
+					t.Errorf("a privileged daemon is not bounded by this shell (%s):\n%+v", probe, rr.calls)
+				}
 			}
 		})
 	}
@@ -636,6 +756,26 @@ func TestCheckLimitsSkipsWithoutPosixRlimits(t *testing.T) {
 }
 
 // --- parsing and the shared definition ---------------------------------------
+
+// TestPamCoreValue: limits.conf counts core in KILOBYTES where ulimits.core counts bytes,
+// so a byte floor is converted and rounded UP -- a grant a fraction short of the ask
+// would still refuse the setrlimit.
+func TestPamCoreValue(t *testing.T) {
+	for _, tc := range []struct {
+		floor int
+		want  string
+	}{
+		{limitUnbounded, "unlimited"},
+		{0, "0"},
+		{1024, "1"},
+		{1025, "2"},
+		{1073741824, "1048576"},
+	} {
+		if got := pamCoreValue(tc.floor); got != tc.want {
+			t.Errorf("pamCoreValue(%d) = %q, want %q", tc.floor, got, tc.want)
+		}
+	}
+}
 
 func TestParseLimit(t *testing.T) {
 	for _, tc := range []struct {

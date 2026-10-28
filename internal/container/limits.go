@@ -109,12 +109,13 @@ func (m *Manager) checkLimits(ctx context.Context, fix bool) error {
 	nrOpen := m.checkNrOpen(ctx, fix)
 	userMgr := m.checkUserManagerLimits(ctx, user)
 	session := m.checkSessionNoFile(ctx, user)
-	// Both rootless rows are fixed by a drop-in, and ONE session restart picks up
+	sessionCore := m.checkSessionCore(ctx, user)
+	// Every rootless row is fixed by a drop-in, and ONE session restart picks up
 	// whichever of them were written -- so it is said once, at the end, rather than
-	// twice by two rows that commonly fail together on a stock host. nr_open needs
+	// by each of the rows that commonly fail together on a stock host. nr_open needs
 	// no restart: sysctl is live immediately.
-	if err := errors.Join(nrOpen, userMgr, session); err != nil {
-		if userMgr != nil || session != nil {
+	if err := errors.Join(nrOpen, userMgr, session, sessionCore); err != nil {
+		if userMgr != nil || session != nil || sessionCore != nil {
 			return fmt.Errorf("%w\n  Then run: sudo loginctl terminate-user %d", err, m.Geteuid())
 		}
 		return err
@@ -198,15 +199,8 @@ func (m *Manager) checkUserManagerLimits(ctx context.Context, user string) error
 		return nil
 	}
 	props := parseUnitProps(out)
-	// core is the one limit the operator may lower, so its floor is what the unit
-	// will actually ask for (Container.CoreLimit): unbounded for the default -1, the
-	// byte count otherwise -- a host need not grant unlimited dumps to a broker set
-	// to write none. validCoreLimit has already held a loaded value to digits.
 	cb := m.Cfg.ContainerBlock(m.P)
-	coreMin := limitUnbounded
-	if n, err := strconv.Atoi(cb.CoreLimit()); err == nil && n >= 0 {
-		coreMin = n
-	}
+	coreMin := m.coreFloor()
 	var short []string
 	for _, want := range []struct {
 		prop string
@@ -259,11 +253,35 @@ func (m *Manager) checkUserManagerLimits(ctx context.Context, user string) error
 		"    %s soft nofile %d\n"+
 		"    %s hard memlock unlimited\n"+
 		"    %s soft memlock unlimited\n"+
+		"    %s hard core %s\n"+
+		"    %s soft core %s\n"+
 		"  Run: sudo systemctl daemon-reload",
 		unit, strings.Join(short, "; "), fmt.Sprintf(userUnitDropInFmt, m.Geteuid()), delegateSetting(),
 		config.ContainerNoFile(), config.ContainerLimitMemLock, cb.SystemdCoreLimit(),
 		pamLimitsDropIn, user, config.ContainerNoFileHard, user, config.ContainerNoFileSoft,
-		user, user)
+		user, user, user, pamCoreValue(coreMin), user, pamCoreValue(coreMin))
+}
+
+// coreFloor is the core-dump limit a host has to grant. ulimits.core is the one limit the
+// operator may lower, so the floor is what the unit will actually ask for
+// (Container.CoreLimit): unbounded for the default -1, the byte count otherwise -- a host
+// need not grant unlimited dumps to a broker set to write none. validCoreLimit has already
+// held a loaded value to digits.
+func (m *Manager) coreFloor() int {
+	if n, err := strconv.Atoi(m.Cfg.ContainerBlock(m.P).CoreLimit()); err == nil && n >= 0 {
+		return n
+	}
+	return limitUnbounded
+}
+
+// pamCoreValue spells a core floor the way pam_limits takes it: "unlimited", or KILOBYTES
+// -- limits.conf counts core in KB where the engines count bytes -- rounded up, so the grant
+// covers the ask rather than falling a fraction short of it.
+func pamCoreValue(floor int) string {
+	if floor == limitUnbounded {
+		return "unlimited"
+	}
+	return strconv.Itoa((floor + 1023) / 1024)
 }
 
 // checkSessionNoFile is the third rootless ceiling, and the one that bounds YOU
@@ -301,6 +319,48 @@ func (m *Manager) checkSessionNoFile(ctx context.Context, user string) error {
 		"    %s soft nofile %d",
 		limitText(got), config.ContainerNoFileHard, pamLimitsDropIn,
 		user, config.ContainerNoFileHard, user, config.ContainerNoFileSoft)
+}
+
+// sessionCoreScript reads this session's HARD core limit, in bytes. Not `ulimit -Hc`: the
+// shell reports that in blocks whose size depends on which shell sh is -- 512 bytes in
+// dash and in bash's POSIX mode, 1024 in plain bash -- while /proc/self/limits always
+// says bytes, the unit ulimits.core is written in. The awk reading it inherits the
+// session's limits, so its own entry is the session's.
+const sessionCoreScript = `awk '/^Max core file size/ {print $6}' /proc/self/limits`
+
+// checkSessionCore is checkSessionNoFile's twin for core dumps. `podman exec` gives the
+// process it starts the container's rlimits from THIS session, and an unprivileged crun
+// cannot raise a hard limit -- so a session whose hard core limit is below ulimits.core
+// (the `* hard core 0` hardened baselines set) runs a container that starts fine under
+// the user manager and then fails every broker cli, shell, configure and perform command
+// with crun's `setrlimit RLIMIT_CORE: Operation not permitted`.
+func (m *Manager) checkSessionCore(ctx context.Context, user string) error {
+	if !m.rootlessPodman() {
+		return nil
+	}
+	r := m.report()
+	want := m.coreFloor()
+	got, err := m.hostLimit(ctx, sessionCoreScript)
+	if errors.Is(err, errLimitUnreadable) {
+		r.Skip("session core: skipped (/proc/self/limits answered nothing)")
+		return nil
+	}
+	if err != nil {
+		r.Fail("session core: cannot read this session's hard limit")
+		return err
+	}
+	if got >= want {
+		r.OK("session core: %s (need %s)", limitText(got), limitText(want))
+		return nil
+	}
+	r.Fail("session core: %s (need %s)", limitText(got), limitText(want))
+	return fmt.Errorf("session core is %s, needs %s: podman exec, and so every command run inside the broker, "+
+		"would fail with `setrlimit RLIMIT_CORE: Operation not permitted`.\n"+
+		"  Create %s as root:\n"+
+		"    %s hard core %s\n"+
+		"    %s soft core %s\n"+
+		"  Or, to keep core dumps limited, set podman.container.ulimits.core to %d or less and run broker deploy again",
+		limitText(got), limitText(want), pamLimitsDropIn, user, pamCoreValue(want), user, pamCoreValue(want), got)
 }
 
 // hostLimit reads one number out of a shell probe. Through a shell for the reason

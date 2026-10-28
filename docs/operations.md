@@ -852,6 +852,9 @@ LimitCORE=infinity
 <user> soft nofile 2448
 <user> hard memlock unlimited
 <user> soft memlock unlimited
+<user> hard core unlimited
+<user> soft core unlimited
+# (core in KB: with podman.container.ulimits.core lowered to a byte count, that count / 1024)
 
 # only if container.dataDir is somewhere this user cannot create
 sudo mkdir -p /opt/solace/data && sudo chown <user> /opt/solace/data
@@ -1816,7 +1819,8 @@ holds:
 | rootless podman | `podman` under `user@<uid>.service`, unprivileged | that unit's **hard** limits |
 
 So `validate` and `broker deploy` read **`fs.nr_open` everywhere**, and on rootless podman
-two more: `user@<uid>.service`'s hard limits, and this login session's own `ulimit -Hn`.
+two more: `user@<uid>.service`'s hard limits, and this login session's own hard `nofile` and
+core limits.
 Of those hard limits, `LimitCORE` is held to what `ulimits.core` asks for -- `infinity` for
 the default, the byte count when lowered, so `0` needs nothing of the host.
 The unit drop-in is written under `user@<uid>.service.d`, not the `user@.service.d`
@@ -1861,6 +1865,8 @@ error: user@1000.service: LimitMEMLOCK is 8388608, needs infinity.
     solace soft nofile 2448
     solace hard memlock unlimited
     solace soft memlock unlimited
+    solace hard core unlimited
+    solace soft core unlimited
   Run: sudo systemctl daemon-reload
   Then run: sudo loginctl terminate-user 1000
 ```
@@ -1877,6 +1883,24 @@ error: session nofile is 524288, needs 1048576.
   Create /etc/security/limits.d/99-solace.conf as root:
     solace hard nofile 1048576
     solace soft nofile 2448
+  Then run: sudo loginctl terminate-user 1000
+```
+
+The session's hard **core** limit is held to `ulimits.core` the same way the user manager's
+`LimitCORE` is -- `unlimited` for the default `-1`, nothing for `0`. It is read from
+`/proc/self/limits`, which counts bytes whatever shell `sh` is. Hardened baselines often set
+`* hard core 0`; the container then starts fine, but `podman exec` -- and so every
+`broker cli`, `shell`, `configure` and `perform` command -- fails with
+`crun: setrlimit RLIMIT_CORE: Operation not permitted`. A line naming the user overrides the
+`*` one:
+
+```
+[FAIL] session core: 0 (need infinity)
+error: session core is 0, needs infinity: podman exec, and so every command run inside the broker, would fail with `setrlimit RLIMIT_CORE: Operation not permitted`.
+  Create /etc/security/limits.d/99-solace.conf as root:
+    solace hard core unlimited
+    solace soft core unlimited
+  Or, to keep core dumps limited, set podman.container.ulimits.core to 0 or less and run broker deploy again
   Then run: sudo loginctl terminate-user 1000
 ```
 

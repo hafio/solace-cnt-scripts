@@ -67,7 +67,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-91 test files, 1677 test functions. Three of those are not tests. Two are os/exec
+91 test files, 1681 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -82,7 +82,7 @@ launched from.
 | internal/broker | 24 | 507 |
 | internal/cli | 14 | 270 |
 | internal/config | 16 | 241 |
-| internal/container | 8 | 196 |
+| internal/container | 8 | 200 |
 | internal/convert | 1 | 40 |
 | internal/render | 2 | 51 |
 | internal/engine | 2 | 27 |
@@ -90,7 +90,7 @@ launched from.
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **91** | **1677** |
+| **Total** | **91** | **1681** |
 
 
 ## Coverage
@@ -2501,7 +2501,7 @@ The host-local Docker/Podman manager, its node-local transport, and the engine
 preflight that precedes every mutating operation, plus the engine `inspect` decode
 behind `broker status` and the server-certificate delivery each engine needs, and the
 host rlimit ceilings every engine is bounded by.
-196 tests across 8 files.
+200 tests across 8 files.
 
 ### runtime_test.go
 
@@ -2679,8 +2679,8 @@ The host rlimit ceilings. `--ulimit` is only a REQUEST: the engine performs the
 `setrlimit`, so what it may ask for depends on the privilege it holds. Docker and
 rootful podman run a privileged engine bounded only by `fs.nr_open`; rootless podman
 runs under `user@<uid>.service` with no `CAP_SYS_RESOURCE` and is bounded by that
-unit's HARD limits, and by this login session's own `ulimit -Hn` for anything the operator
-runs against the container. `/etc/security/limits.d` bounds that last one only -- it is read
+unit's HARD limits, and by this login session's own hard `nofile` and core limits for
+anything the operator runs against the container. `/etc/security/limits.d` bounds that last one only -- it is read
 by `pam_limits`, for login sessions, not for a systemd service -- so the rows that refuse
 over it and the rows that do not are deliberately different.
 
@@ -2706,12 +2706,16 @@ hard limits can bind.
 | `TestPrepHostNrOpenEmptyAnswerSkips` | The other half of that rule: NO answer is not a garbled one. A probe that exits 0 and prints nothing has told us nothing, so it skips -- which is also what keeps every test in this package that is about something else from having to seed a limits answer |
 | `TestCheckLimitsRootlessEmptyUserManagerAnswerSkips` | The same rule for the `systemctl show` probe, with its boundary: an empty answer skips, while an answer carrying SOME properties but not the ones asked for still fails loud naming the missing one |
 | `TestValidateNeverWritesTheSysctlDropIn` | `validate` promises a run that disturbs nothing, so it reports the same shortfall and repairs none of it -- even as root |
-| `TestCheckLimitsRootlessRefusesAShortUserManager` | The rootless ceiling, and the refusal a default host actually gets: `LimitMEMLOCK` ships at 8 MB. The message names the unit, the short value, BOTH drop-ins -- the `user@<uid>.service.d` one that bounds the container, scoped to the uid rather than the template unit, and the `limits.d` one that bounds what the operator runs against it from a login shell -- plus `daemon-reload` and `loginctl terminate-user`, with the account resolved by name rather than left as a placeholder so the drop-in forwards as-is. Naming only the first drop-in is how an operator ends up finding the second the hard way. Never repaired whatever `fix` says: the drop-in needs root, and a rootless deploy as root is already refused |
+| `TestCheckLimitsRootlessRefusesAShortUserManager` | The rootless ceiling, and the refusal a default host actually gets: `LimitMEMLOCK` ships at 8 MB. The message names the unit, the short value, BOTH drop-ins -- the `user@<uid>.service.d` one that bounds the container, scoped to the uid rather than the template unit, and the `limits.d` one that bounds what the operator runs against it from a login shell, its core lines included -- plus `daemon-reload` and `loginctl terminate-user`, with the account resolved by name rather than left as a placeholder so the drop-in forwards as-is. Naming only the first drop-in is how an operator ends up finding the second the hard way. Never repaired whatever `fix` says: the drop-in needs root, and a rootless deploy as root is already refused |
 | `TestCheckLimitsRootlessSessionNoFile` | The third rootless ceiling, and the one that bounds the OPERATOR rather than the container: `podman exec` and the admin commands inherit this session's rlimits, which `pam_limits` sets. A stock host is at 524288, so this is a row a fresh install actually fails. The refusal names the `limits.d` drop-in, both lines with the account resolved, and `loginctl terminate-user`; nothing may touch that path -- the drop-in needs root, which a rootless deploy never has |
 | `TestCheckLimitsSaysRestartTheSessionOnce` | A stock rootless host fails BOTH drop-in rows, and one session restart picks up whichever were written -- so `loginctl terminate-user` is counted, and must appear exactly once however many rows asked for a file. Both causes still survive the join |
 | `TestCheckLimitsNrOpenAloneNeedsNoRestart` | `sysctl` is live immediately, so the `nr_open` row must not drag the session-restart line in behind it |
-| `TestCheckLimitsSessionNoFileIsRootlessOnly` | Docker and rootful podman start the container from a privileged daemon, so the shell that issued the command bounds nothing it does and the `ulimit -Hn` probe must not run |
-| `TestCheckLimitsRootlessCoreFloorFollowsTheConfiguredLimit` | `ulimits.core` is the one limit the operator may lower, so `user@<uid>.service`'s `LimitCORE` is held to what the unit will ask for, not to unlimited: with `core: 0` a host granting no dumps passes; with 1 GiB the same host is refused with `LimitCORE is 0, needs 1073741824` and a drop-in asking for exactly that; and the default `-1` still needs `infinity` |
+| `TestCheckLimitsSessionRowsAreRootlessOnly` | Docker and rootful podman start the container from a privileged daemon, so the shell that issued the command bounds nothing it does and neither session probe (`ulimit -Hn`, the `/proc/self/limits` core read) may run |
+| `TestCheckLimitsRootlessSessionCore` | A session hard core limit of 0 (the `* hard core 0` hardened baselines set) refuses: the container would start, but `podman exec` gets its rlimits from this session and fails with `setrlimit RLIMIT_CORE`. The refusal names the `limits.d` core lines, the alternative of lowering `podman.container.ulimits.core` to the session's value, and the one session restart; the row reports what it found, and nothing writes the drop-in |
+| `TestCheckLimitsRootlessSessionCoreFollowsTheConfiguredLimit` | The session is held to what `ulimits.core` asks for: core 0 passes a session granting none, 1 GiB passes an unlimited session, and 1 GiB on a 1 MiB session refuses, asking for 1048576 -- KB, the unit limits.conf counts core in |
+| `TestCheckLimitsSessionCoreUnreadable` | The core row's two non-answers: an empty read (no `/proc` to ask) skips and says so, a value that will not parse refuses |
+| `TestPamCoreValue` | A core floor in bytes becomes limits.conf's KB, rounded up so the grant covers the ask; unbounded is `unlimited` |
+| `TestCheckLimitsRootlessCoreFloorFollowsTheConfiguredLimit` | `ulimits.core` is the one limit the operator may lower, so `user@<uid>.service`'s `LimitCORE` is held to what the unit will ask for, not to unlimited: with `core: 0` a host granting no dumps passes; with 1 GiB the same host is refused with `LimitCORE is 0, needs 1073741824` and drop-ins asking for exactly that (`hard core 1048576` in the limits.d one, which counts KB); and the default `-1` still needs `infinity` |
 | `TestCheckLimitsRootlessRefusesUndelegatedControllers` | The rootless quadlet carries a cpuset now, and the cpuset controller is not delegated to a user slice by default, so an undelegated host would fail the container at start. Same row and same drop-in as the rlimits, because it is the same file |
 | `TestCheckLimitsRootlessUnparseableLimitFailsLoud` | A `systemctl` property that IS reported but in a shape this cannot read is an anomaly, not a limit to assume adequate -- distinct from the property being absent, which names the property, and from the whole answer being empty, which skips |
 | `TestCheckLimitsSessionNoFileUnreadable` | The session row's two non-answers, splitting the way every other probe does: nothing at all is a skip, a value that will not parse is a refusal |

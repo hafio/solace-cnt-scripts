@@ -40,6 +40,8 @@ func healthyRootlessOut(nrOpen string) func(name string, args []string) []byte {
 			return []byte(nrOpen)
 		case name == "sh" && slices.Contains(args, "ulimit -Hn"):
 			return []byte(healthySessionNoFile)
+		case name == "sh" && slices.Contains(args, sessionCoreScript):
+			return []byte(healthySessionCore)
 		case slices.Contains(args, "--format") && strings.Contains(strings.Join(args, " "), "IDMappings"):
 			// 0:1 is this user mapped to container root; 1:65536 is the subuid
 			// range, which is what covers ctrCfg's runUser of 1000:0.

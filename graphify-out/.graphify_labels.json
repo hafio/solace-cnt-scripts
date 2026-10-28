@@ -19,11 +19,9 @@
   "42": "inject_test.go",
   "48": "localCfg",
   "49": "config_test.go",
-  "59": ".rpc",
   "60": "confirm.go",
   "61": ".configRows",
   "62": "rootless_test.go",
-  "75": "usagef",
   "87": ".ConfigureReplication",
   "88": "AdminSecret",
   "89": "render_test.go",
@@ -33,6 +31,5 @@
   "112": "capRunner",
   "116": "certFixture",
   "118": "Container State Inspection",
-  "126": "bytes.Buffer",
-  "135": "containerTransport"
+  "126": "bytes.Buffer"
 }
