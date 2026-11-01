@@ -200,6 +200,7 @@ You do not run the gates. Hand over the invocation and continue from the output 
 | Config export and import | [docs/operations.md](docs/operations.md), [docs/import.md](docs/import.md) | `internal/broker/{blocks,annotate,sections,inject,transform,diff,importops,driver}.go` |
 | Data replication and DR switchover | [docs/operations.md](docs/operations.md) | `internal/broker/{replication,replicationops,matechannel,switchplan,sempmate}.go` |
 | Docker and Podman internals | [docs/operations.md](docs/operations.md) | `internal/container`, `internal/render` |
+| Docker, Podman and Kubernetes parity with the sibling solmq-conn-util | [docs/parity.md](docs/parity.md) | `internal/container`, `internal/k8s`, `internal/engine` |
 | Bash env-file migration | [docs/configuration.md](docs/configuration.md) | `internal/convert` |
 | Build, dev-script tasks, releases | [docs/developer.md](docs/developer.md) | `scripts/dev.sh`, `scripts/dev.ps1` |
 

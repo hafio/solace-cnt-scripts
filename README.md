@@ -49,6 +49,7 @@ needs and is safe to re-run.
 | [docs/operations.md](docs/operations.md) | Day-2: preflight, config order, HA mechanics, re-deploying, removal, data replication, upgrades, troubleshooting |
 | [docs/developer.md](docs/developer.md) | Build, dev-script tasks, gates, goldens, releases, repo layout |
 | [docs/container-security.md](docs/container-security.md) | The container security rules every platform must satisfy, and how each is expressed -- written to be reused in other projects |
+| [docs/parity.md](docs/parity.md) | Where this tool and its sibling solmq-conn-util agree and differ on Docker, Podman and Kubernetes |
 | [env/sample.yaml](env/sample.yaml) | The annotated schema -- what a bare `solace-util examples` prints, committed for reference |
 | [solace-yaml-generator.html](solace-yaml-generator.html) | A form, opened in a browser, that builds an env file and previews what `operator generate` and `broker generate` render from it. The CLI stays the authority -- see [docs/developer.md](docs/developer.md#the-env-file-generator-page) |
 

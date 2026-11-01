@@ -197,6 +197,6 @@ git tag v0.1.0 && git push origin v0.1.0
 | `internal/examples` | The embedded env-file templates `examples` prints, and the generator for `env/sample.yaml`. |
 | `env/` | Config files. `sample.yaml` is generated -- edit `internal/examples/assets/full.yaml`. |
 | `solace-yaml-generator.html` | The browser env-file generator; its `GEN` block is generated (see [The env-file generator page](#the-env-file-generator-page)). |
-| `docs/` | [commands.md](commands.md) -- generated CLI reference; [abbreviation.md](abbreviation.md) -- generated glossary of every short form; [configuration.md](configuration.md) -- the env file; [operations.md](operations.md) -- day-2 procedures; [developer.md](developer.md) -- this file; [test.md](test.md) -- the catalogue of every test. |
+| `docs/` | [commands.md](commands.md) -- generated CLI reference; [abbreviation.md](abbreviation.md) -- generated glossary of every short form; [configuration.md](configuration.md) -- the env file; [operations.md](operations.md) -- day-2 procedures; [developer.md](developer.md) -- this file; [test.md](test.md) -- the catalogue of every test; [parity.md](parity.md) -- the Docker, Podman and Kubernetes contract shared with the sibling solmq-conn-util. |
 | `scripts/` | `dev.ps1` / `dev.sh` developer tooling. |
 | `graphify-out/` | Persistent knowledge graph of the repo. Rebuild with the `graphify` task. |

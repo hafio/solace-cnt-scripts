@@ -1212,10 +1212,10 @@ another team put there, and this tool may not have created it in the first place
   merely stays.
 
 **Docker and Podman have their own teardown wrinkles**, on top of the `--delete-data` layer.
-The sequence is: stop the container, remove it, remove the compose file or quadlet unit,
-remove the engine secrets (and, on podman, any legacy certificate file under
-`podman.baseDir`), then ask about the data directory -- whose CONTENTS are what
-`--delete-data` removes; the directory stays.
+The sequence is: stop the container, remove it, remove the quadlet unit on podman (the
+compose file stays where `broker deploy` wrote it), remove the engine secrets (and, on
+podman, any legacy certificate file under `podman.baseDir`), then ask about the data
+directory -- whose CONTENTS are what `--delete-data` removes; the directory stays.
 
 - Podman's secret store is a real, separate persistence layer -- `broker remove` removes
   every secret `broker deploy` loaded into it as part of removing the container. A secret
