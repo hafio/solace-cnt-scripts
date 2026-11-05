@@ -28,8 +28,7 @@ Tests are run through the mirrored dev scripts, never with a bare `go test` in C
 - The `test` task runs `go test -count=1 ./...`. Race detection is on by default in `dev.sh`;
   on `dev.ps1` it is opt-in with `SOLACE_RACE=1`. A race run defaults `GORACE` to
   `atexit_sleep_ms=0` when unset: the race detector otherwise pauses 1s before every clean
-  exit, and `internal/engine`'s helper-process tests re-run the test binary about 16 times.
-  Running `go test -race` by hand without it pays that pause again.
+  exit. Running `go test -race` by hand without it pays that pause again.
 - `cov` writes `coverage/coverage.out` and `coverage/coverage.html` and prints the total. It
   never races -- `test` is the race run -- so it is the faster of the two. The
   previous total in `scripts/logs/cov.log` is the local floor -- an unexplained drop is a
@@ -67,35 +66,33 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-90 test files, 1660 test functions. Three of those are not tests. Two are os/exec
-helper-process shims, each a no-op unless its own environment variable is set:
-`TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
-`TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
-because a real `*exec.ExitError` cannot be constructed by hand. The third is `TestMain`
-in `internal/cli`, which points `os.Stdin` at an already-closed pipe for the whole package.
+90 test files, 1640 test functions. One of those is not a test: `TestMain` in
+`internal/cli`, which points `os.Stdin` at an already-closed pipe for the whole package.
 That pipe is not a terminal under `confirm.StdinIsTerminal`, so a test that reaches a confirm
 helper without injecting `App.Interactive` gets the "pass --no-prompt instead" error at once
-instead of blocking on the console the suite was launched from.
+instead of blocking on the console the suite was launched from. No test in `internal/engine`
+starts a child process any more: running commands is the shared `runner` package's, and its
+own tests carry the os/exec helper-process shim.
 
 | Package | Files | Tests |
 | --- | --- | --- |
 | internal/k8s | 20 | 304 |
 | internal/broker | 24 | 507 |
-| internal/cli | 14 | 265 |
-| internal/config | 16 | 231 |
+| internal/cli | 14 | 264 |
+| internal/config | 16 | 232 |
 | internal/container | 8 | 200 |
 | internal/convert | 1 | 40 |
 | internal/render | 2 | 51 |
-| internal/engine | 2 | 27 |
+| internal/engine | 2 | 7 |
 | internal/output | 1 | 16 |
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/examples | 1 | 8 |
-| **Total** | **90** | **1660** |
+| **Total** | **90** | **1640** |
 
 
 ## Coverage
 
-Last recorded run, from `scripts/logs/cov.log` (2026-11-05), total **97.8%**. Re-run `cov`
+Last recorded run, from `scripts/logs/cov.log` (2026-11-05), total **97.9%**. Re-run `cov`
 after any change; these figures go stale the moment tests move, and the previous total is
 the floor the next run has to hold.
 
@@ -312,31 +309,31 @@ path that actually runs.
 | internal/tools/vulnjudge | 98.9% |
 | internal/render | 98.7% |
 | internal/convert | 97.4% |
-| internal/config | 96.6% |
+| internal/config | 96.7% |
 | internal/container | 95.7% |
 | internal/k8s | 99.0% |
 | internal/broker | 98.7% |
 | internal/cli | 97.2% |
 | internal/examples | 90.0% |
-| internal/engine | see below |
+| internal/engine | 100.0% |
 
 **Adopting the shared module's `exitcode`, `notice`, `paritydoc` and `abbrev` left the total at
 97.9%.** `internal/abbrev` (100.0%, 8 tests) and the covered code of `internal/cli/exit.go` (with
 the four tests that exercised it) moved to `github.com/hafio/go-deploy-utility`, which tests them
 there. They were too small a share of the statements to move the rounded total.
 
-**97.9% -> 97.8% from adopting the shared module's `execguard` and `envref`, and the reason is
-recorded.** About 340 lines of guard left `internal/config/execguard.go`, and `secretref.go`
-lost its own reference parsing; nearly every statement in them was covered, and they are now
+**97.9% held through adopting the shared module's `execguard` and `envref`.** About 340 lines
+of guard left `internal/config/execguard.go`, and `secretref.go` lost its own reference
+parsing; nearly every statement in them was covered, and they are now
 tested in `github.com/hafio/go-deploy-utility/execguard` and `envref`. Eleven tests went with
 them (`internal/config` 241 -> 231 tests, the total 1670 -> 1660, after the one new
 `TestNewEscalatorsAreNeverApproved`). What stays uncovered in `internal/config` -- the
 `viaDescription` cases and the nil-site skip in `expandCommandHomes` (execguard.go), the
 `expandHomePaths` error returns (hostpath.go), and defensive branches in `load.go` and
-`validate.go` -- is unchanged and is now a larger share of a smaller package: 1390 of 1439
-statements, 96.6%. The one uncovered branch S3 touched, the invisible-character refusal in
-`CheckHostPath`, gained two cases in `TestCheckHostPathRejects` after this run; that is one
-statement, which moves `internal/config` to 96.7% and leaves the total at 97.8%.
+`validate.go` -- is unchanged and became a larger share of a smaller package, so the first run
+read 97.8% (`internal/config` 96.6%). The one uncovered branch S3 touched, the
+invisible-character refusal in `CheckHostPath`, then gained two cases in
+`TestCheckHostPathRejects`, which put `internal/config` at 96.7% and the total back to 97.9%.
 
 `internal/cli` reads 97.2% against the 97.6% last tabled. S3 changed no `internal/cli` source
 and removed no case from its tests, so that move dates from the confirm adoption, which
@@ -370,12 +367,17 @@ wiring these mechanics to commands, and in the error arms of `internal/k8s/opera
 `internal/k8s/checkreport.go` and `internal/k8s/prep.go`. **That is the gap to close before
 the next feature**, and 94.2% is the floor until it is.
 
-**`internal/engine` is not currently measurable.** It reports `0.0%` in this run and
-`100.0%` in others, with every test passing both times -- so the figure is a measurement
-artifact, not coverage that vanished. The package's `Exec` tests re-execute the test binary
-as a child process (`TestHelperProcess`/`helperCommand`), and a coverage-instrumented child
-can clobber the parent's profile; the run also slows noticeably when it happens. Until that
-is fixed, treat the total above as understated by roughly engine's share.
+**`internal/engine` is measurable again.** It used to report `0.0%` in some runs and `100.0%` in
+others, with every test passing both times, because its `Exec` tests re-executed the test
+binary as a child process (`TestHelperProcess`) and a coverage-instrumented child could clobber
+the parent's profile. The package no longer runs anything of its own -- execution, resolution,
+quoting and the echo runner moved to the shared `runner` package -- and its tests drive
+`runnertest.Fake`, so no test starts a child, and the first `cov` after the move read 100.0%.
+
+**97.9% held through adopting the shared runner.** `Exec`, `Echo`, `Resolve`, `MaskEnv` and
+`Quote` left `internal/engine` with the 22 tests that exercised them, and are tested in
+`github.com/hafio/go-deploy-utility/runner`. What stayed is wiring, covered in full. Every other
+package read the same as in the table before the move.
 
 `main.go` reports `0.0%` and always will: it is three statements -- call `Execute`, print
 what came back, exit with `exitcode.Code`'s answer -- and no test can drive them, which is
@@ -391,7 +393,7 @@ type behind the platform CLI overrides and the execution guard that decides what
 `Command` may be, the scaling block that sizes the broker on every platform, and the
 platform vocabulary the CLI resolves against, the host-path rules every file-valued
 key is held to, the grammar every value written as-is into an artifact is held to, and
-the two storage stories a Kubernetes deployment may tell. 241 tests across 16 files.
+the two storage stories a Kubernetes deployment may tell. 232 tests across 16 files.
 
 ### command_test.go
 
@@ -401,6 +403,7 @@ the two storage stories a Kubernetes deployment may tell. 241 tests across 16 fi
 | `TestCommandUnmarshalRejectsOtherKinds` | A mapping is neither a command line nor an argv, so it fails loud at decode naming the accepted forms |
 | `TestCommandUnmarshalPropagatesDecodeErrors` | A node of an accepted kind whose contents still will not decode (`!!binary` with invalid base64; a sequence element that is not a scalar) surfaces yaml's error instead of falling through to an empty command |
 | `TestCommandNameAndArgs` | `Name`/`Args` split a command into argv[0] and the leading arguments that precede each call's own, including the unset and bare-binary cases |
+| `TestCommandArgv` | The whole line for one call is the command followed by the call's own arguments (an unset command contributes nothing), in a slice of its own, so a later call cannot rewrite an earlier one's argv -- the same aliasing trap `TestCommandArgsDoesNotAliasCommand` guards for `Args` |
 | `TestCommandArgsDoesNotAliasCommand` | `Args` allocates: with spare capacity in the backing array, a naive `append(cmd[1:], ...)` would corrupt the previous call's argv. Two successive calls must stay independent and the `Command` itself unchanged |
 | `TestCommandString` | Display rendering, used by the check reports and error messages |
 | `TestValidateProbeCommandAccepts` | The container health-check probe keeps the loose rules, because it runs inside the broker rather than here: a path, and a shell pipeline with metacharacters, both pass, as does an unset command. The field-by-field opposite of the shared `execguard` reject tests |
@@ -789,7 +792,7 @@ sample env, plus command aliases, platform resolution, the generated command and
 abbreviation references, shell completion, and the end-to-end behaviour of the
 execution guard.
 
-`echoRunner`, a test-only helper (`cli_test.go`) that installs `engine.Echo` via the
+`echoRunner`, a test-only helper (`cli_test.go`) that installs `runner.Echo` via the
 `App.NewRunner` seam (`internal/cli/context.go`), is how a test asserts the exact argv a
 command would issue. Reach for `runRootWith(t, args, echoRunner)` (or the
 `runStandalone`/`runCtr` wrappers built on it) for that.
@@ -803,7 +806,7 @@ without a live broker;
 fixtures stand in for a captured `show current-config` transcript; and
 `exportconfigReadCounter` wraps `App.PromptIn` to prove a confirmation prompt was never
 actually read, not merely that the command did not block.
-268 tests across 14 files.
+264 tests across 14 files.
 
 Because the platform is a flag rather than the first word of a command, the
 invocations here name it explicitly (`--platform docker`) rather than relying on
@@ -892,7 +895,7 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 | `TestPromptSeamsBeatStdin` | an App carrying `Interactive`/`PromptIn` never touches `os.Stdin` (the App's Prompter is a terminal under the seam although `TestMain`'s stdin is not), which is what keeps the ~200 wiring tests independent of what the suite was launched from |
 | `TestPromptKeepsBufferedAnswersForLaterQuestions` | A command asking TWO questions in one run (`broker remove --delete-data`) gets both answers: a pipe delivering `y\nyes\n` in one read must not lose the second to the first question's reader. Kept here although the `confirm` package has its own reader tests, because the one-Prompter-per-App memoisation is this package's |
 | `TestCtrManagerConfirmWiring` | ctrManager wires Manager.Confirm to confirmRestart, and a non-interactive session (via App.Interactive) declines without reading a prompt |
-| `TestK8sLoginOutcomes` | a transport failure propagates as an error and a canned 200 OK response returns nil, the two real SEMP outcomes engine.Echo's fixed (nil,nil) can never produce; without `semp.adminPass` the password is read back from the admin Secret the broker uses and reaches curl on stdin, never argv, and a failed read never reaches curl |
+| `TestK8sLoginOutcomes` | a transport failure propagates as an error and a canned 200 OK response returns nil, the two real SEMP outcomes runner.Echo's fixed (nil,nil) can never produce; without `semp.adminPass` the password is read back from the admin Secret the broker uses and reaches curl on stdin, never argv, and a failed read never reaches curl |
 | `TestCtrLoginOutcomes` | same as TestK8sLoginOutcomes for the container login path |
 | `TestOpK8sDeployAborts` | `opK8sDeploy`'s error-return arms (CreateNamespace, CreateSecrets, DeployBroker), each failed in its own sub-test with no later step's command issued afterward. Two arms the `deploy all` version had are gone: no Check step, since a deploy runs the per-operation preflight rather than the whole validate report, and no operator-apply step, since the operator has its own noun |
 | `TestK8sDeployRestartsForARenewedCertificate` | A renewed certificate changes only the TLS Secret, which a running pod does not re-read and the operator does not roll out, so a Kubernetes deploy takes the container deploy's consent. The live Secret's digest decides whether anything changed and the primary pod whether anything runs: renewed and running restarts all three pods in `RestartOrder` (monitor first) on `--restart` or a yes, and not on a no or with no terminal; nothing running, or an unchanged digest, restarts nothing even under `--restart` |
@@ -909,7 +912,7 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 | `TestContainerRoleDetectsFromHostname` | `containerRole` (how `broker deploy` and `broker generate` resolve which node THIS host is) over the injected `App.Hostname` seam. An omitted `--pod` in HA is detected from the hostname against `redundancy.*` and announced on stderr; an explicit `--pod` still wins; an unrecognised hostname fails loud naming `primary\|backup\|monitor` as the way out (closing the old silent-second-primary bug, since `config.ParseRole("")` alone always returned Primary); standalone keeps defaulting to primary with no detection announced; the way-out hint names the command that was run (`broker perform assert-leader --pod ...`, not `broker deploy`). An explicit `--pod` is also CHECKED against what the host looks like: disagreement WARNS and proceeds (never prompts -- a three-host scripted deploy must not stall), agreement and an undetectable host both stay silent, since undetectable is the very case `--pod` exists for |
 | `TestStandaloneRouternameFallsBackToTheHost` | The load-time fill (`App.fillStandaloneNodeName`) end to end: a standalone container env file naming no routername renders an artifact whose `hostname` AND `routername` are the HOST's name, announced on stderr. Through the real command, because the point of filling at load is that every reader agrees -- the artifact here, the check report and the DNS check elsewhere, all off one value |
 | `TestConfiguredRouternameSurvivesTheFallback` | The other half: a configured routername is never overwritten by the host's name |
-| `TestK8sSmokeRedundancyUnhealthy` | `broker perform redundancy-test` fails on its first check rather than polling: over the echo seam, `engine.Echo`'s empty `show redundancy` output makes `primaryRedundancyUp` false, so `opK8sVerifyRedundancy` returns the redundancy-unhealthy error before any SEMP login |
+| `TestK8sSmokeRedundancyUnhealthy` | `broker perform redundancy-test` fails on its first check rather than polling: over the echo seam, `runner.Echo`'s empty `show redundancy` output makes `primaryRedundancyUp` false, so `opK8sVerifyRedundancy` returns the redundancy-unhealthy error before any SEMP login |
 | `TestK8sConfigDeleteDomainCertsConfigured` | With one explicitly-named CA configured (`domainCerts.files`, now a full host path), `broker configure domain-certs --remove` issues a kubectl exec instead of self-skipping -- every other test's `files` map is empty, so `domainCANames`'s conversion was correct only by vacuity until this one configures a CA |
 | `TestK8sConfigDeleteDomainCertsFromDirs` | The gap the test above alone would miss: `--remove` now resolves `domainCerts.dirs` too (`config.ResolveDomainCerts`), sharing the resolver with the apply direction, so a directory-derived CA is not silently left on the broker the way it would be if `--remove` read only `.files` |
 | `TestConvertParseError` | a malformed legacy env file (unterminated array assignment) surfaces the parser's own error through the CLI |
@@ -1086,7 +1089,7 @@ answer the three probes that channel makes -- the CLI login banner (target broke
 read by `bannerType`), `show message-vpn *` (target's VPN list), and the broker-generated
 teardown script -- so
 `ImportPlan`/`ImportApply` run against real business logic with no live broker; anything
-uncanned falls through to `(nil, nil)`, the same empty answer `engine.Echo` gives, which is
+uncanned falls through to `(nil, nil)`, the same empty answer `runner.Echo` gives, which is
 what makes an uncanned step fail exactly the way an unanswered real probe would.
 `writeExportconfigArtifact` and the `exportconfigNoVPNArtifact`/`exportconfigOneVPNArtifact`
 fixtures (the latter carrying `exportconfigFixtureSecret`, a fake credential-shaped value)
@@ -1097,8 +1100,8 @@ the command did not block.
 | Test | What it covers |
 | --- | --- |
 | `TestExportConfigScopeConflictIsUsageError` | `--vpn`/`--broker-only` together is a usage error end to end through the command, and the flag conflict never reaches the transport -- S5: bad input rejected AND the downstream call not made |
-| `TestExportConfigLeafRunsOnAllPlatforms` | The leaf reaches its real per-platform handler on kubernetes, docker and podman: under `engine.Echo` the capture is necessarily empty, so all three fail identically on `runCapture`'s own "no output" refusal, which is itself the proof the wiring is not platform-specific |
-| `TestImportConfigLeafRunsOnAllPlatforms` | `import-config`'s counterpart, failing the same way for the same reason: reading a well-formed artifact succeeds, but the first thing `ImportPlan` asks the TARGET for is its own capture, and under `engine.Echo` that answer is empty -- so the empty-capture refusal comes back identically on all three platforms. It used to be the unknown-target-type refusal, from a dedicated banner probe that ran first; that probe is gone, so the empty capture is caught one refusal earlier |
+| `TestExportConfigLeafRunsOnAllPlatforms` | The leaf reaches its real per-platform handler on kubernetes, docker and podman: under `runner.Echo` the capture is necessarily empty, so all three fail identically on `runCapture`'s own "no output" refusal, which is itself the proof the wiring is not platform-specific |
+| `TestImportConfigLeafRunsOnAllPlatforms` | `import-config`'s counterpart, failing the same way for the same reason: reading a well-formed artifact succeeds, but the first thing `ImportPlan` asks the TARGET for is its own capture, and under `runner.Echo` that answer is empty -- so the empty-capture refusal comes back identically on all three platforms. It used to be the unknown-target-type refusal, from a dedicated banner probe that ran first; that probe is gone, so the empty capture is caught one refusal earlier |
 | `TestExportImportPodFlagPlatformScope` | `--pod` is accepted on Kubernetes (names the pod) and refused as a usage error on docker/podman (one container per host, so an accepted-and-ignored flag would be worse than a refused one), for both leaves |
 | `TestExportConfigWithoutOutWritesOnlyArtifactToStdout` | With no `--out` the artifact IS stdout: no report `"==="` section header may appear there (it would corrupt anything piping the output into `import-config` or a file), while narration still reaches stderr unconditionally |
 | `TestExportConfigWithOutWritesFile0600AndReportsOnStdout` | With `--out`, the report (Section + KVBlock) goes to stdout instead and the artifact -- as sensitive as the env file -- is written to a file mode 0600 |
@@ -1176,9 +1179,9 @@ guard has something to disagree with.
 ### exit_test.go
 
 The exit-code contract -- 0 success, 1 operational failure, 2 usage error, and a child's
-own status passed through from the interactive commands. `TestHelperExitProcess` (the
-shim named in the Summary) is here, because a real `*exec.ExitError` cannot be built by
-hand: the test binary re-executes itself and exits with the status the environment names.
+own status passed through from the interactive commands. The status is scripted on the
+fake runner (`Attach` reports the code, a streamed `Run` fails with an `exitcode.Exited`
+error), so no child process is started.
 The marker and classification unit tests (`TestChildExitFallsBackWhenThereIsNoStatus`,
 `TestChildExitKeepsItsMessage`, `TestExitCodeIsNeverNegative`,
 `TestUsageErrorKeepsItsMessage`) live in the shared module's `exitcode` package; the tests
@@ -1189,13 +1192,13 @@ here keep what only this tree can prove.
 | `TestExitCodeContract` | Real invocations through the tree, each asserting the code it produces. Classifying an error handed straight to `exitcode.Code` would prove only that the switch works; these prove the markers are in the paths an operator reaches. The documented gap is pinned too, deliberately: a mistyped TOP-LEVEL command exits 1 because cobra produces that error before any interception point, so the day someone finds a clean fix, this is the case that says the fix worked. A script named by a path, or one `broker.cliScriptsDir` does not hold, is 2 |
 | `TestEveryArgValidatorIsAUsageError` | The drift guard behind `markUsageArgs`. The `Args` declarations are spread across four files, so this walks the BUILT tree rather than trusting the next one added was remembered. Each validator is offered nothing and then far too much; whichever it refuses must be a usage error, and one that accepts both is reported -- not because the command is wrong, but because the test has stopped saying anything about it |
 | `TestRootKeepsCobrasUnknownCommandError` | The reason for the documented gap. Cobra produces its unknown-command error inside `Find` only while `root.Args` is nil; give root a validator and the error is never produced, and a non-runnable root with no error prints help and exits 0 -- so a mistyped command would report success |
-| `TestChildExitStatusIsScopedToInteractiveSessions` | The property that matters about the passthrough: one child error carrying one status becomes this tool's exit code from `broker shell` and does NOT from `broker logs`. Without the scoping every command would start reporting whatever kubectl or the engine exited with, which is neither documentable nor scriptable |
+| `TestChildExitStatusIsScopedToInteractiveSessions` | The property that matters about the passthrough: one child status becomes this tool's exit code from `broker shell` (the session's `Attach` reports 7, `ChildExit` passes it through) and does NOT from `broker logs` (a streamed `Run` failing with the same status as an unmarked `exitcode.Exited` error is exit 1). Without the scoping every command would start reporting whatever kubectl or the engine exited with, which is neither documentable nor scriptable |
 
 ---
 
 ### ops_k8s_test.go
 
-The Kubernetes handlers of `ops_k8s.go`, driven directly over `opRunner` rather than `engine.Echo`, for what the echo seam cannot reach: every confirmation gate in each of its outcomes, every refusal that has to land before anything is issued, and the failures a real cluster hands back mid-operation.
+The Kubernetes handlers of `ops_k8s.go`, driven directly over `opRunner` rather than `runner.Echo`, for what the echo seam cannot reach: every confirmation gate in each of its outcomes, every refusal that has to land before anything is issued, and the failures a real cluster hands back mid-operation.
 
 | Test | What it covers |
 | --- | --- |
@@ -2223,7 +2226,7 @@ instead of the first.
 | `TestValidateSaysTheOperatorGeneratesTheMonitorPassword` | With no `semp.monitorPass` the CR omits `monitoringCredentialsSecret` and the operator generates the monitor user's password; the passwords row is the only place that shows before a deploy, so it reads `monitor=(none -- the operator generates its own)` rather than a bare `(none)` that looks like a gap |
 | `TestValidateSaysWhoOwnsTheAdminSecret` | The admin Secret row in all four shapes: built under a configured name, built under the derived name (and called derived), referenced only, and generated by the operator -- the last a `[WARN]` naming `<kubernetes.name>-pubsubplus-admin-creds` and the fresh-data-volume rule, since it is the one state in which `broker remove` takes the only copy of the password with it |
 | `TestValidateReportsTheDerivedImagePullSecretName` | The "image pull" row's own version of the test above: the row now prints `cfg.ImagePullSecretName()`, not `cfg.K8s.ImagePullSecret` directly, so it must show the Secret that will actually exist -- including the DERIVED default -- rather than only what the env file spelled out, or an operator reading a name matching nothing they configured would read it as a bug instead of the default it is. Covers all three states: a configured name (reported as-is), credentials present with no name (the derived default), and neither (`(none)`/`(none)`) |
-| `TestValidateSkipsTheStorageClassWhenEveryNodeIsCustomMounted` | Closes a gap a shared name hid: the config-side builder branched on custom mounts and the cluster-side one did not, and both were called `storageRows` -- the config-only one is `storageInfoRows` now. It drives a recording runner rather than `engine.Echo` on purpose -- the Echo path short-circuits every cluster-backed row to "skipped (preview)" before `storageRows` is reached, so a preview cannot see this either way, and a test written over Echo asserts nothing. The cluster-side namesake ran the class check regardless -- and since `validateStorage` refuses class and `customVolumeMount` together, it always fell through to the cluster default. On a cluster with no default (bare metal, static provisioning -- exactly why someone pre-creates PVCs) that FAILED the whole report over a class the deploy never touches, and advised setting a key `config.Load` then refuses. Also guards that dead-end advice against coming back |
+| `TestValidateSkipsTheStorageClassWhenEveryNodeIsCustomMounted` | Closes a gap a shared name hid: the config-side builder branched on custom mounts and the cluster-side one did not, and both were called `storageRows` -- the config-only one is `storageInfoRows` now. It drives a recording runner rather than `runner.Echo` on purpose -- the Echo path short-circuits every cluster-backed row to "skipped (preview)" before `storageRows` is reached, so a preview cannot see this either way, and a test written over Echo asserts nothing. The cluster-side namesake ran the class check regardless -- and since `validateStorage` refuses class and `customVolumeMount` together, it always fell through to the cluster default. On a cluster with no default (bare metal, static provisioning -- exactly why someone pre-creates PVCs) that FAILED the whole report over a class the deploy never touches, and advised setting a key `config.Load` then refuses. Also guards that dead-end advice against coming back |
 | `TestValidateStillChecksTheClassWhenOnlySomeNodesAreMounted` | The guard asks per role rather than off `UsesCustomMounts`, so a partly covered group -- which still has claims to bind -- keeps being checked. `validateStorage` forbids that state today; this is what stops the check silently disappearing if the rule is ever relaxed |
 | `TestCheckReportSkipsEmptySections` | A section with no rows (e.g. Placement on a standalone config) prints no header at all, rather than an empty block |
 | `TestStorageInfoRows` | Where each node's data volume comes from: the cluster's default StorageClass when neither a class nor mounts are set, a named class, a custom mount per role -- and, if `validateStorage`'s all-or-none rule is ever relaxed, a `[WARN]` for each node left out of `customVolumeMount` that quietly went back to default provisioning |
@@ -2565,7 +2568,7 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestManagerDockerComposeCommandOverride` | A `docker.compose` override (the standalone `docker-compose` binary) is what every compose call goes through |
 | `TestManagerDockerCheckProbesCompose` | Docker `check` probes the compose command, so a missing plugin fails at check time rather than at deploy time |
 | `TestManagerDockerCheckFailsWhenComposeMissing` | With only the compose probe failing, the error names the `docker.compose` override |
-| `TestManagerDeployDockerPassesSecretsAsEnv` | Deploy writes no secret file at all: `compose up -d` goes through `RunEnv` carrying `SOLACE_ADMIN_PASSWORD`/`SOLACE_REDUNDANCY_PSK`, no value reaches an argv, and the compose file holds the source/target/variable references and the `*filepath` pointer instead of either value |
+| `TestManagerDeployDockerPassesSecretsAsEnv` | Deploy writes no secret file at all: `compose up -d` carries its environment in `Cmd.Env` (recorded as `RunEnv`), `SOLACE_ADMIN_PASSWORD`/`SOLACE_REDUNDANCY_PSK`, no value reaches an argv, and the compose file holds the source/target/variable references and the `*filepath` pointer instead of either value |
 | `TestManagerDeployPodmanCreatesSecrets` | Deploy loads both secrets into podman's store under container-scoped names (`sol-pod-*`) with `secret rm --ignore` then `secret create` -- remove-then-create rather than `create --replace`, since `--replace` needs podman 4.7 while the rest of the wiring needs only 4.5, and `rm --ignore` makes the pair just as idempotent; the test pins `--replace`'s absence from every call, not only the new shape's presence. Values ride stdin and never reach an argv; the quadlet unit is 0600 |
 | `TestManagerDeployRejectsEmptySecret` | An empty required secret fails the deploy naming the field rather than starting a broker without one. It is a backstop rather than the everyday gate: on a loaded env file `config.Validate` has already refused an empty psk, so reaching this needs a `Config` built in code |
 | `TestManagerDeployDockerDryRunMasksSecretEnv` | Dry-run creates nothing, needs no secret value on disk, and echoes the compose environment as `NAME=***` without the password |
@@ -2822,50 +2825,32 @@ previewability.
 
 ## internal/engine
 
-The command runner seam: `Echo` (dry-run) and `Exec` (real subprocess), plus display
-quoting, PATH resolution, and the pre-exec announcement. 27 tests across 2 files.
+The wiring over the shared `runner` package: the `--verbose` announcer, `NoEnv` and
+`IsEcho`, and the stream helpers every call site goes through. Execution, PATH
+resolution, quoting, the echo runner and masking are the shared module's, and so are the
+tests that pinned them (listed with their sources in its `docs/test.md`). These tests drive
+`runnertest.Fake` and start no process. 7 tests across 2 files.
 
 ### runner_test.go
 
 | Test | What it covers |
 | --- | --- |
-| `TestHelperProcess` | Not a test -- the os/exec helper-process shim used as a fake external command by the `Exec` tests below |
-| `TestQuoteTok` | Display quoting per token: empty, plain, and every shell-significant character |
-| `TestQuote` | Whole command lines, including quoted and empty arguments |
-| `TestEchoRun` | `Run` echoes `+ <cmd>` |
-| `TestEchoRunInteractive` | `RunInteractive` echoes with quoting applied |
-| `TestEchoRunInput` | `RunInput` shows stdin as a byte count, never its contents |
-| `TestEchoRunEnv` | `RunEnv` echoes the command first and annotates the variables it would set after it (`<<< (env: NAME=***)`), so `+ <cmd>` stays greppable and no value is printed |
-| `TestEchoRunEnvNoEnv` | With nothing to annotate the line is exactly what `Run` prints, not a dangling `(env: )` |
-| `TestMaskEnv` | The masking helper keeps names (quoting an odd one) and drops values, including a value holding `=`, an empty one, and an entry with no `=` at all -- which is shown as `<malformed>` rather than echoed, since the whole entry may be the value |
-| `TestEchoOutput` | `Output` echoes and returns nil bytes |
-| `TestEchoDefaultWriter` | A zero-value `Echo` writes to stdout |
-| `TestExecOutput` | `Output` captures a child process's stdout |
-| `TestExecOutputFail` | A non-zero exit errors and the message names the binary |
-| `TestExecRun` | `Run` streams on success and errors (naming the binary) on failure |
-| `TestExecRunInput` | `RunInput` feeds stdin to the child and streams its output |
-| `TestExecRunEnv` | `RunEnv` gives the child the extra variable *and* still inherits this process's environment; a non-zero exit errors naming the binary |
-| `TestOnlyEnvRunnerCarriesRunEnv` | The interface narrowing, which is a security boundary rather than a tidiness one: `RunEnv` is how a secret reaches a child without passing through an argv, and exactly one caller needs it (the container manager's compose deploy, for docker's environment-sourced secrets). Every other runner holder -- the cluster, both transports, the mate channel -- has no business putting a value in a child's environment. Compile-time assertions that `Exec` and `Echo` satisfy BOTH interfaces so wiring is unaffected, plus a runtime check that a value reached only through `Runner` does not satisfy `EnvRunner` -- the negative half, because putting the method back on `Runner` would otherwise still compile and pass |
-| `TestExecRunInteractive` | `RunInteractive` runs a child to a clean exit |
-| `TestExecOutputInput` | OutputInput wires stdin from `in` into the child and captures stdout into the returned buffer rather than leaking it to the real terminal -- the curl -K - path this backs has no other way to get the response body back |
-| `TestExecOutputInputFail` | OutputInput wraps a child failure the same way Output does ("name: err") |
-| `TestEchoOutputInput` | the dry-run echo for the credential-bearing curl -K - path prints a byte count and never the stdin body, mirroring TestEchoRunInput but with an explicit assertion that the fake credential never appears in the echoed line |
+| `TestOnlyEnvRunnerCarriesRunEnv` | The narrowing, which is a security boundary rather than a tidiness one: `Cmd.Env` is how a secret reaches a child without passing through an argv, and exactly one caller needs it (the container manager's compose deploy, for docker's environment-sourced secrets). Every other runner holder -- the cluster, both transports, the mate channel -- wraps its runner in `NoEnv`. The unwrapped runner still passes environment; the wrapped one refuses it on `Run` and on `Attach`, naming the program and never an entry or a value, and never reaching the runner underneath; a malformed command is refused first; everything else passes through; and `IsEcho` sees through the wrapper for an echo runner and for nothing else |
+| `TestRunStreamsToThisProcess` | `Run` hands the child this process's stdout and stderr, carries `Cmd.Stdin`, and returns the runner's error as it came |
+| `TestOutputCapturesStdoutAndStreamsStderr` | `Output` returns the captured stdout -- the text too when the run failed, since a broker CLI or kubectl says why in that stream -- and leaves stderr live on this process's |
+| `TestInteractiveReturnsTheSessionStatus` | `Interactive` attaches this process's terminal: status 0 is nil, a non-zero status is an `exitcode.Exited` error reading `name: exit status N` that is a plain failure until `ChildExit` marks it and then passes N through, and an `Attach` error (the session never ran) is returned as it is with no status |
 
 ### resolve_test.go
 
-PATH resolution and the command announcement -- the transparency half of the
-execution guard, which lives here because this is where a binary is actually run.
-The announcement is injected (`Exec.Announce`) rather than written to a package
-variable, so what a run prints is decided by the CLI, in one place.
+The command announcement -- the transparency half of the execution guard. The announcement
+is injected (`Announce`) rather than written to a package variable, so what a run prints is
+decided by the CLI, in one place.
 
 | Test | What it covers |
 | --- | --- |
-| `TestExecVerboseAnnouncesEveryCommand` | Under `--verbose`, `Exec` writes `==> exec: <absolute resolved path> <args>` before each command -- the path, not the name as typed, with the arguments alongside -- and on *every* call, since a trail with one entry per binary would not answer "what did this run issue?" |
-| `TestExecIsSilentWithoutVerbose` | The default runner announces nothing, and neither does a bare `Exec{}`: nil `Announce` is the quiet default rather than a hole that falls back to stderr. The CLI names the binaries once in its preamble instead, which is what stopped the same resolved path landing between report lines on every command |
-| `TestExecEchoesOnEveryMethod` | All six `Runner` methods announce, not just `Run` -- and `Output`/`OutputInput`, which read cluster state, are the least visible to begin with |
-| `TestResolveMissingBinaryIsActionable` | A name that resolves nowhere fails before any process starts, naming what was not found rather than a path the operator never typed. Asserted on `Resolve` (which the CLI preamble now shares) and again through `Exec.Run` |
-| `TestResolveRefusesCurrentDirectory` | The pair to config's bare-name rule: a bare name must never resolve to a file in the working directory -- the binary unpacked beside a shared env file. Go reports it as `exec.ErrDot`; hosts that do not offer the cwd copy at all are logged and still asserted not to run it |
-| `TestChildEnvNamesAreNotSystemVariables` | The variable names this tool passes to a child are never `PATH`, `LD_PRELOAD` or their relatives, and their values stay masked in display paths. The upstream half is container's `TestComposeSecretEnvNamesCannotBeSystemVars` |
+| `TestExecVerboseAnnouncesEveryCommand` | Under `--verbose`, the runner's announcer writes `==> exec: <absolute resolved path> <args>`, the arguments quoted by the shared `runner.Quote`, once per call -- on *every* call, since a trail with one entry per binary would not answer "what did this run issue?". Driven through the announcer, since the shared runner's own tests pin that it is called with the resolved path before each command |
+| `TestExecIsSilentWithoutVerbose` | The default runner announces nothing, and neither does a bare `runner.Exec{}`: nil `Announce` is the quiet default rather than a hole that falls back to stderr. The CLI names the binaries once in its preamble instead, which is what stopped the same resolved path landing between report lines on every command |
+| `TestChildEnvNamesAreNotSystemVariables` | The variable names this tool passes to a child are never `PATH`, `LD_PRELOAD` or their relatives, and their values stay masked by `runner.MaskEnv`. The upstream half is container's `TestComposeSecretEnvNamesCannotBeSystemVars` |
 
 ---
 
@@ -3069,7 +3054,7 @@ new fake.
 | internal/broker | `seqTransport`, `newLocalOps`, `rd`, `sempOK`, `isCurl`, `curlCalls` (verify_local_test.go) | Scripts a sequence of `show redundancy` readings for the primary-driven HA ops; the responder's curl branch answers the mate SEMP channel with the canned `sempOK` reply, and `curlCalls` extracts the recorded SEMP execs for URL/stdin assertions. `localCfg` carries the mate IPs and admin creds the channel needs |
 | internal/broker | `serverCert` (semp_test.go) | The `config.TLS{Cert, CertKey}` pair that makes `sempPort`/`BackupSEMPPreflight`/`BackupRevertActivity` prefer the mate's TLS listener; every TLS-expecting case sets it explicitly since a plaintext broker is what every other test already covers |
 | internal/broker | `assertNoPasswordInArgv` (semp_test.go) | The shared S3 boundary check reused by every mate-SEMP test (plaintext and TLS alike): no argv token may carry the admin password or the RPC body |
-| internal/k8s | `recRunner` / `rrCall` (transport_test.go) | Capturing `engine.Runner` with `outQueue` and `runErrQueue` for scripting multi-step ops, plus `outErrQueue` (per-`Output` errors, so one read in an op can fail while an earlier one succeeds) and `runInputErr` (fails `apply -f -` / `delete -f -`). Both queues fall back to the blanket `outErr`/`runErr` once drained, so a test that sets only those behaves as before. `canI`/`canIErr` answer `Cluster.Preflight`'s `auth can-i` probe out of band (default: permitted) so it never consumes a queued read written for a different call, `canIByVerb` answers one verb's probes differently (`escalate` refused while `create` is permitted), and `canIByResource` one resource's, named probes included (`namespaces` refused while every namespaced probe is permitted), winning over `canIByVerb`; `withoutNamespaceStage` drops a deploy's namespace read and `create namespaces` probe so a sequence test counts only the calls it is about; `afterPreflight` asserts the probe came first and returns the calls after it |
+| internal/k8s | `recRunner` / `rrCall` (transport_test.go) | Capturing `runner.Runner` with `outQueue` and `runErrQueue` for scripting multi-step ops, plus `outErrQueue` (per-`Output` errors, so one read in an op can fail while an earlier one succeeds) and `runInputErr` (fails `apply -f -` / `delete -f -`). Both queues fall back to the blanket `outErr`/`runErr` once drained, so a test that sets only those behaves as before. `canI`/`canIErr` answer `Cluster.Preflight`'s `auth can-i` probe out of band (default: permitted) so it never consumes a queued read written for a different call, `canIByVerb` answers one verb's probes differently (`escalate` refused while `create` is permitted), and `canIByResource` one resource's, named probes included (`namespaces` refused while every namespaced probe is permitted), winning over `canIByVerb`; `withoutNamespaceStage` drops a deploy's namespace read and `create namespaces` probe so a sequence test counts only the calls it is about; `afterPreflight` asserts the probe came first and returns the calls after it |
 | internal/k8s | `errListDenied`, `namedOperatorJSON`, `deniedRunner`, `deniedCluster` (watch_test.go) | An identity that may not list Deployments cluster-wide: `deniedRunner` fails `get deployment --all-namespaces` with `errListDenied` and answers the by-name read in the operator namespace with the given reply -- nil being what `--ignore-not-found` prints when nothing is there. `namedOperatorJSON` builds that reply in the shape production gets, the bare OBJECT `normalizeToList` must wrap, not a List. `deniedCluster` adds a minimal config and narration captured in a buffer |
 | internal/k8s | `tlsCfg` (prep_test.go) | `haCfg` with a certificate pair on disk, so the TLS Secret is one this env file builds under `dev-broker-tls` |
 | internal/k8s | `haCfg`, `saCfg` (names_test.go), `adminCfg` (prep_test.go), `loadK8s` (secrets_test.go) | Config builders |
@@ -3080,14 +3065,14 @@ new fake.
 | internal/k8s | `covApplyRunner`, `covSwapBundle` (operator_test.go) | `covApplyRunner` is a `recRunner` whose `apply -f -` / `delete -f -` fails only for the manifests a predicate picks, so a test can let the Namespace through and fail the Secret or the bundle after it (`runInputErr` fails every call alike). `covSwapBundle` replaces the embedded operator bundle for one test and restores it -- a template that does not render, a bundle with no Namespace or CRD document; it writes a package variable, so no test using it may call `t.Parallel` |
 | internal/cli | `renderCommandDocs`, `-update` flag (commanddoc_test.go) | Renders `docs/commands.md` from the cobra tree; the doc is the golden |
 | internal/cli | `renderAbbrevDocs`, `treeShorthands` (abbrevdoc_test.go) | Renders `docs/abbreviation.md` from the command/role/platform sets plus every single-letter flag in the tree. Shares commanddoc_test.go's `-update` flag, so one `regen` rewrites both goldens |
-| internal/container | `capRunner` / `failOn` (transport_test.go) | Capturing runner whose `fail` (Run family) and `outFail` (Output family) hooks error on a targeted command, driving each error-wrap branch -- `failOn("info")` is how a failed engine preflight is injected. `outFail` exists because the blanket `outErr` cannot single out one of two probes in the same call. `capCall.env` records the extra environment of a `RunEnv` call, which is how the docker secret path is asserted |
-| internal/container | `containsStr`, `maskedKeys` (manager_test.go) | Exact-match lookup in a captured environment, and `engine.MaskEnv` for failure messages -- a test diagnostic must not print a secret either |
+| internal/container | `capRunner` / `failOn` (transport_test.go) | Capturing runner whose `fail` (Run family) and `outFail` (Output family) hooks error on a targeted command, driving each error-wrap branch -- `failOn("info")` is how a failed engine preflight is injected. `outFail` exists because the blanket `outErr` cannot single out one of two probes in the same call. `capCall.env` records the `Cmd.Env` of a call, which is how the docker secret path is asserted. Each fake in this table implements `Run`/`Attach` and records the old method label (`Run`, `RunInput`, `RunEnv`, `Output`, `OutputInput`, `RunInteractive`) derived from the call by a `legacyMethod` helper in its package: an attached session is `RunInteractive`; a streamed stdout (`os.Stdout`) is `RunEnv` with `Env`, `RunInput` with `Stdin`, else `Run`; a captured stdout is `OutputInput` with `Stdin`, else `Output`. Captured answers are written to the stdout writer passed in |
+| internal/container | `containsStr`, `maskedKeys` (manager_test.go) | Exact-match lookup in a captured environment, and `runner.MaskEnv` for failure messages -- a test diagnostic must not print a secret either |
 | internal/container | `newEchoMgr`, `newCapMgr`, `ctrCfg` (manager_test.go) | Manager over dry-run Echo, or over the capturing runner for real file writes. `ctrCfg` leaves `podman.baseDir` unset, since deploy and remove delete a file under it; the clean-up tests point it at a `t.TempDir()`. `Manager.Confirm` is the injectable restart prompt (nil declines, which is what a non-interactive run must do) and `Manager.Restart` is the `--restart` pre-approval |
 | internal/container | `assertMode` (manager_test.go) | Permission-bit assertion for the artifacts the manager writes; skipped on Windows, which carries no POSIX mode |
 | internal/container | `certFixture`, `certCreate`, `bundleHash`, `writeLegacyBundle` (secrets_test.go) | A real key and certificate on disk plus the bundle they should produce; the captured `secret create` for a named secret; the `solace-util.sha256` label a bundle gets; and a legacy bundle file under a fresh `podman.baseDir` |
 | internal/cli | `runRoot`, `capture`/`captureStdout`/`captureStderr` (cli_test.go) | Builds a fresh command tree per call and captures a standard stream through a pipe |
 | internal/cli | `runRootWith` (cli_test.go) | `runRoot` with a hook to configure the `App` before `Execute` -- how the confirm-prompt branches are driven deterministically instead of depending on the test process's own stdin. `runRoot` delegates to it with a nil hook, so it is unchanged for every existing test |
-| internal/cli | `opRunner` / `opCall` / `opFailOn` / `opFailOnCount` (cli_test.go) | A fake `engine.Runner` whose failure is targeted by argv substring (or by the Nth matching occurrence, for the repeated identical `apply`/`delete` calls in `broker deploy` and `broker remove`). Ported from internal/container's `capRunner`/`failOn`; this is what makes the orchestration-abort tests possible -- assert step N fails and step N+1 never ran. `Output` answers the k8s `auth can-i` preflight "yes" unless a test supplies its own `output`/`fail` for that call, so the op-level tests stay about the work they were written for |
+| internal/cli | `opRunner` / `opCall` / `opFailOn` / `opFailOnCount` (cli_test.go) | A fake `runner.Runner` whose failure is targeted by argv substring (or by the Nth matching occurrence, for the repeated identical `apply`/`delete` calls in `broker deploy` and `broker remove`). Ported from internal/container's `capRunner`/`failOn`; this is what makes the orchestration-abort tests possible -- assert step N fails and step N+1 never ran. `Output` answers the k8s `auth can-i` preflight "yes" unless a test supplies its own `output`/`fail` for that call, so the op-level tests stay about the work they were written for |
 | internal/cli | `loadDirect`, `healthyShowRD`, `standbyShowRD` (cli_test.go) | Loads a config from an inline YAML body for tests that build an `App` directly with a non-Echo runner; `healthyShowRD` is a canned `show redundancy` of a healthy primary that holds activity (it satisfies `broker.primaryRedundancyUp` and reports Local Active), `standbyShowRD` the same node with its mate holding activity |
 | internal/cli | `runLeader` / `leaderRun` (cli_test.go) | Drives `broker perform assert-leader` through cobra over env/sample.yaml with an `opRunner` (Echo's empty `show redundancy` is never Local Active, so it cannot reach the assert), the `App.Hostname`/`LocalAddrs`/`Geteuid`/`Interactive`/`PromptIn` seams, and `exportconfigReadCounter` so a case can prove the question was never asked |
 | internal/cli | `writeK8sTLSEnv`, `tlsSecretDigest`, `isGetPod`/`isDeletePod` (cli_test.go) | A k8s env with a certificate pair on disk (the derived `dev-broker-tls` Secret), the digest the rendered Secret carries (read off `k8s.TLSSecret`, not recomputed), and the two pod calls a certificate restart turns on |
@@ -3108,7 +3093,7 @@ new fake.
 | internal/broker | `showReplicationSoftware`, `showReplicationAppliance`, `mateSoftware`, `mateAppliance` (replication_test.go) | Embedded `show replication` reports in both platform layouts, transcribed from the real captures with synthetic addresses. Embedded rather than read from `semp/`, which is gitignored -- a test that only read the real files would skip in CI, exactly where it matters most |
 | internal/config | `validReplication`, `replConfig` (replication_test.go) | A complete, well-formed DR pair -- one site reached over its own cluster CLI, the other over SEMP -- attached to `validK8sConfig`. The two sites deliberately differ in mechanism, so a bug that only reads `via.kubernetes` cannot pass |
 | internal/config | `controlCharCases` (config_test.go) | The shared table of malformed control-character values (newline, CR, NUL, DEL, ...) every credential and additionalUsers-password rejection test drives against its own field |
-| internal/engine | `helperCommand` + `TestHelperProcess` (runner_test.go) | Re-invokes the test binary as a fake external command |
+| internal/engine | `runnertest.Fake` (shared module) | The recording `runner.Runner` the engine tests drive in place of a process: scripted replies, with the writers and the `Attach` flag recorded per call |
 
 ### Injectable seams
 
@@ -3132,7 +3117,7 @@ Override them on the struct after construction:
 | `Ops.LocalAddrs` | `defaultLocalAddrs` (`net.InterfaceAddrs`) | internal/broker -- the address pass of `DetectRole`. `newTestOps` defaults it to an EMPTY set, so no test's "this host matches nothing" case depends on how the machine running the suite is numbered |
 | `App.LocalAddrs` | `nil` (`ctrOps` then leaves `Ops.LocalAddrs` at its own default) | internal/cli -- the same injection one level up, for the container role detection behind `broker deploy`, `broker generate` and `broker perform assert-leader` |
 | `App.Hostname` | `nil` (`ctrOps` then leaves `Ops.Hostname` at its own default, `os.Hostname`) | internal/cli -- same shape as `NewRunner`/`Interactive`/`PromptIn`: a test injects a fixed hostname so `containerRole` (the role detection behind `broker deploy`, `broker generate` and `broker perform assert-leader` on docker/podman) is testable without depending on the suite's own host being named after a broker node |
-| `engine.Runner` | `engine.Exec` | Everywhere -- swapped for `engine.Echo` (dry-run) or a capturing fake |
+| `runner.Runner` | `runner.Exec` (built by `engine.NewExec`) | Everywhere -- swapped for `runner.Echo` (dry-run) or a capturing fake |
 | `Cluster.Log` / `Manager.Log` / `Ops.Log` | nil (discards) | The RAW progress line sink. It takes an already-formatted line and emits it verbatim: the `==> ` and `[TAG ] ` prefixes are added by the `internal/output` Sink the callee builds over it (`progress()`), so a test that captures this field sees exactly the line a terminal would. The CLI passes `lineSink()`; nil discards |
 | `Cluster.Out` / `Manager.Out` / `Ops.Out` | `os.Stdout` | The report sink -- sections, key/value blocks, tables and per-item outcome lines. Wrapped by `report()` |
 | `Cluster.Now` | `time.Now` | internal/k8s -- the clock the status reports' AGE column reads; fixed in tests (`reportCluster`) so it is reproducible against a captured fixture's timestamp |

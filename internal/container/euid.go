@@ -3,6 +3,8 @@ package container
 import (
 	"fmt"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
 	"solace/internal/engine"
 )
@@ -28,11 +30,11 @@ import (
 // schema; the Echo runner, whose preview reaches no host; and a platform with no
 // POSIX euid (Windows returns -1), where there is nothing to compare against and
 // the artifact still has to render.
-func GuardPodmanEUID(cfg *config.Config, p config.Platform, r engine.Runner, euid int) error {
+func GuardPodmanEUID(cfg *config.Config, p config.Platform, r runner.Runner, euid int) error {
 	if p != config.Podman {
 		return nil
 	}
-	if _, echo := r.(engine.Echo); echo {
+	if engine.IsEcho(r) {
 		return nil
 	}
 	if euid < 0 {

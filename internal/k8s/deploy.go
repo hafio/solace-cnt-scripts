@@ -56,13 +56,13 @@ func (c *Cluster) DeployBroker(ctx context.Context, keepYAML bool) error {
 //
 // A runner that answers with NOTHING has not told us the broker is absent -- it has told
 // us nothing at all, which is a different fact and must not be reported as the alarming
-// one. That is the preview case (engine.Echo has no cluster behind it), and it is also
+// one. That is the preview case (runner.Echo has no cluster behind it), and it is also
 // any seam a test installs.
 //
 // The distinction is drawn on the OBSERVATION rather than on the runner type. A real
 // `kubectl get <resource> <name>` for an object that does not exist exits non-zero and
 // is caught as an error above, so a successful call returning no output can only mean
-// nobody answered -- which is true of every silent runner, not just engine.Echo.
+// nobody answered -- which is true of every silent runner, not just runner.Echo.
 func (c *Cluster) ConfirmBrokerApplied(ctx context.Context) error {
 	name := c.Cfg.K8s.Name
 	raw, err := c.kubectlOutput(ctx, "get", brokerResource, name, "-n", c.ns(), "-o", "json")

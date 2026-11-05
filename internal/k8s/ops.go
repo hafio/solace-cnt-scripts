@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
+	"solace/internal/engine"
 )
 
 // rolloutTimeout bounds the readiness wait after scaling a broker StatefulSet up.
@@ -51,7 +54,7 @@ func (c *Cluster) interactiveExec(ctx context.Context, role config.Role, argv ..
 	if err != nil {
 		return err
 	}
-	return c.R.RunInteractive(ctx, k.Name(), k.Args(args...)...)
+	return engine.Interactive(c.R, runner.Cmd{Argv: k.Argv(args...)})
 }
 
 // CLI opens an interactive Solace CLI session on a role's pod, porting

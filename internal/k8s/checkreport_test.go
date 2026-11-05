@@ -8,8 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
-	"solace/internal/engine"
 	"solace/internal/output"
 )
 
@@ -30,7 +31,7 @@ func TestValidateNeverPrintsASecret(t *testing.T) {
 	cfg.TLS.CertKey = "/path/to/tls.key"
 
 	buf := &bytes.Buffer{}
-	c := NewCluster(engine.Echo{W: buf}, cfg, nil, buf)
+	c := NewCluster(runner.Echo{W: buf}, cfg, nil, buf)
 	if err := c.Validate(context.Background()); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -51,7 +52,7 @@ func TestValidateNeverPrintsASecret(t *testing.T) {
 // that were split out on purpose (cpu and mem never share a line).
 func TestValidateGroupsAndOrdersSections(t *testing.T) {
 	buf := &bytes.Buffer{}
-	c := NewCluster(engine.Echo{W: buf}, loadK8s(t), nil, buf)
+	c := NewCluster(runner.Echo{W: buf}, loadK8s(t), nil, buf)
 	if err := c.Validate(context.Background()); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -92,7 +93,7 @@ func TestValidateGroupsAndOrdersSections(t *testing.T) {
 // tagged unverified config as OK would claim verification nobody did.
 func TestValidateTagsEchoedConfigAsINFO(t *testing.T) {
 	buf := &bytes.Buffer{}
-	c := NewCluster(engine.Echo{W: buf}, loadK8s(t), nil, buf)
+	c := NewCluster(runner.Echo{W: buf}, loadK8s(t), nil, buf)
 	if err := c.Validate(context.Background()); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -122,7 +123,7 @@ func TestValidateSaysWhoOwnsTheAdminSecret(t *testing.T) {
 		cfg := loadK8s(t) // adminPass, monitorPass, psk and adminSecret all set
 		mutate(cfg)
 		buf := &bytes.Buffer{}
-		if err := NewCluster(engine.Echo{W: buf}, cfg, nil, buf).Validate(context.Background()); err != nil {
+		if err := NewCluster(runner.Echo{W: buf}, cfg, nil, buf).Validate(context.Background()); err != nil {
 			t.Fatalf("Validate: %v", err)
 		}
 		return buf.String()
@@ -167,7 +168,7 @@ func TestValidateSaysTheOperatorGeneratesTheMonitorPassword(t *testing.T) {
 	cfg := loadK8s(t)
 	cfg.SEMP.MonitorPass = ""
 	buf := &bytes.Buffer{}
-	c := NewCluster(engine.Echo{W: buf}, cfg, nil, buf)
+	c := NewCluster(runner.Echo{W: buf}, cfg, nil, buf)
 	if err := c.Validate(context.Background()); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -190,7 +191,7 @@ func TestValidateSparseConfigExplainsItself(t *testing.T) {
 	cfg.SEMP.AdminPass, cfg.SEMP.MonitorPass, cfg.Redundancy.PSK = "", "", ""
 
 	buf := &bytes.Buffer{}
-	c := NewCluster(engine.Echo{W: buf}, cfg, nil, buf)
+	c := NewCluster(runner.Echo{W: buf}, cfg, nil, buf)
 	if err := c.Validate(context.Background()); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -476,7 +477,7 @@ func TestValidateReportsResolvedPorts(t *testing.T) {
 	cfg.K8s.Ports = []string{"tcp-custom=9100", "tls-custom=9443"}
 
 	buf := &bytes.Buffer{}
-	c := NewCluster(engine.Echo{W: buf}, cfg, nil, buf)
+	c := NewCluster(runner.Echo{W: buf}, cfg, nil, buf)
 	if err := c.Validate(context.Background()); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -508,7 +509,7 @@ func TestValidateReportsUnsetPorts(t *testing.T) {
 	}
 
 	buf := &bytes.Buffer{}
-	c := NewCluster(engine.Echo{W: buf}, cfg, nil, buf)
+	c := NewCluster(runner.Echo{W: buf}, cfg, nil, buf)
 	if err := c.Validate(context.Background()); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -547,7 +548,7 @@ func TestPortRowsNeverFail(t *testing.T) {
 // plus every ports row) must not move rep.failed(scopeAll) off zero.
 func TestValidateConfigSectionNeverFails(t *testing.T) {
 	buf := &bytes.Buffer{}
-	c := NewCluster(engine.Echo{W: buf}, loadK8s(t), nil, buf)
+	c := NewCluster(runner.Echo{W: buf}, loadK8s(t), nil, buf)
 	rep := &checkReport{}
 	c.validationRows(rep)
 	if got := rep.failed(scopeAll); got != 0 {
@@ -587,7 +588,7 @@ func TestValidateReportsThePreSharedKeyChoice(t *testing.T) {
 		cfg := loadK8s(t)
 		mutate(cfg)
 		buf := &bytes.Buffer{}
-		c := NewCluster(engine.Echo{W: buf}, cfg, nil, buf)
+		c := NewCluster(runner.Echo{W: buf}, cfg, nil, buf)
 		if err := c.Validate(context.Background()); err != nil {
 			t.Fatalf("Validate: %v", err)
 		}
@@ -632,7 +633,7 @@ func TestValidateSaysWhoOwnsTheTLSSecret(t *testing.T) {
 		cfg.K8s.TLSServerSecret = "solace-tls-secret"
 		mutate(cfg)
 		buf := &bytes.Buffer{}
-		c := NewCluster(engine.Echo{W: buf}, cfg, nil, buf)
+		c := NewCluster(runner.Echo{W: buf}, cfg, nil, buf)
 		if err := c.Validate(context.Background()); err != nil {
 			t.Fatalf("Validate: %v", err)
 		}
@@ -693,7 +694,7 @@ func TestValidateReportsTheDerivedImagePullSecretName(t *testing.T) {
 		cfg := loadK8s(t)
 		mutate(cfg)
 		buf := &bytes.Buffer{}
-		c := NewCluster(engine.Echo{W: buf}, cfg, nil, buf)
+		c := NewCluster(runner.Echo{W: buf}, cfg, nil, buf)
 		if err := c.Validate(context.Background()); err != nil {
 			t.Fatalf("Validate: %v", err)
 		}
@@ -732,7 +733,7 @@ func TestValidateReportsTheDerivedImagePullSecretName(t *testing.T) {
 // exactly why someone pre-creates PVCs) that FAILED the whole report over a class the
 // deploy never touches, and told the operator to set a key config.Load would then refuse.
 //
-// It drives a recording runner rather than engine.Echo on purpose: the Echo path short-
+// It drives a recording runner rather than runner.Echo on purpose: the Echo path short-
 // circuits every cluster-backed row to "skipped (preview)" before storageRows is reached,
 // so a preview cannot see this either way. recRunner answers the class lookup with nothing,
 // which is precisely the no-default-StorageClass cluster the bug bit on.
@@ -1013,7 +1014,7 @@ func TestOperatorInstallVerdictShowsOnceInEveryView(t *testing.T) {
 		"operator validate": (*Cluster).ValidateOperator,
 	} {
 		buf := &bytes.Buffer{}
-		if err := run(NewCluster(engine.Echo{W: buf}, loadK8s(t), nil, buf), context.Background()); err != nil {
+		if err := run(NewCluster(runner.Echo{W: buf}, loadK8s(t), nil, buf), context.Background()); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 		if got := strings.Count(buf.String(), "[SKIP] "+installKey); got != 1 {
@@ -1153,7 +1154,7 @@ func TestAdditionalUsersRowSaysWhereThePasswordsLand(t *testing.T) {
 	}
 
 	buf := &bytes.Buffer{}
-	if err := NewCluster(engine.Echo{W: buf}, cfg, nil, buf).Validate(context.Background()); err != nil {
+	if err := NewCluster(runner.Echo{W: buf}, cfg, nil, buf).Validate(context.Background()); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 	out := buf.String()

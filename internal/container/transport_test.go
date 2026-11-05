@@ -4,15 +4,18 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/broker"
 	"solace/internal/config"
-	"solace/internal/engine"
 )
 
-// --- capturing fake engine.Runner ------------------------------------------
+// --- capturing fake runner.Runner ------------------------------------------
 
 type capCall struct {
 	method string // Run | RunInput | RunEnv | RunInteractive | Output | OutputInput
@@ -53,35 +56,46 @@ func (r *capRunner) outputFor(name string, args []string) []byte {
 	return r.out
 }
 
-func (r *capRunner) Run(_ context.Context, name string, args ...string) error {
-	r.calls = append(r.calls, capCall{method: "Run", name: name, args: args})
-	return r.failFor(name, args)
+// legacyMethod names a call the way the retired five-method Runner interface did, so the
+// recorded sequences and their assertions keep reading as they always have: a captured
+// stdout is Output (OutputInput with stdin), a streamed one is Run (RunEnv with env,
+// RunInput with stdin), and an attached session is RunInteractive.
+func legacyMethod(c runner.Cmd, stdout io.Writer) string {
+	switch {
+	case stdout != io.Writer(os.Stdout) && c.Stdin != nil:
+		return "OutputInput"
+	case stdout != io.Writer(os.Stdout):
+		return "Output"
+	case c.Env != nil:
+		return "RunEnv"
+	case c.Stdin != nil:
+		return "RunInput"
+	}
+	return "Run"
 }
-func (r *capRunner) RunInput(_ context.Context, in []byte, name string, args ...string) error {
-	r.calls = append(r.calls, capCall{method: "RunInput", name: name, args: args, stdin: string(in)})
-	return r.failFor(name, args)
+
+// Run records the call under its legacy method name and answers it as that method did: a
+// streamed call fails through fail, a captured one answers out and fails through outFail,
+// writing the answer to the stdout it was handed.
+func (r *capRunner) Run(_ context.Context, c runner.Cmd, stdout, _ io.Writer) error {
+	call := capCall{method: legacyMethod(c, stdout), name: c.Argv[0], args: c.Argv[1:], stdin: string(c.Stdin), env: c.Env}
+	r.calls = append(r.calls, call)
+	if call.method == "Output" || call.method == "OutputInput" {
+		_, _ = stdout.Write(r.outputFor(call.name, call.args))
+		return r.outFailFor(call.name, call.args)
+	}
+	return r.failFor(call.name, call.args)
 }
-func (r *capRunner) RunEnv(_ context.Context, extraEnv []string, name string, args ...string) error {
-	r.calls = append(r.calls, capCall{method: "RunEnv", name: name, args: args, env: extraEnv})
-	return r.failFor(name, args)
-}
-func (r *capRunner) RunInteractive(_ context.Context, name string, args ...string) error {
-	r.calls = append(r.calls, capCall{method: "RunInteractive", name: name, args: args})
-	return r.failFor(name, args)
+func (r *capRunner) Attach(c runner.Cmd, _, _, _ *os.File) (int, error) {
+	call := capCall{method: "RunInteractive", name: c.Argv[0], args: c.Argv[1:]}
+	r.calls = append(r.calls, call)
+	return 0, r.failFor(call.name, call.args)
 }
 func (r *capRunner) failFor(name string, args []string) error {
 	if r.fail == nil {
 		return nil
 	}
 	return r.fail(name, args)
-}
-func (r *capRunner) Output(_ context.Context, name string, args ...string) ([]byte, error) {
-	r.calls = append(r.calls, capCall{method: "Output", name: name, args: args})
-	return r.outputFor(name, args), r.outFailFor(name, args)
-}
-func (r *capRunner) OutputInput(_ context.Context, in []byte, name string, args ...string) ([]byte, error) {
-	r.calls = append(r.calls, capCall{method: "OutputInput", name: name, args: args, stdin: string(in)})
-	return r.outputFor(name, args), r.outFailFor(name, args)
 }
 
 // outFailFor prefers the targeted outFail hook, falling back to the blanket
@@ -259,12 +273,12 @@ func TestTransportCopy(t *testing.T) {
 	}
 }
 
-// --- end-to-end: a real broker.Ops over engine.Echo never echoes the body ----
+// --- end-to-end: a real broker.Ops over runner.Echo never echoes the body ----
 
 func TestTransportEchoHidesUploadBody(t *testing.T) {
 	buf := &bytes.Buffer{}
 	cfg := podmanCfg()
-	tr := NewTransport(engine.Echo{W: buf}, cfg, config.Podman)
+	tr := NewTransport(runner.Echo{W: buf}, cfg, config.Podman)
 	o := broker.New(tr, cfg, nil)
 
 	body := "SECRET-CLI-BODY\n"
@@ -312,7 +326,7 @@ func TestTransportEchoHidesSEMPConfig(t *testing.T) {
 	cfg.Redundancy.Enabled = "true"
 	cfg.SEMP = config.SEMP{AdminPass: "SECRET-ADMIN-PW"}
 	cfg.Redundancy.Backup.Addr = "10.0.0.12"
-	tr := NewTransport(engine.Echo{W: buf}, cfg, config.Podman)
+	tr := NewTransport(runner.Echo{W: buf}, cfg, config.Podman)
 	o := broker.New(tr, cfg, nil)
 
 	if err := o.BackupSEMPPreflight(context.Background()); err == nil {

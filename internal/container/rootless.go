@@ -7,7 +7,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
+	"solace/internal/engine"
 )
 
 // The two variables that decide whether `systemctl --user` and `loginctl` can
@@ -138,10 +141,10 @@ func (m *Manager) rootlessRows(ctx context.Context, euid int, fix bool) error {
 // An INHERITED value is never overwritten: an operator who set one meant it. Only
 // an empty variable is filled, and the report says which half came from where.
 //
-// The mechanism is os.Setenv through a seam, not engine.EnvRunner.RunEnv: RunEnv is
-// deliberately a separate interface so that putting a value in a child's
+// The mechanism is os.Setenv through a seam, not Cmd.Env: every holder but the compose
+// manager wraps its runner in engine.NoEnv so that putting a value in a child's
 // environment stays the compose-secrets path alone. Neither of these is a secret,
-// and routing them through RunEnv would reopen the door that split exists to close.
+// and routing them through Cmd.Env would reopen the door that wrapper exists to close.
 //
 // It is memoised because every systemctl call funnels through it, and it must
 // probe once per run rather than once per command.
@@ -162,7 +165,7 @@ func (m *Manager) ensureUserSession(ctx context.Context) error {
 	if xdg == "" {
 		xdg, derivedDir = userRuntimeDirBase+strconv.Itoa(euid), true
 	}
-	if _, err := m.R.Output(ctx, "sh", "-c", `test -d "$0"`, xdg); err != nil {
+	if _, err := engine.Output(ctx, m.R, runner.Cmd{Argv: []string{"sh", "-c", `test -d "$0"`, xdg}}); err != nil {
 		m.sessionErr = fmt.Errorf("the user runtime directory %s does not exist, so `systemctl --user` and "+
 			"`loginctl` have no bus to talk to.\n"+
 			"  Either this process is running under sudo/su/cron (which strip %s -- run as the rootless "+
@@ -301,7 +304,8 @@ const (
 // so on a host configured that way the proposal is still worth checking.
 func (m *Manager) suggestSubIDRange(ctx context.Context, need int) (start, end int, computed bool) {
 	size := max(subIDBlock, need)
-	out, err := m.R.Output(ctx, "sh", "-c", "cat /etc/subuid /etc/subgid 2>/dev/null")
+	out, err := engine.Output(ctx, m.R,
+		runner.Cmd{Argv: []string{"sh", "-c", "cat /etc/subuid /etc/subgid 2>/dev/null"}})
 	if err != nil {
 		return subIDFloor, subIDFloor + size - 1, false
 	}
@@ -330,7 +334,7 @@ func (m *Manager) suggestSubIDRange(ctx context.Context, need int) (start, end i
 // /etc/passwd and would miss exactly the directory accounts most likely to be here.
 // The numeric uid is a usable fallback: usermod accepts it too.
 func (m *Manager) hostUserName(ctx context.Context, euid int) string {
-	out, err := m.R.Output(ctx, "id", "-un")
+	out, err := engine.Output(ctx, m.R, runner.Cmd{Argv: []string{"id", "-un"}})
 	if name := strings.TrimSpace(string(out)); err == nil && name != "" {
 		return name
 	}
@@ -405,7 +409,8 @@ func idMapCovers(ranges string, id int) bool {
 // address.
 func (m *Manager) ensureLinger(ctx context.Context, euid int, user string, fix bool) error {
 	r := m.report()
-	out, err := m.R.Output(ctx, "loginctl", "show-user", strconv.Itoa(euid), "--property=Linger")
+	out, err := engine.Output(ctx, m.R,
+		runner.Cmd{Argv: []string{"loginctl", "show-user", strconv.Itoa(euid), "--property=Linger"}})
 	if err != nil {
 		r.Fail("linger: cannot read this user's linger state from loginctl")
 		return fmt.Errorf("cannot read this user's linger state (`loginctl show-user %d --property=Linger`): %w\n"+
@@ -431,7 +436,7 @@ func (m *Manager) ensureLinger(ctx context.Context, euid int, user string, fix b
 	// No username argument: this enables it for the invoking user, which is the
 	// variant that needs no privilege. Naming a user would be the one that does.
 	m.logf("enabling linger for uid %d, so the broker survives logout and starts at boot", euid)
-	if err := m.R.Run(ctx, "loginctl", "enable-linger"); err != nil {
+	if err := engine.Run(ctx, m.R, runner.Cmd{Argv: []string{"loginctl", "enable-linger"}}); err != nil {
 		r.Fail("linger: could not enable it for uid %d", euid)
 		// polkit normally grants this for your own account, so a refusal means an
 		// inactive session or a tightened set-self-linger -- either way what is left
@@ -472,7 +477,7 @@ func (m *Manager) checkUserSystemd(ctx context.Context) error {
 func (m *Manager) checkDataDir(ctx context.Context, user string) error {
 	r := m.report()
 	dir := m.Cfg.ContainerBlock(m.P).DataDir
-	out, err := m.R.Output(ctx, "sh", "-c", nearestWritableScript, dir)
+	out, err := engine.Output(ctx, m.R, runner.Cmd{Argv: []string{"sh", "-c", nearestWritableScript, dir}})
 	existing := strings.TrimSpace(string(out))
 	if err == nil {
 		r.OK("data dir: %s is creatable (%s is writable)", dir, existing)

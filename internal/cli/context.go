@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hafio/go-deploy-utility/confirm"
+	"github.com/hafio/go-deploy-utility/runner"
 	"github.com/spf13/cobra"
 
 	"solace/internal/config"
@@ -38,7 +39,7 @@ type App struct {
 
 	Platform config.Platform
 	Cfg      *config.Config
-	Runner   engine.EnvRunner
+	Runner   runner.Runner
 
 	// Prompt seams, in the spirit of Manager.Resolve/Geteuid: the confirm
 	// helpers gate destructive actions on a terminal, and a test cannot supply
@@ -60,7 +61,7 @@ type App struct {
 	// a test ever substitutes one -- there is no user-facing way to make this tool
 	// print commands instead of running them, because `generate` is how you look
 	// at an artifact before applying it.
-	NewRunner func(a *App) engine.EnvRunner
+	NewRunner func(a *App) runner.Runner
 
 	// Command-local flag scratch space. Only one command runs per invocation,
 	// so sharing these on the app context is safe.
@@ -239,7 +240,7 @@ func (a *App) hostname() (string, error) {
 // Like announceCommands it never fails: a kubeconfig with no current context is
 // a real state (a fresh install, or --kubeconfig pointing somewhere bare) and
 // the first real call reports it far better than a preamble could. kubectl's own
-// stderr still reaches the operator when that happens -- engine.Exec wires the
+// stderr still reaches the operator when that happens -- runner.Exec wires the
 // child's stderr straight through -- which is left alone deliberately: this tool
 // has no --context of its own, so a kubeconfig with no current context is about
 // to fail every call, and saying so once here is a head start, not noise.
@@ -251,7 +252,7 @@ func (a *App) announceKubeContext() {
 	if err != nil {
 		return
 	}
-	out, err := a.Runner.Output(bg(), kc.Name(), kc.Args("config", "current-context")...)
+	out, err := engine.Output(bg(), a.Runner, runner.Cmd{Argv: kc.Argv("config", "current-context")})
 	if ctx := strings.TrimSpace(string(out)); err == nil && ctx != "" {
 		a.kubeContext = ctx
 		step("kube-context: %q", ctx) // engine output, so quoted before it reaches a terminal
@@ -269,7 +270,7 @@ func (a *App) announceKubeContext() {
 // chosen here, not by an env file, so they are announced only under --verbose.
 //
 // It never fails. A name that resolves nowhere is skipped silently: this is a report,
-// and the first real execution already fails with engine.Resolve's own actionable
+// and the first real execution already fails with runner.Resolve's own actionable
 // message (not found on PATH, or the current-directory refusal).
 func (a *App) announceCommands() {
 	var cmds []config.Command
@@ -292,7 +293,7 @@ func (a *App) announceCommands() {
 	// one binary and deserve one line, while a standalone docker-compose gets its own.
 	seen := make(map[string]bool, len(cmds))
 	for _, c := range cmds {
-		path, err := engine.Resolve(c.Name())
+		path, err := runner.Resolve(c.Name())
 		if err != nil || seen[path] {
 			continue
 		}

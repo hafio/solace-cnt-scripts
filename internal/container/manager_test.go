@@ -13,12 +13,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
-	"solace/internal/engine"
 	"solace/internal/render"
 )
 
-// These tests exercise the container host Manager over two runners: engine.Echo
+// These tests exercise the container host Manager over two runners: runner.Echo
 // (dry-run) to assert the echoed command sequence portably (no euid/file/DNS side
 // effects), and the capturing capRunner from transport_test.go to inspect exact
 // argv and the real file-write paths that dry-run skips. capRunner/capCall/eqArgs
@@ -69,11 +70,11 @@ func ctrCfg(p config.Platform, redundancy string) *config.Config {
 	return c
 }
 
-// newEchoMgr builds a Manager over engine.Echo, routing echoed commands, report
+// newEchoMgr builds a Manager over runner.Echo, routing echoed commands, report
 // output, and progress to one buffer. Resolve is stubbed (dry-run skips it).
 func newEchoMgr(cfg *config.Config, p config.Platform) (*Manager, *bytes.Buffer) {
 	buf := &bytes.Buffer{}
-	m := NewManager(engine.Echo{W: buf}, cfg, p, func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) }, buf)
+	m := NewManager(runner.Echo{W: buf}, cfg, p, func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) }, buf)
 	m.Resolve = func(string) bool { return true }
 	return m, buf
 }
@@ -765,7 +766,7 @@ func containsStr(list []string, want string) bool {
 
 // maskedKeys renders an environment list for a failure message without its
 // values -- a test diagnostic must not print a secret either.
-func maskedKeys(env []string) string { return engine.MaskEnv(env) }
+func maskedKeys(env []string) string { return runner.MaskEnv(env) }
 
 func TestManagerDeployPodmanCreatesSecrets(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "true")
@@ -2047,9 +2048,9 @@ func TestGuardPodmanEUID(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := ctrCfg(tc.platform, "false")
 			cfg.Podman.Rootless = tc.rootless
-			var r engine.Runner = &capRunner{}
+			var r runner.Runner = &capRunner{}
 			if tc.echo {
-				r = engine.Echo{W: io.Discard}
+				r = runner.Echo{W: io.Discard}
 			}
 			err := GuardPodmanEUID(cfg, tc.platform, r, tc.euid)
 			if tc.wantErr != (err != nil) {
@@ -2109,7 +2110,7 @@ func TestManagerPrepHostRootlessAsRootFailsHard(t *testing.T) {
 // --- nil Log/Out sinks fall back to discard / os.Stdout ----------------------
 
 func TestManagerNilSinks(t *testing.T) {
-	m := NewManager(engine.Echo{}, ctrCfg(config.Docker, "false"), config.Docker, nil, nil)
+	m := NewManager(runner.Echo{}, ctrCfg(config.Docker, "false"), config.Docker, nil, nil)
 	m.Resolve = func(string) bool { return true }
 	if err := m.Check(context.Background()); err != nil {
 		t.Fatalf("Check with nil Log/Out should not error: %v", err)

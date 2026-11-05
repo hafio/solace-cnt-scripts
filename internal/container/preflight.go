@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
+	"solace/internal/engine"
 )
 
 // Preflight is the read-only probe every mutating operation runs first. `<runtime>
@@ -32,13 +35,13 @@ func (m *Manager) Preflight(ctx context.Context) error {
 	if m.isEcho() {
 		// Echo the probe so the preview shows it, then skip the assertion: the
 		// Echo runner answers nothing, and there is no engine to answer.
-		if _, err := m.R.Output(ctx, rt.Name(), rt.Args("info")...); err != nil {
+		if _, err := engine.Output(ctx, m.R, runner.Cmd{Argv: rt.Argv("info")}); err != nil {
 			return err
 		}
 		m.report().KVRow(reportKeyWidth, "engine", "skipped (preview)")
 		return nil
 	}
-	if _, err := m.R.Output(ctx, rt.Name(), rt.Args("info")...); err != nil {
+	if _, err := engine.Output(ctx, m.R, runner.Cmd{Argv: rt.Argv("info")}); err != nil {
 		// The engine's own message already went to stderr; add the one line that
 		// says what to do about it, which differs by platform and rootless mode.
 		return fmt.Errorf("cannot talk to the %s engine (%q info failed): %w\n  %s",

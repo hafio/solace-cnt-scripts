@@ -1,298 +1,111 @@
-// Package engine abstracts external command execution (kubectl, helm, docker,
-// podman, systemctl, openssl) so the rest of the tool can execute commands,
-// echo them, or stub them in tests without touching os/exec.
+// Package engine is this tool's wiring over the shared command runner
+// (github.com/hafio/go-deploy-utility/runner): the verbose announcer, the holders'
+// refusal to carry environment, and the helpers that point a command's streams at this
+// process. Execution, resolution, quoting and echoing all live in the shared module.
 package engine
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"strings"
+
+	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/runner"
 
 	"solace/internal/output"
 )
-
-// Runner runs external commands. Implementations: Exec (real), Echo (records what
-// would have run), and test fakes. Every path the tool shells out through goes via
-// a Runner so behaviour is uniform and testable.
-type Runner interface {
-	// Run executes name+args, streaming stdout/stderr to this process's stdout/stderr.
-	Run(ctx context.Context, name string, args ...string) error
-	// RunInput is Run with stdin fed from in (used for `kubectl apply -f -`).
-	RunInput(ctx context.Context, in []byte, name string, args ...string) error
-	// RunInteractive wires this process's stdio through to the child, for
-	// interactive sessions (`exec -it`, a Solace CLI, a shell).
-	RunInteractive(ctx context.Context, name string, args ...string) error
-	// Output executes name+args and returns captured stdout; stderr is streamed.
-	Output(ctx context.Context, name string, args ...string) ([]byte, error)
-	// OutputInput is Output with stdin fed from in: it returns captured stdout
-	// while streaming stderr (used for `curl -K -` with credentials on stdin).
-	OutputInput(ctx context.Context, in []byte, name string, args ...string) ([]byte, error)
-}
-
-// EnvRunner is a Runner that can also hand variables to the child's environment.
-//
-// It is separate from Runner because exactly ONE caller in the tool needs it --
-// container.Manager's compose deploy, which is how docker's environment-sourced secrets
-// reach the child without ever appearing in an argv. Every other holder of a runner
-// (k8s.Cluster, both transports, the replication mate channel) has no business passing
-// environment to a child, and an interface that offered them the ability would be
-// inviting a secret into a place none of them should be putting one.
-//
-// Exec and Echo both satisfy it, so nothing changes about wiring: the narrowing is about
-// what a given caller is ABLE to do, which is the only thing an interface is for.
-type EnvRunner interface {
-	Runner
-	// RunEnv is Run with extra "KEY=value" variables added to the child's
-	// environment. It carries secret values to a child that reads them from its
-	// environment (docker compose's environment-sourced secrets) without ever
-	// putting them in an argv -- so implementations must never echo a value.
-	RunEnv(ctx context.Context, extraEnv []string, name string, args ...string) error
-}
-
-// Resolve turns a command name into the absolute path this tool will execute. It is
-// the one definition of how that happens: Exec resolves through it immediately before
-// running, and the CLI resolves through it up front to name the binaries an env file
-// chose, so the path reported and the path run are produced by the same rule.
-//
-// Resolution is explicit rather than left to exec.Command so two things are true at
-// the moment they matter. First, an unexpected binary LOCATION can be shown -- the
-// allowlist in config guarantees `kubectl` is what was asked for, and this is what
-// shows which kubectl actually answered. Second, exec.ErrDot is an error here, not a
-// fallback: Go reports it when a bare name resolved relative to the current directory,
-// which is precisely the "attacker-supplied file shipped alongside the config" case,
-// so it is refused rather than run.
-func Resolve(name string) (string, error) {
-	path, err := exec.LookPath(name)
-	if err == nil {
-		return path, nil
-	}
-	// LookPath returns the path it found ALONGSIDE ErrDot, so the message can name the
-	// file that would have run.
-	if errors.Is(err, exec.ErrDot) {
-		return "", fmt.Errorf("refusing to run %q from the current directory: it resolved to %q, which is "+
-			"not on your PATH -- a binary shipped beside an env file must never run implicitly; "+
-			"install it, or add its directory to PATH", name, path)
-	}
-	return "", fmt.Errorf("%s: not found on PATH: %w", name, err)
-}
-
-// Exec is the real Runner backed by os/exec.
-type Exec struct {
-	// Announce, when set, is called with the resolved path and arguments before each
-	// command runs. nil is silent, and silent is the default: the CLI names the
-	// binaries an env file chose ONCE in its preamble, where they read as part of the
-	// output, and installs an announcer here only for --verbose -- where a per-call
-	// trail is the whole point rather than noise between report lines.
-	Announce func(path string, args []string)
-}
 
 // NewExec builds the runner the CLI uses. With verbose, every command is announced to
 // w as it runs, through the same internal/output Sink the CLI's own progress lines use
 // -- output is a leaf package, so both sides share the one `==> ` definition instead of
 // each spelling it out. Without verbose the runner says nothing: the preamble already
 // reported what resolved.
-func NewExec(w io.Writer, verbose bool) Exec {
+func NewExec(w io.Writer, verbose bool) runner.Exec {
 	if !verbose {
-		return Exec{}
+		return runner.Exec{}
 	}
 	sink := output.New(w)
-	return Exec{Announce: func(path string, args []string) {
-		sink.Step("exec: %s", Quote(path, args...))
+	return runner.Exec{Announce: func(path string, args []string) {
+		sink.Step("exec: %s", runner.Quote(path, args...))
 	}}
 }
 
-// command resolves name and builds the exec.Cmd, announcing it first when an announcer
-// is installed:
+// noEnv is the Runner NoEnv returns. It is a value type so IsEcho can see through it.
+type noEnv struct{ runner.Runner }
+
+// NoEnv narrows a Runner to one that refuses a Cmd carrying Env.
 //
-//	==> exec: /usr/bin/kubectl get pods -n solace
-func (e Exec) command(ctx context.Context, name string, args []string) (*exec.Cmd, error) {
-	path, err := Resolve(name)
-	if err != nil {
-		return nil, err
+// Env is how a secret reaches a child without passing through an argv, and exactly ONE
+// caller in the tool needs it -- container.Manager's compose deploy, which is how docker's
+// environment-sourced secrets arrive. Every other holder of a runner (k8s.Cluster, both
+// transports, the replication mate channel) has no business passing environment to a
+// child, so each wraps what it is given in NoEnv and a builder that starts putting a value
+// there fails loudly instead of quietly widening what the child inherits.
+func NoEnv(r runner.Runner) runner.Runner { return noEnv{r} }
+
+// Run refuses a Cmd with Env, naming the program but never the entries: they are secret
+// values as often as not.
+func (n noEnv) Run(ctx context.Context, c runner.Cmd, stdout, stderr io.Writer) error {
+	if err := refuseEnv(c); err != nil {
+		return err
 	}
-	if e.Announce != nil {
-		e.Announce(path, args)
-	}
-	return exec.CommandContext(ctx, path, args...), nil
+	return n.Runner.Run(ctx, c, stdout, stderr)
 }
 
-// run is the body all six Exec methods share: resolve, wire stdio, run, and wrap a
-// failure with the command's own name. They differ ONLY in how stdio is wired, which
-// is what the wire callback says -- so there is one definition of what running a
-// command means here rather than six copies that could drift a stream or a wrap apart.
-//
-// Both standard streams default to this process's own, and wire overrides what it
-// needs: a capture replaces Stdout, and stderr stays live everywhere, because an
-// engine's diagnostics belong in front of the operator whether or not its stdout is
-// being read.
-func (e Exec) run(ctx context.Context, name string, args []string, wire func(*exec.Cmd)) error {
-	cmd, err := e.command(ctx, name, args)
+// Attach is Run's counterpart for an attached session.
+func (n noEnv) Attach(c runner.Cmd, stdin, stdout, stderr *os.File) (int, error) {
+	if err := refuseEnv(c); err != nil {
+		return 0, err
+	}
+	return n.Runner.Attach(c, stdin, stdout, stderr)
+}
+
+func refuseEnv(c runner.Cmd) error {
+	if err := c.Check(); err != nil {
+		return err
+	}
+	if len(c.Env) > 0 {
+		return fmt.Errorf("%s: refusing to pass environment to the child: only the compose deploy may do that, "+
+			"so this command must carry its values another way (the entries are not shown, in case they are secrets)",
+			c.Argv[0])
+	}
+	return nil
+}
+
+// IsEcho reports whether r only echoes (runner.Echo), looking through NoEnv. Callers use
+// it to skip work that only makes sense against a real engine: file writes, host probes,
+// questions a preview cannot answer.
+func IsEcho(r runner.Runner) bool {
+	if n, ok := r.(noEnv); ok {
+		r = n.Runner
+	}
+	_, ok := r.(runner.Echo)
+	return ok
+}
+
+// Run executes c with the child's output going to this process's stdout and stderr.
+func Run(ctx context.Context, r runner.Runner, c runner.Cmd) error {
+	return r.Run(ctx, c, os.Stdout, os.Stderr)
+}
+
+// Output executes c and returns its captured stdout, with stderr streamed to this
+// process's. It returns whatever the child managed to write even when it failed: a broker
+// CLI or kubectl often says why in that same stream, and the callers that scan a
+// transcript need the text more than they need the error alone.
+func Output(ctx context.Context, r runner.Runner, c runner.Cmd) ([]byte, error) {
+	return runner.Output(ctx, r, c, os.Stderr)
+}
+
+// Interactive wires this process's own terminal through to the child, for interactive
+// sessions (`exec -it`, a Solace CLI, a shell). A non-zero session status comes back as
+// exitcode.Exited, which is a plain failure until the CLI marks it with
+// exitcode.ChildExit; an error from Attach means the session never ran and is returned
+// as it is.
+func Interactive(r runner.Runner, c runner.Cmd) error {
+	code, err := r.Attach(c, os.Stdin, os.Stdout, os.Stderr)
 	if err != nil {
 		return err
 	}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if wire != nil {
-		wire(cmd)
-	}
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s: %w", name, err)
-	}
-	return nil
-}
-
-func (e Exec) Run(ctx context.Context, name string, args ...string) error {
-	return e.run(ctx, name, args, nil)
-}
-
-func (e Exec) RunInput(ctx context.Context, in []byte, name string, args ...string) error {
-	return e.run(ctx, name, args, func(c *exec.Cmd) { c.Stdin = bytes.NewReader(in) })
-}
-
-func (e Exec) RunEnv(ctx context.Context, extraEnv []string, name string, args ...string) error {
-	// Inherit and extend: the child still needs PATH, HOME and DOCKER_* from this
-	// process, so this adds to the environment rather than replacing it. Appending
-	// also means a name that somehow collided with an inherited one would be a
-	// duplicate entry rather than an override -- but nothing config-derived can
-	// produce a bare PATH/LD_PRELOAD name in the first place, since every variable
-	// here is a secret name carrying a fixed literal suffix (render.ContainerSecret;
-	// pinned by TestComposeSecretEnvNamesCannotBeSystemVars).
-	return e.run(ctx, name, args, func(c *exec.Cmd) { c.Env = append(os.Environ(), extraEnv...) })
-}
-
-func (e Exec) RunInteractive(ctx context.Context, name string, args ...string) error {
-	return e.run(ctx, name, args, func(c *exec.Cmd) { c.Stdin = os.Stdin })
-}
-
-// Output returns whatever the child managed to write even when it failed: a broker CLI
-// or kubectl often says why in that same stream, and the callers that scan a transcript
-// need the text more than they need the error alone.
-func (e Exec) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
-	var out bytes.Buffer
-	err := e.run(ctx, name, args, func(c *exec.Cmd) { c.Stdout = &out })
-	return out.Bytes(), err
-}
-
-func (e Exec) OutputInput(ctx context.Context, in []byte, name string, args ...string) ([]byte, error) {
-	var out bytes.Buffer
-	err := e.run(ctx, name, args, func(c *exec.Cmd) {
-		c.Stdin = bytes.NewReader(in)
-		c.Stdout = &out
-	})
-	return out.Bytes(), err
-}
-
-// Echo prints the command it would run instead of running it. Output returns
-// nothing so callers that parse output degrade gracefully.
-//
-// It is reached only through the CLI's App.NewRunner seam, which nothing
-// user-facing sets: there is no flag that turns the tool into an echo mode, because
-// `generate` is how you look at an artifact before applying it. What Echo is for is
-// letting the wiring tests assert the exact argv a command would issue without a
-// cluster or a container engine to issue it against.
-type Echo struct{ W io.Writer }
-
-func (e Echo) w() io.Writer {
-	if e.W != nil {
-		return e.W
-	}
-	return os.Stdout
-}
-
-// echo prints the one line Run, RunInteractive and Output all show. What this runner
-// records is the argv, and an interactive session or a captured read issues the same
-// argv a plain run does -- so the three shared a body byte for byte.
-func (e Echo) echo(name string, args []string) {
-	fmt.Fprintln(e.w(), "+ "+Quote(name, args...))
-}
-
-// echoStdin is that line plus the SIZE of what would have been fed to the child. The
-// bytes themselves are never echoed: stdin is how a secret reaches a command without
-// passing through an argv, so echoing it would undo the reason it went there.
-func (e Echo) echoStdin(in []byte, name string, args []string) {
-	fmt.Fprintf(e.w(), "+ %s  <<< (%d bytes on stdin)\n", Quote(name, args...), len(in))
-}
-
-func (e Echo) Run(_ context.Context, name string, args ...string) error {
-	e.echo(name, args)
-	return nil
-}
-
-func (e Echo) RunInput(_ context.Context, in []byte, name string, args ...string) error {
-	e.echoStdin(in, name, args)
-	return nil
-}
-
-// RunEnv echoes the variable names it would set with their values masked: the
-// whole point of the environment is to carry secrets, and echoed output is
-// printed, logged and pasted into tickets. The names are annotated AFTER the
-// command, the way RunInput annotates its stdin, so every echoed line still reads
-// as "+ <the command>".
-func (e Echo) RunEnv(ctx context.Context, extraEnv []string, name string, args ...string) error {
-	if len(extraEnv) == 0 {
-		return e.Run(ctx, name, args...)
-	}
-	fmt.Fprintf(e.w(), "+ %s  <<< (env: %s)\n", Quote(name, args...), MaskEnv(extraEnv))
-	return nil
-}
-
-// MaskEnv renders "KEY=value" pairs as a printable "KEY=*** KEY2=***", keeping the
-// names (which are what a reader needs to check the wiring) and dropping every
-// value. Exported so any other display path masks identically.
-func MaskEnv(env []string) string {
-	masked := make([]string, 0, len(env))
-	for _, pair := range env {
-		key, _, ok := strings.Cut(pair, "=")
-		if !ok {
-			// No '=' means no key to show, and echoing the whole entry as if it were
-			// one would print the very value this function exists to hide.
-			key = "<malformed>"
-		}
-		masked = append(masked, quoteTok(key)+"=***")
-	}
-	return strings.Join(masked, " ")
-}
-
-func (e Echo) RunInteractive(_ context.Context, name string, args ...string) error {
-	e.echo(name, args)
-	return nil
-}
-
-// Output returns nothing, so a caller that parses output degrades rather than reading
-// an echoed line as the command's answer.
-func (e Echo) Output(_ context.Context, name string, args ...string) ([]byte, error) {
-	e.echo(name, args)
-	return nil, nil
-}
-
-func (e Echo) OutputInput(_ context.Context, in []byte, name string, args ...string) ([]byte, error) {
-	e.echoStdin(in, name, args)
-	return nil, nil
-}
-
-// Quote renders a command line for display, single-quoting any token that
-// contains whitespace or shell-significant characters. Display only.
-func Quote(name string, args ...string) string {
-	var b strings.Builder
-	b.WriteString(quoteTok(name))
-	for _, a := range args {
-		b.WriteByte(' ')
-		b.WriteString(quoteTok(a))
-	}
-	return b.String()
-}
-
-func quoteTok(s string) string {
-	if s == "" {
-		return "''"
-	}
-	if strings.ContainsAny(s, " \t\n\"'$&|;<>()*?[]{}") {
-		return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-	}
-	return s
+	return exitcode.Exited(c.Argv[0], code)
 }

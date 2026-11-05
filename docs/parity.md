@@ -152,19 +152,25 @@ These follow from what each tool deploys and stay as they are.
 
 ## Runner seams
 
-Every external command goes through one runner interface per tool. The two interfaces differ,
-so the platform code above is written twice rather than shared.
+Every external command in both tools crosses the shared `runner.Runner`. `Run` executes a
+`runner.Cmd`, which holds the argv, the stdin bytes and any extra environment, and writes the
+two output streams to the writers it is given. `Combined`, `Split` and `Output` are capture
+helpers over `Run`. `Attach` hands the terminal to an interactive session and returns the
+session's exit code.
 
-| Capability | solmq-conn-util `runner.Runner` | solace-util `engine.Runner` |
+`runner.Exec` resolves the program through `PATH` and refuses a match in the current
+directory. A cancelled command is interrupted, then killed when a grace period ends; an
+attached session is never interrupted. Errors read `<program>: <cause>` and never carry an
+argument, the stdin bytes or an environment value. `runner.Echo` prints the command instead
+of running it, with stdin as a byte count and every environment value masked.
+
+What each tool keeps on top of the shared runner:
+
+| Policy | solmq-conn-util | solace-util |
 | --- | --- | --- |
-| Combined stdout and stderr capture | `Run` | none |
-| Separate stdout and stderr capture | `RunSplit` (optional) | `Output`: stdout captured, stderr live |
-| Stream to any writer | `Stream(ctx, cmd, out, err)` | `Run` to the process's stdout and stderr only |
-| Context | `Stream` only | every call |
-| Environment for the child | on any call | `EnvRunner` only |
-| Stdin and environment together | yes | no |
-| Interactive terminal | `Attach(cmd, files)` returns the exit code | `RunInteractive(ctx, ...)` returns an error |
-| Dry run, masked environment, announce | none | `Echo`, `MaskEnv`, `Announce` |
+| Verbose trail | none | `--verbose` announces each resolved command |
+| `runner.Echo` | not used | the runner its tests install |
+| Environment for the child | any command | compose only; every other holder refuses it |
+| A cancelled log follow | a clean end, exit 0 | no follow is cancelled; Ctrl-C ends the process |
 
-Neither interface is a superset of the other. Each call site is written against its own
-runner's output and error model.
+Output policy is the Output row under Divergences.

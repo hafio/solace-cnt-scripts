@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"solace/internal/engine"
+	"github.com/hafio/go-deploy-utility/runner"
 )
 
 // TestCanIAnswerReadsTheLastLine: kubectl prints advisory lines above the verdict on
@@ -147,7 +147,7 @@ func TestCanIAnswersWithoutFailing(t *testing.T) {
 // permitted run takes, exactly as Preflight passes under the Echo runner.
 func TestCanIIsPermittedUnderEcho(t *testing.T) {
 	var out strings.Builder
-	c := NewCluster(engine.Echo{W: &out}, loadK8s(t), nil, &out)
+	c := NewCluster(runner.Echo{W: &out}, loadK8s(t), nil, &out)
 	allowed, answered := c.canI(context.Background(), probe{verb: "delete", resource: "namespaces"})
 	if !allowed || !answered {
 		t.Errorf("canI under Echo = (%v, %v), want (true, true)", allowed, answered)
@@ -162,7 +162,7 @@ func TestCanIIsPermittedUnderEcho(t *testing.T) {
 // question was never asked -- unanswered, never a yes -- and nothing is echoed.
 func TestCanIUnderEchoStillHonoursTheExecutionGuard(t *testing.T) {
 	var out strings.Builder
-	c := NewCluster(engine.Echo{W: &out}, unapprovedCfg(), nil, &out)
+	c := NewCluster(runner.Echo{W: &out}, unapprovedCfg(), nil, &out)
 	allowed, answered := c.canI(context.Background(), probe{verb: "delete", resource: "namespaces"})
 	if allowed || answered {
 		t.Errorf("canI under Echo with an unapproved command = (%v, %v), want (false, false)", allowed, answered)
@@ -204,7 +204,7 @@ func TestPreflightRefusesAnUnreadableAnswer(t *testing.T) {
 // one legitimate reason to skip already has one.
 func TestPreflightIsPreviewableUnderEcho(t *testing.T) {
 	var out strings.Builder
-	c := NewCluster(engine.Echo{W: &out}, loadK8s(t), nil, &out)
+	c := NewCluster(runner.Echo{W: &out}, loadK8s(t), nil, &out)
 	if err := c.Preflight(context.Background(), "create", brokerResource); err != nil {
 		t.Fatalf("Preflight under the Echo runner must not fail: %v", err)
 	}

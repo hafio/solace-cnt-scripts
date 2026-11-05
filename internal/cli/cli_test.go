@@ -12,10 +12,10 @@ import (
 	"testing"
 
 	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/runner"
 	"github.com/spf13/cobra"
 
 	"solace/internal/config"
-	"solace/internal/engine"
 	"solace/internal/k8s"
 	"solace/internal/render"
 )
@@ -53,12 +53,12 @@ func withEnv(args ...string) []string {
 	return append(append([]string{}, args...), "--env", sampleEnv)
 }
 
-// echoRunner installs engine.Echo as the App's runner. It replaces the retired
+// echoRunner installs runner.Echo as the App's runner. It replaces the retired
 // --dry-run flag: the flag is gone from the CLI, but the property these tests
 // assert -- which argv a command would issue -- is unchanged, so the seam that
 // used to be a user-facing mode is now a test-only one.
 func echoRunner(a *App) {
-	a.NewRunner = func(*App) engine.EnvRunner { return engine.Echo{W: os.Stdout} }
+	a.NewRunner = func(*App) runner.Runner { return runner.Echo{W: os.Stdout} }
 }
 
 // smokeAdminPass is a distinctive admin password used only by the standalone test
@@ -145,7 +145,7 @@ func writeCtrStandaloneEnv(t *testing.T) string {
 
 // loadDirect writes yamlBody to a temp file and loads it for platform p, for
 // tests that need a *config.Config to build an App directly (bypassing App.load
-// and its runner-selection entirely) so a fake Runner other than engine.Echo can
+// and its runner-selection entirely) so a fake Runner other than runner.Echo can
 // be attached -- see opRunner below.
 func loadDirect(t *testing.T, yamlBody string, p config.Platform) *config.Config {
 	t.Helper()
@@ -160,12 +160,12 @@ func loadDirect(t *testing.T, yamlBody string, p config.Platform) *config.Config
 	return cfg
 }
 
-// --- fake engine.Runner for direct op-function calls ------------------------
+// --- fake runner.Runner for direct op-function calls ------------------------
 //
 // opK8sDeployAll/opK8sPrepAll/opK8sRemoveAll/opCtrVerifyRedundancy etc. are
 // unexported handlers that take only an *App (or an *App plus a role arg), so a
 // test in this package can call them directly rather than through cobra/runRoot.
-// Doing so is what makes two things possible that engine.Echo cannot provide: (1)
+// Doing so is what makes two things possible that runner.Echo cannot provide: (1)
 // targeted fault injection -- Echo's Run/Output methods never return an error, so
 // the ordering property "step N fails, step N+1 never runs" has no double to
 // exercise it without this, mirroring internal/container's capRunner/failOn
@@ -182,7 +182,7 @@ type opCall struct {
 	stdin  string // RunInput/OutputInput only
 }
 
-// opRunner is a fake engine.Runner. fail, when set, is consulted for every call
+// opRunner is a fake runner.Runner. fail, when set, is consulted for every call
 // after it is recorded: a non-nil return is propagated as that command's error. It
 // receives the whole opCall (not just name/args, unlike container's failOn) so a
 // test can target a call by its stdin body as well as its argv -- see
@@ -195,17 +195,47 @@ type opRunner struct {
 	output func(opCall) []byte
 }
 
-func (r *opRunner) Run(_ context.Context, name string, args ...string) error {
-	return r.do(opCall{method: "Run", name: name, args: args})
+// legacyMethod names a call the way the retired five-method Runner interface did, so the
+// recorded sequences and their assertions keep reading as they always have: a captured
+// stdout is Output (OutputInput with stdin), a streamed one is Run (RunEnv with env,
+// RunInput with stdin), and an attached session is RunInteractive.
+func legacyMethod(c runner.Cmd, stdout io.Writer) string {
+	switch {
+	case stdout != io.Writer(os.Stdout) && c.Stdin != nil:
+		return "OutputInput"
+	case stdout != io.Writer(os.Stdout):
+		return "Output"
+	case c.Env != nil:
+		return "RunEnv"
+	case c.Stdin != nil:
+		return "RunInput"
+	}
+	return "Run"
 }
-func (r *opRunner) RunInput(_ context.Context, in []byte, name string, args ...string) error {
-	return r.do(opCall{method: "RunInput", name: name, args: args, stdin: string(in)})
+
+func (r *opRunner) Run(_ context.Context, cmd runner.Cmd, stdout, _ io.Writer) error {
+	c := opCall{method: legacyMethod(cmd, stdout), name: cmd.Argv[0], args: cmd.Argv[1:], stdin: string(cmd.Stdin)}
+	if c.method != "Output" && c.method != "OutputInput" {
+		return r.do(c)
+	}
+	r.calls = append(r.calls, c)
+	if r.fail != nil {
+		if err := r.fail(c); err != nil {
+			return err
+		}
+	}
+	var out []byte
+	if r.output != nil {
+		out = r.output(c)
+	}
+	if out == nil && c.method == "Output" && opCanI(c) {
+		out = []byte("yes\n")
+	}
+	_, err := stdout.Write(out)
+	return err
 }
-func (r *opRunner) RunEnv(_ context.Context, _ []string, name string, args ...string) error {
-	return r.do(opCall{method: "RunEnv", name: name, args: args})
-}
-func (r *opRunner) RunInteractive(_ context.Context, name string, args ...string) error {
-	return r.do(opCall{method: "RunInteractive", name: name, args: args})
+func (r *opRunner) Attach(cmd runner.Cmd, _, _, _ *os.File) (int, error) {
+	return 0, r.do(opCall{method: "RunInteractive", name: cmd.Argv[0], args: cmd.Argv[1:]})
 }
 func (r *opRunner) do(c opCall) error {
 	r.calls = append(r.calls, c)
@@ -227,38 +257,6 @@ func opCanI(c opCall) bool {
 		}
 	}
 	return false
-}
-
-func (r *opRunner) Output(_ context.Context, name string, args ...string) ([]byte, error) {
-	c := opCall{method: "Output", name: name, args: args}
-	r.calls = append(r.calls, c)
-	if r.fail != nil {
-		if err := r.fail(c); err != nil {
-			return nil, err
-		}
-	}
-	if r.output != nil {
-		if out := r.output(c); out != nil {
-			return out, nil
-		}
-	}
-	if opCanI(c) {
-		return []byte("yes\n"), nil
-	}
-	return nil, nil
-}
-func (r *opRunner) OutputInput(_ context.Context, in []byte, name string, args ...string) ([]byte, error) {
-	c := opCall{method: "OutputInput", name: name, args: args, stdin: string(in)}
-	r.calls = append(r.calls, c)
-	if r.fail != nil {
-		if err := r.fail(c); err != nil {
-			return nil, err
-		}
-	}
-	if r.output != nil {
-		return r.output(c), nil
-	}
-	return nil, nil
 }
 
 // opArgvMatch reports whether substr appears in c's command name or any of its args.
@@ -1447,10 +1445,10 @@ func TestScriptCommandsUploadFromTheScriptsDir(t *testing.T) {
 	const p0, b0 = "dev-broker-pubsubplus-p-0", "dev-broker-pubsubplus-b-0"
 	k8sCP := func(pod string) func(string) string {
 		return func(local string) string {
-			return "+ " + engine.Quote("kubectl", "cp", "-n", "solace", local) + " " + pod + ":"
+			return "+ " + runner.Quote("kubectl", "cp", "-n", "solace", local) + " " + pod + ":"
 		}
 	}
-	dockerCP := func(local string) string { return "+ " + engine.Quote("docker", "cp", local) + " solace:" }
+	dockerCP := func(local string) string { return "+ " + runner.Quote("docker", "cp", local) + " solace:" }
 	cases := []struct {
 		name, verb, file string
 		env              func(*testing.T) string
@@ -2099,8 +2097,8 @@ func writeK8sDeployAllEnv(t *testing.T, redundancy string) *config.Config {
 
 // k8sDeployAllOutputHook supplies the canned Output content opK8sDeployAll's
 // happy path needs once a fake (non-Echo) Runner is in play:
-// k8s.Cluster.isEcho() is a concrete type assertion on engine.Echo, so a fake
-// Runner takes CheckStorageClass's real validation branch (unlike engine.Echo,
+// k8s.Cluster.isEcho() is a concrete type assertion on runner.Echo, so a fake
+// Runner takes CheckStorageClass's real validation branch (unlike runner.Echo,
 // which skips it) -- it needs a WaitForFirstConsumer/true StorageClass answer to
 // pass. The `show redundancy` answer is a Local Active primary, so that a deploy
 // which regressed into asserting the leader would get all the way to the assert and
@@ -2575,7 +2573,7 @@ func TestRemoveBrokerSaysWhereAnOperatorPasswordLives(t *testing.T) {
 // actual failover exercise arm (RedundancyCoordinated) rather than only the
 // skip/reject arms already covered by TestCtrRoleGuards. It sets this host as
 // the primary and supplies a canned `show redundancy` transcript over a fake
-// Runner, since engine.Echo's fixed empty output would otherwise send
+// Runner, since runner.Echo's fixed empty output would otherwise send
 // RedundancyCoordinated into its real poll loop (broker.New's 2s x 60 budget,
 // which the CLI has no seam to shorten).
 func TestOpCtrVerifyRedundancyRunsCoordinated(t *testing.T) {
@@ -2639,7 +2637,7 @@ func runLeader(t *testing.T, platform config.Platform, host, showRD, answer stri
 		"--platform", string(platform)}, extra...)
 	res.stderr = captureStderr(t, func() {
 		res.stdout, res.err = runRootWith(t, args, func(a *App) {
-			a.NewRunner = func(*App) engine.EnvRunner { return res.rr }
+			a.NewRunner = func(*App) runner.Runner { return res.rr }
 			a.Hostname = func() (string, error) { return host, nil }
 			// No interface addresses, so detection rests on the name alone and not on how
 			// the machine running the suite is numbered.
@@ -2825,7 +2823,7 @@ func TestAssertLeaderStandaloneSkipsBeforeAnyPrompt(t *testing.T) {
 			stderr := captureStderr(t, func() {
 				_, err = runRootWith(t, []string{"broker", "perform", "assert-leader", "--pod", pod,
 					"--env", env, "--platform", "docker"}, func(a *App) {
-					a.NewRunner = func(*App) engine.EnvRunner { return rr }
+					a.NewRunner = func(*App) runner.Runner { return rr }
 					a.Interactive = func() bool { return true }
 					a.PromptIn = exportconfigReadCounter{Reader: strings.NewReader("y\n"), n: &reads}
 				})
@@ -2867,7 +2865,7 @@ func TestAssertLeaderOnKubernetesTouchesOnlyThePrimaryPod(t *testing.T) {
 			reads := 0
 			_, err := runRootWith(t, withEnv("broker", "perform", "assert-leader", "--platform", "kubernetes"),
 				func(a *App) {
-					a.NewRunner = func(*App) engine.EnvRunner { return rr }
+					a.NewRunner = func(*App) runner.Runner { return rr }
 					a.Interactive = func() bool { return true }
 					a.PromptIn = exportconfigReadCounter{Reader: strings.NewReader("y\n"), n: &reads}
 				})
@@ -2924,7 +2922,7 @@ func TestContainerRoleDetectsFromHostname(t *testing.T) {
 		return &App{
 			Cfg:      loadDirect(t, body, config.Docker),
 			Platform: config.Docker,
-			Runner:   engine.Echo{W: io.Discard},
+			Runner:   runner.Echo{W: io.Discard},
 			Hostname: func() (string, error) { return host, nil },
 			// No interface addresses: detection's second pass must not depend on how
 			// the machine running the suite is numbered. The pass itself is covered in
@@ -3125,7 +3123,7 @@ func TestConfiguredRouternameSurvivesTheFallback(t *testing.T) {
 }
 
 // TestK8sSmokeRedundancyUnhealthy covers opK8sVerifyRedundancy's error-return: on
-// the HA sample over the echo seam, engine.Echo's empty `show redundancy` output
+// the HA sample over the echo seam, runner.Echo's empty `show redundancy` output
 // makes primaryRedundancyUp false, so Redundancy fails on its first check (no poll).
 func TestK8sSmokeRedundancyUnhealthy(t *testing.T) {
 	_, err := runRootWith(t, withEnv("broker", "perform", "redundancy-test", "--platform", "kubernetes"), echoRunner)
@@ -3807,7 +3805,7 @@ func TestCtrManagerConfirmWiring(t *testing.T) {
 
 // TestK8sLoginOutcomes covers k8sLogin's two real, distinct SEMP outcomes -- a
 // transport failure (error propagates) vs. a successful login (nil) -- which
-// engine.Echo's fixed (nil, nil) OutputInput return can never produce; every
+// runner.Echo's fixed (nil, nil) OutputInput return can never produce; every
 // existing test only reaches the "no HTTP response" failure-but-not-error branch.
 func TestK8sLoginOutcomes(t *testing.T) {
 	cfg, err := config.Load(writeStandaloneEnv(t), config.K8s)
@@ -3959,7 +3957,7 @@ func firstLine(s string) string {
 
 // fakeBinaryOnPath writes an executable stub named base into a fresh directory, puts
 // that directory at the front of PATH for this test, and returns the bare name plus the
-// absolute path engine.Resolve will find. It makes the announcement assertions hermetic:
+// absolute path runner.Resolve will find. It makes the announcement assertions hermetic:
 // no test host needs kubectl or docker installed, and the expected path is exact rather
 // than "something absolute".
 func fakeBinaryOnPath(t *testing.T, base string) (name, path string) {
@@ -4046,7 +4044,7 @@ func TestAnnounceCommandsNamesResolvedBinaries(t *testing.T) {
 	})
 	// A name that resolves nowhere is skipped in silence: this is a report, and turning
 	// it into a failure would break a command whose runner the operator never reaches.
-	// The first real execution still fails with engine.Resolve's own message.
+	// The first real execution still fails with runner.Resolve's own message.
 	t.Run("an unresolvable binary is skipped silently", func(t *testing.T) {
 		cfg, err := config.Load(writeStandaloneEnv(t), config.K8s)
 		if err != nil {

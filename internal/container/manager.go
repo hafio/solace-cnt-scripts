@@ -15,6 +15,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
 	"solace/internal/engine"
 	"solace/internal/output"
@@ -32,9 +34,11 @@ const reportKeyWidth = 15
 // namespace from one control point, a container host runs one broker, so the
 // Manager's operations are node-local and the HA coordination (the redundancy
 // test) is a per-host handshake handled in package broker. Every mutating
-// command routes through the engine.Runner, so the Echo runner records without running.
+// command routes through the runner.Runner, so the Echo runner records without running.
+// Manager is the one holder that may pass environment to a child -- the compose deploy
+// -- so R is the runner as given; every other holder wraps its runner in engine.NoEnv.
 type Manager struct {
-	R   engine.EnvRunner
+	R   runner.Runner
 	Cfg *config.Config
 	P   config.Platform
 	// Log is the RAW line sink for progress: one already-formatted line, emitted
@@ -88,7 +92,7 @@ type Manager struct {
 // redundancy pre-shared key on a first HA deploy and rewrite the env file it was handed;
 // the key is the operator's to make now (config.validateContainerPSK refuses an empty one
 // and prints the openssl command), and nothing in this package writes to an env file.
-func NewManager(r engine.EnvRunner, cfg *config.Config, p config.Platform, log func(string, ...any), out io.Writer) *Manager {
+func NewManager(r runner.Runner, cfg *config.Config, p config.Platform, log func(string, ...any), out io.Writer) *Manager {
 	return &Manager{
 		R:       r,
 		Cfg:     cfg,
@@ -123,9 +127,9 @@ func (m *Manager) out() io.Writer {
 	return os.Stdout
 }
 
-// isEcho reports whether the runner only echoes (engine.Echo), so file writes
+// isEcho reports whether the runner only echoes (runner.Echo), so file writes
 // and DNS/euid probes are previewed rather than performed.
-func (m *Manager) isEcho() bool { _, ok := m.R.(engine.Echo); return ok }
+func (m *Manager) isEcho() bool { return engine.IsEcho(m.R) }
 
 // runtime is the guarded runtime command (docker.command / podman.command): argv[0]
 // plus any leading arguments that precede every call's own. It re-runs
@@ -141,7 +145,7 @@ func (m *Manager) run(ctx context.Context, args ...string) error {
 	if err != nil {
 		return err
 	}
-	return m.R.Run(ctx, r.Name(), r.Args(args...)...)
+	return engine.Run(ctx, m.R, runner.Cmd{Argv: r.Argv(args...)})
 }
 
 // output captures a runtime subcommand's stdout through the Runner.
@@ -150,7 +154,7 @@ func (m *Manager) output(ctx context.Context, args ...string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return m.R.Output(ctx, r.Name(), r.Args(args...)...)
+	return engine.Output(ctx, m.R, runner.Cmd{Argv: r.Argv(args...)})
 }
 
 // composeCmd is the guarded compose invocation (docker only): whatever
@@ -180,7 +184,7 @@ func (m *Manager) compose(ctx context.Context, args ...string) error {
 	if err != nil {
 		return err
 	}
-	return m.R.RunEnv(ctx, env, c.Name(), c.Args(args...)...)
+	return engine.Run(ctx, m.R, runner.Cmd{Argv: c.Argv(args...), Env: env})
 }
 
 // composeNeedsSecretValues reports whether this compose invocation will actually
@@ -328,7 +332,7 @@ func (m *Manager) Reachable(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if _, err := m.R.Output(ctx, rt.Name(), rt.Args("version")...); err != nil {
+	if _, err := engine.Output(ctx, m.R, runner.Cmd{Argv: rt.Argv("version")}); err != nil {
 		return fmt.Errorf("cannot reach the %s runtime %q (is it installed and running?): %w", platformTitle(m.P), rt, err)
 	}
 	if m.P == config.Docker {
@@ -336,7 +340,7 @@ func (m *Manager) Reachable(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if _, err := m.R.Output(ctx, c.Name(), c.Args("version")...); err != nil {
+		if _, err := engine.Output(ctx, m.R, runner.Cmd{Argv: c.Argv("version")}); err != nil {
 			return fmt.Errorf("cannot run the compose command %q (install the docker compose plugin, "+
 				"or set docker.compose to this host's standalone 'docker-compose' binary): %w", c, err)
 		}
@@ -418,7 +422,7 @@ func (m *Manager) PrepHost(ctx context.Context) error {
 
 	cb := m.Cfg.ContainerBlock(m.P)
 	m.logf("preparing data directory %s", cb.DataDir)
-	if err := m.R.Run(ctx, "mkdir", "-p", cb.DataDir); err != nil {
+	if err := engine.Run(ctx, m.R, runner.Cmd{Argv: []string{"mkdir", "-p", cb.DataDir}}); err != nil {
 		return fmt.Errorf("create data dir %q: %w%s", cb.DataDir, err, m.dataDirHint(cb.DataDir))
 	}
 	if m.rootlessPodman() {
@@ -440,7 +444,7 @@ func (m *Manager) PrepHost(ctx context.Context) error {
 		if err := m.run(ctx, "unshare", "chown", cb.RunUser, cb.DataDir); err != nil {
 			return fmt.Errorf("chown data dir %q (rootless): %w%s", cb.DataDir, err, m.dataDirHint(cb.DataDir))
 		}
-	} else if err := m.R.Run(ctx, "chown", cb.RunUser, cb.DataDir); err != nil {
+	} else if err := engine.Run(ctx, m.R, runner.Cmd{Argv: []string{"chown", cb.RunUser, cb.DataDir}}); err != nil {
 		return fmt.Errorf("chown data dir %q to %q: %w", cb.DataDir, cb.RunUser, err)
 	}
 
@@ -473,7 +477,7 @@ func (m *Manager) registryLogin(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := m.R.RunInput(ctx, []byte(pass), r.Name(), r.Args(args...)...); err != nil {
+	if err := engine.Run(ctx, m.R, runner.Cmd{Argv: r.Argv(args...), Stdin: []byte(pass)}); err != nil {
 		return fmt.Errorf("%s login to registry %s failed: %w", platformTitle(m.P), orNone(registry), err)
 	}
 	return nil
@@ -600,12 +604,12 @@ func (m *Manager) createPodmanSecrets(ctx context.Context, secrets []render.Cont
 			certChanged = true
 			create = append(create, "--label", render.CertDigestLabel+"="+digest)
 		}
-		if err := m.R.Run(ctx, r.Name(), r.Args("secret", "rm", "--ignore", s.Name)...); err != nil {
+		if err := engine.Run(ctx, m.R, runner.Cmd{Argv: r.Argv("secret", "rm", "--ignore", s.Name)}); err != nil {
 			return false, fmt.Errorf("remove the existing podman secret %q before recreating it (from %s): %w",
 				s.Name, s.ConfigKey, err)
 		}
-		if err := m.R.RunInput(ctx, []byte(s.Value), r.Name(),
-			r.Args(append(create, s.Name, "-")...)...); err != nil {
+		if err := engine.Run(ctx, m.R, runner.Cmd{
+			Argv: r.Argv(append(create, s.Name, "-")...), Stdin: []byte(s.Value)}); err != nil {
 			return false, fmt.Errorf("create podman secret %q from %s: %w", s.Name, s.ConfigKey, err)
 		}
 	}
@@ -656,8 +660,8 @@ func (m *Manager) certSecretHash(ctx context.Context, r config.Command, name str
 	if m.isEcho() {
 		return ""
 	}
-	out, err := m.R.Output(ctx, r.Name(), r.Args("secret", "inspect", "--format",
-		`{{index .Spec.Labels "`+render.CertDigestLabel+`"}}`, name)...)
+	out, err := engine.Output(ctx, m.R, runner.Cmd{Argv: r.Argv("secret", "inspect", "--format",
+		`{{index .Spec.Labels "`+render.CertDigestLabel+`"}}`, name)})
 	if err != nil {
 		return ""
 	}
@@ -907,8 +911,8 @@ func (m *Manager) dockerCertChanged(ctx context.Context) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		out, err := m.R.Output(ctx, r.Name(), r.Args("inspect", "--type", "container", "--format",
-			`{{index .Config.Labels "`+render.CertDigestLabel+`"}}`, m.name())...)
+		out, err := engine.Output(ctx, m.R, runner.Cmd{Argv: r.Argv("inspect", "--type", "container", "--format",
+			`{{index .Config.Labels "`+render.CertDigestLabel+`"}}`, m.name())})
 		if err != nil {
 			return true, nil
 		}
@@ -1101,7 +1105,7 @@ func (m *Manager) removePodmanSecrets(ctx context.Context) error {
 		// sites. It also makes the warning below honest: "already removed" stops
 		// being a plausible cause once a missing secret is a success, so what is
 		// left really is a failure worth naming.
-		if err := m.R.Run(ctx, r.Name(), r.Args("secret", "rm", "--ignore", s.Name)...); err != nil {
+		if err := engine.Run(ctx, m.R, runner.Cmd{Argv: r.Argv("secret", "rm", "--ignore", s.Name)}); err != nil {
 			if len(s.SourceFiles) > 0 {
 				keyErr = fmt.Errorf("remove podman secret %q: it holds the broker's PRIVATE KEY and must not be "+
 					"left in this host's secret store -- remove it by hand (`%s`) and re-run: %w",
@@ -1187,7 +1191,7 @@ func (m *Manager) purgeData(ctx context.Context) error {
 	if m.rootlessPodman() {
 		return m.run(ctx, append([]string{"unshare", "find"}, args...)...)
 	}
-	return m.R.Run(ctx, "find", args...)
+	return engine.Run(ctx, m.R, runner.Cmd{Argv: append([]string{"find"}, args...)})
 }
 
 // --- Lifecycle: Start / Stop / Restart ---------------------------------------
@@ -1514,7 +1518,7 @@ func (m *Manager) CLI(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return m.R.RunInteractive(ctx, r.Name(), r.Args("exec", "-it", m.name(), "cli", "-A")...)
+	return engine.Interactive(m.R, runner.Cmd{Argv: r.Argv("exec", "-it", m.name(), "cli", "-A")})
 }
 
 // Shell opens an interactive shell inside the container.
@@ -1523,7 +1527,7 @@ func (m *Manager) Shell(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return m.R.RunInteractive(ctx, r.Name(), r.Args("exec", "-it", m.name(), "bash")...)
+	return engine.Interactive(m.R, runner.Cmd{Argv: r.Argv("exec", "-it", m.name(), "bash")})
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -1538,7 +1542,7 @@ func (m *Manager) systemctl(ctx context.Context, args ...string) error {
 	if err := m.ensureUserSession(ctx); err != nil {
 		return err
 	}
-	return m.R.Run(ctx, "systemctl", m.systemctlArgs(args)...)
+	return engine.Run(ctx, m.R, runner.Cmd{Argv: append([]string{"systemctl"}, m.systemctlArgs(args)...)})
 }
 
 // systemctlOutput captures a systemctl subcommand's stdout, for the state probes
@@ -1549,7 +1553,7 @@ func (m *Manager) systemctlOutput(ctx context.Context, args ...string) ([]byte, 
 	if err := m.ensureUserSession(ctx); err != nil {
 		return nil, err
 	}
-	return m.R.Output(ctx, "systemctl", m.systemctlArgs(args)...)
+	return engine.Output(ctx, m.R, runner.Cmd{Argv: append([]string{"systemctl"}, m.systemctlArgs(args)...)})
 }
 
 // systemctlArgs prepends the `--user` token when the config is rootless, honoring

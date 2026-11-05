@@ -7,8 +7,7 @@ import (
 	"testing"
 
 	"github.com/hafio/go-deploy-utility/exitcode"
-
-	"solace/internal/engine"
+	"github.com/hafio/go-deploy-utility/runner"
 )
 
 // The euid guard cli.prepare runs (container.GuardPodmanEUID) is the one place the
@@ -51,7 +50,7 @@ func runGuarded(t *testing.T, euid int, args ...string) (string, error, *opRunne
 	rr := &opRunner{}
 	out, err := runRootWith(t, args, func(a *App) {
 		a.Geteuid = func() int { return euid }
-		a.NewRunner = func(*App) engine.EnvRunner { return rr }
+		a.NewRunner = func(*App) runner.Runner { return rr }
 	})
 	return out, err, rr
 }

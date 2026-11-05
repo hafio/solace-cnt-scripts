@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"solace/internal/engine"
+	"github.com/hafio/go-deploy-utility/runner"
 )
 
 func TestImageTag(t *testing.T) {
@@ -120,7 +120,7 @@ func TestConfirmNoDowngradeIsSilentInAPreview(t *testing.T) {
 	buf := &bytes.Buffer{}
 	cfg := haCfg()
 	cfg.K8s.Operator.Image = "solace/pubsubplus-eventbroker-operator:1.4.0"
-	c := NewCluster(engine.Echo{W: buf}, cfg, func(f string, a ...any) {
+	c := NewCluster(runner.Echo{W: buf}, cfg, func(f string, a ...any) {
 		fmt.Fprintf(buf, f+"\n", a...)
 	}, buf)
 	newer := &deploymentItem{}

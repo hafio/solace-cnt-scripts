@@ -24,8 +24,7 @@ const defaultSCJSONPath = `jsonpath={.items[?(@.metadata.annotations.storageclas
 // without a live cluster, while still echoing the commands they would run. A real
 // cluster never hits this path, so `no default StorageClass` still fails loud there.
 func (c *Cluster) isEcho() bool {
-	_, ok := c.R.(engine.Echo)
-	return ok
+	return engine.IsEcho(c.R)
 }
 
 // Check is the whole-env-file validation, and is the container-side Manager.Check's

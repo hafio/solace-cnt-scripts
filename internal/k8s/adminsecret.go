@@ -8,8 +8,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
-	"solace/internal/engine"
 )
 
 // adminsecret.go is where this deployment's admin password lives on Kubernetes when the
@@ -44,7 +45,7 @@ func AdminSecretInUse(cfg *config.Config) string {
 // command that must authenticate when the env file carries no semp.adminPass. It goes
 // through readSecretKey, the reader replication already uses, and adds the next step that
 // fits whichever Secret it was.
-func ReadAdminPassword(r engine.Runner, cfg *config.Config) (string, error) {
+func ReadAdminPassword(r runner.Runner, cfg *config.Config) (string, error) {
 	cmd, err := cfg.ClusterCommand()
 	if err != nil {
 		return "", err

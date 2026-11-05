@@ -10,8 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
-	"solace/internal/engine"
 )
 
 // The operator's watch scope is the one field of the install that does not belong to any
@@ -846,7 +847,7 @@ func TestOperatorReleaseDeletesTheOperatorWhenTheEnvFileCoversEveryNamespace(t *
 func TestOperatorReleasePreviewShowsTheFullDelete(t *testing.T) {
 	var out bytes.Buffer
 	log := func(f string, a ...any) { fmt.Fprintf(&out, f+"\n", a...) }
-	c := NewCluster(engine.Echo{W: &out}, loadK8s(t), log, &out)
+	c := NewCluster(runner.Echo{W: &out}, loadK8s(t), log, &out)
 	if err := c.OperatorRelease(context.Background(), false); err != nil {
 		t.Fatalf("OperatorRelease under Echo: %v\n%s", err, out.String())
 	}

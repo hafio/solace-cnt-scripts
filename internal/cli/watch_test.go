@@ -9,8 +9,7 @@ import (
 	"time"
 
 	"github.com/hafio/go-deploy-utility/exitcode"
-
-	"solace/internal/engine"
+	"github.com/hafio/go-deploy-utility/runner"
 )
 
 // stopAfter is a Sleep seam that records each interval it was asked to wait and ends the
@@ -100,7 +99,7 @@ func TestWatchKeepsGoingAfterAFailedRefresh(t *testing.T) {
 	errOut := captureStderr(t, func() {
 		_, err = runRootWith(t, []string{"broker", "status", "--all", "--watch", "--interval", "2s",
 			"--platform", "docker", "--env", writeCtrStandaloneEnv(t)}, func(a *App) {
-			a.NewRunner = func(*App) engine.EnvRunner { return rr }
+			a.NewRunner = func(*App) runner.Runner { return rr }
 			a.Terminal = func() bool { return false }
 			a.Sleep = stopAfter(2, &slept)
 		})

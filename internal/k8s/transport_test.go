@@ -3,15 +3,18 @@ package k8s
 import (
 	"bytes"
 	"context"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/broker"
 	"solace/internal/config"
-	"solace/internal/engine"
 )
 
-// --- capturing fake engine.Runner ------------------------------------------
+// --- capturing fake runner.Runner ------------------------------------------
 
 type rrCall struct {
 	method string // Run | RunInput | RunInteractive | Output | OutputInput
@@ -137,36 +140,60 @@ func (r *recRunner) nextOutErr() error {
 	return r.outErr
 }
 
-func (r *recRunner) Run(_ context.Context, name string, args ...string) error {
-	r.calls = append(r.calls, rrCall{"Run", name, args, ""})
-	return r.nextRunErr()
-}
-func (r *recRunner) RunInput(_ context.Context, in []byte, name string, args ...string) error {
-	r.calls = append(r.calls, rrCall{"RunInput", name, args, string(in)})
-	return r.runInputErr
+// legacyMethod names a call the way the retired five-method Runner interface did, so the
+// recorded sequences and their assertions keep reading as they always have: a captured
+// stdout is Output (OutputInput with stdin), a streamed one is Run (RunEnv with env,
+// RunInput with stdin), and an attached session is RunInteractive.
+func legacyMethod(c runner.Cmd, stdout io.Writer) string {
+	switch {
+	case stdout != io.Writer(os.Stdout) && c.Stdin != nil:
+		return "OutputInput"
+	case stdout != io.Writer(os.Stdout):
+		return "Output"
+	case c.Env != nil:
+		return "RunEnv"
+	case c.Stdin != nil:
+		return "RunInput"
+	}
+	return "Run"
 }
 
-// RunEnv exists to satisfy engine.Runner: nothing in the k8s package passes
-// secrets through a child environment (every secret rides stdin), so it records
-// the call like Run and the extra environment is deliberately not modelled.
-func (r *recRunner) RunEnv(_ context.Context, _ []string, name string, args ...string) error {
-	r.calls = append(r.calls, rrCall{"RunEnv", name, args, ""})
+// Run records the call under its legacy method name and answers it as that method did.
+// RunEnv exists only so a call that carries Env is still recorded: nothing in the k8s
+// package passes secrets through a child environment (every secret rides stdin), so the
+// extra environment is deliberately not modelled.
+func (r *recRunner) Run(_ context.Context, c runner.Cmd, stdout, _ io.Writer) error {
+	method, name, args := legacyMethod(c, stdout), c.Argv[0], c.Argv[1:]
+	switch method {
+	case "RunInput":
+		r.calls = append(r.calls, rrCall{method, name, args, string(c.Stdin)})
+		return r.runInputErr
+	case "Output":
+		r.calls = append(r.calls, rrCall{method, name, args, ""})
+		if isCanI(args) {
+			return writeOut(stdout)(r.canIAnswer(args))
+		}
+		return writeOut(stdout)(r.nextOut(), r.nextOutErr())
+	case "OutputInput":
+		r.calls = append(r.calls, rrCall{method, name, args, string(c.Stdin)})
+		return writeOut(stdout)(r.out, r.nextOutErr())
+	}
+	r.calls = append(r.calls, rrCall{method, name, args, ""})
 	return r.nextRunErr()
 }
-func (r *recRunner) RunInteractive(_ context.Context, name string, args ...string) error {
-	r.calls = append(r.calls, rrCall{"RunInteractive", name, args, ""})
-	return nil
-}
-func (r *recRunner) Output(_ context.Context, name string, args ...string) ([]byte, error) {
-	r.calls = append(r.calls, rrCall{"Output", name, args, ""})
-	if isCanI(args) {
-		return r.canIAnswer(args)
+
+// writeOut returns a function that writes a scripted answer to the captured stdout and
+// passes the scripted error through, so an answer and an error can come back together.
+func writeOut(stdout io.Writer) func([]byte, error) error {
+	return func(out []byte, err error) error {
+		_, _ = stdout.Write(out)
+		return err
 	}
-	return r.nextOut(), r.nextOutErr()
 }
-func (r *recRunner) OutputInput(_ context.Context, in []byte, name string, args ...string) ([]byte, error) {
-	r.calls = append(r.calls, rrCall{"OutputInput", name, args, string(in)})
-	return r.out, r.nextOutErr()
+
+func (r *recRunner) Attach(c runner.Cmd, _, _, _ *os.File) (int, error) {
+	r.calls = append(r.calls, rrCall{"RunInteractive", c.Argv[0], c.Argv[1:], ""})
+	return 0, nil
 }
 
 // afterPreflight asserts the FIRST recorded call is the read-only permission probe
@@ -330,12 +357,12 @@ func TestTransportCopy(t *testing.T) {
 	}
 }
 
-// --- end-to-end: a real broker.Ops over engine.Echo never echoes the body ---
+// --- end-to-end: a real broker.Ops over runner.Echo never echoes the body ---
 
 func TestTransportEchoHidesUploadBody(t *testing.T) {
 	buf := &bytes.Buffer{}
 	cfg := haCfg()
-	tr := NewTransport(engine.Echo{W: buf}, cfg)
+	tr := NewTransport(runner.Echo{W: buf}, cfg)
 	o := broker.New(tr, cfg, nil)
 
 	body := "SECRET-CLI-BODY\n"

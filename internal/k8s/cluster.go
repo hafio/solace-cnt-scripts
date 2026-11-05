@@ -5,6 +5,8 @@ import (
 	"io"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
 	"solace/internal/engine"
 	"solace/internal/output"
@@ -35,7 +37,7 @@ const operatorDeployRef = "deployment/" + operatorDeployment
 // transport. Every command routes through R, so the Echo runner records it and tests capture
 // the exact argv. Out is the report sink; Log is the narration sink.
 type Cluster struct {
-	R   engine.Runner
+	R   runner.Runner
 	Cfg *config.Config
 	// Log is the RAW line sink for progress: it receives one already-formatted
 	// line and emits it verbatim. The `==> ` and `[TAG ] ` prefixes are added by
@@ -66,8 +68,8 @@ type Cluster struct {
 
 // NewCluster builds a Cluster over the given runner, config, line sink and output
 // sink. Confirm is left nil, which DECLINES; a caller that can ask sets it.
-func NewCluster(r engine.Runner, cfg *config.Config, log func(string, ...any), out io.Writer) *Cluster {
-	return &Cluster{R: r, Cfg: cfg, Log: log, Out: out}
+func NewCluster(r runner.Runner, cfg *config.Config, log func(string, ...any), out io.Writer) *Cluster {
+	return &Cluster{R: engine.NoEnv(r), Cfg: cfg, Log: log, Out: out}
 }
 
 // confirm asks the operator question through the Confirm seam. A nil Confirm DECLINES:
@@ -125,7 +127,7 @@ func (c *Cluster) kubectl(ctx context.Context, args ...string) error {
 	if err != nil {
 		return err
 	}
-	return c.R.Run(ctx, k.Name(), k.Args(args...)...)
+	return engine.Run(ctx, c.R, runner.Cmd{Argv: k.Argv(args...)})
 }
 
 // apply pipes a rendered manifest to `kubectl apply -f -` on stdin (never a temp
@@ -135,7 +137,7 @@ func (c *Cluster) apply(ctx context.Context, manifest []byte) error {
 	if err != nil {
 		return err
 	}
-	return c.R.RunInput(ctx, manifest, k.Name(), k.Args("apply", "-f", "-")...)
+	return engine.Run(ctx, c.R, runner.Cmd{Argv: k.Argv("apply", "-f", "-"), Stdin: manifest})
 }
 
 // deleteStdin pipes a rendered manifest to `kubectl delete -f - --ignore-not-found`,
@@ -145,7 +147,7 @@ func (c *Cluster) deleteStdin(ctx context.Context, manifest []byte) error {
 	if err != nil {
 		return err
 	}
-	return c.R.RunInput(ctx, manifest, k.Name(), k.Args("delete", "-f", "-", "--ignore-not-found")...)
+	return engine.Run(ctx, c.R, runner.Cmd{Argv: k.Argv("delete", "-f", "-", "--ignore-not-found"), Stdin: manifest})
 }
 
 // output runs `kubectl args...` and returns captured stdout.
@@ -154,7 +156,7 @@ func (c *Cluster) kubectlOutput(ctx context.Context, args ...string) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
-	return c.R.Output(ctx, k.Name(), k.Args(args...)...)
+	return engine.Output(ctx, c.R, runner.Cmd{Argv: k.Argv(args...)})
 }
 
 // operatorNS resolves the namespace the operator runs in: the configured

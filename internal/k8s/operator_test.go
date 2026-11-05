@@ -5,14 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/runner"
 	"gopkg.in/yaml.v3"
 
 	"solace/internal/config"
-	"solace/internal/engine"
 	"solace/internal/examples"
 )
 
@@ -493,7 +494,7 @@ func TestOperatorApplyRefusesAFallbackFirstInstallWithoutEscalateOrBind(t *testi
 // both belong to a refused list, which a preview cannot have.
 func TestOperatorApplyPreviewReadsTheOperatorOnce(t *testing.T) {
 	var out strings.Builder
-	c := NewCluster(engine.Echo{W: &out}, loadK8s(t), nil, &out)
+	c := NewCluster(runner.Echo{W: &out}, loadK8s(t), nil, &out)
 	if err := c.OperatorApply(context.Background()); err != nil {
 		t.Fatalf("OperatorApply under Echo: %v", err)
 	}
@@ -1302,12 +1303,13 @@ type covApplyRunner struct {
 	err error
 }
 
-// RunInput records the call like recRunner does, then fails it when failOn selects the manifest.
-func (r *covApplyRunner) RunInput(ctx context.Context, in []byte, name string, args ...string) error {
-	if err := r.recRunner.RunInput(ctx, in, name, args...); err != nil {
+// Run records the call like recRunner does, then fails a call carrying stdin when failOn
+// selects the manifest.
+func (r *covApplyRunner) Run(ctx context.Context, c runner.Cmd, stdout, stderr io.Writer) error {
+	if err := r.recRunner.Run(ctx, c, stdout, stderr); err != nil {
 		return err
 	}
-	if r.failOn(string(in)) {
+	if legacyMethod(c, stdout) == "RunInput" && r.failOn(string(c.Stdin)) {
 		return r.err
 	}
 	return nil

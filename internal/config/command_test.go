@@ -174,6 +174,35 @@ func TestCommandNameAndArgs(t *testing.T) {
 	}
 }
 
+// TestCommandArgv: the whole line for one call is the command followed by the call's own
+// arguments, in a slice of its own, so a later call cannot rewrite an earlier one's argv.
+func TestCommandArgv(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  Command
+		want string
+	}{
+		{"unset", nil, "get pods"},
+		{"bare binary", Command{"kubectl"}, "kubectl get pods"},
+		{"wrapper", Command{"microk8s", "kubectl"}, "microk8s kubectl get pods"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strings.Join(tc.cmd.Argv("get", "pods"), " "); got != tc.want {
+				t.Errorf("Argv() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	base := make([]string, 0, 8)
+	base = append(base, "microk8s", "kubectl")
+	cmd := Command(base)
+	first := cmd.Argv("get", "pods")
+	_ = cmd.Argv("delete", "ns")
+	if got := strings.Join(first, " "); got != "microk8s kubectl get pods" {
+		t.Errorf("a second Argv overwrote the first: %q", got)
+	}
+}
+
 // TestCommandArgsDoesNotAliasCommand guards the aliasing trap: a Command is a
 // long-lived config value reused by every call, so building argv with
 // append(cmd[1:], extra...) would write into its backing array whenever there is

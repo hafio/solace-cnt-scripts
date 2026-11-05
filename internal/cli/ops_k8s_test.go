@@ -9,14 +9,14 @@ import (
 	"testing"
 
 	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/runner"
 
 	"solace/internal/config"
-	"solace/internal/engine"
 	"solace/internal/k8s"
 )
 
 // ops_k8s_test.go drives the Kubernetes handlers of ops_k8s.go directly, over opRunner
-// (cli_test.go) rather than engine.Echo, for the branches the echo seam cannot reach: every
+// (cli_test.go) rather than runner.Echo, for the branches the echo seam cannot reach: every
 // confirmation gate in each of its outcomes, every refusal that has to land BEFORE anything
 // is issued, and the failures a real cluster hands back mid-operation. Echo answers every
 // read with nothing and never fails, so it can show which argv a command would issue but not
@@ -812,7 +812,7 @@ func TestOpsK8sStatusOperatorRefusesAClusterCommandTheGuardRejects(t *testing.T)
 	cfg := writeK8sDeployAllEnv(t, "false")
 	cfg.K8s.Command = config.Command{"sudo", "kubectl"}
 	var echoed strings.Builder
-	a := &App{Cfg: cfg, Platform: config.K8s, Runner: engine.Echo{W: &echoed}}
+	a := &App{Cfg: cfg, Platform: config.K8s, Runner: runner.Echo{W: &echoed}}
 	_, _, err := opsK8sRun(t, func() error { return opK8sStatusOperator(a) })
 	if err == nil || !strings.Contains(err.Error(), "kubernetes.command") || !strings.Contains(err.Error(), "privilege-escalation wrapper (sudo)") {
 		t.Fatalf("opK8sStatusOperator err = %v, want the guard's refusal naming kubernetes.command and the sudo wrapper", err)

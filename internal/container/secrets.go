@@ -10,7 +10,7 @@ import (
 
 // previewValue stands in for a file-backed secret under the Echo runner. It is
 // non-empty on purpose: the entry must survive so the child-environment list still
-// has exactly one variable per secret, and engine.MaskEnv prints it as *** anyway.
+// has exactly one variable per secret, and runner.Echo prints it as *** anyway.
 const previewValue = "(preview)"
 
 // ResolveSecretValues fills in the secrets whose bytes are not in the env file.

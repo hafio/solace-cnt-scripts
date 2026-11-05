@@ -2,20 +2,15 @@ package cli
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/runner"
 	"github.com/spf13/cobra"
-
-	"solace/internal/engine"
 )
 
 // k8sEnv appends the sample env plus --platform kubernetes. The sample declares all
@@ -165,40 +160,49 @@ func TestRootKeepsCobrasUnknownCommandError(t *testing.T) {
 	}
 }
 
-// interactiveFailRunner is engine.Echo with RunInteractive failing. Every other
-// method still echoes, so the preflight and the argv assertions behave as they do
+// interactiveFailRunner is runner.Echo with Attach reporting a session status. Every
+// other call still echoes, so the preflight and the argv assertions behave as they do
 // under the plain Echo runner and only the handed-over session fails.
 type interactiveFailRunner struct {
-	engine.Echo
-	err error
+	runner.Echo
+	code int
 }
 
-func (r interactiveFailRunner) RunInteractive(context.Context, string, ...string) error { return r.err }
+func (r interactiveFailRunner) Attach(runner.Cmd, *os.File, *os.File, *os.File) (int, error) {
+	return r.code, nil
+}
 
-// runFailRunner is engine.Echo with Run failing -- the non-interactive counterpart,
-// for proving that the SAME error from a command that is not a handed-over session
-// is an ordinary failure.
+// runFailRunner is runner.Echo with a streamed Run failing -- the non-interactive
+// counterpart, for proving that the SAME status from a command that is not a handed-over
+// session is an ordinary failure. A captured read still echoes, so a preflight probe
+// does not trip it.
 type runFailRunner struct {
-	engine.Echo
+	runner.Echo
 	err error
 }
 
-func (r runFailRunner) Run(context.Context, string, ...string) error { return r.err }
+func (r runFailRunner) Run(ctx context.Context, c runner.Cmd, stdout, stderr io.Writer) error {
+	if legacyMethod(c, stdout) != "Run" {
+		return r.Echo.Run(ctx, c, stdout, stderr)
+	}
+	return r.err
+}
 
 // TestChildExitStatusIsScopedToInteractiveSessions is the property that matters
-// about the passthrough: the same child error, carrying the same status, becomes
-// this tool's exit code from `shell` and does NOT from `logs broker`.
+// about the passthrough: the same child status becomes this tool's exit code from
+// `shell` and does NOT from `logs broker`.
 //
 // Without the scoping, every command would start reporting whatever kubectl or the
 // engine happened to exit with, which is neither documentable nor usable in a
-// script. Testing both halves against one error is what pins that.
+// script. Testing both halves against one status is what pins that. The status is
+// scripted: a session's Attach reports the code, and a streamed Run fails with the
+// same one as an exitcode.Exited error.
 func TestChildExitStatusIsScopedToInteractiveSessions(t *testing.T) {
-	child := fmt.Errorf("kubectl: %w", childStatusError(t, 7))
 	env := writeStandaloneEnv(t)
 
 	_, err := runRootWith(t, []string{"broker", "shell", "--env", env}, func(a *App) {
-		a.NewRunner = func(*App) engine.EnvRunner {
-			return interactiveFailRunner{Echo: engine.Echo{W: io.Discard}, err: child}
+		a.NewRunner = func(*App) runner.Runner {
+			return interactiveFailRunner{Echo: runner.Echo{W: io.Discard}, code: 7}
 		}
 	})
 	if got := exitcode.Code(err); got != 7 {
@@ -206,51 +210,14 @@ func TestChildExitStatusIsScopedToInteractiveSessions(t *testing.T) {
 	}
 
 	_, err = runRootWith(t, []string{"broker", "logs", "--env", env}, func(a *App) {
-		a.NewRunner = func(*App) engine.EnvRunner {
-			return runFailRunner{Echo: engine.Echo{W: io.Discard}, err: child}
+		a.NewRunner = func(*App) runner.Runner {
+			return runFailRunner{Echo: runner.Echo{W: io.Discard}, err: exitcode.Exited("kubectl", 7)}
 		}
 	})
 	if got := exitcode.Code(err); got != exitcode.Failure {
-		t.Errorf("logs broker over the same error: got %d, want %d -- the engine's status must not "+
+		t.Errorf("logs broker over the same status: got %d, want %d -- the engine's status must not "+
 			"escape a command that is not a handed-over session (err: %v)", got, exitcode.Failure, err)
 	}
-}
-
-// TestHelperExitProcess is not a test: it is the child process childStatusError
-// starts. This is the standard os/exec helper-process pattern -- the test binary
-// re-executes itself -- because a real *exec.ExitError cannot be built by hand (only
-// os/exec fills in its ProcessState) and no one command spells "exit 7" on both
-// Windows and Linux. The value is the status to exit with.
-func TestHelperExitProcess(t *testing.T) {
-	code := os.Getenv(exitCodeVar)
-	if code == "" {
-		t.Skip("helper process for childStatusError; nothing to do when run directly")
-	}
-	n, err := strconv.Atoi(code)
-	if err != nil {
-		t.Fatalf("%s=%q is not a number", exitCodeVar, code)
-	}
-	os.Exit(n)
-}
-
-const exitCodeVar = "SOLACE_TEST_CHILD_EXIT_CODE"
-
-// childStatusError returns a real *exec.ExitError carrying the given status.
-func childStatusError(t *testing.T, code int) error {
-	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run", "^TestHelperExitProcess$")
-	cmd.Env = append(os.Environ(), exitCodeVar+"="+strconv.Itoa(code))
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	err := cmd.Run()
-	var ee *exec.ExitError
-	if !errors.As(err, &ee) {
-		t.Fatalf("helper process did not produce an exit status: %v", err)
-	}
-	if ee.ExitCode() != code {
-		t.Fatalf("helper process exited %d, wanted %d", ee.ExitCode(), code)
-	}
-	return err
 }
 
 // walkTree visits c and every command beneath it.

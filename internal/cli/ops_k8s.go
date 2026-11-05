@@ -15,9 +15,9 @@ import (
 )
 
 // The k8s handlers wire the cobra tree to the two Kubernetes entry types: k8s.Cluster
-// (operations that talk to the cluster/operator, over engine.Runner) and broker.Ops
+// (operations that talk to the cluster/operator, over runner.Runner) and broker.Ops
 // (config/verify operations against a running broker, over the kubectl Transport).
-// A test installs engine.Echo through App.NewRunner, so every handler is exercisable
+// A test installs runner.Echo through App.NewRunner, so every handler is exercisable
 // without a cluster. Progress goes to stderr via step; rendered artifacts are the only
 // stdout (emit).
 

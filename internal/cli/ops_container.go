@@ -14,9 +14,9 @@ import (
 
 // The container (docker/podman) handlers wire the cobra tree to the two entry
 // types, mirroring the k8s handlers: container.Manager (host operations --
-// prep/deploy/delete/status, over engine.Runner) and broker.Ops (config/verify
+// prep/deploy/delete/status, over runner.Runner) and broker.Ops (config/verify
 // against the running broker, over the node-local container Transport). a.Platform
-// selects docker vs podman downstream. A test installs engine.Echo through
+// selects docker vs podman downstream. A test installs runner.Echo through
 // App.NewRunner, so every handler is exercisable without a real engine.
 //
 // The container transport is node-local (one broker per host) and ignores the role, so

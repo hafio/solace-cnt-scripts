@@ -12,6 +12,8 @@ import (
 	"context"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/broker"
 	"solace/internal/config"
 	"solace/internal/engine"
@@ -21,10 +23,10 @@ import (
 // against the single broker container on this host. Node-local: there is one
 // container per host, so the role argument is ignored (the k8s transport maps it
 // to a pod; here every call targets the same container). Every call routes through
-// the injected engine.Runner, so the Echo runner records the command without running it
+// the injected runner.Runner, so the Echo runner records the command without running it
 // and tests capture the exact argv.
 type containerTransport struct {
-	r    engine.Runner
+	r    runner.Runner
 	cfg  *config.Config
 	p    config.Platform
 	name string // container name
@@ -35,9 +37,9 @@ type containerTransport struct {
 // once; the role argument on every method is ignored (node-local, one
 // container/host). The runtime command is deliberately NOT captured -- it is
 // resolved through the execution guard on every call (runtime below).
-func NewTransport(r engine.Runner, cfg *config.Config, p config.Platform) broker.Transport {
+func NewTransport(r runner.Runner, cfg *config.Config, p config.Platform) broker.Transport {
 	return &containerTransport{
-		r:    r,
+		r:    engine.NoEnv(r),
 		cfg:  cfg,
 		p:    p,
 		name: cfg.ContainerBlock(p).Name,
@@ -70,7 +72,7 @@ func (c *containerTransport) Run(ctx context.Context, _ config.Role, argv ...str
 	if err != nil {
 		return err
 	}
-	return c.r.Run(ctx, rt.Name(), rt.Args(c.execArgs(false, argv)...)...)
+	return engine.Run(ctx, c.r, runner.Cmd{Argv: rt.Argv(c.execArgs(false, argv)...)})
 }
 
 func (c *containerTransport) Output(ctx context.Context, _ config.Role, argv ...string) ([]byte, error) {
@@ -78,7 +80,7 @@ func (c *containerTransport) Output(ctx context.Context, _ config.Role, argv ...
 	if err != nil {
 		return nil, err
 	}
-	return c.r.Output(ctx, rt.Name(), rt.Args(c.execArgs(false, argv)...)...)
+	return engine.Output(ctx, c.r, runner.Cmd{Argv: rt.Argv(c.execArgs(false, argv)...)})
 }
 
 func (c *containerTransport) OutputInput(ctx context.Context, _ config.Role, in []byte, argv ...string) ([]byte, error) {
@@ -86,11 +88,11 @@ func (c *containerTransport) OutputInput(ctx context.Context, _ config.Role, in 
 	if err != nil {
 		return nil, err
 	}
-	return c.r.OutputInput(ctx, in, rt.Name(), rt.Args(c.execArgs(true, argv)...)...)
+	return engine.Output(ctx, c.r, runner.Cmd{Argv: rt.Argv(c.execArgs(true, argv)...), Stdin: in})
 }
 
 // Upload writes data to destPath inside the container by piping it to `sh -c 'cat
-// > <dest>'` on stdin -- the secret-safe path: the body rides RunInput's stdin
+// > <dest>'` on stdin -- the secret-safe path: the body rides Cmd.Stdin
 // (shown as a byte count under the Echo runner), never an argv or a temp file. destPath
 // is tool-generated and validName-checked upstream, so shSingleQuote is defensive.
 func (c *containerTransport) Upload(ctx context.Context, _ config.Role, data []byte, destPath string) error {
@@ -100,7 +102,7 @@ func (c *containerTransport) Upload(ctx context.Context, _ config.Role, data []b
 	}
 	shcmd := "cat > " + shSingleQuote(destPath)
 	argv := c.execArgs(true, []string{"sh", "-c", shcmd})
-	return c.r.RunInput(ctx, data, rt.Name(), rt.Args(argv...)...)
+	return engine.Run(ctx, c.r, runner.Cmd{Argv: rt.Argv(argv...), Stdin: data})
 }
 
 // UploadFile copies a local file into the container via
@@ -110,7 +112,7 @@ func (c *containerTransport) UploadFile(ctx context.Context, _ config.Role, loca
 	if err != nil {
 		return err
 	}
-	return c.r.Run(ctx, rt.Name(), rt.Args("cp", localPath, c.name+":"+destPath)...)
+	return engine.Run(ctx, c.r, runner.Cmd{Argv: rt.Argv("cp", localPath, c.name+":"+destPath)})
 }
 
 // Download copies remotePath from the container to localPath via
@@ -120,7 +122,7 @@ func (c *containerTransport) Download(ctx context.Context, _ config.Role, remote
 	if err != nil {
 		return err
 	}
-	return c.r.Run(ctx, rt.Name(), rt.Args("cp", c.name+":"+remotePath, localPath)...)
+	return engine.Run(ctx, c.r, runner.Cmd{Argv: rt.Argv("cp", c.name+":"+remotePath, localPath)})
 }
 
 // shSingleQuote wraps s in single quotes for safe use inside `sh -c`, escaping any

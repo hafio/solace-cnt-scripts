@@ -83,11 +83,11 @@ the env file's section key and the `--platform` value. The yaml tag is a separat
 
 **There is no `--dry-run` and no `--gen-*` flags.** `generate <target>` is the only
 look-before-you-leap surface, so an artifact you meant to read and a cluster you meant to change
-are not one typo apart. `engine.Echo` is a TEST-ONLY runner installed through the
+are not one typo apart. `runner.Echo` (from the shared module) is a TEST-ONLY runner installed through the
 `App.NewRunner` seam; nothing user-facing installs it.
 
 **Secret values are shown in exactly one place** -- `generate` on Kubernetes, where the Secret
-manifest *is* the artifact. Everywhere else reports say `set`/`MISSING` and `engine.Echo` masks
+manifest *is* the artifact. Everywhere else reports say `set`/`MISSING` and `runner.Echo` masks
 child environment as `NAME=***`.
 
 **The env-loading hook lives on each runnable command's `PreRunE`, never on root's

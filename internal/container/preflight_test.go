@@ -8,8 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
-	"solace/internal/engine"
 	"solace/internal/render"
 )
 
@@ -251,7 +252,7 @@ func TestComposeSecretEnvIsTheOnlyChildEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("composeSecretEnv: %v", err)
 	}
-	masked := engine.MaskEnv(raw)
+	masked := runner.MaskEnv(raw)
 	if strings.Contains(masked, "secret-pass") || strings.Contains(masked, "test-psk") {
 		t.Errorf("MaskEnv leaked a secret value: %q", masked)
 	}

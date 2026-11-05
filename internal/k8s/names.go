@@ -2,7 +2,7 @@
 // bundle, cluster/broker lifecycle over kubectl, and the concrete broker.Transport
 // that wraps `kubectl exec/cp`. It is the Go port of the numbered bash scripts at
 // the repo root (001-069, 010-020 deploy, 110-120 delete, and the operational
-// helpers). Cluster/operator operations run over an engine.Runner directly; runtime
+// helpers). Cluster/operator operations run over a runner.Runner directly; runtime
 // broker operations run through internal/broker over the transport in transport.go.
 package k8s
 

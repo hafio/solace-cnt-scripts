@@ -8,7 +8,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
+	"solace/internal/engine"
 )
 
 // Where the two host limits that bind a container actually live. NOT
@@ -157,7 +160,7 @@ func (m *Manager) checkNrOpen(ctx context.Context, fix bool) error {
 // raiseNrOpen applies the value now and writes the drop-in that survives a reboot.
 func (m *Manager) raiseNrOpen(ctx context.Context) error {
 	setting := fmt.Sprintf("fs.nr_open=%d", config.ContainerNoFileHard)
-	if err := m.R.Run(ctx, "sysctl", "-w", setting); err != nil {
+	if err := engine.Run(ctx, m.R, runner.Cmd{Argv: []string{"sysctl", "-w", setting}}); err != nil {
 		return fmt.Errorf("sysctl -w %s: %w", setting, err)
 	}
 	body := fmt.Sprintf("# Written by solace-util: the broker container needs nofile %d.\nfs.nr_open = %d\n",
@@ -185,9 +188,9 @@ func (m *Manager) checkUserManagerLimits(ctx context.Context, user string) error
 	unit := fmt.Sprintf("user@%d.service", m.Geteuid())
 	// m.R.Output directly, NOT m.systemctl: that helper prepends --user when
 	// rootless, and this is a question for the SYSTEM manager about a system unit.
-	out, err := m.R.Output(ctx, "systemctl", "show", unit,
+	out, err := engine.Output(ctx, m.R, runner.Cmd{Argv: []string{"systemctl", "show", unit,
 		"-p", "LimitNOFILE", "-p", "LimitNOFILESoft", "-p", "LimitMEMLOCK", "-p", "LimitCORE",
-		"-p", "DelegateControllers")
+		"-p", "DelegateControllers"}})
 	if err != nil {
 		r.Fail("user manager: cannot read %s limits", unit)
 		return fmt.Errorf("cannot read %s limits (`systemctl show %s`): %w", unit, unit, err)
@@ -367,7 +370,7 @@ func (m *Manager) checkSessionCore(ctx context.Context, user string) error {
 // nearestWritableScript uses one: /proc is a path on the LINUX host, and this tool
 // is routinely driven from Windows.
 func (m *Manager) hostLimit(ctx context.Context, script string) (int, error) {
-	out, err := m.R.Output(ctx, "sh", "-c", script)
+	out, err := engine.Output(ctx, m.R, runner.Cmd{Argv: []string{"sh", "-c", script}})
 	if err != nil {
 		return 0, fmt.Errorf("%w (`sh -c %q`): %w", errLimitUnreadable, script, err)
 	}

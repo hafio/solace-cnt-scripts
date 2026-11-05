@@ -280,6 +280,17 @@ func (c Command) Args(extra ...string) []string {
 	return append(out, extra...)
 }
 
+// Argv is the whole command line for one call -- the program, the configured leading
+// arguments, then the call's own -- as the argv a runner.Cmd takes. Like Args it always
+// builds a new slice. An unset Command has no program, so the result starts with the
+// call's own first argument and the runner refuses it as an empty program rather than
+// running that as one.
+func (c Command) Argv(extra ...string) []string {
+	out := make([]string, 0, len(c)+len(extra))
+	out = append(out, c...)
+	return append(out, extra...)
+}
+
 // String renders the command for reports and error messages.
 func (c Command) String() string { return strings.Join(c, " ") }
 

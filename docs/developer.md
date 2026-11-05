@@ -66,7 +66,7 @@ Run the local gate with `scripts/dev.ps1 all scan` (or `./scripts/dev.sh all sca
 `<timestamp> | <task> | <duration>s | OK|FAILED` footer; coverage HTML in
 `coverage/coverage.html`.
 
-Current test coverage is 97.8% as of 2026-11-05, recorded in `scripts/logs/cov.log`. **The
+Current test coverage is 97.9% as of 2026-11-05, recorded in `scripts/logs/cov.log`. **The
 previous total is the local floor**: if a change lands lower, either add the missing tests or
 say in the change which number moved and why (deleting dead code or a weak test can
 legitimately lower it). This is a local mechanism -- a CI runner is a fresh checkout with no
@@ -184,7 +184,7 @@ git tag v0.1.0 && git push origin v0.1.0
 | --- | --- |
 | `main.go` | Entry point (`cli.Execute()`). |
 | `internal/config` | Env-file schema, loading, defaults, validation, role helpers. |
-| `internal/engine` | External-command runner (real exec; an echo variant used as a test seam; secrets never echoed). |
+| `internal/engine` | Wiring over the shared `runner` package: the `--verbose` announcer, `NoEnv` (every holder but compose refuses child environment), `IsEcho`, and the stream helpers `Run`, `Output` and `Interactive`. Exec, echo and quoting are the shared module's. |
 | `internal/render` | Templating for the broker CR, operator bundle, compose/run/quadlet artifacts. |
 | `internal/broker` | Platform-agnostic config/verify operations over an injected transport. |
 | `internal/k8s` | Kubernetes cluster/operator operations and the kubectl transport. |

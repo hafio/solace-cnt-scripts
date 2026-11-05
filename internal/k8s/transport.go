@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/broker"
 	"solace/internal/config"
 	"solace/internal/engine"
@@ -12,18 +14,18 @@ import (
 // kubectlTransport implements broker.Transport by wrapping `kubectl exec/cp -n <ns>
 // <pod> --` against the broker pod for a role. Broker pods are single-container, so
 // no `-c` flag is used (050:30, 053:56, enter-solace-cli.sh:18). Every call routes
-// through the injected engine.Runner, so the Echo runner records the command without running
+// through the injected runner.Runner, so the Echo runner records the command without running
 // it and tests capture the exact argv.
 type kubectlTransport struct {
-	r   engine.Runner
+	r   runner.Runner
 	cfg *config.Config
 }
 
 // NewTransport builds the Kubernetes broker.Transport over the given runner and
 // config. The returned transport binds each role to pod <name>-pubsubplus-<role>-0
 // in the broker namespace.
-func NewTransport(r engine.Runner, cfg *config.Config) broker.Transport {
-	return &kubectlTransport{r: r, cfg: cfg}
+func NewTransport(r runner.Runner, cfg *config.Config) broker.Transport {
+	return &kubectlTransport{r: engine.NoEnv(r), cfg: cfg}
 }
 
 func (k *kubectlTransport) ns() string { return k.cfg.K8s.Namespace }
@@ -50,7 +52,7 @@ func (k *kubectlTransport) Run(ctx context.Context, role config.Role, argv ...st
 	if err != nil {
 		return err
 	}
-	return k.r.Run(ctx, kc.Name(), kc.Args(k.execArgs(role, false, argv)...)...)
+	return engine.Run(ctx, k.r, runner.Cmd{Argv: kc.Argv(k.execArgs(role, false, argv)...)})
 }
 
 func (k *kubectlTransport) Output(ctx context.Context, role config.Role, argv ...string) ([]byte, error) {
@@ -58,7 +60,7 @@ func (k *kubectlTransport) Output(ctx context.Context, role config.Role, argv ..
 	if err != nil {
 		return nil, err
 	}
-	return k.r.Output(ctx, kc.Name(), kc.Args(k.execArgs(role, false, argv)...)...)
+	return engine.Output(ctx, k.r, runner.Cmd{Argv: kc.Argv(k.execArgs(role, false, argv)...)})
 }
 
 func (k *kubectlTransport) OutputInput(ctx context.Context, role config.Role, in []byte, argv ...string) ([]byte, error) {
@@ -66,11 +68,11 @@ func (k *kubectlTransport) OutputInput(ctx context.Context, role config.Role, in
 	if err != nil {
 		return nil, err
 	}
-	return k.r.OutputInput(ctx, in, kc.Name(), kc.Args(k.execArgs(role, true, argv)...)...)
+	return engine.Output(ctx, k.r, runner.Cmd{Argv: kc.Argv(k.execArgs(role, true, argv)...), Stdin: in})
 }
 
 // Upload writes data to destPath inside the pod by piping it to `sh -c 'cat >
-// <dest>'` on stdin -- the secret-safe path: the body rides RunInput's stdin (shown
+// <dest>'` on stdin -- the secret-safe path: the body rides Cmd.Stdin (shown
 // as a byte count under the Echo runner), never an argv or a temp file. destPath is
 // tool-generated and validName-checked upstream, so shSingleQuote is defensive.
 func (k *kubectlTransport) Upload(ctx context.Context, role config.Role, data []byte, destPath string) error {
@@ -80,7 +82,7 @@ func (k *kubectlTransport) Upload(ctx context.Context, role config.Role, data []
 		return err
 	}
 	argv := k.execArgs(role, true, []string{"sh", "-c", shcmd})
-	return k.r.RunInput(ctx, data, kc.Name(), kc.Args(argv...)...)
+	return engine.Run(ctx, k.r, runner.Cmd{Argv: kc.Argv(argv...), Stdin: data})
 }
 
 // UploadFile copies a local file into the pod via
@@ -90,7 +92,7 @@ func (k *kubectlTransport) UploadFile(ctx context.Context, role config.Role, loc
 	if err != nil {
 		return err
 	}
-	return k.r.Run(ctx, kc.Name(), kc.Args("cp", "-n", k.ns(), localPath, podName(k.cfg, role)+":"+destPath)...)
+	return engine.Run(ctx, k.r, runner.Cmd{Argv: kc.Argv("cp", "-n", k.ns(), localPath, podName(k.cfg, role)+":"+destPath)})
 }
 
 // Download copies remotePath from the pod to localPath via
@@ -100,7 +102,7 @@ func (k *kubectlTransport) Download(ctx context.Context, role config.Role, remot
 	if err != nil {
 		return err
 	}
-	return k.r.Run(ctx, kc.Name(), kc.Args("cp", "-n", k.ns(), podName(k.cfg, role)+":"+remotePath, localPath)...)
+	return engine.Run(ctx, k.r, runner.Cmd{Argv: kc.Argv("cp", "-n", k.ns(), podName(k.cfg, role)+":"+remotePath, localPath)})
 }
 
 // shSingleQuote wraps s in single quotes for safe use inside `sh -c`, escaping any
