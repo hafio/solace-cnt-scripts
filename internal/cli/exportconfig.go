@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
+
 	"solace/internal/broker"
 	"solace/internal/config"
 	"solace/internal/output"
@@ -51,7 +53,7 @@ func runImport(a *App, o *broker.Ops, role config.Role, file string) error {
 		// runtime failure: no retry and no different broker state would help.
 		// %w, not %v: the underlying *fs.PathError stays reachable through the usage
 		// wrapper, so errors.Is(err, os.ErrNotExist) still answers.
-		return usagef("read the configuration artifact %q: %w", file, err)
+		return exitcode.Usagef("read the configuration artifact %q: %w", file, err)
 	}
 
 	plan, err := o.ImportPlan(bg(), role, artifact)

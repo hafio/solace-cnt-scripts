@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"solace/internal/abbrev"
+	"github.com/hafio/go-deploy-utility/abbrev"
 )
 
 // Role is a broker node role. The single-letter forms (p|b|m) appear in k8s pod

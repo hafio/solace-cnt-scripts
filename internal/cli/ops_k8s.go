@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
+
 	"solace/internal/broker"
 	"solace/internal/config"
 	"solace/internal/k8s"
@@ -509,11 +511,16 @@ func opK8sLogs(a *App, role config.Role) error {
 }
 
 // opK8sCLI / opK8sShell hand the terminal to a session in the pod, so the session's
-// own exit status is this tool's (childExit, exit.go). `broker perform cli-script` is
+// own exit status is this tool's (exitcode.ChildExit). `broker perform cli-script` is
 // deliberately NOT marked: it runs a script through the CLI and reports on the
 // script, which is this tool's own judgement rather than a status to pass along.
-func opK8sCLI(a *App, role config.Role) error   { return childExit(k8sCluster(a).CLI(bg(), role)) }
-func opK8sShell(a *App, role config.Role) error { return childExit(k8sCluster(a).Shell(bg(), role)) }
+func opK8sCLI(a *App, role config.Role) error {
+	return exitcode.ChildExit(k8sCluster(a).CLI(bg(), role))
+}
+
+func opK8sShell(a *App, role config.Role) error {
+	return exitcode.ChildExit(k8sCluster(a).Shell(bg(), role))
+}
 
 func opK8sCopyFrom(a *App, files []string) error {
 	role, err := podRole(a)
@@ -553,7 +560,7 @@ func opK8sRestart(a *App, roleArg string) error {
 	}
 	role, err := config.ParseRole(roleArg)
 	if err != nil {
-		return asUsage(err)
+		return exitcode.AsUsage(err)
 	}
 	if !confirmAction(a, "Restart", "restart", k8sWhat(a, "the "+roleWord(role)+" broker pod")) {
 		return nil
@@ -832,7 +839,7 @@ func domainCANames(certs []config.DomainCert) []string {
 // "every pod, rolling".
 func podRole(a *App) (config.Role, error) {
 	role, err := config.ParseRole(a.pod)
-	return role, asUsage(err)
+	return role, exitcode.AsUsage(err)
 }
 
 // podRoles resolves --pod against the role set an operation would use by default.

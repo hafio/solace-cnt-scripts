@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/spf13/cobra"
 
 	"solace/internal/broker"
@@ -101,13 +102,13 @@ func resolveScriptPath(a *App, file, verb string) (string, error) {
 	who := "broker perform " + verb
 	dir := a.Cfg.Broker.CLIScriptsDir
 	if dir == "" {
-		return "", usagef("%s: broker.cliScriptsDir is empty, and scripts are read from nowhere else", who)
+		return "", exitcode.Usagef("%s: broker.cliScriptsDir is empty, and scripts are read from nowhere else", who)
 	}
 	if file == "" {
-		return "", usagef("%s: a script file name is required -- it is read from broker.cliScriptsDir (%s)", who, dir)
+		return "", exitcode.Usagef("%s: a script file name is required -- it is read from broker.cliScriptsDir (%s)", who, dir)
 	}
 	if config.HasPathSeparator(file) {
-		return "", usagef("%s runs scripts from broker.cliScriptsDir (%s) only: give the script's file name, "+
+		return "", exitcode.Usagef("%s runs scripts from broker.cliScriptsDir (%s) only: give the script's file name, "+
 			"not a path (got %q) -- the current directory is never searched", who, dir, file)
 	}
 	p := filepath.Join(dir, file)
@@ -115,18 +116,18 @@ func resolveScriptPath(a *App, file, verb string) (string, error) {
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		if _, derr := os.Stat(dir); errors.Is(derr, os.ErrNotExist) {
-			return "", usagef("%s: broker.cliScriptsDir (%s) does not exist -- create it and put %q there: %w",
+			return "", exitcode.Usagef("%s: broker.cliScriptsDir (%s) does not exist -- create it and put %q there: %w",
 				who, dir, file, err)
 		}
-		return "", usagef("%s: %q is not in broker.cliScriptsDir (%s) -- put it there, or point "+
+		return "", exitcode.Usagef("%s: %q is not in broker.cliScriptsDir (%s) -- put it there, or point "+
 			"broker.cliScriptsDir at the folder that holds it: %w", who, file, dir, err)
 	case err != nil:
-		return "", usagef("%s: cannot use %q from broker.cliScriptsDir: %w", who, file, err)
+		return "", exitcode.Usagef("%s: cannot use %q from broker.cliScriptsDir: %w", who, file, err)
 	case !fi.Mode().IsRegular():
-		return "", usagef("%s: %s is not a regular file", who, p)
+		return "", exitcode.Usagef("%s: %s is not a regular file", who, p)
 	}
 	if err := broker.ValidScriptName(strings.TrimSuffix(verb, "-script"), file); err != nil {
-		return "", usagef("%s: %w", who, err)
+		return "", exitcode.Usagef("%s: %w", who, err)
 	}
 	step("script: %s", p)
 	return p, nil

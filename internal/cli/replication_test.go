@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
+
 	"solace/internal/broker"
 	"solace/internal/config"
 )
@@ -1423,7 +1425,7 @@ func TestMateChannelRefusesASEMPSiteWithNoPassword(t *testing.T) {
 	if ch != nil {
 		t.Errorf("a refused site still produced a channel: %s", ch.Describe())
 	}
-	if !isUsage(err) {
+	if !exitcode.IsUsage(err) {
 		t.Errorf("error %q is not a usage error, but the env file is what is wrong", err)
 	}
 	for _, want := range []string{"v:dr1", "passSecret"} {
@@ -1686,7 +1688,7 @@ func TestOpK8sReplicationOpsReadThePodFromTheFlag(t *testing.T) {
 				g.app.pod = "bogus"
 
 				err := op.run(g.app)
-				if err == nil || !isUsage(err) || !strings.Contains(err.Error(), "bogus") {
+				if err == nil || !exitcode.IsUsage(err) || !strings.Contains(err.Error(), "bogus") {
 					t.Fatalf("err = %v, want a usage error naming the bad pod", err)
 				}
 				if len(g.rr.calls) != 0 {

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
@@ -86,7 +87,7 @@ func platformSuffix(ps []config.Platform) string {
 // not apply to the platform this env file selected. It names the platforms that
 // do have it, so the message is a pointer rather than a dead end.
 func unsupportedErr(cmd *cobra.Command, p config.Platform) error {
-	return usagef("%q is not supported on %s: it applies to %s",
+	return exitcode.Usagef("%q is not supported on %s: it applies to %s",
 		cmd.CommandPath(), p, config.JoinPlatforms(commandPlatforms(cmd)))
 }
 
@@ -123,7 +124,7 @@ func checkFlagPlatforms(cmd *cobra.Command, p config.Platform) error {
 		}
 		allowed := parsePlatformList(vals[0])
 		if !supportsPlatform(allowed, p) {
-			bad = usagef("--%s is not supported on %s: it applies to %s",
+			bad = exitcode.Usagef("--%s is not supported on %s: it applies to %s",
 				f.Name, p, config.JoinPlatforms(allowed))
 		}
 	})
@@ -174,7 +175,7 @@ func prepare(app *App, cmd *cobra.Command) error {
 	}
 	p, err := resolvePlatform(app)
 	if err != nil {
-		return asUsage(err)
+		return exitcode.AsUsage(err)
 	}
 	app.Platform = p
 	if !supportsPlatform(commandPlatforms(cmd), p) {
@@ -184,7 +185,7 @@ func prepare(app *App, cmd *cobra.Command) error {
 		return err
 	}
 	if err := app.load(cmd); err != nil {
-		return asUsage(err)
+		return exitcode.AsUsage(err)
 	}
 	// Last, because it needs the config and the runner load built. The DECLARED
 	// podman.rootless is checked against the account running this command before
@@ -199,7 +200,7 @@ func prepare(app *App, cmd *cobra.Command) error {
 	if !app.willExecute(cmd) {
 		return nil
 	}
-	return asUsage(container.GuardPodmanEUID(app.Cfg, app.Platform, app.Runner, app.geteuid()))
+	return exitcode.AsUsage(container.GuardPodmanEUID(app.Cfg, app.Platform, app.Runner, app.geteuid()))
 }
 
 // resolvePlatform settles which platform this invocation drives. --platform wins

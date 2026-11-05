@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
+
 	"solace/internal/broker"
 	"solace/internal/config"
 	"solace/internal/container"
@@ -358,8 +360,8 @@ func opCtrLogs(a *App) error {
 
 // opCtrCLI / opCtrShell hand the terminal over, so the session's own exit status is
 // this tool's -- the container half of what opK8sCLI/opK8sShell document.
-func opCtrCLI(a *App) error      { return childExit(ctrManager(a).CLI(bg())) }
-func opCtrShell(a *App) error    { return childExit(ctrManager(a).Shell(bg())) }
+func opCtrCLI(a *App) error      { return exitcode.ChildExit(ctrManager(a).CLI(bg())) }
+func opCtrShell(a *App) error    { return exitcode.ChildExit(ctrManager(a).Shell(bg())) }
 func opCtrDescribe(a *App) error { return ctrManager(a).Describe(bg()) }
 
 // opCtrStatusBroker reports on this host's broker: the running-artifact summary,
@@ -492,12 +494,12 @@ func containerRenderRole(a *App) (config.Role, error) {
 func detectContainerRole(a *App, arg string, mustDetect bool, cmd string) (config.Role, error) {
 	if !a.Cfg.RedundancyEnabled() {
 		role, err := config.ParseRole(arg)
-		return role, asUsage(err)
+		return role, exitcode.AsUsage(err)
 	}
 	if arg != "" {
 		role, err := config.ParseRole(arg)
 		if err != nil {
-			return "", asUsage(err)
+			return "", exitcode.AsUsage(err)
 		}
 		// An explicit role wins, but it is still CHECKED against what the host looks
 		// like: naming the wrong one is how a second primary joins a group, and the

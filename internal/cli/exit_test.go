@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/spf13/cobra"
 
 	"solace/internal/engine"
@@ -27,14 +27,14 @@ func k8sEnv(args ...string) []string {
 }
 
 // TestExitCodeContract drives real invocations through the tree and asserts the code
-// each produces. Classifying an error handed straight to ExitCode would prove only
+// each produces. Classifying an error handed straight to exitcode.Code would prove only
 // that the switch works; these prove the markers are actually in the paths an
 // operator reaches.
 //
 // The documented gap is asserted too, deliberately: a mistyped TOP-LEVEL command
 // exits 1 because cobra produces that error before any interception point, and
 // pinning it means the day someone finds a clean fix, this is the case that tells
-// them the fix worked (ExitCode, exit.go).
+// them the fix worked (exitcode.Code, and the known gap in exit.go).
 func TestExitCodeContract(t *testing.T) {
 	k8sOnly := writeStandaloneEnv(t) // declares kubernetes: and nothing else
 
@@ -43,37 +43,37 @@ func TestExitCodeContract(t *testing.T) {
 		args []string
 		want int
 	}{
-		{"unknown flag", k8sEnv("broker", "status", "--nope"), exitUsage},
-		{"flag missing its value", k8sEnv("broker", "status", "--pod"), exitUsage},
-		{"too many positionals", k8sEnv("validate", "extra"), exitUsage},
-		{"unknown noun under a verb", k8sEnv("broker", "bogus"), exitUsage},
-		{"role positional where none is taken", k8sEnv("broker", "logs", "primary"), exitUsage},
-		{"unknown word where none is taken", k8sEnv("broker", "logs", "bogus"), exitUsage},
-		{"bad --pod value", k8sEnv("broker", "status", "--pod", "nope"), exitUsage},
-		{"unparseable --since value", k8sEnv("broker", "logs", "--since", "half an hour"), exitUsage},
-		{"bad --platform value", withEnv("broker", "status", "--platform", "nope"), exitUsage},
+		{"unknown flag", k8sEnv("broker", "status", "--nope"), exitcode.Usage},
+		{"flag missing its value", k8sEnv("broker", "status", "--pod"), exitcode.Usage},
+		{"too many positionals", k8sEnv("validate", "extra"), exitcode.Usage},
+		{"unknown noun under a verb", k8sEnv("broker", "bogus"), exitcode.Usage},
+		{"role positional where none is taken", k8sEnv("broker", "logs", "primary"), exitcode.Usage},
+		{"unknown word where none is taken", k8sEnv("broker", "logs", "bogus"), exitcode.Usage},
+		{"bad --pod value", k8sEnv("broker", "status", "--pod", "nope"), exitcode.Usage},
+		{"unparseable --since value", k8sEnv("broker", "logs", "--since", "half an hour"), exitcode.Usage},
+		{"bad --platform value", withEnv("broker", "status", "--platform", "nope"), exitcode.Usage},
 		{"--platform naming an undeclared section",
-			[]string{"broker", "status", "--env", k8sOnly, "--platform", "docker"}, exitUsage},
+			[]string{"broker", "status", "--env", k8sOnly, "--platform", "docker"}, exitcode.Usage},
 		{"env file that does not exist",
-			[]string{"broker", "status", "--env", "no/such/file.yaml"}, exitUsage},
+			[]string{"broker", "status", "--env", "no/such/file.yaml"}, exitcode.Usage},
 		{"env file declaring no platform section",
-			[]string{"broker", "status", "--env", writeNoPlatformEnv(t)}, exitUsage},
+			[]string{"broker", "status", "--env", writeNoPlatformEnv(t)}, exitcode.Usage},
 		{"--allow-command where nothing executes",
-			k8sEnv("broker", "generate", "--allow-command", "kubectl"), exitUsage},
+			k8sEnv("broker", "generate", "--allow-command", "kubectl"), exitcode.Usage},
 		{"kubernetes-only command on a container platform",
-			[]string{"operator", "status", "--env", writeCtrStandaloneEnv(t), "--platform", "docker"}, exitUsage},
+			[]string{"operator", "status", "--env", writeCtrStandaloneEnv(t), "--platform", "docker"}, exitcode.Usage},
 		{"kubernetes-only flag on a container platform",
-			[]string{"broker", "logs", "--previous", "--env", writeCtrStandaloneEnv(t), "--platform", "docker"}, exitUsage},
-		{"unknown example platform", []string{"examples", "--platform", "bogus"}, exitUsage},
+			[]string{"broker", "logs", "--previous", "--env", writeCtrStandaloneEnv(t), "--platform", "docker"}, exitcode.Usage},
+		{"unknown example platform", []string{"examples", "--platform", "bogus"}, exitcode.Usage},
 		// A script is a NAME in broker.cliScriptsDir: a path, or a name that folder does
 		// not hold, is a command line to fix, not a broker to retry.
-		{"cli script named by a path", k8sEnv("broker", "perform", "cli-script", "./setup.cli"), exitUsage},
-		{"shell script named by a path", k8sEnv("broker", "perform", "shell-script", "scripts/run.sh"), exitUsage},
+		{"cli script named by a path", k8sEnv("broker", "perform", "cli-script", "./setup.cli"), exitcode.Usage},
+		{"shell script named by a path", k8sEnv("broker", "perform", "shell-script", "scripts/run.sh"), exitcode.Usage},
 		{"script whose scripts folder does not exist",
-			[]string{"broker", "perform", "cli-script", "setup.cli", "--env", k8sOnly}, exitUsage},
-		{"a noun run bare prints help", k8sEnv("broker"), exitOK},
-		{"--help", []string{"broker", "status", "--help"}, exitOK},
-		{"mistyped top-level command (documented gap)", []string{"depoy", "broker"}, exitFailure},
+			[]string{"broker", "perform", "cli-script", "setup.cli", "--env", k8sOnly}, exitcode.Usage},
+		{"a noun run bare prints help", k8sEnv("broker"), exitcode.OK},
+		{"--help", []string{"broker", "status", "--help"}, exitcode.OK},
+		{"mistyped top-level command (documented gap)", []string{"depoy", "broker"}, exitcode.Failure},
 	}
 
 	for _, tc := range cases {
@@ -83,7 +83,7 @@ func TestExitCodeContract(t *testing.T) {
 			// resolution in App.load, so the suite does not depend on what is
 			// installed on the machine running it.
 			_, err := runRootWith(t, tc.args, echoRunner)
-			if got := ExitCode(err); got != tc.want {
+			if got := exitcode.Code(err); got != tc.want {
 				t.Fatalf("`solace-util %s`: exit %d, want %d (err: %v)",
 					strings.Join(tc.args, " "), got, tc.want, err)
 			}
@@ -128,7 +128,7 @@ func TestEveryArgValidatorIsAUsageError(t *testing.T) {
 				continue
 			}
 			refused = true
-			if !isUsage(err) {
+			if !exitcode.IsUsage(err) {
 				t.Errorf("%s: Args refused %d arguments with a non-usage error: %v",
 					c.CommandPath(), len(args), err)
 			}
@@ -154,7 +154,7 @@ func TestRootKeepsCobrasUnknownCommandError(t *testing.T) {
 	root := newRootCmd(&App{})
 	if root.Args != nil {
 		t.Fatal("root has an Args validator: cobra will no longer produce its unknown-command error, " +
-			"and a mistyped top-level command will print help and exit 0 (see ExitCode in exit.go)")
+			"and a mistyped top-level command will print help and exit 0 (see the known gap in exit.go)")
 	}
 	_, err := runRootWith(t, []string{"depoy", "broker"}, echoRunner)
 	if err == nil {
@@ -201,7 +201,7 @@ func TestChildExitStatusIsScopedToInteractiveSessions(t *testing.T) {
 			return interactiveFailRunner{Echo: engine.Echo{W: io.Discard}, err: child}
 		}
 	})
-	if got := ExitCode(err); got != 7 {
+	if got := exitcode.Code(err); got != 7 {
 		t.Errorf("shell over a session that exited 7: got %d, want 7 (err: %v)", got, err)
 	}
 
@@ -210,123 +210,25 @@ func TestChildExitStatusIsScopedToInteractiveSessions(t *testing.T) {
 			return runFailRunner{Echo: engine.Echo{W: io.Discard}, err: child}
 		}
 	})
-	if got := ExitCode(err); got != exitFailure {
+	if got := exitcode.Code(err); got != exitcode.Failure {
 		t.Errorf("logs broker over the same error: got %d, want %d -- the engine's status must not "+
-			"escape a command that is not a handed-over session (err: %v)", got, exitFailure, err)
+			"escape a command that is not a handed-over session (err: %v)", got, exitcode.Failure, err)
 	}
 }
 
-// TestChildExitFallsBackWhenThereIsNoStatus: a marked error with no exit status
-// behind it (the engine binary was not found, a signal killed the child) must not
-// invent one.
-func TestChildExitFallsBackWhenThereIsNoStatus(t *testing.T) {
-	if got := ExitCode(childExit(nil)); got != exitOK {
-		t.Errorf("childExit(nil): got %d, want %d", got, exitOK)
-	}
-	if got := ExitCode(childExit(errors.New("docker: not found on PATH"))); got != exitFailure {
-		t.Errorf("marked error with no child status: got %d, want %d", got, exitFailure)
-	}
-	// A usage error is never overridden by a status: the two markers cannot both
-	// apply to one error, and the classification order must be stable if they ever do.
-	if got := ExitCode(asUsage(childExit(childStatusError(t, 7)))); got != exitUsage {
-		t.Errorf("usage marker over a child status: got %d, want %d", got, exitUsage)
-	}
-}
-
-// TestChildExitKeepsItsMessage is the childExit half of TestUsageErrorKeepsItsMessage
-// below, and it matters for the same reason: main() PRINTS what Execute returned
-// before exiting with the code. A marker that swallowed the message would leave a
-// failed session reporting a bare status and nothing about what went wrong.
-func TestChildExitKeepsItsMessage(t *testing.T) {
-	inner := errors.New("kubectl: exit status 7")
-	marked := childExit(inner)
-	if marked.Error() != inner.Error() {
-		t.Errorf("childExit message: got %q, want %q", marked, inner)
-	}
-	if !errors.Is(marked, inner) {
-		t.Errorf("childExit lost the cause: %v", marked)
-	}
-}
-
-// TestExitCodeIsNeverNegative covers the guard on a signal-killed child, which is the
-// one status this process cannot pass through: os.Exit is documented for 0-125 and a
-// negative is meaningless to both operating systems this runs on. Go reports -1 for a
-// signalled child, so without the guard `shell` on a killed session would call
-// os.Exit(-1).
-//
-// The two platforms produce different codes for a Kill -- Unix signals (-1 from
-// ExitCode) where Windows terminates with a real status -- so the assertion is the
-// portable property rather than a number: whatever comes back is a status this process
-// can legally exit with.
-func TestExitCodeIsNeverNegative(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run", "^TestHelperExitProcess$")
-	cmd.Env = append(os.Environ(), exitCodeVar+"=block")
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start helper: %v", err)
-	}
-	if err := cmd.Process.Kill(); err != nil {
-		// Skipped rather than failed: a Kill this process is not permitted to make
-		// says nothing about the guard under test, and a flaky hard failure in a
-		// gate is worse than a case that occasionally does not run.
-		t.Skipf("could not kill the helper process on this platform: %v", err)
-	}
-	err := cmd.Wait()
-	if err == nil {
-		t.Fatal("a killed child reported success")
-	}
-	got := ExitCode(childExit(fmt.Errorf("kubectl: %w", err)))
-	if got <= 0 || got > 125 {
-		t.Errorf("ExitCode for a killed session = %d, want a status os.Exit can take (1-125)", got)
-	}
-}
-
-// TestUsageErrorKeepsItsMessage: the classification must cost nothing in what the
-// operator reads, since every one of these errors names the flag, word or platform
-// that was wrong.
-func TestUsageErrorKeepsItsMessage(t *testing.T) {
-	const msg = "--pod nope: unknown role"
-	if got := usagef("%s", msg).Error(); got != msg {
-		t.Errorf("usagef message: got %q, want %q", got, msg)
-	}
-	inner := errors.New(msg)
-	marked := asUsage(inner)
-	if marked.Error() != msg || !errors.Is(marked, inner) {
-		t.Errorf("asUsage lost the message or the cause: %v", marked)
-	}
-	// Marking twice is marking once: asUsage is applied both at individual sites and
-	// over whole call paths (prepare), so the two have to compose.
-	if twice := asUsage(marked); twice.Error() != msg || !isUsage(twice) {
-		t.Errorf("double marking changed the error: %v", twice)
-	}
-	if asUsage(nil) != nil {
-		t.Error("asUsage(nil) is not nil")
-	}
-}
-
-// TestHelperExitProcess is not a test: it is the child process childStatusError and
-// TestExitCodeIsNeverNegative start. This is the standard os/exec helper-process
-// pattern -- the test binary re-executes itself -- because a real *exec.ExitError
-// cannot be built by hand (only os/exec fills in its ProcessState) and no one command
-// spells "exit 7" on both Windows and Linux.
-//
-// A numeric value exits with that status. The value "block" instead waits to be
-// killed, which is how the signalled-child branch is reached; the sleep is a
-// backstop against a Kill that never lands, so a broken test fails on the suite
-// timeout rather than hanging forever.
+// TestHelperExitProcess is not a test: it is the child process childStatusError
+// starts. This is the standard os/exec helper-process pattern -- the test binary
+// re-executes itself -- because a real *exec.ExitError cannot be built by hand (only
+// os/exec fills in its ProcessState) and no one command spells "exit 7" on both
+// Windows and Linux. The value is the status to exit with.
 func TestHelperExitProcess(t *testing.T) {
 	code := os.Getenv(exitCodeVar)
-	switch code {
-	case "":
+	if code == "" {
 		t.Skip("helper process for childStatusError; nothing to do when run directly")
-	case "block":
-		time.Sleep(time.Minute)
-		os.Exit(0)
 	}
 	n, err := strconv.Atoi(code)
 	if err != nil {
-		t.Fatalf("%s=%q is neither a number nor \"block\"", exitCodeVar, code)
+		t.Fatalf("%s=%q is not a number", exitCodeVar, code)
 	}
 	os.Exit(n)
 }

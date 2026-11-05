@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/hafio/go-deploy-utility/notice"
 )
 
 // update regenerates docs/import.md from the classification in sections.go.
@@ -75,23 +77,27 @@ func TestOnlyOneSectionIsAppliedFirst(t *testing.T) {
 	}
 }
 
-// supportNoticeMD is internal/cli's notice of the same name, copied because a test in one
-// package cannot import another's. TestEveryDocCarriesTheSupportNotice (internal/cli)
-// fails if docs/import.md -- rendered from this copy -- ever differs from it.
-const supportNoticeMD = "" +
-	"> [!WARNING]\n" +
-	"> **Not a supported Solace product.** `solace-util` was created by Solace\n" +
-	"> Professional Services and is supported only by Solace Professional Services --\n" +
-	"> not by Solace Support. For help with this tool, contact your Solace\n" +
-	"> Professional Services representative rather than opening a Solace Support\n" +
-	"> case. This notice covers this tool only, not the Solace PubSub+ Event Broker\n" +
-	"> or the EventBroker Operator that it deploys and operates.\n"
+// supportNotice is internal/cli's notice of the same name, rebuilt here because a test in
+// one package cannot import another's. TestEveryDocCarriesTheSupportNotice (internal/cli)
+// fails if docs/import.md -- rendered from this one -- ever differs from the shared form.
+var supportNotice = mustNotice("solace-util", "tool",
+	"the Solace PubSub+ Event Broker or the EventBroker Operator that it deploys and operates")
+
+// mustNotice builds a notice or panics: the arguments are constants, so a failure is a
+// wiring bug that should stop the test binary rather than skip a check.
+func mustNotice(name, kind, covers string) notice.Notice {
+	n, err := notice.New(name, kind, covers)
+	if err != nil {
+		panic(fmt.Sprintf("build the support notice for %s: %v", name, err))
+	}
+	return n
+}
 
 func renderImportDocs() []byte {
 	var b strings.Builder
 
 	b.WriteString("# What `import-config` applies\n\n")
-	b.WriteString(supportNoticeMD + "\n")
+	b.WriteString(supportNotice.Markdown() + "\n")
 	b.WriteString("This file is GENERATED from `internal/broker/sections.go` by\n")
 	b.WriteString("`internal/broker/importdoc_test.go`. Do not edit it by hand: run the `regen` task.\n\n")
 	b.WriteString("`broker perform import-config` decides what to do with a captured configuration\n")

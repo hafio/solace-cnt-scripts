@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
+
 	"solace/internal/engine"
 )
 
@@ -91,8 +93,8 @@ func TestPodmanEUIDGuardRefusesBeforeAnyCommand(t *testing.T) {
 			}
 			// Exit 2: a different invocation is what fixes it, and retrying the
 			// same one cannot -- prepare's own rule (platform.go).
-			if code := ExitCode(err); code != exitUsage {
-				t.Errorf("exit code = %d, want %d (usage)", code, exitUsage)
+			if code := exitcode.Code(err); code != exitcode.Usage {
+				t.Errorf("exit code = %d, want %d (usage)", code, exitcode.Usage)
 			}
 			if len(rr.calls) != 0 {
 				t.Errorf("nothing may reach the engine once the euid is wrong:\n%+v", rr.calls)

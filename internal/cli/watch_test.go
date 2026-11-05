@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
+
 	"solace/internal/engine"
 )
 
@@ -186,8 +188,8 @@ func TestWatchIntervalIsValidated(t *testing.T) {
 					return nil
 				}
 			})
-			if err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("err = %v (exit %d), want a usage error containing %q", err, ExitCode(err), tc.want)
+			if err == nil || exitcode.Code(err) != exitcode.Usage || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v (exit %d), want a usage error containing %q", err, exitcode.Code(err), tc.want)
 			}
 			if out != "" {
 				t.Errorf("a refused --interval still ran the report: %q", out)

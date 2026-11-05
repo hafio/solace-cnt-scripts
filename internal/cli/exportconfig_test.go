@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
+
 	"solace/internal/engine"
 )
 
@@ -281,9 +283,9 @@ func TestExportConfigScopeConflictIsUsageError(t *testing.T) {
 	rr := &opRunner{}
 	_, err := runRootWith(t, withEnv("broker", "perform", "export-config", "--vpn", "acme", "--broker-only", "--platform", "kubernetes"),
 		func(a *App) { a.NewRunner = func(*App) engine.EnvRunner { return rr } })
-	if err == nil || ExitCode(err) != exitUsage {
+	if err == nil || exitcode.Code(err) != exitcode.Usage {
 		t.Fatalf("export-config --vpn x --broker-only err = %v (exit %d), want a usage error (exit %d)",
-			err, ExitCode(err), exitUsage)
+			err, exitcode.Code(err), exitcode.Usage)
 	}
 	if len(rr.calls) != 0 {
 		t.Errorf("the flag conflict still reached the transport:\n%s", rr.dump())
@@ -365,8 +367,8 @@ func TestExportImportPodFlagPlatformScope(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rr := &opRunner{}
 			_, err := runRootWith(t, withEnv(tc.args...), func(a *App) { a.NewRunner = func(*App) engine.EnvRunner { return rr } })
-			if err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), "--pod is not supported on") {
-				t.Fatalf("%s err = %v (exit %d), want a --pod usage refusal (exit %d)", tc.name, err, ExitCode(err), exitUsage)
+			if err == nil || exitcode.Code(err) != exitcode.Usage || !strings.Contains(err.Error(), "--pod is not supported on") {
+				t.Fatalf("%s err = %v (exit %d), want a --pod usage refusal (exit %d)", tc.name, err, exitcode.Code(err), exitcode.Usage)
 			}
 			if len(rr.calls) != 0 {
 				t.Errorf("%s: --pod was refused but the transport still saw %d call(s):\n%s", tc.name, len(rr.calls), rr.dump())
@@ -584,9 +586,9 @@ func TestImportConfigMissingFileIsUsageError(t *testing.T) {
 	rr := &opRunner{}
 	_, err := runRootWith(t, withEnv("broker", "perform", "import-config", missing, "--platform", "kubernetes"),
 		func(a *App) { a.NewRunner = func(*App) engine.EnvRunner { return rr } })
-	if err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), "read the configuration artifact") {
+	if err == nil || exitcode.Code(err) != exitcode.Usage || !strings.Contains(err.Error(), "read the configuration artifact") {
 		t.Fatalf("import-config <missing file> err = %v (exit %d), want a usage error naming the read failure",
-			err, ExitCode(err))
+			err, exitcode.Code(err))
 	}
 	if len(rr.calls) != 0 {
 		t.Errorf("a missing artifact still reached the transport:\n%s", rr.dump())
@@ -665,8 +667,8 @@ func TestExportConfigRejectsABadVPNNameAsUsage(t *testing.T) {
 		if err == nil {
 			t.Fatalf("--vpn %q was accepted", bad)
 		}
-		if code := ExitCode(err); code != exitUsage {
-			t.Errorf("--vpn %q exit code = %d, want %d (usage)", bad, code, exitUsage)
+		if code := exitcode.Code(err); code != exitcode.Usage {
+			t.Errorf("--vpn %q exit code = %d, want %d (usage)", bad, code, exitcode.Usage)
 		}
 		if len(rr.calls) != 0 {
 			t.Errorf("--vpn %q reached the broker before being rejected:\n%s", bad, rr.dump())
@@ -813,7 +815,7 @@ func TestExportScopeFlagCombination(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			vpns, brokerOnly, err := exportScope(&App{vpns: tc.vpns, brokerOnly: tc.brokerOnly})
 			if tc.wantErr {
-				if err == nil || !isUsage(err) {
+				if err == nil || !exitcode.IsUsage(err) {
 					t.Fatalf("exportScope(%v, %v) err = %v, want a usage error", tc.vpns, tc.brokerOnly, err)
 				}
 				return

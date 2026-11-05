@@ -67,7 +67,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-91 test files, 1681 test functions. Three of those are not tests. Two are os/exec
+90 test files, 1670 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -80,7 +80,7 @@ launched from.
 | --- | --- | --- |
 | internal/k8s | 20 | 302 |
 | internal/broker | 24 | 507 |
-| internal/cli | 14 | 270 |
+| internal/cli | 14 | 267 |
 | internal/config | 16 | 241 |
 | internal/container | 8 | 200 |
 | internal/convert | 1 | 40 |
@@ -88,14 +88,13 @@ launched from.
 | internal/engine | 2 | 27 |
 | internal/output | 1 | 16 |
 | internal/tools/vulnjudge | 1 | 11 |
-| internal/abbrev | 1 | 8 |
 | internal/examples | 1 | 8 |
-| **Total** | **91** | **1681** |
+| **Total** | **90** | **1670** |
 
 
 ## Coverage
 
-Last recorded run, from `scripts/logs/cov.log` (2026-10-22), total **97.9%**. Re-run `cov`
+Last recorded run, from `scripts/logs/cov.log` (2026-11-05), total **97.9%**. Re-run `cov`
 after any change; these figures go stale the moment tests move, and the previous total is
 the floor the next run has to hold.
 
@@ -308,7 +307,6 @@ path that actually runs.
 
 | Package | Coverage |
 | --- | --- |
-| internal/abbrev | 100.0% |
 | internal/output | 100.0% |
 | internal/tools/vulnjudge | 98.9% |
 | internal/render | 98.7% |
@@ -320,6 +318,11 @@ path that actually runs.
 | internal/cli | 97.6% |
 | internal/examples | 90.0% |
 | internal/engine | see below |
+
+**Adopting the shared module's `exitcode`, `notice`, `paritydoc` and `abbrev` left the total at
+97.9%.** `internal/abbrev` (100.0%, 8 tests) and the covered code of `internal/cli/exit.go` (with
+the four tests that exercised it) moved to `github.com/hafio/go-deploy-utility`, which tests them
+there. They were too small a share of the statements to move the rounded total.
 
 **The total is down from 96.1%, and the reason is recorded rather than absorbed.** The
 noun-first command-tree overhaul added two substantial mechanics -- the operator watch-list
@@ -356,8 +359,8 @@ can clobber the parent's profile; the run also slows noticeably when it happens.
 is fixed, treat the total above as understated by roughly engine's share.
 
 `main.go` reports `0.0%` and always will: it is three statements -- call `Execute`, print
-what came back, exit with `ExitCode`'s answer -- and no test can drive them, which is
-exactly why the classification lives in `internal/cli` (exit.go) rather than in main.
+what came back, exit with `exitcode.Code`'s answer -- and no test can drive them, which is
+exactly why the classification lives in the shared `exitcode` package, which tests it, rather than in main.
 
 ---
 
@@ -905,14 +908,14 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 
 ### aliases_test.go
 
-Command abbreviations (`internal/cli/aliases.go`): an [abbrev](../internal/abbrev) set
+Command abbreviations (`internal/cli/aliases.go`): an [abbrev](https://github.com/hafio/go-deploy-utility/tree/main/abbrev) set
 keyed by a command's NAME, applied by a tree walk, panicking at construction on a
 sibling collision. What these tests protect is not the individual words but the two
 properties that make them safe to hand out -- an alias resolves to exactly the command
 its long form does, and no alias can ever be ambiguous with a sibling -- plus the
 deliberate absences (`start`/`stop` get none, and no verb that owns objects gets a
 bare-alias shortcut to acting). The charset and shorter-than rules are the set's own
-and are covered in `internal/abbrev`.
+and are covered in the shared module's `abbrev` package.
 
 | Test | What it covers |
 | --- | --- |
@@ -984,7 +987,8 @@ the destructive-confirmation tests use.
 | Test | What it covers |
 | --- | --- |
 | `TestCommandDocs` | Renders the command reference from the live tree and fails while `docs/commands.md` is stale -- the drift gate for every command path, positional, flag, `Short`/`Long` string, alias, and platform/render-only annotation. This file is also the generator: `-update` rewrites the doc |
-| `TestEveryDocCarriesTheSupportNotice` | Every doc -- the README and every file under `docs/`, generated or not -- opens with its title and then the support notice exactly as `supportNoticeMD` holds it (not a supported Solace product; supported only by Solace Professional Services). The three generated docs get it from their generators, `internal/broker`'s import.md one from a copy this test keeps honest. Skipped under `-update`, since regen rewrites import.md after this package runs |
+| `TestEveryDocCarriesTheSupportNotice` | Every doc -- the README and every file under `docs/`, generated or not -- opens with its title and then the support notice exactly as `supportNotice` (built by the shared `notice` package) renders it (not a supported Solace product; supported only by Solace Professional Services). The three generated docs get it from their generators, `internal/broker`'s import.md one from a copy this test keeps honest. Skipped under `-update`, since regen rewrites import.md after this package runs |
+| `TestParityDocMatchesTheSharedBody` | `docs/parity.md` carries the canonical parity body from the shared module's `paritydoc` package unchanged, below this tool's own support notice. `paritydoc.Check` names the first line where the copy drifted |
 
 ### abbrevdoc_test.go
 
@@ -1161,17 +1165,17 @@ The exit-code contract -- 0 success, 1 operational failure, 2 usage error, and a
 own status passed through from the interactive commands. `TestHelperExitProcess` (the
 shim named in the Summary) is here, because a real `*exec.ExitError` cannot be built by
 hand: the test binary re-executes itself and exits with the status the environment names.
+The marker and classification unit tests (`TestChildExitFallsBackWhenThereIsNoStatus`,
+`TestChildExitKeepsItsMessage`, `TestExitCodeIsNeverNegative`,
+`TestUsageErrorKeepsItsMessage`) live in the shared module's `exitcode` package; the tests
+here keep what only this tree can prove.
 
 | Test | What it covers |
 | --- | --- |
-| `TestExitCodeContract` | Real invocations through the tree, each asserting the code it produces. Classifying an error handed straight to `ExitCode` would prove only that the switch works; these prove the markers are in the paths an operator reaches. The documented gap is pinned too, deliberately: a mistyped TOP-LEVEL command exits 1 because cobra produces that error before any interception point, so the day someone finds a clean fix, this is the case that says the fix worked. A script named by a path, or one `broker.cliScriptsDir` does not hold, is 2 |
+| `TestExitCodeContract` | Real invocations through the tree, each asserting the code it produces. Classifying an error handed straight to `exitcode.Code` would prove only that the switch works; these prove the markers are in the paths an operator reaches. The documented gap is pinned too, deliberately: a mistyped TOP-LEVEL command exits 1 because cobra produces that error before any interception point, so the day someone finds a clean fix, this is the case that says the fix worked. A script named by a path, or one `broker.cliScriptsDir` does not hold, is 2 |
 | `TestEveryArgValidatorIsAUsageError` | The drift guard behind `markUsageArgs`. The `Args` declarations are spread across four files, so this walks the BUILT tree rather than trusting the next one added was remembered. Each validator is offered nothing and then far too much; whichever it refuses must be a usage error, and one that accepts both is reported -- not because the command is wrong, but because the test has stopped saying anything about it |
 | `TestRootKeepsCobrasUnknownCommandError` | The reason for the documented gap. Cobra produces its unknown-command error inside `Find` only while `root.Args` is nil; give root a validator and the error is never produced, and a non-runnable root with no error prints help and exits 0 -- so a mistyped command would report success |
 | `TestChildExitStatusIsScopedToInteractiveSessions` | The property that matters about the passthrough: one child error carrying one status becomes this tool's exit code from `broker shell` and does NOT from `broker logs`. Without the scoping every command would start reporting whatever kubectl or the engine exited with, which is neither documentable nor scriptable |
-| `TestChildExitFallsBackWhenThereIsNoStatus` | A marked error with no exit status behind it (binary not found, child killed by a signal) must not invent one |
-| `TestChildExitKeepsItsMessage` | `main()` PRINTS what `Execute` returned before exiting with the code, so a marker that swallowed the message would leave a failed session reporting a bare status and nothing about what went wrong |
-| `TestExitCodeIsNeverNegative` | The guard on a signal-killed child -- the one status this process cannot pass through, since `os.Exit` is documented for 0-125 and Go reports -1 for a signalled child. The two operating systems produce different codes for a Kill, so the assertion is the portable property rather than a number: whatever comes back is a status this process can legally exit with |
-| `TestUsageErrorKeepsItsMessage` | The classification costs nothing in what the operator reads -- every one of these errors names the flag, word or platform that was wrong |
 
 ---
 
@@ -2944,31 +2948,6 @@ The dev-only judge the `scan` task pipes govulncheck JSON through. 11 tests.
 
 ---
 
-## internal/abbrev
-
-The leaf package that owns the RULES for every approved short form -- not the words.
-Sets are declared by whoever owns the vocabulary (`config` declares roles and platforms,
-`cli` declares command names), and this is where what makes a short form legal is
-decided once: lowercase letters or digits, strictly shorter than the word it stands for,
-claimed by one word only, and never shadowing a canonical name. Every rule is checked at
-construction and fails as a panic, so a bad declaration cannot reach a release -- which
-also means every test that builds a set is a validation test. 8 tests.
-
-### abbrev_test.go
-
-| Test | What it covers |
-| --- | --- |
-| `TestExpandResolvesBothSpellings` | The one lookup callers get: a canonical word resolves to itself, so `ParseRole` and `ParsePlatform` each stay a single branch instead of a membership test plus a lookup. Case, leading space and an unknown word all miss |
-| `TestOrderIsDeclarationOrder` | Nothing sorts the entries. The order is meaningful in every set the tool declares -- redundancy order for roles, the order platforms are offered in -- and it is the order errors and the reference print, so an alphabetical `Names()` would silently reword both. Also pins that an entry may carry no short form at all |
-| `TestAccessorsReturnCopies` | The sets are package-level and shared by the parsers, the CLI wiring and the docs generator, so a caller mutating a returned slice would be mutating a global. `Entries`, `Short` and `Names` all hand back copies |
-| `TestShortOfUnknownWord` | What `applyAliases` relies on: it asks the set about every command in the tree, most of which have no entry, and must get nil rather than a panic |
-| `TestList` | The error sentence exactly, because `ParsePlatform`'s message IS this rendering and `TestParsePlatformErrorTeachesCanonical` reads it back. Covers three entries, a word with no short form, one entry (no conjunction) and an empty set |
-| `TestKind` | The label errors and doc headings use |
-| `TestNewPanicsOnAWiringBug` | Every rule, one case each: empty kind, empty canonical, a canonical declared twice, one short form claimed by two words, a short form shadowing a canonical declared LATER (which is why canonicals are claimed in a pass of their own), an empty short form, a short form that is not shorter, and the charset -- uppercase, a shell metacharacter, a space |
-| `TestDigitsAreAllowed` | Keeps the charset from being letters-only by accident: a product word ending in a number is exactly the case an abbreviation is worth having for |
-
----
-
 ## internal/output
 
 The leaf package every stdout/stderr convention lives in: the `==> ` progress voice, the
@@ -3022,7 +3001,7 @@ sections were present.
 | `TestExamplesCarryNoRealSecret` | The S3 check on shipped text: every template's `semp.adminPass` is a CHANGE-ME placeholder, so an unedited copy is refused by the broker rather than deployed with a password that is public in this repo |
 | `TestGetRejectsAnUnknownName` | The error boundary: a typo is answered with every name it could have meant, and a platform abbreviation is NOT accepted here -- expanding it is the CLI layer's job, at the point it reads its own input |
 | `TestEveryNameResolves` | The declared table against the embedded files: a name added without its asset, or with a path the `//go:embed` pattern misses, fails here rather than panicking in front of a user. Also that every entry has a description for the listing |
-| `TestListNamesEveryExample` | The error and help phrasing comes from the table, never from a list typed beside it -- the rule `internal/abbrev`'s `Set.List` follows |
+| `TestListNamesEveryExample` | The error and help phrasing comes from the table, never from a list typed beside it -- the rule the shared `abbrev` package's `Set.List` follows |
 
 ---
 
@@ -3084,7 +3063,6 @@ new fake.
 | internal/k8s | `covApplyRunner`, `covSwapBundle` (operator_test.go) | `covApplyRunner` is a `recRunner` whose `apply -f -` / `delete -f -` fails only for the manifests a predicate picks, so a test can let the Namespace through and fail the Secret or the bundle after it (`runInputErr` fails every call alike). `covSwapBundle` replaces the embedded operator bundle for one test and restores it -- a template that does not render, a bundle with no Namespace or CRD document; it writes a package variable, so no test using it may call `t.Parallel` |
 | internal/cli | `renderCommandDocs`, `-update` flag (commanddoc_test.go) | Renders `docs/commands.md` from the cobra tree; the doc is the golden |
 | internal/cli | `renderAbbrevDocs`, `treeShorthands` (abbrevdoc_test.go) | Renders `docs/abbreviation.md` from the command/role/platform sets plus every single-letter flag in the tree. Shares commanddoc_test.go's `-update` flag, so one `regen` rewrites both goldens |
-| internal/abbrev | `sample` (abbrev_test.go) | A set with the shape every real one has -- ordered canonicals, one short form each, one word deliberately carrying none. Build ad-hoc sets with `New` only for the malformed cases |
 | internal/container | `capRunner` / `failOn` (transport_test.go) | Capturing runner whose `fail` (Run family) and `outFail` (Output family) hooks error on a targeted command, driving each error-wrap branch -- `failOn("info")` is how a failed engine preflight is injected. `outFail` exists because the blanket `outErr` cannot single out one of two probes in the same call. `capCall.env` records the extra environment of a `RunEnv` call, which is how the docker secret path is asserted |
 | internal/container | `containsStr`, `maskedKeys` (manager_test.go) | Exact-match lookup in a captured environment, and `engine.MaskEnv` for failure messages -- a test diagnostic must not print a secret either |
 | internal/container | `newEchoMgr`, `newCapMgr`, `ctrCfg` (manager_test.go) | Manager over dry-run Echo, or over the capturing runner for real file writes. `ctrCfg` leaves `podman.baseDir` unset, since deploy and remove delete a file under it; the clean-up tests point it at a `t.TempDir()`. `Manager.Confirm` is the injectable restart prompt (nil declines, which is what a non-interactive run must do) and `Manager.Restart` is the `--restart` pre-approval |

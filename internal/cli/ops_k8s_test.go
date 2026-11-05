@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
+
 	"solace/internal/config"
 	"solace/internal/engine"
 	"solace/internal/k8s"
@@ -207,8 +209,8 @@ func TestOpsK8sConfigureLeavesRefuseOppositeDirections(t *testing.T) {
 				PromptIn: exportconfigReadCounter{Reader: strings.NewReader("yes\n"), n: &reads}}
 			tc.set(a)
 			_, _, err := opsK8sRun(t, func() error { return tc.op(a) })
-			if err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("err = %v (exit %d), want a usage refusal naming %q", err, ExitCode(err), tc.want)
+			if err == nil || exitcode.Code(err) != exitcode.Usage || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v (exit %d), want a usage refusal naming %q", err, exitcode.Code(err), tc.want)
 			}
 			if len(rr.calls) != 0 || reads != 0 {
 				t.Errorf("a contradictory request must act and ask nothing: %d call(s), %d prompt read(s):\n%s", len(rr.calls), reads, rr.dump())
@@ -263,8 +265,8 @@ func TestOpsK8sABadPodIsRefusedBeforeAnythingRuns(t *testing.T) {
 				PromptIn: exportconfigReadCounter{Reader: strings.NewReader("yes\n"), n: &reads}}
 			tc.set(a)
 			_, _, err := opsK8sRun(t, func() error { return tc.op(a) })
-			if err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), `invalid node role "bogus"`) {
-				t.Fatalf("err = %v (exit %d), want a usage error naming the bad role", err, ExitCode(err))
+			if err == nil || exitcode.Code(err) != exitcode.Usage || !strings.Contains(err.Error(), `invalid node role "bogus"`) {
+				t.Fatalf("err = %v (exit %d), want a usage error naming the bad role", err, exitcode.Code(err))
 			}
 			if len(rr.calls) != 0 || reads != 0 {
 				t.Errorf("a refused --pod must act and ask nothing: %d call(s), %d prompt read(s):\n%s", len(rr.calls), reads, rr.dump())
@@ -325,8 +327,8 @@ func TestOpsK8sPodRolesAnnouncesWhatItNarrows(t *testing.T) {
 		var got []config.Role
 		var err error
 		errOut := captureStderr(t, func() { got, err = podRoles(&App{pod: "bogus"}, all) })
-		if got != nil || err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), `invalid node role "bogus"`) {
-			t.Fatalf("podRoles(bogus) = %v, %v (exit %d), want no roles and a usage error naming the word", got, err, ExitCode(err))
+		if got != nil || err == nil || exitcode.Code(err) != exitcode.Usage || !strings.Contains(err.Error(), `invalid node role "bogus"`) {
+			t.Fatalf("podRoles(bogus) = %v, %v (exit %d), want no roles and a usage error naming the word", got, err, exitcode.Code(err))
 		}
 		if errOut != "" {
 			t.Errorf("a refused --pod must not announce a narrowing it never made: %q", errOut)
@@ -845,8 +847,8 @@ func TestOpsK8sOperatorLogsRefusesAnUnparseableSince(t *testing.T) {
 		rr := &opRunner{}
 		a := &App{Cfg: writeK8sDeployAllEnv(t, "false"), Platform: config.K8s, Runner: rr, since: "yesterday"}
 		_, _, err := opsK8sRun(t, func() error { return opK8sOperatorLogs(a) })
-		if err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), "--since") {
-			t.Fatalf("opK8sOperatorLogs err = %v (exit %d), want a usage error naming --since", err, ExitCode(err))
+		if err == nil || exitcode.Code(err) != exitcode.Usage || !strings.Contains(err.Error(), "--since") {
+			t.Fatalf("opK8sOperatorLogs err = %v (exit %d), want a usage error naming --since", err, exitcode.Code(err))
 		}
 		if len(rr.calls) != 0 {
 			t.Errorf("a refused flag must not reach the cluster:\n%s", rr.dump())

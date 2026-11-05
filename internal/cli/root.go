@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/spf13/cobra"
 
 	"solace/internal/config"
@@ -58,7 +59,7 @@ func newRootCmd(app *App) *cobra.Command {
 	// error, not a runtime failure, and must exit 2 like every other one. Cobra
 	// resolves this hook through the nearest ancestor that sets it, so setting it
 	// on root covers every command in the tree.
-	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return asUsage(err) })
+	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return exitcode.AsUsage(err) })
 
 	root.PersistentFlags().StringVarP(&app.EnvName, "env", "e", config.EnvFileDefault, "env file name, searched in the base dir then <base-dir>/env; a value with a directory is used as-is")
 	root.PersistentFlags().StringVar(&app.BaseDir, "base-dir", "", "directory searched for the env file, and holding env/ (default: current directory)")

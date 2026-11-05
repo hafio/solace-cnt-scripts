@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/spf13/cobra"
 
 	"solace/internal/config"
@@ -781,8 +782,8 @@ func TestOpsGatherDiagnosticsRefusesDaysBelowOne(t *testing.T) {
 				rr := &opRunner{}
 				a := &App{Cfg: cfg, Platform: o.platform, Runner: rr, days: days}
 				err := o.op(a)
-				if code := ExitCode(err); code != exitUsage {
-					t.Fatalf("err = %v (exit %d), want a usage error (exit %d)", err, code, exitUsage)
+				if code := exitcode.Code(err); code != exitcode.Usage {
+					t.Fatalf("err = %v (exit %d), want a usage error (exit %d)", err, code, exitcode.Usage)
 				}
 				if want := fmt.Sprintf("--days must be at least 1 (got: %d)", days); !strings.Contains(err.Error(), want) {
 					t.Errorf("err = %v, want it to name %q", err, want)
@@ -1408,8 +1409,8 @@ func TestResolveScriptPath(t *testing.T) {
 		for _, tc := range cases {
 			t.Run(verb+"/"+tc.name, func(t *testing.T) {
 				_, err := resolveScriptPath(appFor(tc.dir), tc.file, verb)
-				if err == nil || ExitCode(err) != exitUsage {
-					t.Fatalf("err = %v (exit %d), want a usage refusal", err, ExitCode(err))
+				if err == nil || exitcode.Code(err) != exitcode.Usage {
+					t.Fatalf("err = %v (exit %d), want a usage refusal", err, exitcode.Code(err))
 				}
 				if !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "broker perform "+verb) {
 					t.Errorf("err = %q, want it to contain %q and the command's own name", err, tc.want)
@@ -1538,8 +1539,8 @@ func TestScriptCommandsRefuseBeforeAnythingRuns(t *testing.T) {
 						args := append([]string{"broker", "perform", verb, tc.file}, tc.extra...)
 						args = append(append(args, tg.args...), "--env", env)
 						out, err := runRootWith(t, args, echoRunner)
-						if err == nil || ExitCode(err) != exitUsage {
-							t.Fatalf("err = %v (exit %d), want a usage refusal (exit %d)", err, ExitCode(err), exitUsage)
+						if err == nil || exitcode.Code(err) != exitcode.Usage {
+							t.Fatalf("err = %v (exit %d), want a usage refusal (exit %d)", err, exitcode.Code(err), exitcode.Usage)
 						}
 						if !strings.Contains(err.Error(), tc.want) {
 							t.Errorf("err = %q, want it to contain %q", err, tc.want)
@@ -2750,8 +2751,8 @@ func TestAssertLeaderPrimaryAndMonitorNeverAsk(t *testing.T) {
 		})
 		t.Run(string(platform)+"/a standby primary is refused with the way out", func(t *testing.T) {
 			r := runLeader(t, platform, "solace-primary", standbyShowRD, "y\n")
-			if r.err == nil || ExitCode(r.err) != exitFailure {
-				t.Fatalf("err = %v (exit %d), want a failure (exit %d)", r.err, ExitCode(r.err), exitFailure)
+			if r.err == nil || exitcode.Code(r.err) != exitcode.Failure {
+				t.Fatalf("err = %v (exit %d), want a failure (exit %d)", r.err, exitcode.Code(r.err), exitcode.Failure)
 			}
 			for _, w := range []string{"primary node does not hold activity", "redundancy revert-activity", "broker cli"} {
 				if !strings.Contains(r.err.Error(), w) {

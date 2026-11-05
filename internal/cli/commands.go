@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/spf13/cobra"
 
 	"solace/internal/config"
@@ -65,7 +66,7 @@ func group(use, short, long string) *cobra.Command {
 		if len(args) == 0 {
 			return cmd.Help()
 		}
-		return usagef("%q is not something %s can act on; run `%s` to see what it can",
+		return exitcode.Usagef("%q is not something %s can act on; run `%s` to see what it can",
 			args[0], cmd.CommandPath(), cmd.CommandPath())
 	}
 	return c
@@ -828,7 +829,7 @@ func logArgs(a *App) ([]string, error) {
 	if a.since != "" {
 		d, err := config.CanonicalDuration("--since", a.since)
 		if err != nil {
-			return nil, asUsage(err)
+			return nil, exitcode.AsUsage(err)
 		}
 		args = append(args, "--since", d)
 	}
@@ -902,10 +903,10 @@ func noRolePositional(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	if _, err := config.ParseRole(args[0]); err == nil {
-		return usagef("%s does not take a role argument; use --pod %s instead "+
+		return exitcode.Usagef("%s does not take a role argument; use --pod %s instead "+
 			"(on kubernetes --pod picks the pod to act on, on docker/podman it says which "+
 			"node this host is)",
 			cmd.CommandPath(), args[0])
 	}
-	return usagef("unknown command %q for %q", args[0], cmd.CommandPath())
+	return exitcode.Usagef("unknown command %q for %q", args[0], cmd.CommandPath())
 }

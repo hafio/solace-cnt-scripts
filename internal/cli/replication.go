@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
+
 	"solace/internal/broker"
 	"solace/internal/config"
 	"solace/internal/k8s"
@@ -28,7 +30,7 @@ import (
 // here points a switchover at the wrong broker.
 func resolveSites(a *App, o *broker.Ops, role config.Role) (self, mate config.ReplSite, err error) {
 	if !a.Cfg.Replication.Configured() {
-		return config.ReplSite{}, config.ReplSite{}, usagef(
+		return config.ReplSite{}, config.ReplSite{}, exitcode.Usagef(
 			"this env file declares no replication: section, so there is no DR pair to act on")
 	}
 	name, err := o.RouterName(bg(), role)
@@ -289,7 +291,7 @@ func mateChannel(a *App, o *broker.Ops, site config.ReplSite) (broker.MateChanne
 		}
 		return o.NewSEMPMate(site, pass)
 	default:
-		return nil, usagef("replication site %q has no via: block, so this tool cannot reach it. "+
+		return nil, exitcode.Usagef("replication site %q has no via: block, so this tool cannot reach it. "+
 			"A switch has to change the role at BOTH sites, so the mate must be reachable",
 			site.VirtualRouterName)
 	}
@@ -312,7 +314,7 @@ func mateSEMPPassword(a *App, site config.ReplSite) (string, error) {
 		return s.Pass, nil
 	}
 	if s.PassSecret == nil {
-		return "", usagef("replication site %q declares via.semp but no password: set pass, point "+
+		return "", exitcode.Usagef("replication site %q declares via.semp but no password: set pass, point "+
 			"passEnv at an environment variable, or name a Kubernetes Secret in passSecret",
 			site.VirtualRouterName)
 	}

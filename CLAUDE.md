@@ -23,17 +23,21 @@ env-file reference, [docs/operations.md](docs/operations.md) the day-2 lifecycle
 
 ## Packages, and which way they may import
 
-`internal/{abbrev,config,engine,render,broker,k8s,container,convert,cli,output,examples}` plus
+`internal/{config,engine,render,broker,k8s,container,convert,cli,output,examples}` plus
 `main.go`, and `internal/tools/vulnjudge` -- a dev-only command the `scan` task pipes
 govulncheck's JSON through, so a fixable vulnerability fails the gate and one with no released
 fix warns.
 
+Shared code (`exitcode`, `notice`, `paritydoc`, `abbrev`) comes from `github.com/hafio/go-deploy-utility`.
+Tools build against that module's checkout through an untracked `go.work` (see the module's
+docs/consuming.md) until a tag is pinned.
+
 The layering is enforced by convention, not by a compiler, so it is stated here:
 
-- **`abbrev`, `output` and `examples` import nothing but the stdlib.** That is what lets any
+- **`output` and `examples` import nothing but the stdlib.** That is what lets any
   package use them, and it is why `output` can define the `==> ` prefix once for both `engine`
   and `cli`.
-- **`config` imports only `abbrev`.** It must never import `convert` (which is why
+- **`config` imports only the shared module's `abbrev`.** It must never import `convert` (which is why
   `config.Load`'s invalid-YAML hint carries its own bash-file sniff) and never `render` (which
   is why `validate.go` keeps a small copy of the environment-variable folding `render` owns).
 - **`k8s` and `container` import `broker`; the reverse would be a cycle.** `broker.CLIRunner`
@@ -104,7 +108,7 @@ lists have to name it.
 
 **Abbreviations: nothing rewrites argv.** Each site expands its own input at the moment it reads
 it -- cobra's `Find` for a command, `config.ParseRole`, `config.ParsePlatform`, pflag for a
-shorthand. `internal/abbrev` owns the RULES and each package declares its own words. One rule
+shorthand. The shared module's `abbrev` package owns the RULES and each package declares its own words. One rule
 CLI-wide: abbreviations work everywhere, completion teaches the canonical spelling.
 
 **Cobra's Windows Explorer check stays off** (`cobra.MousetrapHelpText = ""` in `newRootCmd`).
