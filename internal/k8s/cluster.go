@@ -110,7 +110,7 @@ func (c *Cluster) ns() string { return c.Cfg.K8s.Namespace }
 // KUBE variable, which the scripts expanded unquoted so it could carry a whole
 // profile (`kubectl --kubeconfig <file>`), not just a binary name.
 //
-// It re-runs the execution guard (config.CheckCommand, via ClusterCommand) on every
+// It re-runs the execution guard (execguard.Check, via ClusterCommand) on every
 // call rather than trusting the value Validate already saw. That is the second of
 // the guard's two enforcement points: this package can be driven from a Config that
 // never went through config.Load, and a hostile command must be inert there too. The

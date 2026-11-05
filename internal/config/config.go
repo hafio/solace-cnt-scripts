@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/execguard"
 	"gopkg.in/yaml.v3"
 )
 
@@ -57,15 +58,15 @@ type Config struct {
 	Docker DockerConfig `yaml:"docker"`
 	Podman PodmanConfig `yaml:"podman"`
 
-	// extraAllowed holds the binaries the operator approved for this invocation
+	// approvals holds the binaries the operator approved for this invocation
 	// with --allow-command. Unexported on purpose: yaml.v3 cannot decode into an
 	// unexported field, so no env file can widen its own allowlist -- that
 	// authority stays with the person at the keyboard (see AllowCommands).
-	extraAllowed map[string]bool
+	approvals execguard.Approvals
 
 	// baseDir is the directory of the env file this Config was loaded from, and
 	// every relative host path in the file resolves against it (rebaseHostPaths).
-	// Unexported for the same reason extraAllowed is: yaml.v3 cannot decode into
+	// Unexported for the same reason approvals is: yaml.v3 cannot decode into
 	// it, so a file cannot declare its own base and thereby reach a path outside
 	// the directory it was found in.
 	//

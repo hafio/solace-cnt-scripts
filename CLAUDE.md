@@ -28,7 +28,7 @@ env-file reference, [docs/operations.md](docs/operations.md) the day-2 lifecycle
 govulncheck's JSON through, so a fixable vulnerability fails the gate and one with no released
 fix warns.
 
-Shared code (`exitcode`, `notice`, `paritydoc`, `abbrev`) comes from `github.com/hafio/go-deploy-utility`.
+Shared code (`exitcode`, `notice`, `paritydoc`, `abbrev`, `execguard`, `envref`) comes from `github.com/hafio/go-deploy-utility`.
 Tools build against that module's checkout through an untracked `go.work` (see the module's
 docs/consuming.md) until a tag is pinned.
 
@@ -118,15 +118,16 @@ notice it coming back -- every test would still pass, just slower.
 
 ## Security invariants
 
-**Config text must not be able to choose what executes.** `config.CheckCommand` is the whole
+**Config text must not be able to choose what executes.** The shared `execguard.Check` is the whole
 rule for `kubernetes.command`, `docker.command`, `podman.command`, `docker.compose` and each
 `replication.sites[].via.kubernetes.command`, and it is enforced **twice from that one
 definition**: in `Validate`, and again in every executor immediately before argv is built.
 Executors are handed a `*config.Config` directly and **must not assume `config.Load` ran** --
 if you add one, re-run the check there too.
 
-**`--allow-command` is the only way to widen the allowlist**, and it has a floor: `neverAllowed`
-(the escalators -- sudo, doas, pkexec, run0, nsenter and the rest) can be approved by nobody.
+**`--allow-command` is the only way to widen the allowlist**, and it has a floor: the
+shared `execguard` package's escalator list (sudo, doas, pkexec, run0, nsenter, runuser, chroot and
+the rest) can be approved by nobody. `config.AllowCommands` only wraps `execguard.Approve`.
 There is deliberately no schema key, no env var and no binding layer: an env file that could
 approve its own binary would make the allowlist decorative.
 

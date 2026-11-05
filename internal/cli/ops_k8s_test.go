@@ -814,8 +814,8 @@ func TestOpsK8sStatusOperatorRefusesAClusterCommandTheGuardRejects(t *testing.T)
 	var echoed strings.Builder
 	a := &App{Cfg: cfg, Platform: config.K8s, Runner: engine.Echo{W: &echoed}}
 	_, _, err := opsK8sRun(t, func() error { return opK8sStatusOperator(a) })
-	if err == nil || !strings.Contains(err.Error(), "kubernetes.command") || !strings.Contains(err.Error(), "sudo") {
-		t.Fatalf("opK8sStatusOperator err = %v, want the guard's refusal naming kubernetes.command and sudo", err)
+	if err == nil || !strings.Contains(err.Error(), "kubernetes.command") || !strings.Contains(err.Error(), "privilege-escalation wrapper (sudo)") {
+		t.Fatalf("opK8sStatusOperator err = %v, want the guard's refusal naming kubernetes.command and the sudo wrapper", err)
 	}
 	if echoed.Len() != 0 {
 		t.Errorf("a command the guard refused was issued anyway: %q", echoed.String())

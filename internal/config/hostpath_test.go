@@ -5,13 +5,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hafio/go-deploy-utility/execguard"
 )
 
 // TestHostPathCharsetIsDerivedFromTheTokenCharset is the reason hostPathUnsafe is
 // built by strings.Map rather than typed out: two hand-written charsets drift, and
 // the drift is invisible until an operator hits the one character that is in one
 // list and not the other. This asserts the relationship, not the contents -- adding
-// a character to unsafeTokenChars must widen the path set too, automatically.
+// a character to execguard.UnsafeChars must widen the path set too, automatically.
 func TestHostPathCharsetIsDerivedFromTheTokenCharset(t *testing.T) {
 	for _, r := range hostPathAdmits {
 		if strings.ContainsRune(hostPathUnsafe, r) {
@@ -21,32 +23,32 @@ func TestHostPathCharsetIsDerivedFromTheTokenCharset(t *testing.T) {
 		// Each admitted character must actually be in the set it is removed FROM,
 		// or the removal is decoration. A colon belongs in neither list: the token
 		// charset never refused one, so "admitting" it here would assert nothing.
-		if !strings.ContainsRune(unsafeTokenChars, r) {
-			t.Errorf("hostPathAdmits lists %q, but unsafeTokenChars does not refuse it, so removing it is a "+
+		if !strings.ContainsRune(execguard.UnsafeChars, r) {
+			t.Errorf("hostPathAdmits lists %q, but execguard.UnsafeChars does not refuse it, so removing it is a "+
 				"no-op that makes the derivation look stricter than it is", string(r))
 		}
 	}
 	// Everything the token charset refuses and the path charset is not explicitly
 	// forgiven must still be refused. This is the half that catches a new character
-	// added to unsafeTokenChars alone.
-	for _, r := range unsafeTokenChars {
+	// added to execguard.UnsafeChars alone.
+	for _, r := range execguard.UnsafeChars {
 		if strings.ContainsRune(hostPathAdmits, r) {
 			continue
 		}
 		if !strings.ContainsRune(hostPathUnsafe, r) {
-			t.Errorf("unsafeTokenChars contains %q but hostPathUnsafe does not, and it is not one of the "+
+			t.Errorf("execguard.UnsafeChars contains %q but hostPathUnsafe does not, and it is not one of the "+
 				"deliberately admitted characters: the two sets have drifted", string(r))
 		}
 	}
-	if len(hostPathUnsafe) != len(unsafeTokenChars)-len(hostPathAdmits) {
+	if len(hostPathUnsafe) != len(execguard.UnsafeChars)-len(hostPathAdmits) {
 		t.Errorf("hostPathUnsafe has %d characters, want %d (the token set minus exactly %q)",
-			len(hostPathUnsafe), len(unsafeTokenChars)-len(hostPathAdmits), hostPathAdmits)
+			len(hostPathUnsafe), len(execguard.UnsafeChars)-len(hostPathAdmits), hostPathAdmits)
 	}
 	// A colon passes both gates, and that is deliberate rather than an oversight:
 	// it is legitimate in a command token (`--server=https://host:6443`) and in a
 	// Windows path (`C:\certs`). What a colon does to a mount LINE is a rendering
 	// problem, handled where the line is written, not here.
-	if strings.ContainsRune(hostPathUnsafe, ':') || strings.ContainsRune(unsafeTokenChars, ':') {
+	if strings.ContainsRune(hostPathUnsafe, ':') || strings.ContainsRune(execguard.UnsafeChars, ':') {
 		t.Error("neither charset should refuse ':': it is legitimate in a flag value and in a Windows path")
 	}
 	// The dollar sign is the one worth naming individually: compose interpolates it
@@ -94,15 +96,22 @@ func TestCheckHostPathRejects(t *testing.T) {
 		{"certs/a*.crt", "compose file or quadlet unit"},
 		{"certs/`cmd`.crt", "compose file or quadlet unit"},
 		{"my certs/tls.crt", "source:target:options"},
-		// U+00A0, a non-breaking space: unicode.IsSpace, but NOT isCtrl (which is
-		// r < 0x20) and not a Cf formatting character. It is the case that proves
+		// U+00A0, a non-breaking space: unicode.IsSpace, but NOT a control
+		// character (execguard.IsControl is C0, DEL and C1 less NEL) and not a Cf formatting character. It is the case that proves
 		// the whitespace branch handles more than the ASCII space. Written as an
 		// escape so this source file stays plain ASCII.
 		{"certs/\u00a0tls.crt", "source:target:options"},
 		// A tab is caught one branch earlier, as a control character, because
-		// isCtrl is r < 0x20. Pinned so the branch order is deliberate.
+		// execguard.IsControl covers C0. Pinned so the branch order is deliberate.
 		{"certs/tls\t.crt", "control character"},
 		{"certs/tls\n.crt", "control character"},
+		// C1 is a control character too: U+009B is a CSI to a terminal that honours
+		// C1, so a path carrying one could rewrite the log line it is printed in.
+		{"certs/tls\u009b.crt", "control character"},
+		// An invisible formatting character (execguard.IsInvisible) is not a control
+		// character, so it has its own refusal: a review cannot see it in the path.
+		{"certs/tls​.crt", "invisible formatting character"},
+		{"certs/‮tls.crt", "invisible formatting character"},
 		// Every LEADING-tilde shape, and the message is the whole point: this is
 		// the fail-closed half of the expansion feature, not a rejection of the
 		// syntax an operator writes. expandHomePaths has already run by the time
@@ -915,7 +924,7 @@ kubernetes:
 	// loaded exactly as they load it. Two things have to hold at once and only a full Load
 	// shows both -- the token expanded, and the guard Validate runs afterwards ACCEPTED the
 	// expanded token. An expanded home is why tildeHome normalises separators to '/':
-	// '\' is in unsafeTokenChars, so a Windows home spliced in verbatim would be refused
+	// '\' is in execguard.UnsafeChars, so a Windows home spliced in verbatim would be refused
 	// by the very check this pass exists to satisfy.
 	kc := c.K8s.Command[len(c.K8s.Command)-1]
 	if strings.HasPrefix(kc, "~") {

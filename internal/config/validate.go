@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/hafio/go-deploy-utility/execguard"
 )
 
 // Validate checks mandatory and enum fields for the given platform, mirroring
@@ -55,7 +57,7 @@ func (c *Config) Validate(p Platform) error {
 	// The platform CLI is user-supplied and reaches os/exec, so it goes through the
 	// full execution guard (execguard.go) on every platform before anything can
 	// run. This is the first of the two enforcement points; every executor re-runs
-	// the same CheckCommand immediately before it builds argv, so a hostile env
+	// the same execguard.Check immediately before it builds argv, so a hostile env
 	// file is inert even on a path that never reached Validate.
 	if err := c.validateExecCommands(p); err != nil {
 		return err
@@ -330,17 +332,13 @@ func validateProbeCommand(field string, cmd Command) error {
 		if tok == "" {
 			return fmt.Errorf("%s[%d] is an empty argument; remove it or quote the intended value", field, i)
 		}
-		if j := strings.IndexFunc(tok, isCtrl); j >= 0 {
+		if j := strings.IndexFunc(tok, execguard.IsControl); j >= 0 {
 			return fmt.Errorf("%s[%d] contains a control character (0x%02x) at offset %d: %q",
 				field, i, tok[j], j, tok)
 		}
 	}
 	return nil
 }
-
-// isCtrl reports the ASCII control characters (including NUL and DEL), which can
-// never legitimately appear in a command name or argument here.
-func isCtrl(r rune) bool { return r < 0x20 || r == 0x7f }
 
 // identRE constrains the identifiers that reach a rendered artifact in a
 // structural position: a compose service key, a `container_name`, a systemd
@@ -498,7 +496,7 @@ func validSecretKey(field, value string) error {
 // exists, and is worse than a failed read: a dash-led name or namespace is parsed by
 // kubectl as a flag (`-A`, `--kubeconfig=/x`), and the key is spliced into a jsonpath
 // expression. It is "config text must not choose what executes" applied to the
-// arguments rather than to argv[0], and like CheckCommand it is enforced twice from this
+// arguments rather than to argv[0], and like execguard.Check it is enforced twice from this
 // one definition: in Validate for replication.sites[].via.semp.passSecret, and again by
 // internal/k8s's secret reader immediately before argv is built.
 //
@@ -944,8 +942,8 @@ func foldToEnvVar(name string) string {
 }
 
 // checkCredentialChars rejects a control character (unicode.IsControl: this
-// covers Unicode's control category, not just the ASCII set isCtrl above
-// checks, since a secret can carry any encoding) in one secret value. An empty
+// covers Unicode's control category, not just the ASCII set
+// execguard.IsControl checks, since a secret can carry any encoding) in one secret value. An empty
 // value is left alone -- emptiness is requireAll's or the caller's own job, not
 // this check's. The message names the field and the byte offset of the
 // offending character but never the value itself, or even the character: these

@@ -123,6 +123,9 @@ func TestAllowCommandRejectsBadValues(t *testing.T) {
 		{"doas", "doas", "is never permitted"},
 		{"pkexec", "pkexec", "is never permitted"},
 		{"sudo.exe", "sudo.exe", "is never permitted"},
+		{"runuser", "runuser", "runuser solace-util ..."},
+		{"chroot", "chroot", "is never permitted"},
+		{"invalid UTF-8", "li\x9bma", "not valid UTF-8"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -167,16 +170,20 @@ func TestAllowCommandRejectedWhereNothingExecutes(t *testing.T) {
 func TestEscalationIsRefusedEndToEnd(t *testing.T) {
 	env := writeRuntimeEnv(t, "sudo kubectl")
 
-	// Without the hatch: an unlisted binary.
-	if _, err := runRootWith(t, []string{"broker", "status", "--platform", "kubernetes", "--env", env}, echoRunner); err == nil {
+	// Without the hatch: refused as a privilege-escalation wrapper, not merely unlisted.
+	_, err := runRootWith(t, []string{"broker", "status", "--platform", "kubernetes", "--env", env}, echoRunner)
+	if err == nil {
 		t.Fatal("`sudo kubectl` was accepted")
 	}
+	if !strings.Contains(err.Error(), "is a privilege-escalation wrapper (sudo), which is never permitted") {
+		t.Errorf("error = %v, want the escalation refusal", err)
+	}
 	// With the hatch: refused at the flag, before the config is even read.
-	_, err := runRootWith(t, []string{"broker", "status", "--allow-command", "sudo", "--platform", "kubernetes", "--env", env}, echoRunner)
+	_, err = runRootWith(t, []string{"broker", "status", "--allow-command", "sudo", "--platform", "kubernetes", "--env", env}, echoRunner)
 	if err == nil {
 		t.Fatal("--allow-command sudo was accepted")
 	}
-	for _, want := range []string{"is never permitted", "solace ..."} {
+	for _, want := range []string{"is never permitted", "sudo solace-util ..."} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error = %v, want it to contain %q", err, want)
 		}

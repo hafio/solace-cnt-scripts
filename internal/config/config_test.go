@@ -1656,7 +1656,15 @@ func TestLoadSecretRefErrors(t *testing.T) {
 			// The reference key takes a NAME; ${...} is the way that goes wrong.
 			"value where a name belongs",
 			"semp:\n  adminPassEnv: ${SOLACE_TEST_SET}\n",
-			[]string{"semp.adminPassEnv", "environment variable name"},
+			[]string{"semp.adminPassEnv", "holds a variable reference"},
+		},
+		{
+			// A name that fails the name rules is not echoed back: the likeliest such
+			// "name" is the secret itself, pasted into the reference key by mistake.
+			// UNIQUE-LITERAL-VALUE is caught by the no-leak assertion below.
+			"invalid name is not echoed",
+			"semp:\n  adminPassEnv: UNIQUE-LITERAL-VALUE\n",
+			[]string{"semp.adminPassEnv", "not a valid environment variable name"},
 		},
 		{
 			"per-user reference",

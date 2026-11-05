@@ -3,7 +3,6 @@
   "4": "cli_test.go",
   "6": "Command Reference Docs",
   "7": "Manager",
-  "10": "CheckCommand",
   "12": "NewCluster",
   "15": "transform_test.go",
   "16": "manager_test.go",
@@ -16,14 +15,11 @@
   "34": "ResolveDomainCerts",
   "38": "annotate_test.go",
   "42": "inject_test.go",
-  "48": "localCfg",
   "49": "config_test.go",
   "62": "rootless_test.go",
   "88": "AdminSecret",
   "89": "render_test.go",
   "91": "RuleFor",
-  "97": "replConfig",
   "112": "capRunner",
-  "118": "Container State Inspection",
-  "126": "bytes.Buffer"
+  "118": "Container State Inspection"
 }

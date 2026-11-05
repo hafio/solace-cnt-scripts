@@ -67,7 +67,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-90 test files, 1670 test functions. Three of those are not tests. Two are os/exec
+90 test files, 1660 test functions. Three of those are not tests. Two are os/exec
 helper-process shims, each a no-op unless its own environment variable is set:
 `TestHelperProcess` in `internal/engine` (`GO_WANT_HELPER_PROCESS=1`) and
 `TestHelperExitProcess` in `internal/cli` (`SOLACE_TEST_CHILD_EXIT_CODE`), which exists
@@ -82,7 +82,7 @@ instead of blocking on the console the suite was launched from.
 | internal/k8s | 20 | 304 |
 | internal/broker | 24 | 507 |
 | internal/cli | 14 | 265 |
-| internal/config | 16 | 241 |
+| internal/config | 16 | 231 |
 | internal/container | 8 | 200 |
 | internal/convert | 1 | 40 |
 | internal/render | 2 | 51 |
@@ -90,12 +90,12 @@ instead of blocking on the console the suite was launched from.
 | internal/output | 1 | 16 |
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/examples | 1 | 8 |
-| **Total** | **90** | **1670** |
+| **Total** | **90** | **1660** |
 
 
 ## Coverage
 
-Last recorded run, from `scripts/logs/cov.log` (2026-11-05), total **97.9%**. Re-run `cov`
+Last recorded run, from `scripts/logs/cov.log` (2026-11-05), total **97.8%**. Re-run `cov`
 after any change; these figures go stale the moment tests move, and the previous total is
 the floor the next run has to hold.
 
@@ -312,11 +312,11 @@ path that actually runs.
 | internal/tools/vulnjudge | 98.9% |
 | internal/render | 98.7% |
 | internal/convert | 97.4% |
-| internal/config | 96.7% |
-| internal/container | 95.6% |
+| internal/config | 96.6% |
+| internal/container | 95.7% |
 | internal/k8s | 99.0% |
 | internal/broker | 98.7% |
-| internal/cli | 97.6% |
+| internal/cli | 97.2% |
 | internal/examples | 90.0% |
 | internal/engine | see below |
 
@@ -324,6 +324,24 @@ path that actually runs.
 97.9%.** `internal/abbrev` (100.0%, 8 tests) and the covered code of `internal/cli/exit.go` (with
 the four tests that exercised it) moved to `github.com/hafio/go-deploy-utility`, which tests them
 there. They were too small a share of the statements to move the rounded total.
+
+**97.9% -> 97.8% from adopting the shared module's `execguard` and `envref`, and the reason is
+recorded.** About 340 lines of guard left `internal/config/execguard.go`, and `secretref.go`
+lost its own reference parsing; nearly every statement in them was covered, and they are now
+tested in `github.com/hafio/go-deploy-utility/execguard` and `envref`. Eleven tests went with
+them (`internal/config` 241 -> 231 tests, the total 1670 -> 1660, after the one new
+`TestNewEscalatorsAreNeverApproved`). What stays uncovered in `internal/config` -- the
+`viaDescription` cases and the nil-site skip in `expandCommandHomes` (execguard.go), the
+`expandHomePaths` error returns (hostpath.go), and defensive branches in `load.go` and
+`validate.go` -- is unchanged and is now a larger share of a smaller package: 1390 of 1439
+statements, 96.6%. The one uncovered branch S3 touched, the invisible-character refusal in
+`CheckHostPath`, gained two cases in `TestCheckHostPathRejects` after this run; that is one
+statement, which moves `internal/config` to 96.7% and leaves the total at 97.8%.
+
+`internal/cli` reads 97.2% against the 97.6% last tabled. S3 changed no `internal/cli` source
+and removed no case from its tests, so that move dates from the confirm adoption, which
+shrank `confirm.go` and recorded only the total. `internal/container` 95.6% -> 95.7% predates
+S3 too: S3 changed only comments there.
 
 **The total is down from 96.1%, and the reason is recorded rather than absorbed.** The
 noun-first command-tree overhaul added two substantial mechanics -- the operator watch-list
@@ -385,7 +403,7 @@ the two storage stories a Kubernetes deployment may tell. 241 tests across 16 fi
 | `TestCommandNameAndArgs` | `Name`/`Args` split a command into argv[0] and the leading arguments that precede each call's own, including the unset and bare-binary cases |
 | `TestCommandArgsDoesNotAliasCommand` | `Args` allocates: with spare capacity in the backing array, a naive `append(cmd[1:], ...)` would corrupt the previous call's argv. Two successive calls must stay independent and the `Command` itself unchanged |
 | `TestCommandString` | Display rendering, used by the check reports and error messages |
-| `TestValidateProbeCommandAccepts` | The container health-check probe keeps the loose rules, because it runs inside the broker rather than here: a path, and a shell pipeline with metacharacters, both pass, as does an unset command. The field-by-field opposite of `TestCheckCommandRejects` |
+| `TestValidateProbeCommandAccepts` | The container health-check probe keeps the loose rules, because it runs inside the broker rather than here: a path, and a shell pipeline with metacharacters, both pass, as does an unset command. The field-by-field opposite of the shared `execguard` reject tests |
 | `TestValidateProbeCommandRejects` | Even the probe rejects empty arguments and control characters (newline, NUL), naming the field and the offending index |
 | `TestValidateRejectsBadCommand` | A malformed command fails `Validate` for all three platforms, ahead of the mandatory-field checks, so the message names the command field rather than the fields also missing |
 | `TestRuntimeDefaults` | Defaults resolve to exactly one token with no leading args (`kubectl`/`docker`/`podman`), so existing argv is byte-identical; `kubernetes.command` is defaulted on every platform |
@@ -394,30 +412,28 @@ the two storage stories a Kubernetes deployment may tell. 241 tests across 16 fi
 
 ### execguard_test.go
 
-The execution guard: what a config-declared command may be, and the proof that the
-validator and every executor enforce it from one definition.
+The execution guard's wiring: which fields are guarded, which binaries each platform may run,
+and the proof that the validator and every executor enforce it from one definition. The token
+rules, the escalation ban and the `--allow-command` approvals live in the shared
+`github.com/hafio/go-deploy-utility/execguard` package, which tests them there: eleven tests
+that used to be in this file moved with them (`TestCheckCommandAccepts`,
+`TestCheckCommandRejects`, `TestEscalationFloorFoldsCaseBothWays`,
+`TestFlagValuePositionIsNotGuaranteed`, `TestCharsetAgreesAcrossBothYAMLForms`,
+`TestGuardErrorsAreActionable`, `TestAllowCommandsAccepts`, `TestAllowCommandsRejects`,
+`TestAllowCommandsRejectsEscalation`, `TestEscalationCannotBeAllowedByAnyRoute` and
+`TestAllowedBinaryIsNotGloballyAllowed`).
 
 | Test | What it covers |
 | --- | --- |
 | `TestGuardConfigIsValid` | Guards the fixture the rest of the file rests on: the untouched `guardConfig` validates cleanly on all three platforms, so a `Validate` failure below can only have come from the guard |
-| `TestCheckCommandAccepts` | The shapes an operator legitimately writes: every allowlisted binary bare, a flags-and-values profile, `--flag=value` followed by another flag, a lone `-`, a stripped `.exe`/`.EXE` suffix, a chained runner WITH the escape hatch (`lima podman`, `microk8s kubectl`, `lima --tty=false nerdctl`), and both compose forms including one derived behind a wrapper. Every wrapper here is non-escalating on purpose -- `--allow-command` can never approve sudo and its relatives. Also an EMBEDDED tilde in a flag value (`C:/Users/RUNNER~1/.kube/config`), which is the 8.3 short name a Windows runner really hands out and exactly what expansion itself produces there -- so refusing `~` by character rather than by position would refuse this tool's own output |
-| `TestCheckCommandRejects` | The full reject matrix, each case also asserting the message names the offending token and a way out: an empty or nil command, an unlisted binary (`curl`, `bash`), the right binary on the wrong platform, every path form, a bare word in subcommand position, a bare word after `--flag=value`, `compose` outside the one field and position that permits it, a token after `compose`, a chained runner WITHOUT the hatch, the wrong name in the hatch, an escalation wrapper even when one is forced into the allow-set, the literal `--`, and one case per charset class -- all 21 metacharacters, quotes, backslash, backtick, `$`, control characters, NUL, DEL, seven Unicode space characters beyond ASCII, and four invisible formatting characters (zero-width space and joiner, RTL override, soft hyphen) whose message names the code point since the character cannot be seen -- in argv[0] and in a later token. Plus the three LEADING-tilde shapes, each with its own message: a path form in argv[0] and a bare `~` in argv[0] (both refused by `checkBinary`'s bare-name rule, which is why argv[0] is the one token expansion skips), and an unexpanded `~` in a flag value, whose message says nothing downstream expands it -- the fail-closed half of `expandCommandHomes`, since a Config that went through `Load` never carries one |
-| `TestFlagValuePositionIsNotGuaranteed` | Documents the one acknowledged limit as a property rather than a surprise, and how far it actually reaches: `docker --tls rm` and `kubectl --insecure-skip-tls-verify delete` both pass. Neither flag takes a value, so the word after it is not a flag value at all -- it reaches SUBCOMMAND position, the one thing the guard otherwise guarantees. Arity is what cannot be known without a per-binary flag table, so this is accepted rather than closed. The whole charset -- metacharacters, Unicode whitespace, invisible characters -- still applies there, which is the half an adversarial review found incomplete once. Fails deliberately if a future change narrows the limit, so it gets rewritten as a rejection |
-| `TestEscalationFloorFoldsCaseBothWays` | The escalation floor is matched case-INSENSITIVELY at both enforcement points, and the allowlist deliberately is not. `--allow-command Sudo` used to be accepted and stored, and `allowed()`'s purge deleted only the lowercase key, so both belts had the same hole -- which bites exactly where filesystems are case-insensitive (Windows, which ships sudo.exe, and macOS by default). The third subtest pins the asymmetry: `KUBECTL` must still be REFUSED by the allowlist, because a deny list may only ever refuse more, while a positive match that folded case would approve a file nobody listed |
-| `TestCharsetAgreesAcrossBothYAMLForms` | The regression guard for how that gap arose: a `Command` may be a scalar (split with the Unicode-aware `strings.Fields`) or an explicit sequence (preserved token for token). For ten Unicode space characters, the scalar form must split and the sequence form must refuse -- otherwise two spellings of one config would get two verdicts |
-| `TestGuardErrorsAreActionable` | Every guard message is one line, names the field, and names a remedy (the allowlist, the escape hatch, or the specific fix) -- a message that only said "invalid" would leave the operator guessing which of four fields to edit |
-| `TestValidatorAndExecutorAgree` | The shared-definition test. Every accept and reject case is driven through BOTH enforcement points -- `Validate`, and the accessor each executor calls before building argv -- and the two must return the same verdict. Fails if anyone ever forks the check |
+| `TestValidatorAndExecutorAgree` | The shared-definition test. Every accept and reject case is driven through BOTH enforcement points -- `Validate`, and the accessor each executor calls before building argv -- and the two must return the same verdict. Fails if anyone ever forks the check. Includes a C1 control character and an invalid UTF-8 byte in a token, and `runuser` and `chroot` as command words, all of which the shared guard now refuses |
 | `TestExecutorRejectsWithoutValidate` | The reason the check runs twice: a `Config` built in code, which never went through `config.Load`, is still refused by `ClusterCommand`, `RuntimeCommand` and `ComposeCommand` |
-| `TestAllowCommandsAccepts` | `--allow-command` is repeatable, each value extends the same set, and `.exe` folds to one entry |
-| `TestAllowCommandsRejects` | A bad hatch value is a usage error naming the flag: paths (so the hatch cannot reintroduce the path form layer 2 refuses), metacharacters, whitespace, control characters, empty |
-| `TestAllowCommandsRejectsEscalation` | The escape hatch has a floor: `sudo`, `sudoedit`, `doas`, `su`, `pkexec`, `run0`, `systemd-run`, `machinectl`, `setpriv`, `capsh`, `unshare`, `nsenter`, `runas`, `gsudo` and their `.exe` spellings can be approved by nobody. Granting one elevates every command the tool issues for the life of an env file, where `sudo solace-util ...` elevates one invocation the operator chose -- so the message must name that alternative, and the name must not be recorded despite the failure |
-| `TestEscalationCannotBeAllowedByAnyRoute` | The structural backstop: even with an escalation wrapper forced into the allow-set (a future edit to `execBinaries`, or a caller populating `extraAllowed` directly), `allowed()` strips the category back out -- while a legitimate wrapper in the same forced set still works, proving it is a deny-list and not a broken allow-set |
-| `TestAllowedBinaryIsNotGloballyAllowed` | An approval is per-`Config`, so it cannot leak into a second config in the same process |
+| `TestNewEscalatorsAreNeverApproved` | The eight wrappers the shared guard added to the escalation ban (`runuser`, `sg`, `chroot`, `gosu`, `su-exec`, `setuidgid`, `s6-setuidgid`, `chpst`) are refused in a command by `Validate` with the privilege-escalation message, and refused as an `--allow-command` value with the message naming `<wrapper> solace-util ...` as the alternative |
 | `TestComposeCommandDerivation` | `docker.compose` defaults to the runtime's own `compose` subcommand, and `ApplyDefaults` stores exactly what `ComposeCommand` derives -- the two definitions cannot drift |
 | `TestComposeDerivationInheritsRejection` | An unlisted runtime cannot become an approved compose command by way of the derivation |
-| `TestExecBinariesCoversEveryPlatform` | The allowlist is pinned against `Platforms()`. A missing key is neither a compile error nor an obvious runtime one: `commandRules.allowed` would return an empty set, so every command that platform names would be refused as un-allowlisted and the error would offer an empty "allowed" list -- a confusing refusal rather than a loud wiring failure |
-| `TestAllowCommandIsNotASchemaKey` | The structural half of "the config author has no say": every plausible spelling of an allowlist key fails strict decoding, and none reaches the unexported field backing it |
-| `TestCommandTildeExpansion` | `expandCommandHomes` field by field -- `kubernetes.command`, `docker.command`, `docker.compose`, `podman.command`, `replication.sites[].via.kubernetes.command` -- and every case runs `CheckCommand` afterwards, because expansion and the guard are one feature: the point of expanding is that `--kubeconfig ~/solace/kubecontext` then passes, so a token that expanded to something the guard refuses fails here. It is the drift test between the pass' field list and `validateExecCommands`' -- a field missing from the pass keeps its literal `~` and its row fails. `docker.compose`'s row uses the STANDALONE `docker-compose` binary because the guard leaves no other option: `checkFlagShape` admits the `compose` subword only as the LAST token and only directly after an allowed binary, so `docker --config ~/dk compose` is refused for the subword position rather than for the tilde, and a tilde in that field is only expressible through the standalone form. Four sub-cases carry the rest of the rule: argv[0] is left ALONE and then refused by `checkBinary` (a home directory cannot be part of a bare binary name), an 8.3 short name survives untouched, an unresolvable home fails naming the field and the underlying cause rather than letting a literal `~` reach the guard, and a home containing a space is refused HERE -- `checkToken`'s own whitespace message tells the operator to split the argument into list entries, which is wrong advice for a space they never typed |
+| `TestExecBinariesCoversEveryPlatform` | The allowlist is pinned against `Platforms()`. A missing key is neither a compile error nor an obvious runtime one: `rulesFor` would hand the shared guard an empty `Allowed`, so every command that platform names would be refused with a wiring error and the error would offer an empty "allowed" list -- a confusing refusal rather than a loud wiring failure |
+| `TestAllowCommandIsNotASchemaKey` | The structural half of "the config author has no say": every plausible spelling of an allowlist key fails strict decoding, and none reaches the unexported field backing it (checked by running `lima podman` through `execguard.Check` with the decoded approvals, which must still refuse) |
+| `TestCommandTildeExpansion` | `expandCommandHomes` field by field -- `kubernetes.command`, `docker.command`, `docker.compose`, `podman.command`, `replication.sites[].via.kubernetes.command` -- and every case runs `execguard.Check` afterwards, because expansion and the guard are one feature: the point of expanding is that `--kubeconfig ~/solace/kubecontext` then passes, so a token that expanded to something the guard refuses fails here. It is the drift test between the pass' field list and `validateExecCommands`' -- a field missing from the pass keeps its literal `~` and its row fails. `docker.compose`'s row uses the STANDALONE `docker-compose` binary because the guard leaves no other option: the shared flag-shape rule admits the `compose` subword only as the LAST token and only directly after an allowed binary, so `docker --config ~/dk compose` is refused for the subword position rather than for the tilde, and a tilde in that field is only expressible through the standalone form. Four sub-cases carry the rest of the rule: argv[0] is left ALONE and then refused by the shared binary check (a home directory cannot be part of a bare binary name), an 8.3 short name survives untouched, an unresolvable home fails naming the field and the underlying cause rather than letting a literal `~` reach the guard, and a home containing a space is refused HERE -- the shared guard's own whitespace message tells the operator to split the argument into list entries, which is wrong advice for a space they never typed |
 
 ### config_test.go
 
@@ -483,7 +499,7 @@ validator and every executor enforce it from one definition.
 | `TestLoadUnknownFieldHasNoConvertHint` | A valid-YAML file with an unknown key stays a schema error, without the convert hint |
 | `TestLoadValidationError` | A file that parses but fails validation surfaces the missing-fields message |
 | `TestLoadResolvesSecretRefs` | An env file carrying no secret at all -- `passEnv` plus a per-user `passwordEnv` -- loads into a fully populated config |
-| `TestLoadSecretRefErrors` | Every way a reference fails: unset variable, exported-but-empty variable, both keys set, a `${...}` value where a NAME belongs, and the same on a per-user entry. No message echoes a value |
+| `TestLoadSecretRefErrors` | Every way a reference fails: unset variable, exported-but-empty variable, both keys set, a `${...}` value where a NAME belongs (the shared "holds a variable reference" message), an invalid name (refused and not echoed back, since the likeliest such name is the secret pasted into the wrong key), and the same on a per-user entry. No message echoes a value |
 | `TestSecretRefsLeaveLiteralsAlone` | A literal `${VAR}` password stays exactly that: only the dedicated `*Env` key resolves anything |
 | `TestAdditionalUserNameFollowsTheBrokerRule` | The broker's OWN grammar, checked on every platform: start with a letter or `_`, 1-32 characters. Both boundaries are pinned (a leading underscore and exactly 32 characters are legal; 33 is not). Checked at load because the broker would otherwise reject it at CREATE time -- on a running deployment, after everything else has been applied |
 | `TestAdditionalUserNameIsStricterOnKubernetes` | The one rule that differs by platform. The users reach a Kubernetes broker through `spec.extraEnvVarsSecret`, projected with `envFrom` -- and the kubelet SILENTLY DROPS keys that are not valid environment variable names, so a username carrying `.` or `-` yields a user with no password, or none at all, with nothing in the deploy to say so. The same name stays legal on docker/podman, which mount the password as a file, and the error has to say "DROPS" so the silence is the thing being explained |
@@ -633,9 +649,9 @@ and the keys deliberately exempt from it.
 
 | Test | What it covers |
 | --- | --- |
-| `TestHostPathCharsetIsDerivedFromTheTokenCharset` | Why `hostPathUnsafe` is built by `strings.Map` rather than typed out: two hand-written charsets drift, and the drift is invisible until an operator hits the one character in one list and not the other. It asserts the relationship, not the contents -- widening `unsafeTokenChars` widens the path set automatically |
+| `TestHostPathCharsetIsDerivedFromTheTokenCharset` | Why `hostPathUnsafe` is built by `strings.Map` rather than typed out: two hand-written charsets drift, and the drift is invisible until an operator hits the one character in one list and not the other. It asserts the relationship, not the contents -- widening `execguard.UnsafeChars` widens the path set automatically |
 | `TestCheckHostPathAccepts` | The shapes an operator legitimately writes, including the two Windows forms a command token may not carry and an EMBEDDED tilde (`C:\Users\RUNNER~1\certs`, an 8.3 short name). A LEADING one is deliberately NOT here -- it sits in the rejects table, because `expandHomePaths` runs over every host-path key before `Validate` reaches this gate, so a `~` still arriving is a wiring failure rather than a shape anyone writes |
-| `TestCheckHostPathRejects` | Each refusal with its own reason, so a message that stops naming the cause fails here rather than confusing an operator -- and that includes all four leading-`~` shapes (`~`, `~/...`, `~\...`, `~user/...`), whose message must say the Config was not loaded from a file rather than that a tilde is disallowed in a path. That is the fail-closed half of the expansion feature: the alternative to failing is a literal `~` reaching a quadlet `Volume=` line, a compose mount source, or the `rm -rf` behind `broker remove --delete-data` |
+| `TestCheckHostPathRejects` | Each refusal with its own reason, so a message that stops naming the cause fails here rather than confusing an operator -- and that includes all four leading-`~` shapes (`~`, `~/...`, `~\...`, `~user/...`), whose message must say the Config was not loaded from a file rather than that a tilde is disallowed in a path. That is the fail-closed half of the expansion feature: the alternative to failing is a literal `~` reaching a quadlet `Volume=` line, a compose mount source, or the `rm -rf` behind `broker remove --delete-data`. A C1 control character (U+009B, a CSI to a terminal that honours C1) is refused as a control character too, since the host-path gate now reads `execguard.IsControl`. An invisible formatting character (U+200B, U+202E) has its own refusal, through `execguard.IsInvisible` |
 | `TestExpandTilde` | `expandTilde` directly, over an injected home-directory func: bare `~`, `~/...`, `~\...`, a non-tilde value left untouched, an embedded tilde (8.3 short name) left untouched, `~user/...` refused by name, an unresolvable home directory refused, and an expanded value containing whitespace refused (the real-world `C:\Users\John Smith` case) |
 | `TestIsAbsHostPath` | The question asked for both operating systems at once, which is the point -- `filepath.IsAbs` alone answers only for the machine running the test, so one env file would be judged differently depending on where it was loaded |
 | `TestBaseNameSplitsOnBothSeparators` | The cross-platform agreement test. The value becomes an in-broker filename AND a Secret data key, so two answers for one env-file name two different objects rather than differing cosmetically |
@@ -934,8 +950,8 @@ executors -- driven through the real command tree.
 | `TestAllowCommandIsRegisteredWhereItExecutes` | `--allow-command` is declared on every command that runs something -- the unit the operator is approving a binary for -- and is still NOT a root flag, so it stays a usage error on `solace-util convert`, which loads no config and runs no platform CLI |
 | `TestAllowCommandIsRepeatable` | Both values of a repeated flag are collected in order, so a chain needing two approvals does not force a choice |
 | `TestAllowCommandApprovesAWrappedRuntime` | The accept case end to end: `microk8s kubectl` is refused with a message naming the hatch, and runs -- reaching the echoed command -- once the operator passes `--allow-command microk8s` |
-| `TestAllowCommandRejectsBadValues` | A path, a metacharacter, an empty value, or any privilege-escalation wrapper is a usage error, so the hatch cannot reintroduce what the guard refuses |
-| `TestEscalationIsRefusedEndToEnd` | An env file naming `sudo kubectl` is refused with and without the flag, and the refusal names the supported alternative -- elevate the tool itself, at the moment you run it |
+| `TestAllowCommandRejectsBadValues` | A path, a metacharacter, an empty value, invalid UTF-8, or any privilege-escalation wrapper (including `runuser` and `chroot`, which the shared guard added) is a usage error, so the hatch cannot reintroduce what the guard refuses |
+| `TestEscalationIsRefusedEndToEnd` | An env file naming `sudo kubectl` is refused with and without the flag -- without it as a privilege-escalation wrapper rather than merely an unlisted binary -- and the refusal names the supported alternative (`sudo solace-util ...`) -- elevate the tool itself, at the moment you run it |
 | `TestAllowCommandRejectedWhereNothingExecutes` | The flag is refused on every leaf under `generate` (broker, operator, secrets, artifact), so it is never learned as harmless boilerplate that later gets pasted into a run that does execute |
 | `TestHostileRuntimeIsRefusedByEveryVerb` | An unlisted binary stops `check`, `status`, `deploy`, `remove`, `status --all` and `logs` alike -- `status` running `curl` is the same arbitrary execution `deploy` running it would be |
 | `TestSmuggledSubcommandIsRefused` | `kubectl delete`, `kubectl delete ns prod` and a literal `--` in the config are all refused: this tool appends its own subcommand, and a word there would run ahead of it |

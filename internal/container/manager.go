@@ -129,7 +129,7 @@ func (m *Manager) isEcho() bool { _, ok := m.R.(engine.Echo); return ok }
 
 // runtime is the guarded runtime command (docker.command / podman.command): argv[0]
 // plus any leading arguments that precede every call's own. It re-runs
-// config.CheckCommand on every call -- the Manager is built straight from a
+// execguard.Check on every call -- the Manager is built straight from a
 // *config.Config, so it is the executor half of the guard's two enforcement points
 // and must not assume Validate ever ran (execguard.go).
 func (m *Manager) runtime() (config.Command, error) { return m.Cfg.RuntimeCommand(m.P) }
@@ -1566,7 +1566,7 @@ func (m *Manager) systemctlArgs(args []string) []string {
 // any command ran, so in production this never fires -- it is kept at the two
 // sites where a wrong-account run does LASTING damage, Deploy's writes into the
 // secret store and PrepHost's mkdir/chown, because an executor must not assume
-// its caller checked. That is the same stance runtime() takes on CheckCommand.
+// its caller checked. That is the same stance runtime() takes on execguard.Check.
 func (m *Manager) checkPodmanEUID() error {
 	return GuardPodmanEUID(m.Cfg, m.P, m.R, m.Geteuid())
 }

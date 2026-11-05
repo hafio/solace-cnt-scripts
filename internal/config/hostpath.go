@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/hafio/go-deploy-utility/execguard"
 )
 
 // A host path is not a command token, and the difference is the whole reason this
@@ -19,7 +21,7 @@ import (
 // splits. So the two charsets differ, and they differ in one direction only: a
 // path admits three characters a token refuses.
 //
-// The set is DERIVED from unsafeTokenChars by removal rather than typed out again,
+// The set is DERIVED from execguard.UnsafeChars by removal rather than typed out again,
 // which is what stops the two drifting apart when one is edited.
 // TestHostPathCharsetIsDerivedFromTheTokenCharset pins the derivation itself.
 //
@@ -29,12 +31,12 @@ import (
 // so the bare-name rule that motivates the token ban does not apply.
 //
 // The tilde is not removed here, because the token charset does not carry it: a command
-// token's tilde is refused POSITIONALLY (execguard.go's checkToken refuses a leading one
+// token's tilde is refused POSITIONALLY (the shared execguard token check refuses a leading one
 // and admits an embedded one), which is the rule host paths already used. That is what
 // lets an 8.3 short name through -- `C:\Users\RUNNER~1\...` is what a GitHub Windows
 // runner really hands out.
 //
-// A colon needs no removal: unsafeTokenChars never contained one, because
+// A colon needs no removal: execguard.UnsafeChars never contained one, because
 // `--server=https://host:6443` is a legitimate command token. It is called out here
 // because a colon in a host path is NOT harmless the way a backslash is -- both
 // container artifacts write a mount as `source:target:options`, so a drive-letter
@@ -45,14 +47,14 @@ var hostPathUnsafe = strings.Map(func(r rune) rune {
 		return -1
 	}
 	return r
-}, unsafeTokenChars)
+}, execguard.UnsafeChars)
 
 // hostPathAdmits are the token-charset characters a host path is allowed to carry.
 // Named so the test can assert the relationship against one definition instead of
 // repeating the list.
 //
-// It is just the backslash. The tilde is not in unsafeTokenChars at all -- a command
-// token's tilde is refused POSITIONALLY (checkToken refuses a leading one, admits an 8.3
+// It is just the backslash. The tilde is not in execguard.UnsafeChars at all -- a command
+// token's tilde is refused POSITIONALLY (the shared token check refuses a leading one, admits an 8.3
 // short name's embedded one) -- so there is nothing to remove here.
 const hostPathAdmits = `\`
 
@@ -70,10 +72,10 @@ func CheckHostPath(field, p string) error {
 	if p == "" {
 		return nil
 	}
-	if j := strings.IndexFunc(p, isCtrl); j >= 0 {
+	if j := strings.IndexFunc(p, execguard.IsControl); j >= 0 {
 		return fmt.Errorf("%s contains a control character (0x%02x) at offset %d: %q", field, p[j], j, p)
 	}
-	if j := strings.IndexFunc(p, isInvisible); j >= 0 {
+	if j := strings.IndexFunc(p, execguard.IsInvisible); j >= 0 {
 		return fmt.Errorf("%s = %q contains an invisible formatting character at offset %d; it cannot be "+
 			"seen in a review or a log line, so it is not allowed in a path", field, p, j)
 	}
@@ -156,7 +158,7 @@ func IsAbsHostPath(p string) bool {
 // copy-from paths, filepath.Base in the CLI-script upload, and a hand-rolled
 // strings.ContainsAny(file, "/\\") in two command files.
 func BaseName(p string) string {
-	if i := strings.LastIndexAny(p, pathSeparators); i >= 0 {
+	if i := strings.LastIndexAny(p, execguard.PathSeparators); i >= 0 {
 		return p[i+1:]
 	}
 	return p
@@ -169,14 +171,14 @@ func BaseName(p string) string {
 // take -- and it must answer the same way on both operating systems for the same
 // env file.
 func HasPathSeparator(p string) bool {
-	return strings.ContainsAny(p, pathSeparators)
+	return strings.ContainsAny(p, execguard.PathSeparators)
 }
 
 // isPathSep is the same question about ONE byte, for the callers examining a known
 // position rather than searching. Both read the separator set from the one constant
-// (execguard.go's pathSeparators), so a path rule and a command rule cannot come to
+// (execguard.PathSeparators), so a path rule and a command rule cannot come to
 // disagree about what a separator is.
-func isPathSep(b byte) bool { return strings.IndexByte(pathSeparators, b) >= 0 }
+func isPathSep(b byte) bool { return strings.IndexByte(execguard.PathSeparators, b) >= 0 }
 
 // BaseDir is the directory of the env file this Config was loaded from, or empty
 // for a Config that never went through Load. Exported for error messages and for
@@ -423,7 +425,7 @@ func expandTilde(p string, homeDir func() (string, error)) (string, error) {
 
 // expandTildeToken expands a leading tilde in a COMMAND TOKEN (execguard.go's
 // expandCommandHomes). It is expandTilde's twin and differs only in what it says
-// about whitespace: an expanded home carrying a space would reach CheckCommand's own
+// about whitespace: an expanded home carrying a space would reach execguard's own
 // whitespace refusal, which explains itself by telling the operator to write each
 // argument as its own list entry -- true of a token they typed, and misleading advice
 // for a space that came out of their home directory rather than their env file.
@@ -443,7 +445,7 @@ func expandTildeToken(tok string, homeDir func() (string, error)) (string, error
 // tildeHome expands a LEADING tilde only: exactly "~", or "~" immediately
 // followed by '/' or '\\'. A tilde anywhere else in the value -- including one
 // followed by any other character -- is left untouched, which is what keeps an
-// 8.3 short name (`C:\Users\RUNNER~1\...`) working: CheckHostPath and checkToken
+// 8.3 short name (`C:\Users\RUNNER~1\...`) working: CheckHostPath and the shared token check
 // both draw this same line between "leading" and "everywhere else", and this is
 // the resolving half of that one rule. Anything starting `~` and
 // followed by something other than a separator is the `~user/...` form (another

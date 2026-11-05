@@ -220,7 +220,7 @@ func TestCommandString(t *testing.T) {
 // is rendered into the compose/quadlet artifact and run by the container engine
 // inside the broker, so the execution guard's allowlist and subcommand rules would
 // be meaningless -- a probe is legitimately a shell pipeline, and the engine, not
-// this process, decides what it means. Contrast TestCheckCommandRejects, which is
+// this process, decides what it means. Contrast the shared execguard reject tests, which are
 // the field-by-field opposite for everything that does become argv here.
 func TestValidateProbeCommandAccepts(t *testing.T) {
 	cases := []struct {

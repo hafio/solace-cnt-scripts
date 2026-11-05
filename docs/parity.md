@@ -94,8 +94,11 @@ Both tools follow every rule in this section today.
 14. **Command binaries are bare names from an allowlist.** `command:` must name `kubectl`,
     `oc`, `docker` or `podman` without a path. The name is resolved through `PATH`, and a
     match in the current directory is refused. `--allow-command <name>` approves another
-    name for one run. `solmq-conn-util`: `internal/validate`, `internal/runner/runner.go`.
-    `solace-util`: `internal/config/execguard.go`, `internal/engine/runner.go`.
+    name for one run. A privilege-escalation wrapper such as `sudo` is never accepted in a
+    command, not even with `--allow-command`; run the tool itself under `sudo` instead. Both
+    tools check commands with the shared `execguard` package. `solmq-conn-util`:
+    `internal/validate`, `internal/runner/runner.go`. `solace-util`:
+    `internal/config/execguard.go`, `internal/engine/runner.go`.
 
 ## Divergences
 

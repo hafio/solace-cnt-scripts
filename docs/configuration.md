@@ -572,7 +572,8 @@ running anything with it.**
 
 To make that review short, the fields are restricted. A command is accepted only when:
 
-1. **Every token is inert and visible.** No control characters, no whitespace inside a single
+1. **Every token is inert and visible.** No control characters (C0, DEL and the C1 range),
+   no invalid UTF-8, no whitespace inside a single
    argument (any Unicode whitespace, not just the ASCII space), no invisible formatting
    characters (zero-width spaces and joiners, bidirectional overrides), no quotes, no
    backslash, no backtick, and none of `$ ; | & < > ( ) * ? [ ] { } # !`. Nothing is ever
@@ -639,8 +640,10 @@ to the person who can see what they are approving. It is rejected on any `genera
 where nothing executes.
 
 **Privilege escalation is never approvable**, by the config or by you: `sudo`, `sudoedit`,
-`doas`, `su`, `pkexec`, `run0`, `systemd-run`, `machinectl`, `setpriv`, `capsh`, `unshare`,
-`nsenter`, `runas` and `gsudo` are refused as `--allow-command` values, in any casing
+`doas`, `su`, `pkexec`, `run0`, `runuser`, `sg`, `systemd-run`, `machinectl`, `setpriv`,
+`capsh`, `unshare`, `nsenter`, `chroot`, `gosu`, `su-exec`, `setuidgid`, `s6-setuidgid`,
+`chpst`, `runas` and `gsudo` are refused as `--allow-command` values and in any command
+field, in any casing
 (`Sudo` and `SUDO.exe` too -- Windows and a default macOS filesystem resolve those to the same
 binary, so matching them exactly would have let a capital letter through a floor that is
 supposed to stop everyone). The allowlist in rule 2 above is the opposite: it stays
@@ -657,7 +660,8 @@ sudo solace-util broker deploy -e prod.yaml   # yes (prod.yaml is a podman env f
 # command: sudo podman  in the env file      # never
 ```
 
-The same check runs twice -- once when the env file is loaded, and again immediately before
+The rules above are the shared `execguard` package's, the same ones solmq-conn-util applies,
+so both tools refuse the same things in the same words. The same check runs twice -- once when the env file is loaded, and again immediately before
 any command line is built -- from a single implementation, so a hostile file is inert even
 on a path that skipped validation.
 

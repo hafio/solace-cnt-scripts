@@ -19,7 +19,7 @@ import (
 // AllowCommands models here. These tests are therefore also the container-side
 // proof that an approved chained runner reaches argv intact. Deliberately NOT a
 // privilege-escalation wrapper -- --allow-command can never approve one of those
-// (config.neverAllowed), which TestAllowCommandsRejectsEscalation covers.
+// (the shared execguard package), which its own tests cover.
 func wrappedCtrCfg() *config.Config {
 	cfg := ctrCfg(config.Docker, "true")
 	cfg.Docker.Command = config.Command{"lima", "nerdctl"}

@@ -56,7 +56,7 @@ func Load(path string, p Platform, allowCommands ...string) (*Config, error) {
 	// leading '~' is a form the checks are supposed to see RESOLVED, not a form they
 	// are supposed to accept. `dataDir: ~/solace/data` is not absolute by
 	// IsAbsHostPath, so validating first refused it before anything could expand it;
-	// and CheckCommand polices what will actually be handed to exec, which after this
+	// and execguard.Check polices what will actually be handed to exec, which after this
 	// pass is the expanded token. That is what lets both guards refuse a surviving
 	// '~' outright -- one arriving at either of them means the field is missing from
 	// a list here, or the Config never came from a file (each of the two functions
