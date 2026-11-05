@@ -481,22 +481,19 @@ func TestExportConfigOutOverwriteGate(t *testing.T) {
 
 	t.Run("refuses without confirmation and leaves the file alone", func(t *testing.T) {
 		var err error
-		stderrText := captureStderr(t, func() {
+		_ = captureStderr(t, func() {
 			_, err = runRootWith(t, []string{"broker", "perform", "export-config", "--out", outFile, "--env", path, "--platform", "kubernetes"},
 				func(a *App) {
 					a.Interactive = func() bool { return false }
 					a.NewRunner = func(*App) engine.EnvRunner { return rr }
 				})
 		})
-		// The refusal formats the path with %q, so on Windows the message carries
-		// ESCAPED separators (C:\\Users\\...) while outFile holds single ones.
-		// Comparing against the quoted form is what makes this assertion portable --
-		// a raw Contains passes on Linux and fails here for no real reason.
-		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%q", outFile)) {
+		// The Gate error carries the path raw (%s), so the plain path is what to look for.
+		if err == nil || !strings.Contains(err.Error(), outFile) {
 			t.Fatalf("export-config --out over an existing file err = %v, want a refusal naming %q", err, outFile)
 		}
-		if !strings.Contains(stderrText, "--no-prompt") {
-			t.Errorf("the refusal did not name --no-prompt: %q", stderrText)
+		if !strings.Contains(err.Error(), "pass --no-prompt instead") {
+			t.Errorf("the refusal did not name --no-prompt: %v", err)
 		}
 		if body, readErr := os.ReadFile(outFile); readErr != nil || string(body) != "PLACEHOLDER" {
 			t.Errorf("a declined overwrite still changed the file: body=%q err=%v", body, readErr)
@@ -727,15 +724,12 @@ func TestImportConfigConfirmationMatrix(t *testing.T) {
 		}
 	})
 
-	t.Run("non-interactive without --no-prompt warns and writes nothing", func(t *testing.T) {
-		_, stderrText, err, rr := runImportConfirmation(t, path, artifact, []string{"fake-import-vpn"}, nil, func(a *App) {
+	t.Run("non-interactive without --no-prompt fails naming the flag and writes nothing", func(t *testing.T) {
+		_, _, err, rr := runImportConfirmation(t, path, artifact, []string{"fake-import-vpn"}, nil, func(a *App) {
 			a.Interactive = func() bool { return false }
 		})
-		if err != nil {
-			t.Fatalf("an unanswerable prompt must not fail the command: %v", err)
-		}
-		if !strings.Contains(stderrText, "--no-prompt") {
-			t.Errorf("the refusal did not name --no-prompt: %q", stderrText)
+		if err == nil || !strings.Contains(err.Error(), "pass --no-prompt instead") {
+			t.Fatalf("an unanswerable prompt must fail naming --no-prompt, got %v", err)
 		}
 		if rr.hasCall(".export-teardown.cli") || rr.hasCall(".verify-export.cli") {
 			t.Errorf("an unanswerable prompt must not touch the broker:\n%s", rr.dump())

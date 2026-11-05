@@ -462,7 +462,8 @@ func TestOperatorApplyRefusesAFallbackFirstInstallWithoutEscalateOrBind(t *testi
 			rr.canIByVerb = map[string]string{tc.verb: "no"}
 			c := NewCluster(rr, cfg, nil, nil)
 			asked := false
-			c.Confirm = func(string) bool { asked = true; return true }
+			c.Confirm = func(string) (bool, error) { asked = true; return true, nil }
+			c.ConfirmScope = c.Confirm
 			err := c.OperatorApply(context.Background())
 			if err == nil {
 				t.Fatal("a fallback first install without " + tc.verb + " must be refused before anything is applied")
@@ -1379,7 +1380,8 @@ func TestOperatorApplyStopsAtARefusedPermission(t *testing.T) {
 	rr := &recRunner{canI: "no"}
 	c := NewCluster(rr, loadK8s(t), nil, nil)
 	asked := false
-	c.Confirm = func(string) bool { asked = true; return true }
+	c.Confirm = func(string) (bool, error) { asked = true; return true, nil }
+	c.ConfirmScope = c.Confirm
 	err := c.OperatorApply(context.Background())
 	if err == nil {
 		t.Fatal("OperatorApply must fail when the permission probe answers no")
@@ -1397,6 +1399,31 @@ func TestOperatorApplyStopsAtARefusedPermission(t *testing.T) {
 	}
 }
 
+// TestOperatorApplyReturnsAWideningQuestionThatCouldNotBePut: a ConfirmScope that cannot ask
+// (no terminal) fails the deploy with its own error, carried as it came and not read as a
+// "no", and nothing is applied. The downgrade seam is not consulted for it.
+func TestOperatorApplyReturnsAWideningQuestionThatCouldNotBePut(t *testing.T) {
+	cfg := loadK8s(t)
+	cfg.K8s.Operator.Namespace = "op-ns"
+	cfg.K8s.Operator.WatchNamespaces = ""
+	cfg.K8s.Operator.WatchBrokerNS = boolPtr(false) // nothing listed at all: every namespace
+	installed := operatorItem("op-ns", operatorImage(cfg), "team-a")
+	rr := &recRunner{out: []byte(`{"items":[` + installed + `]}`)}
+	c := NewCluster(rr, cfg, nil, nil)
+	cause := errors.New("needs a terminal")
+	c.ConfirmScope = func(string) (bool, error) { return false, cause }
+	c.Confirm = func(string) (bool, error) { t.Error("the downgrade question was asked"); return true, nil }
+	err := c.OperatorApply(context.Background())
+	if !errors.Is(err, cause) {
+		t.Fatalf("OperatorApply err = %v, want the ConfirmScope error carried through", err)
+	}
+	for _, call := range rr.calls {
+		if call.method == "RunInput" {
+			t.Errorf("an unaskable widening still applied a document: %+v", call)
+		}
+	}
+}
+
 // TestOperatorApplyAsksBeforeWideningTheWatchList: an env file that asks for EVERY namespace,
 // against a shared operator that watches a named list, hands brokers this env file has never
 // heard of a wider reconciler -- a privilege increase, so a question and not a side effect. An
@@ -1405,12 +1432,12 @@ func TestOperatorApplyStopsAtARefusedPermission(t *testing.T) {
 func TestOperatorApplyAsksBeforeWideningTheWatchList(t *testing.T) {
 	const question = "Let the operator watch EVERY namespace in this cluster?"
 	var asked []string
-	answer := func(yes bool) func(string) bool {
-		return func(q string) bool { asked = append(asked, q); return yes }
+	answer := func(yes bool) func(string) (bool, error) {
+		return func(q string) (bool, error) { asked = append(asked, q); return yes, nil }
 	}
 	for _, tc := range []struct {
 		name      string
-		confirm   func(string) bool
+		confirm   func(string) (bool, error)
 		wantErr   bool
 		wantAsked bool
 	}{
@@ -1429,7 +1456,8 @@ func TestOperatorApplyAsksBeforeWideningTheWatchList(t *testing.T) {
 			installed := operatorItem("op-ns", operatorImage(cfg), "team-a")
 			rr := &recRunner{out: []byte(`{"items":[` + installed + `]}`)}
 			c := NewCluster(rr, cfg, nil, nil)
-			c.Confirm = tc.confirm
+			c.ConfirmScope = tc.confirm
+			c.Confirm = func(string) (bool, error) { t.Error("the downgrade question was asked, but nothing here downgrades"); return true, nil }
 			err := c.OperatorApply(context.Background())
 
 			var applied []rrCall

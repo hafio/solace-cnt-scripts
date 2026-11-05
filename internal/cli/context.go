@@ -1,13 +1,13 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"io"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/confirm"
 	"github.com/spf13/cobra"
 
 	"solace/internal/config"
@@ -41,17 +41,17 @@ type App struct {
 	Runner   engine.EnvRunner
 
 	// Prompt seams, in the spirit of Manager.Resolve/Geteuid: the confirm
-	// helpers gate destructive actions on an interactive terminal, and a test cannot
-	// supply one. Interactive nil means stdinCanAnswer and PromptIn nil means
+	// helpers gate destructive actions on a terminal, and a test cannot supply
+	// one. Interactive nil means confirm.StdinIsTerminal and PromptIn nil means
 	// os.Stdin. Nothing user-facing sets either field; only tests do.
 	Interactive func() bool
 	PromptIn    io.Reader
 
-	// The run's single buffered prompt reader, built on first use by promptSource.
-	// It must be shared across questions: a per-call reader discards whatever it
-	// buffered past the line it returned, which loses the answer to the NEXT
-	// question in the same run.
-	promptReader *bufio.Reader
+	// The run's single Prompter, built on first use by prompter. It must be shared
+	// across questions: it holds the one buffered reader, and a per-call reader
+	// discards whatever it buffered past the line it returned, which loses the
+	// answer to the NEXT question in the same run.
+	prompt *confirm.Prompter
 
 	// NewRunner builds the Runner every command executes through. It exists as a
 	// seam for the same reason Interactive/PromptIn do: a test cannot supply a

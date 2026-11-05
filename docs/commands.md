@@ -1117,8 +1117,10 @@ Install the operator, or add this env file's namespaces to it (kubernetes only)
 Installs the operator, or unions this env file's namespaces into an
 already-running one's watch list.
 
-Widening the watch to all namespaces, or installing an older version,
-needs an interactive confirmation with no unattended override.
+Installing an older version asks first; --no-prompt approves it. Widening
+the watch to all namespaces needs a terminal and is never approved by
+--no-prompt: name the namespaces in kubernetes.operator.watchNamespaces
+instead.
 
 ```
 solace-util operator deploy [flags]
@@ -1131,6 +1133,7 @@ Applies to: kubernetes. On any other platform this command fails rather than doi
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--no-prompt` | `false` | approve an operator downgrade without asking; never approves widening the watch to every namespace |
 
 
 ### solace-util operator generate

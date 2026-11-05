@@ -242,8 +242,14 @@ func (c *Cluster) OperatorApply(ctx context.Context) error {
 	// rendered from this env file alone -- see watch.go. Also before the first write,
 	// because the widening case is a question.
 	plan := c.reconcileWatch(dep)
-	if plan.widening && !c.confirm("Let the operator watch EVERY namespace in this cluster?") {
-		return fmt.Errorf("declined: the operator's watch list was left as it is, and nothing was applied")
+	if plan.widening {
+		ok, err := c.confirmScope("Let the operator watch EVERY namespace in this cluster?")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("declined: the operator's watch list was left as it is, and nothing was applied")
+		}
 	}
 	c.logf("deploying operator to namespace %s", opNS)
 	manifest, err := RenderOperator(c.Cfg, opNS, plan.value)

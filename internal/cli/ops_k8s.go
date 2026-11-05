@@ -22,16 +22,14 @@ import (
 // stdout (emit).
 
 // k8sCluster builds a Cluster over the app's runner/config, wiring stdout as the report
-// sink. It wires no reader: the package asks exactly one question, through Confirm.
+// sink. It wires no reader: the package asks two questions, through Confirm and ConfirmScope.
 func k8sCluster(a *App) *k8s.Cluster {
 	c := k8s.NewCluster(a.Runner, a.Cfg, lineSink(), os.Stdout)
-	// Same seam container.Manager carries: the one question this side asks is
-	// whether to downgrade the cluster-scoped operator. It is the ONE question
-	// --no-prompt cannot answer -- `deploy operator` does not register the flag,
-	// and confirmDowngrade has no escape for it, so a non-interactive run always
-	// declines. Rolling every broker in a cluster back is a decision made by a
-	// human at a terminal or not at all.
-	c.Confirm = func(question string) bool { return confirmDowngrade(a, question) }
+	// Same seam container.Manager carries. The downgrade is answered by --no-prompt on
+	// `operator deploy`; widening the watch to every namespace is NOT -- it has its own
+	// seam, which asks a terminal and nothing else, so no flag can approve it.
+	c.Confirm = func(question string) (bool, error) { return confirmDowngrade(a, question) }
+	c.ConfirmScope = func(question string) (bool, error) { return confirmScope(a, question) }
 	return c
 }
 
@@ -196,9 +194,9 @@ func opK8sConfigServerCerts(a *App) error {
 		if err != nil {
 			return err
 		}
-		if !confirmAction(a, "Remove the TLS server certificate from", "remove the TLS server certificate from",
-			k8sWhat(a, "broker "+a.Cfg.K8s.Name)) {
-			return nil
+		if ok, err := confirmAction(a, "Remove the TLS server certificate from", "remove the TLS server certificate from",
+			k8sWhat(a, "broker "+a.Cfg.K8s.Name)); err != nil || !ok {
+			return err
 		}
 		return k8sOps(a).RemoveServerCerts(bg(), roles...)
 	}
@@ -243,9 +241,9 @@ func opK8sConfigDomainCerts(a *App) error {
 		return err
 	}
 	if remove {
-		if !confirmAction(a, "Remove", "remove",
-			k8sWhat(a, "the configured domain CA certificates from broker "+a.Cfg.K8s.Name)) {
-			return nil
+		if ok, err := confirmAction(a, "Remove", "remove",
+			k8sWhat(a, "the configured domain CA certificates from broker "+a.Cfg.K8s.Name)); err != nil || !ok {
+			return err
 		}
 		return k8sOps(a).RemoveDomainCerts(bg(), role, domainCANames(certs))
 	}
@@ -266,9 +264,9 @@ func opK8sConfigProductKeys(a *App) error {
 		return err
 	}
 	if remove {
-		if !confirmAction(a, "Revoke every configured product key from", "revoke the product keys from",
-			k8sWhat(a, "broker "+a.Cfg.K8s.Name)) {
-			return nil
+		if ok, err := confirmAction(a, "Revoke every configured product key from", "revoke the product keys from",
+			k8sWhat(a, "broker "+a.Cfg.K8s.Name)); err != nil || !ok {
+			return err
 		}
 		return k8sOps(a).RemoveProductKeys(bg(), a.Cfg.Broker.ProductKeys, roles...)
 	}
@@ -291,9 +289,9 @@ func opK8sConfigDefaultVPN(a *App) error {
 	if enable {
 		return k8sOps(a).EnableDefaultVPN(bg(), role)
 	}
-	if !confirmAction(a, "Shut down", "shut down",
-		k8sWhat(a, "the default message-VPN on broker "+a.Cfg.K8s.Name)) {
-		return nil
+	if ok, err := confirmAction(a, "Shut down", "shut down",
+		k8sWhat(a, "the default message-VPN on broker "+a.Cfg.K8s.Name)); err != nil || !ok {
+		return err
 	}
 	return k8sOps(a).DisableDefaultVPN(bg(), role)
 }
@@ -313,9 +311,9 @@ func opK8sConfigDefaultUsers(a *App) error {
 	if enable {
 		return k8sOps(a).EnableDefaultUsers(bg(), role)
 	}
-	if !confirmAction(a, "Shut down", "shut down",
-		k8sWhat(a, "the default client-username in every message-VPN on broker "+a.Cfg.K8s.Name)) {
-		return nil
+	if ok, err := confirmAction(a, "Shut down", "shut down",
+		k8sWhat(a, "the default client-username in every message-VPN on broker "+a.Cfg.K8s.Name)); err != nil || !ok {
+		return err
 	}
 	return k8sOps(a).DisableDefaultUsers(bg(), role)
 }
@@ -552,9 +550,9 @@ func opK8sStopBroker(a *App) error  { return k8sCluster(a).ReplicasStop(bg()) }
 func opK8sRestart(a *App, roleArg string) error {
 	c := k8sCluster(a)
 	if roleArg == "" {
-		if !confirmAction(a, "Restart", "restart",
-			k8sWhat(a, "every broker pod, one at a time (monitor, backup, primary),")) {
-			return nil
+		if ok, err := confirmAction(a, "Restart", "restart",
+			k8sWhat(a, "every broker pod, one at a time (monitor, backup, primary),")); err != nil || !ok {
+			return err
 		}
 		return c.RestartRolling(bg())
 	}
@@ -562,8 +560,8 @@ func opK8sRestart(a *App, roleArg string) error {
 	if err != nil {
 		return exitcode.AsUsage(err)
 	}
-	if !confirmAction(a, "Restart", "restart", k8sWhat(a, "the "+roleWord(role)+" broker pod")) {
-		return nil
+	if ok, err := confirmAction(a, "Restart", "restart", k8sWhat(a, "the "+roleWord(role)+" broker pod")); err != nil || !ok {
+		return err
 	}
 	return c.RestartPod(bg(), role)
 }
@@ -592,9 +590,9 @@ func opK8sOperatorDeploy(a *App) error {
 // The layer question is the CRDs, whose deletion cascades to every PubSubPlusEventBroker
 // in the cluster -- including brokers this env file has never heard of.
 func opK8sOperatorRemove(a *App) error {
-	if !confirmDelete(a, "the EventBroker operator in namespace "+
-		k8s.OperatorNamespace(a.Cfg)+k8sContext(a)) {
-		return nil
+	if ok, err := confirmDelete(a, "the EventBroker operator in namespace "+
+		k8s.OperatorNamespace(a.Cfg)+k8sContext(a)); err != nil || !ok {
+		return err
 	}
 	c := k8sCluster(a)
 	// The CRDs are the retained layer, gated exactly as `broker remove --delete-data`
@@ -623,7 +621,10 @@ func opK8sOperatorRemove(a *App) error {
 			warn("could not list the broker resources across the cluster (%v); --delete-crd needs that list to "+
 				"prove no broker would be cascade-deleted, so it is checked again before anything is removed", listErr)
 		}
-		deleteCRDs = confirmLayer(a, layerCRD)
+		var err error
+		if deleteCRDs, err = confirmLayer(a, layerCRD); err != nil {
+			return err
+		}
 	case brokersExist:
 		warn("%d broker resource(s) still exist, so the operator CRDs are kept "+
 			"(deleting them would cascade-delete every one): %s", len(refs), strings.Join(refs, ", "))
@@ -639,9 +640,9 @@ func opK8sOperatorRemove(a *App) error {
 func opK8sOperatorStart(a *App) error { return k8sCluster(a).OperatorScale(bg(), 1) }
 
 func opK8sOperatorStop(a *App) error {
-	if !confirmAction(a, "Stop", "stop", "the operator, freezing reconciliation for every broker "+
-		"it watches"+k8sContext(a)) {
-		return nil
+	if ok, err := confirmAction(a, "Stop", "stop", "the operator, freezing reconciliation for every broker "+
+		"it watches"+k8sContext(a)); err != nil || !ok {
+		return err
 	}
 	return k8sCluster(a).OperatorScale(bg(), 0)
 }
@@ -713,15 +714,18 @@ func opK8sRemoveBroker(a *App) error {
 	if a.Cfg.AdminSecretName() == "" {
 		warnWhereTheAdminPasswordIs(a)
 	}
-	if !confirmDelete(a, k8sWhat(a, "broker "+a.Cfg.K8s.Name)) {
-		return nil
+	if ok, err := confirmDelete(a, k8sWhat(a, "broker "+a.Cfg.K8s.Name)); err != nil || !ok {
+		return err
 	}
 	c := k8sCluster(a)
 	ctx := bg()
 	// The layer question is asked once, before any of the work, so a removal cannot get
 	// halfway through and then stop to ask something -- and every permission the removal
 	// will use is asked about next, so it cannot get halfway through and then be refused.
-	purge := confirmLayer(a, layerData)
+	purge, err := confirmLayer(a, layerData)
+	if err != nil {
+		return err
+	}
 	if err := c.PreflightRemoval(ctx, purge); err != nil {
 		return err
 	}
@@ -787,8 +791,8 @@ func removeNamespaceIfEmpty(a *App, c *k8s.Cluster) error {
 		c.ReportNamespaceOccupied(contents)
 		return nil
 	}
-	if !confirmDelete(a, "the now-empty namespace "+a.Cfg.K8s.Namespace+k8sContext(a)) {
-		return nil
+	if ok, err := confirmDelete(a, "the now-empty namespace "+a.Cfg.K8s.Namespace+k8sContext(a)); err != nil || !ok {
+		return err
 	}
 	return c.DeleteNamespace(bg())
 }

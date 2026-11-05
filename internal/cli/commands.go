@@ -696,12 +696,19 @@ func newOperatorValidateCmd(app *App) *cobra.Command {
 
 const operatorDeployLong = "Installs the operator, or unions this env file's namespaces into an\n" +
 	"already-running one's watch list.\n\n" +
-	"Widening the watch to all namespaces, or installing an older version,\n" +
-	"needs an interactive confirmation with no unattended override."
+	"Installing an older version asks first; --no-prompt approves it. Widening\n" +
+	"the watch to all namespaces needs a terminal and is never approved by\n" +
+	"--no-prompt: name the namespaces in kubernetes.operator.watchNamespaces\n" +
+	"instead."
 
 func newOperatorDeployCmd(app *App) *cobra.Command {
-	return onlyOn(withLong(leaf(app, "deploy", "Install the operator, or add this env file's namespaces to it",
+	c := onlyOn(withLong(leaf(app, "deploy", "Install the operator, or add this env file's namespaces to it",
 		opK8sOperatorDeploy), operatorDeployLong), config.K8s)
+	// Not addRemoveFlags: that flag answers yes to every question, and this command has
+	// one question it must never answer.
+	c.Flags().BoolVar(&app.noPrompt, "no-prompt", false,
+		"approve an operator downgrade without asking; never approves widening the watch to every namespace")
+	return c
 }
 
 const operatorRemoveLong = "Removes this env file's namespaces from the operator's watch list,\n" +

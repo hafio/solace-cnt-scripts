@@ -239,7 +239,7 @@ func resolvePlatform(a *App) (config.Platform, error) {
 		step("platform: %s (from %s)", found[0], path)
 		return found[0], nil
 	}
-	if !interactive(a) {
+	if !a.prompter().Terminal() {
 		return "", fmt.Errorf("env file %q declares more than one platform section (%s): "+
 			"pass --platform kubernetes|docker|podman (kube|dk|pm) to choose", path, config.JoinPlatforms(found))
 	}
@@ -273,8 +273,10 @@ func promptPlatform(a *App, found []config.Platform) (config.Platform, error) {
 	// An unanswered question falls through as "", which Atoi rejects below -- the same
 	// loud error a garbage answer gets. A platform guessed on the operator's behalf is
 	// exactly the decision that must not be silent, so there is nothing to special-case.
-	answer, _ := promptLine(promptSource(a), os.Stderr,
-		fmt.Sprintf("Which platform? [1-%d] ", len(found)))
+	answer, _, err := a.prompter().ReadLine(fmt.Sprintf("Which platform? [1-%d] ", len(found)))
+	if err != nil {
+		return "", err
+	}
 	n, err := strconv.Atoi(strings.TrimSpace(answer))
 	if err != nil || n < 1 || n > len(found) {
 		return "", fmt.Errorf("no platform selected (got %q): pass --platform %s to choose without being asked",

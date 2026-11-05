@@ -97,8 +97,8 @@ func opCtrStopBroker(a *App) error  { return ctrManager(a).Stop(bg()) }
 // on Kubernetes. It asks with confirmAction's own verb ("Restart"), since the
 // action is not a deletion and a prompt that says otherwise would be read as one.
 func opCtrRestartBroker(a *App) error {
-	if !confirmAction(a, "Restart", "restart", containerWhat(a)) {
-		return nil
+	if ok, err := confirmAction(a, "Restart", "restart", containerWhat(a)); err != nil || !ok {
+		return err
 	}
 	return ctrManager(a).Restart(bg())
 }
@@ -123,9 +123,9 @@ func opCtrConfigServerCerts(a *App) error {
 		return err
 	}
 	if remove {
-		if !confirmAction(a, "Remove the TLS server certificate from", "remove the TLS server certificate from",
-			containerWhat(a)) {
-			return nil
+		if ok, err := confirmAction(a, "Remove the TLS server certificate from", "remove the TLS server certificate from",
+			containerWhat(a)); err != nil || !ok {
+			return err
 		}
 		return ctrOps(a).RemoveServerCerts(bg(), config.Primary)
 	}
@@ -149,9 +149,9 @@ func opCtrConfigDomainCerts(a *App) error {
 		return err
 	}
 	if remove {
-		if !confirmAction(a, "Remove the configured domain CA certificates from",
-			"remove the configured domain CA certificates from", containerWhat(a)) {
-			return nil
+		if ok, err := confirmAction(a, "Remove the configured domain CA certificates from",
+			"remove the configured domain CA certificates from", containerWhat(a)); err != nil || !ok {
+			return err
 		}
 		return ctrOps(a).RemoveDomainCerts(bg(), config.Primary, domainCANames(certs))
 	}
@@ -164,9 +164,9 @@ func opCtrConfigProductKeys(a *App) error {
 		return err
 	}
 	if remove {
-		if !confirmAction(a, "Revoke every configured product key from", "revoke the product keys from",
-			containerWhat(a)) {
-			return nil
+		if ok, err := confirmAction(a, "Revoke every configured product key from", "revoke the product keys from",
+			containerWhat(a)); err != nil || !ok {
+			return err
 		}
 		return ctrOps(a).RemoveProductKeys(bg(), a.Cfg.Broker.ProductKeys, config.Primary)
 	}
@@ -184,9 +184,9 @@ func opCtrConfigDefaultVPN(a *App) error {
 	if enable {
 		return ctrOps(a).EnableDefaultVPN(bg(), config.Primary)
 	}
-	if !confirmAction(a, "Shut down the default message-VPN on",
-		"shut down the default message-VPN on", containerWhat(a)) {
-		return nil
+	if ok, err := confirmAction(a, "Shut down the default message-VPN on",
+		"shut down the default message-VPN on", containerWhat(a)); err != nil || !ok {
+		return err
 	}
 	return ctrOps(a).DisableDefaultVPN(bg(), config.Primary)
 }
@@ -202,9 +202,9 @@ func opCtrConfigDefaultUsers(a *App) error {
 	if enable {
 		return ctrOps(a).EnableDefaultUsers(bg(), config.Primary)
 	}
-	if !confirmAction(a, "Shut down the default client-username in every message-VPN on",
-		"shut down the default client-username in every message-VPN on", containerWhat(a)) {
-		return nil
+	if ok, err := confirmAction(a, "Shut down the default client-username in every message-VPN on",
+		"shut down the default client-username in every message-VPN on", containerWhat(a)); err != nil || !ok {
+		return err
 	}
 	return ctrOps(a).DisableDefaultUsers(bg(), config.Primary)
 }
@@ -238,8 +238,8 @@ func opCtrConfigLeader(a *App) error {
 	if err != nil || !ok {
 		return err
 	}
-	if !confirmAssertFromBackup(a) {
-		return nil
+	if ok, err := confirmAssertFromBackup(a); err != nil || !ok {
+		return err
 	}
 	return o.LeaderAssert(bg(), role)
 }
@@ -263,7 +263,7 @@ func leaderAsksFirst(a *App, role config.Role) bool {
 // confirmAssertFromBackup is assert-leader's question on a backup host. The warning comes
 // first, and is printed even under --no-prompt, so an unattended log still says whose
 // configuration won.
-func confirmAssertFromBackup(a *App) bool {
+func confirmAssertFromBackup(a *App) (bool, error) {
 	warn("this host is the backup node: asserting the config-sync leader here makes its router and " +
 		"message-VPN configuration the copy config-sync pushes to the primary, overwriting the primary's")
 	return confirmAction(a, "Assert the config-sync leader from", "assert the config-sync leader from",
@@ -431,10 +431,14 @@ func opCtrGenArtifact(a *App) error {
 // ownership prep gave it; removing the certificate is NOT optional and a failure there is
 // fatal, because leaving a private key on the host is the worst outcome available.
 func opCtrRemoveBroker(a *App) error {
-	if !confirmDelete(a, containerWhat(a)) {
-		return nil
+	if ok, err := confirmDelete(a, containerWhat(a)); err != nil || !ok {
+		return err
 	}
-	return ctrManager(a).Delete(bg(), confirmLayer(a, layerData))
+	purge, err := confirmLayer(a, layerData)
+	if err != nil {
+		return err
+	}
+	return ctrManager(a).Delete(bg(), purge)
 }
 
 // opCtrDeployHost carries the whole per-host bring-up: check, prep host, deploy. The

@@ -102,7 +102,7 @@ Both tools follow every rule in this section today.
 | Topic | solmq-conn-util | solace-util | Status |
 | --- | --- | --- | --- |
 | Compose file | handed to compose on stdin, never written | written beside the env file and compared on redeploy | decided, not yet applied: stdin |
-| Confirmation without a terminal | fails at once with exit 1 and names `--no-prompt` | reads an answer from stdin; end of input declines with a warning and exit 0 | decided, not yet applied: fail at once |
+| Confirmation without a terminal | fails at once with exit 1 and names `--no-prompt` | fails at once with exit 1 and names `--no-prompt` | aligned |
 | Rootless podman | derived from the effective uid | declared as `podman.rootless`; a uid mismatch is refused; `XDG_RUNTIME_DIR` and the DBus address are repaired | decided, not yet applied |
 | Quadlet directory | `$HOME/.config/containers/systemd`; `XDG_CONFIG_HOME` is not read | `$XDG_CONFIG_HOME/containers/systemd`, configurable | adopt: solmq-conn-util honours `XDG_CONFIG_HOME` |
 | Host checks for rootless podman | none; a short subuid range warns | linger, session core limit, `fs.nr_open`, user manager limits, session nofile; a short subuid range refuses | adopt: solmq-conn-util takes linger, session repair and the core limit |

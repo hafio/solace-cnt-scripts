@@ -184,7 +184,7 @@ func TestMateSEMPPasswordReadsTheNamedSecret(t *testing.T) {
 }
 
 // TestMateSEMPPasswordRefusesASiteWithNoPassword names all three ways to supply one.
-// There is deliberately no stdin prompt: promptLine echoes, and a no-echo read is a
+// There is deliberately no stdin prompt: the shared prompt echoes, and a no-echo read is a
 // dependency decision this feature does not need to take.
 func TestMateSEMPPasswordRefusesASiteWithNoPassword(t *testing.T) {
 	a := replApp(t, &opRunner{})
@@ -215,11 +215,12 @@ func TestConfirmReplicationConfigNamesTheBiggerHammer(t *testing.T) {
 	mate := siteNamed(t, a, "v:dr1")
 
 	var ok bool
+	var err error
 	stderr := captureStderr(t, func() {
-		ok = confirmReplicationConfig(a, self, mate)
+		ok, err = confirmReplicationConfig(a, self, mate)
 	})
-	if !ok {
-		t.Fatal("an exact \"yes\" must confirm")
+	if err != nil || !ok {
+		t.Fatalf("an exact \"yes\" must confirm: (%v, %v)", ok, err)
 	}
 	if !strings.Contains(stderr, "EVERY VPN this broker is replicating") {
 		t.Errorf("stderr = %q, want the bigger-hammer warning naming every VPN, not only the listed ones", stderr)
@@ -243,11 +244,12 @@ func TestConfirmReplicationConfigIsStrictAndRefusalStopsTheApply(t *testing.T) {
 	for _, tc := range []struct {
 		name, answer string
 		wantOK       bool
+		wantErr      bool
 	}{
-		{"exact yes proceeds", "yes\n", true},
-		{"lenient y is refused", "y\n", false},
-		{"explicit no is refused", "no\n", false},
-		{"an unanswerable prompt is refused", "", false},
+		{"exact yes proceeds", "yes\n", true, false},
+		{"lenient y is refused", "y\n", false, false},
+		{"explicit no is refused", "no\n", false, false},
+		{"an unanswerable prompt is an error naming --no-prompt", "", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rr := &opRunner{}
@@ -258,9 +260,13 @@ func TestConfirmReplicationConfigIsStrictAndRefusalStopsTheApply(t *testing.T) {
 			mate := siteNamed(t, a, "v:dr1")
 
 			var ok bool
-			captureStderr(t, func() { ok = confirmReplicationConfig(a, self, mate) })
+			var err error
+			captureStderr(t, func() { ok, err = confirmReplicationConfig(a, self, mate) })
 			if ok != tc.wantOK {
 				t.Fatalf("confirmReplicationConfig = %v, want %v", ok, tc.wantOK)
+			}
+			if tc.wantErr != (err != nil) || (err != nil && !strings.Contains(err.Error(), "pass --no-prompt instead")) {
+				t.Fatalf("confirmReplicationConfig err = %v, want an error naming --no-prompt = %v", err, tc.wantErr)
 			}
 			// A gate that answers the question must not itself have reached the broker,
 			// whichever way it answered: it runs before ConfigureReplication is called.
@@ -906,7 +912,7 @@ func TestOpPerformReplicationAsksNothingWhenThePairAlreadyMatches(t *testing.T) 
 // it asks: anything but an exact `yes` returns without a single role being written at either
 // site. A lenient `y` is the case that matters -- this question interrupts message flow, so a
 // habitual y must not reach it -- and a stdin that ends before any reply is a decision nobody
-// made, which is refused and says how to proceed unattended.
+// made, which is an error that says how to proceed unattended.
 func TestOpPerformReplicationDeclinedConfirmationWritesNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -920,8 +926,13 @@ func TestOpPerformReplicationDeclinedConfirmationWritesNothing(t *testing.T) {
 			g := replNewRig(t, broker.RoleStandby, broker.RoleActive)
 			g.app.PromptIn = strings.NewReader(tc.answer)
 
-			stdout, stderr, err := g.perform(t)
-			if err != nil {
+			stdout, _, err := g.perform(t)
+			if tc.answer == "" {
+				if err == nil || !strings.Contains(err.Error(), "reading input: EOF") ||
+					!strings.Contains(err.Error(), "pass --no-prompt instead") {
+					t.Fatalf("an unanswered confirmation err = %v, want the EOF error naming --no-prompt", err)
+				}
+			} else if err != nil {
 				t.Fatalf("a declined confirmation is an answer, not a failure: %v", err)
 			}
 			if g.asked != 1 {
@@ -930,9 +941,6 @@ func TestOpPerformReplicationDeclinedConfirmationWritesNothing(t *testing.T) {
 			g.wantNoWrites(t)
 			if strings.Contains(stdout, "Replication status") {
 				t.Errorf("stdout = %q, want no status page for a run that moved nothing", stdout)
-			}
-			if tc.answer == "" && !strings.Contains(stderr, "--no-prompt") {
-				t.Errorf("stderr = %q, want the refusal to name --no-prompt", stderr)
 			}
 		})
 	}
@@ -1384,11 +1392,16 @@ func TestConfirmReplicationSwitchNamesEveryMoveAndIsStrict(t *testing.T) {
 			a.PromptIn = strings.NewReader(tc.answer)
 
 			var ok bool
+			var err error
 			stderr := captureStderr(t, func() {
-				ok = confirmReplicationSwitch(a, plan)
+				ok, err = confirmReplicationSwitch(a, plan)
 			})
 			if ok != tc.want {
 				t.Fatalf("confirmReplicationSwitch = %v, want %v", ok, tc.want)
+			}
+			if wantErr := tc.answer == ""; wantErr != (err != nil) ||
+				(err != nil && !strings.Contains(err.Error(), "pass --no-prompt instead")) {
+				t.Fatalf("confirmReplicationSwitch err = %v, want an error naming --no-prompt = %v", err, wantErr)
 			}
 			orders := strings.Index(stderr, `message-vpn "ORDERS" will be demoted, confirmed, then promoted`)
 			payments := strings.Index(stderr, `message-vpn "PAYMENTS" will be demoted, confirmed, then promoted`)
@@ -1397,9 +1410,6 @@ func TestConfirmReplicationSwitchNamesEveryMoveAndIsStrict(t *testing.T) {
 			}
 			if !strings.Contains(stderr, "2 message-VPN(s): ORDERS, PAYMENTS") {
 				t.Errorf("stderr = %q, want the count and the sorted list in the question", stderr)
-			}
-			if tc.answer == "" && !strings.Contains(stderr, "--no-prompt") {
-				t.Errorf("stderr = %q, want the refusal to name --no-prompt", stderr)
 			}
 			if len(rr.calls) != 0 {
 				t.Errorf("the gate reached the broker before it was answered:\n%s", rr.dump())
@@ -1587,7 +1597,7 @@ func TestOpConfigureReplicationConvergesTheMateAndReportsWhatItStopped(t *testin
 // apply before the broker is read, let alone written. The gate is asked after the router name
 // -- it needs the site -- and before anything else, so the one read that preceded it is the
 // only thing the broker has seen. A decline is an answer and exits clean, prints no report
-// for a run that applied nothing, and an unanswered question names --no-prompt.
+// for a run that applied nothing, and an unanswered question is an error naming --no-prompt.
 func TestOpConfigureReplicationDeclinedLeavesTheBrokerUntouched(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -1600,8 +1610,13 @@ func TestOpConfigureReplicationDeclinedLeavesTheBrokerUntouched(t *testing.T) {
 			g := replNewRig(t, broker.RoleStandby, broker.RoleStandby)
 			g.app.PromptIn = strings.NewReader(tc.answer)
 
-			stdout, stderr, err := g.configure(t)
-			if err != nil {
+			stdout, _, err := g.configure(t)
+			if tc.answer == "" {
+				if err == nil || !strings.Contains(err.Error(), "reading input: EOF") ||
+					!strings.Contains(err.Error(), "pass --no-prompt instead") {
+					t.Fatalf("an unanswered confirmation err = %v, want the EOF error naming --no-prompt", err)
+				}
+			} else if err != nil {
 				t.Fatalf("a declined confirmation is an answer, not a failure: %v", err)
 			}
 			if g.asked != 1 {
@@ -1610,9 +1625,6 @@ func TestOpConfigureReplicationDeclinedLeavesTheBrokerUntouched(t *testing.T) {
 			g.wantOnlyTheNameRead(t)
 			if stdout != "" {
 				t.Errorf("stdout = %q, want no report for a run that applied nothing", stdout)
-			}
-			if tc.answer == "" && !strings.Contains(stderr, "--no-prompt") {
-				t.Errorf("stderr = %q, want the refusal to name --no-prompt", stderr)
 			}
 		})
 	}

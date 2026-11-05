@@ -564,7 +564,7 @@ type ReplViaSEMP struct {
 
 	// Exactly one of these supplies the mate's admin password. The username is always
 	// config.AdminUser -- the broker's own name, not this schema's. There is no stdin
-	// prompt: promptLine echoes, and a no-echo read is a dependency decision this
+	// prompt: the shared prompt echoes, and a no-echo read is a dependency decision this
 	// feature does not need to take.
 	Pass       string          `yaml:"pass"`       // secret; discouraged, this file travels
 	PassEnv    string          `yaml:"passEnv"`    // env var holding pass instead

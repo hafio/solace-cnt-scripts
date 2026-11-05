@@ -48,15 +48,20 @@ type Cluster struct {
 	// testable against a fixed instant. nil means time.Now.
 	Now func() time.Time
 
-	// Confirm asks the operator a yes/no question, the same seam
-	// container.Manager carries. nil DECLINES, which is what an unattended run
-	// must do when the question is "may I downgrade a cluster-scoped operator".
+	// Confirm asks the operator whether to downgrade the cluster-scoped operator, the
+	// same seam container.Manager carries. nil DECLINES, which is what a run with no
+	// way to ask must do. An error is a question that could not be put (no terminal,
+	// no --no-prompt) and is returned as the command's failure, not read as a "no".
 	//
-	// This is the ONLY question this package asks, and it is a func rather than a
-	// reader/writer pair on purpose: internal/cli owns the terminal, so every other
-	// confirmation -- including the removal prompts and the namespace question -- is
-	// asked there and reaches here as a decision already made.
-	Confirm func(question string) bool
+	// A func rather than a reader/writer pair on purpose: internal/cli owns the
+	// terminal, so every other confirmation -- including the removal prompts and the
+	// namespace question -- is asked there and reaches here as a decision already made.
+	Confirm func(question string) (bool, error)
+
+	// ConfirmScope asks whether the operator may watch EVERY namespace. It is its own
+	// seam because --no-prompt answers Confirm and must never answer this: widening
+	// the watch needs a terminal. nil DECLINES; an error is returned as the failure.
+	ConfirmScope func(question string) (bool, error)
 }
 
 // NewCluster builds a Cluster over the given runner, config, line sink and output
@@ -66,12 +71,23 @@ func NewCluster(r engine.Runner, cfg *config.Config, log func(string, ...any), o
 }
 
 // confirm asks the operator question through the Confirm seam. A nil Confirm DECLINES:
-// the questions this package asks are all "may I do something whose blast radius is
-// wider than this env file" -- downgrade a shared operator, widen its watch scope -- and
-// an unattended run must answer no to those. Routed through one helper so the
-// nil-declines rule cannot be spelled differently at a second call site.
-func (c *Cluster) confirm(question string) bool {
-	return c.Confirm != nil && c.Confirm(question)
+// the question this seam carries is "may I do something whose blast radius is wider
+// than this env file" -- downgrade a shared operator -- and a run with no way to ask
+// must answer no. Routed through one helper so the nil-declines rule cannot be spelled
+// differently at a second call site.
+func (c *Cluster) confirm(question string) (bool, error) {
+	if c.Confirm == nil {
+		return false, nil
+	}
+	return c.Confirm(question)
+}
+
+// confirmScope is confirm for the watch-widening question, over ConfirmScope.
+func (c *Cluster) confirmScope(question string) (bool, error) {
+	if c.ConfirmScope == nil {
+		return false, nil
+	}
+	return c.ConfirmScope(question)
 }
 
 // progress is the stderr Sink for this package's narration: phases through Step,

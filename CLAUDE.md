@@ -169,13 +169,17 @@ deliberately not `step`.
 
 **No driver package prompts.** Every confirmation lives in `internal/cli` and goes to stderr, so
 redirecting stdout captures results rather than questions. `k8s` and `container` take a
-`Confirm` func seam that declines when nil.
+`Confirm` func seam that declines when nil (`k8s` also takes `ConfirmScope`).
 
-**Whether a human is present is decided by READING stdin, never by what kind of stream it is.**
-The question goes to stderr, the answer is read from stdin, and an unanswered question is NOT a
-"no": a reply of `n` is a decision, EOF means nobody could make one, and only the second earns
-the refusal line naming `--no-prompt`. See [docs/operations.md](docs/operations.md) for the
-operator-facing contract and `internal/cli/confirm.go` for why every other approach failed.
+**A human is present when stdin is a terminal** (a character device, `confirm.StdinIsTerminal`).
+Without one, and without `--no-prompt`, a destructive gate fails at once with exit 1 and an error
+naming `--no-prompt`; a pipe is never read, and end of input at a terminal is an error too. A reply
+of `n` is a decision and exits 0. The prompts are the shared `confirm` package's, held on the App
+as one `*confirm.Prompter` (`App.Interactive` and `App.PromptIn` are the test seams). On
+`operator deploy`, `--no-prompt` approves a downgrade only; widening the watch to every namespace
+has its own `Cluster.ConfirmScope` seam and needs a terminal. See
+[docs/operations.md](docs/operations.md) for the operator-facing contract and
+`internal/cli/confirm.go` for the gates.
 
 **Removals keep the expensive layer.** `broker remove` keeps persistent data, `operator remove`
 keeps the CRDs. The `--delete-*` flag RAISES the question rather than silencing it, `--no-prompt`

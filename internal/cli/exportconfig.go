@@ -62,8 +62,8 @@ func runImport(a *App, o *broker.Ops, role config.Role, file string) error {
 	}
 	plan.Report(output.New(os.Stdout))
 
-	if !confirmImport(a, plan) {
-		return nil
+	if ok, err := confirmImport(a, plan); err != nil || !ok {
+		return err
 	}
 
 	// Apply, report, and STOP if anything failed. The diff below runs only after a
@@ -114,7 +114,7 @@ func runImport(a *App, o *broker.Ops, role config.Role, file string) error {
 // tearing down an existing VPN destroys the messages spooled in its queues, which
 // is the irreversible loss --delete-data asks about, so it takes the same exact
 // "yes". Creating VPNs the target does not have destroys nothing and takes [y/N].
-func confirmImport(a *App, plan *broker.ImportPlan) bool {
+func confirmImport(a *App, plan *broker.ImportPlan) (bool, error) {
 	switch {
 	case len(plan.Existing) > 0:
 		return confirmActionStrict(a, "Tear down and rebuild", "import",
@@ -124,7 +124,7 @@ func confirmImport(a *App, plan *broker.ImportPlan) bool {
 		return confirmAction(a, "Import", "import",
 			fmt.Sprintf("%s into this broker", plan.NewList()))
 	default:
-		return true
+		return true, nil
 	}
 }
 

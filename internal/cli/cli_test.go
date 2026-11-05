@@ -22,13 +22,13 @@ import (
 
 // TestMain severs the package from the real stdin for every test in it.
 //
-// interactive() is deliberately generous now -- it asks only whether stdin is usable,
-// never what kind of stream it is (see stdinCanAnswer) -- so a test that reaches a
-// confirm helper without setting App.PromptIn would read the console the suite was
-// launched from and block there waiting for a human. Pointing stdin at an
-// already-closed pipe makes every such read return EOF at once, which is exactly the
-// unattended case every confirm helper is required to refuse. Tests that want a real
-// answer swap os.Stdin themselves, one test at a time.
+// A test that reaches a confirm helper without setting App.Interactive would ask the
+// default terminal test (confirm.StdinIsTerminal) about the console the suite was
+// launched from, and on a developer's terminal that is a character device -- so it
+// would block there waiting for a human. Pointing stdin at an already-closed pipe makes
+// that test say "not a terminal" at once, which is exactly the unattended case every
+// confirm helper is required to refuse with an error naming --no-prompt. Tests that
+// want a real answer inject App.Interactive and App.PromptIn, one test at a time.
 func TestMain(m *testing.M) {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -1698,10 +1698,10 @@ func TestConfirmLayerMatrix(t *testing.T) {
 	yes := func() bool { return true }
 	no := func() bool { return false }
 	for _, tc := range []struct {
-		name        string
-		app         *App
-		want        bool
-		wantWarning string
+		name    string
+		app     *App
+		want    bool
+		wantErr string
 	}{
 		{"no layer flag -> kept, nothing asked",
 			&App{Interactive: yes}, false, ""},
@@ -1713,18 +1713,24 @@ func TestConfirmLayerMatrix(t *testing.T) {
 			&App{deleteLayer: true, Interactive: yes, PromptIn: strings.NewReader("yes\n")}, true, ""},
 		{"--delete-data, interactive, anything else -> kept",
 			&App{deleteLayer: true, Interactive: yes, PromptIn: strings.NewReader("y\n")}, false, ""},
-		{"--delete-data, no terminal, no --no-prompt -> kept and said so",
-			&App{deleteLayer: true, Interactive: no}, false, "--no-prompt"},
+		{"--delete-data, no terminal, no --no-prompt -> error naming the flag",
+			&App{deleteLayer: true, Interactive: no}, false, "pass --no-prompt instead"},
+		{"--delete-data, end of input at a terminal -> error before anything is deleted",
+			&App{deleteLayer: true, Interactive: yes, PromptIn: strings.NewReader("")}, false, "reading input: EOF"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var got bool
-			errOut := captureStderr(t, func() { got = confirmLayer(tc.app, layerData) })
+			var err error
+			_ = captureStderr(t, func() { got, err = confirmLayer(tc.app, layerData) })
 			if got != tc.want {
 				t.Errorf("confirmLayer = %v, want %v", got, tc.want)
 			}
-			if tc.wantWarning != "" && !strings.Contains(errOut, tc.wantWarning) {
-				t.Errorf("stderr = %q, want it to name %q -- refusing silently leaves the "+
-					"operator thinking the data went", errOut, tc.wantWarning)
+			if tc.wantErr == "" && err != nil {
+				t.Errorf("confirmLayer err = %v, want nil", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Errorf("confirmLayer err = %v, want it to carry %q -- failing silently leaves the "+
+					"operator thinking the data went", err, tc.wantErr)
 			}
 		})
 	}
@@ -1734,19 +1740,15 @@ func TestConfirmLayerMatrix(t *testing.T) {
 // itself, which is the question every destructive command asks before it does anything.
 // That meaning did not change.
 func TestConfirmDeleteShortcut(t *testing.T) {
-	if !confirmDelete(&App{noPrompt: true}, "broker x") {
-		t.Error("confirmDelete with --no-prompt = false, want true")
+	if ok, err := confirmDelete(&App{noPrompt: true}, "broker x"); err != nil || !ok {
+		t.Errorf("confirmDelete with --no-prompt = (%v, %v), want (true, nil)", ok, err)
 	}
 }
 
 // TestConfirmNonTTY covers the unattended branches. Stdin is a pipe whose write end is
-// CLOSED, so the read returns EOF with no input -- the "nobody answered" case, which is
-// what an unattended run actually looks like. confirmDelete refuses without --no-prompt
-// and confirmLayer keeps the retained layer, on any host.
-//
-// The closed write end is the point, not an accident: an OPEN one would block here
-// exactly as it would in production, which is the one cost of deciding by reading
-// rather than by inspecting the descriptor (see stdinCanAnswer).
+// CLOSED, which the default terminal test (confirm.StdinIsTerminal) reports as not a
+// terminal -- what an unattended run looks like. confirmDelete and confirmLayer both fail
+// at once with an error naming --no-prompt, and neither reads the pipe.
 func TestConfirmNonTTY(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -1759,123 +1761,135 @@ func TestConfirmNonTTY(t *testing.T) {
 	defer func() { os.Stdin = old }()
 
 	var deleted bool
-	_ = captureStderr(t, func() { deleted = confirmDelete(&App{}, "broker x") })
+	var derr error
+	_ = captureStderr(t, func() { deleted, derr = confirmDelete(&App{}, "broker x") })
 	if deleted {
 		t.Error("confirmDelete non-TTY without --no-prompt = true, want false")
 	}
-	if confirmLayer(&App{}, layerData) {
+	if derr == nil || !strings.Contains(derr.Error(), "pass --no-prompt instead") {
+		t.Errorf("confirmDelete non-TTY err = %v, want one naming --no-prompt", derr)
+	}
+	var purge bool
+	var lerr error
+	_ = captureStderr(t, func() { purge, lerr = confirmLayer(&App{deleteLayer: true}, layerData) })
+	if purge {
 		t.Error("confirmLayer non-TTY = true, want false (kept)")
+	}
+	if lerr == nil || !strings.Contains(lerr.Error(), "pass --no-prompt instead") {
+		t.Errorf("confirmLayer non-TTY err = %v, want one naming --no-prompt", lerr)
 	}
 }
 
-// TestConfirmDowngradeNeverUnattended pins the M9 policy: unlike every other
-// confirm helper here, confirmDowngrade has no --no-prompt escape at all, because
-// `deploy operator` never registers that flag -- an operator downgrade is always
-// a human's call, made at a terminal, or not made.
+// TestConfirmDowngradeNoPromptApprovesOnlyTheDowngrade pins the decided policy: on
+// `operator deploy`, --no-prompt approves an operator downgrade (confirmDowngrade) and
+// nothing wider. The watch-widening question (confirmScope) ignores the flag and needs a
+// terminal, so the two are exercised side by side.
 //
 // This is exercised directly rather than through runRootWith/echoRunner: the
 // Echo runner's isEcho() short-circuit in k8s.confirmNoDowngrade returns before
 // Cluster.Confirm (and so this closure) is ever invoked, so a real downgrade
 // cannot be driven to this function from the CLI dispatch layer at all. Direct
 // unit coverage of the function itself is what IS reachable.
-func TestConfirmDowngradeNeverUnattended(t *testing.T) {
-	t.Run("non-interactive declines and tells the operator to re-run interactively", func(t *testing.T) {
+func TestConfirmDowngradeNoPromptApprovesOnlyTheDowngrade(t *testing.T) {
+	yes := func() bool { return true }
+	no := func() bool { return false }
+	t.Run("no terminal and no --no-prompt fails naming the flag", func(t *testing.T) {
 		var proceed bool
-		errOut := captureStderr(t, func() {
-			proceed = confirmDowngrade(&App{Interactive: func() bool { return false }}, "Downgrade the operator?")
+		var err error
+		_ = captureStderr(t, func() {
+			proceed, err = confirmDowngrade(&App{Interactive: no}, "Downgrade the operator?")
 		})
 		if proceed {
-			t.Error("a non-interactive run must decline the downgrade")
+			t.Error("a run that cannot ask must not downgrade")
 		}
-		if strings.Contains(errOut, "--no-prompt") {
-			t.Errorf("refusal must not advise a flag `deploy operator` does not register: %q", errOut)
-		}
-		if !strings.Contains(errOut, "interactively") {
-			t.Errorf("refusal must tell the operator to re-run interactively: %q", errOut)
+		if err == nil || !strings.Contains(err.Error(), "confirming the operator downgrade interactively") ||
+			!strings.Contains(err.Error(), "pass --no-prompt instead") {
+			t.Errorf("err = %v, want the Gate error for the operator downgrade naming --no-prompt", err)
 		}
 	})
-	t.Run("--no-prompt is not a side-door -- still declines non-interactively", func(t *testing.T) {
-		if confirmDowngrade(&App{noPrompt: true, Interactive: func() bool { return false }}, "q") {
-			t.Error("noPrompt must not have been re-added as an escape for confirmDowngrade")
+	t.Run("--no-prompt approves the downgrade without asking", func(t *testing.T) {
+		ok, err := confirmDowngrade(&App{noPrompt: true, Interactive: no}, "q")
+		if err != nil || !ok {
+			t.Errorf("confirmDowngrade --no-prompt = (%v, %v), want (true, nil)", ok, err)
+		}
+	})
+	t.Run("--no-prompt does not approve widening the watch", func(t *testing.T) {
+		var ok bool
+		var err error
+		_ = captureStderr(t, func() { ok, err = confirmScope(&App{noPrompt: true, Interactive: no}, "q") })
+		if ok {
+			t.Error("--no-prompt must never approve widening the operator's watch")
+		}
+		if err == nil || !strings.Contains(err.Error(), "needs a terminal") ||
+			!strings.Contains(err.Error(), "kubernetes.operator.watchNamespaces") {
+			t.Errorf("err = %v, want one saying it needs a terminal and naming kubernetes.operator.watchNamespaces", err)
+		}
+	})
+	t.Run("--no-prompt does not answer a widening question that is asked", func(t *testing.T) {
+		a := &App{noPrompt: true, Interactive: yes, PromptIn: strings.NewReader("n\n")}
+		var ok bool
+		var err error
+		_ = captureStderr(t, func() { ok, err = confirmScope(a, "q") })
+		if ok || err != nil {
+			t.Errorf("confirmScope = (%v, %v), want (false, nil): the terminal's no stands", ok, err)
+		}
+	})
+	t.Run("a yes at the terminal approves widening", func(t *testing.T) {
+		a := &App{Interactive: yes, PromptIn: strings.NewReader("y\n")}
+		var ok bool
+		var err error
+		_ = captureStderr(t, func() { ok, err = confirmScope(a, "q") })
+		if !ok || err != nil {
+			t.Errorf("confirmScope = (%v, %v), want (true, nil)", ok, err)
+		}
+	})
+	t.Run("end of input at the terminal is the same refusal", func(t *testing.T) {
+		a := &App{Interactive: yes, PromptIn: strings.NewReader("")}
+		var err error
+		_ = captureStderr(t, func() { _, err = confirmScope(a, "q") })
+		if err == nil || !strings.Contains(err.Error(), "reading input: EOF") ||
+			!strings.Contains(err.Error(), "kubernetes.operator.watchNamespaces") {
+			t.Errorf("err = %v, want the unanswered refusal naming kubernetes.operator.watchNamespaces", err)
 		}
 	})
 	t.Run("interactive yes proceeds", func(t *testing.T) {
-		a := &App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("yes\n")}
-		if !confirmDowngrade(a, "Downgrade the operator?") {
+		a := &App{Interactive: yes, PromptIn: strings.NewReader("yes\n")}
+		var ok bool
+		_ = captureStderr(t, func() { ok, _ = confirmDowngrade(a, "Downgrade the operator?") })
+		if !ok {
 			t.Error("an interactive yes must let the downgrade through")
 		}
 	})
-	t.Run("interactive no refuses", func(t *testing.T) {
-		a := &App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("no\n")}
-		if confirmDowngrade(a, "Downgrade the operator?") {
-			t.Error("an interactive no must refuse the downgrade")
+	t.Run("interactive no declines quietly", func(t *testing.T) {
+		a := &App{Interactive: yes, PromptIn: strings.NewReader("no\n")}
+		var ok bool
+		var err error
+		_ = captureStderr(t, func() { ok, err = confirmDowngrade(a, "Downgrade the operator?") })
+		if ok || err != nil {
+			t.Errorf("confirmDowngrade = (%v, %v), want (false, nil)", ok, err)
 		}
 	})
 }
 
-// TestDeployOperatorNoPromptStaysUnknownFlag pins the other half of M9: the fix
-// removes confirmDowngrade's dead a.noPrompt branch, not the flag's absence from
-// `deploy operator` -- --no-prompt was never wired there (addRemoveFlags is not
-// called on this command), so it must keep failing exactly the way it did before,
-// as cobra's own unknown-flag error, rather than silently becoming valid.
-func TestDeployOperatorNoPromptStaysUnknownFlag(t *testing.T) {
-	_, err := runRootWith(t, append(withEnv("operator", "deploy", "--no-prompt"), "--platform", "kubernetes"), echoRunner)
-	if err == nil {
-		t.Fatal("deploy operator --no-prompt must still fail: the flag is not registered on this command")
+// TestDeployOperatorNoPromptApprovesOnlyTheDowngrade pins the flag's registration: it is
+// a real flag on `operator deploy` now (it was an unknown flag before), its usage says it
+// stops at the downgrade, and a run that passes it is not refused as unknown.
+func TestDeployOperatorNoPromptApprovesOnlyTheDowngrade(t *testing.T) {
+	root := newRootCmd(&App{})
+	cmd, _, err := root.Find([]string{"operator", "deploy"})
+	if err != nil {
+		t.Fatalf("find operator deploy: %v", err)
 	}
-	if !strings.Contains(err.Error(), "unknown flag") {
-		t.Errorf("err = %v, want an unknown-flag error", err)
+	f := cmd.Flags().Lookup("no-prompt")
+	if f == nil {
+		t.Fatal("operator deploy must register --no-prompt: it approves the operator downgrade")
 	}
-}
-
-// TestPromptYesNo pins the lenient delete confirmation: y/yes (any case) accept,
-// everything else declines.
-//
-// The second return is the distinction the whole prompt layer now rests on. An empty
-// stream is UNANSWERED, not a "no": a reply of "n" is the operator's decision, while
-// EOF means nobody was there to make one, and only the latter earns the refusal line
-// that names --no-prompt. A bare "\n" is a real answer -- someone pressed Enter -- and
-// declines. A final line with no trailing newline still counts.
-func TestPromptYesNo(t *testing.T) {
-	cases := []struct {
-		in           string
-		want         bool
-		wantAnswered bool
-	}{
-		{"y\n", true, true}, {"yes\n", true, true}, {"Y\n", true, true}, {"YES\n", true, true},
-		{"n\n", false, true}, {"no\n", false, true}, {"\n", false, true}, {"maybe\n", false, true},
-		{"y", true, true},  // no trailing newline: still an answer
-		{"", false, false}, // EOF with no input: nobody answered
+	if !strings.Contains(f.Usage, "downgrade") || !strings.Contains(f.Usage, "never approves widening the watch") {
+		t.Errorf("--no-prompt usage = %q, want it to say it approves a downgrade and never the widening", f.Usage)
 	}
-	for _, tc := range cases {
-		var out strings.Builder
-		got, answered := promptYesNo(strings.NewReader(tc.in), &out, "? ")
-		if got != tc.want || answered != tc.wantAnswered {
-			t.Errorf("promptYesNo(%q) = (%v, %v), want (%v, %v)", tc.in, got, answered, tc.want, tc.wantAnswered)
-		}
-	}
-}
-
-// TestPromptYes pins the strict layer-deletion confirmation: only an exact
-// (trimmed, case-insensitive) "yes" accepts; a bare "y" is not enough. Same
-// answered-vs-declined split as TestPromptYesNo.
-func TestPromptYes(t *testing.T) {
-	cases := []struct {
-		in           string
-		want         bool
-		wantAnswered bool
-	}{
-		{"yes\n", true, true}, {"YES\n", true, true}, {"  yes  \n", true, true},
-		{"y\n", false, true}, {"no\n", false, true}, {"\n", false, true}, {"yess\n", false, true},
-		{"yes", true, true},
-		{"", false, false},
-	}
-	for _, tc := range cases {
-		var out strings.Builder
-		got, answered := promptYes(strings.NewReader(tc.in), &out, "? ")
-		if got != tc.want || answered != tc.wantAnswered {
-			t.Errorf("promptYes(%q) = (%v, %v), want (%v, %v)", tc.in, got, answered, tc.want, tc.wantAnswered)
-		}
+	_, err = runRootWith(t, append(withEnv("operator", "deploy", "--no-prompt"), "--platform", "kubernetes"), echoRunner)
+	if err != nil && strings.Contains(err.Error(), "unknown flag") {
+		t.Errorf("operator deploy --no-prompt err = %v, want the flag accepted", err)
 	}
 }
 
@@ -2682,8 +2696,8 @@ func TestAssertLeaderAsksBeforeActingFromABackup(t *testing.T) {
 			wantStderr: []string{"node role detected: backup", "this host is the backup node", question}},
 		{name: "no declines without a word", host: "solace-backup", showRD: backupActiveShowRD, answer: "n\n",
 			asked: true, wantStderr: []string{question}, noStderr: []string{"refusing"}},
-		{name: "no answer refuses and names the silencer", host: "solace-backup", showRD: backupActiveShowRD,
-			asked: true, wantStderr: []string{"refusing to assert the config-sync leader", "--no-prompt"}},
+		{name: "no answer is an error that names the silencer", host: "solace-backup", showRD: backupActiveShowRD,
+			asked: true, wantErr: "pass --no-prompt instead", wantStderr: []string{question}},
 		{name: "--no-prompt asserts without asking", host: "solace-backup", showRD: backupActiveShowRD,
 			answer: "y\n", extra: []string{"--no-prompt"}, asserted: true,
 			wantStderr: []string{"this host is the backup node"}, noStderr: []string{question}},
@@ -3253,7 +3267,7 @@ func TestConvertToFile(t *testing.T) {
 
 	_ = captureStderr(t, func() {
 		_, err := runRoot(t, []string{"convert", src, "-o", dst})
-		if err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
+		if err == nil || !strings.Contains(err.Error(), "pass --no-prompt instead") {
 			t.Fatalf("second convert err = %v, want a refusal", err)
 		}
 	})
@@ -3412,9 +3426,9 @@ func TestExecute(t *testing.T) {
 	}
 }
 
-// TestK8sConfirmDeclined covers the confirm-declined branch of every removal: a
-// non-interactive run without --no-prompt must issue zero cluster calls -- the
-// actual safety default.
+// TestK8sConfirmDeclined covers the no-terminal branch of every removal: a run with no
+// terminal and no --no-prompt must fail with an error naming the flag and issue zero
+// cluster calls -- the actual safety default.
 //
 // There is one remove per noun now: the secrets and namespace steps that used to be their
 // own commands are folded into `broker remove`. The property they were here to protect is
@@ -3438,11 +3452,11 @@ func TestK8sConfirmDeclined(t *testing.T) {
 				a.Interactive = func() bool { return false }
 				echoRunner(a)
 			})
-			if err != nil {
-				t.Fatalf("%s err = %v, want nil", tc.name, err)
+			if err == nil || !strings.Contains(err.Error(), "pass --no-prompt instead") {
+				t.Fatalf("%s err = %v, want one naming --no-prompt", tc.name, err)
 			}
 			if strings.Contains(out, "+ kubectl") {
-				t.Errorf("%s stdout = %q, want no kubectl echo (declined)", tc.name, out)
+				t.Errorf("%s stdout = %q, want no kubectl echo (refused)", tc.name, out)
 			}
 		})
 	}
@@ -3456,7 +3470,9 @@ func TestK8sConfirmDeclined(t *testing.T) {
 // which CLUSTER the call lands in, so a file saying "dev" against a context that
 // drifted to prod reads exactly the same.
 //
-// The context is injected here the way the runner and the interactive seam are:
+// With no terminal the prompt is never written, so the same facts are read off the Gate
+// error that names the target instead. The context is injected here the way the runner
+// and the interactive seam are:
 // announceKubeContext resolves it from `kubectl config current-context` during
 // load, which a test-supplied runner deliberately skips.
 func TestK8sPromptsNameNamespaceAndContext(t *testing.T) {
@@ -3478,19 +3494,17 @@ func TestK8sPromptsNameNamespaceAndContext(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			args := append(append([]string{}, tc.args...), "--platform", "kubernetes")
-			errOut := captureStderr(t, func() {
-				_, err := runRootWith(t, withEnv(args...), func(a *App) {
-					a.Interactive = func() bool { return false } // declines, but still renders the refusal
-					a.kubeContext = "prod-cluster"
-					echoRunner(a)
-				})
-				if err != nil {
-					t.Fatalf("%s err = %v, want nil", tc.name, err)
-				}
+			_, err := runRootWith(t, withEnv(args...), func(a *App) {
+				a.Interactive = func() bool { return false } // refuses, but the error still names the target
+				a.kubeContext = "prod-cluster"
+				echoRunner(a)
 			})
+			if err == nil {
+				t.Fatalf("%s err = nil, want the no-terminal refusal", tc.name)
+			}
 			for _, want := range tc.want {
-				if !strings.Contains(errOut, want) {
-					t.Errorf("%s prompt = %q, want it to name %q", tc.name, errOut, want)
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("%s refusal = %q, want it to name %q", tc.name, err, want)
 				}
 			}
 		})
@@ -3502,20 +3516,18 @@ func TestK8sPromptsNameNamespaceAndContext(t *testing.T) {
 // clause is dropped entirely. A prompt reading "(context )" would be worse than
 // one that never mentioned it.
 func TestK8sPromptsOmitAnUnknownContext(t *testing.T) {
-	errOut := captureStderr(t, func() {
-		_, err := runRootWith(t, withEnv("broker", "remove", "--platform", "kubernetes"), func(a *App) {
-			a.Interactive = func() bool { return false }
-			echoRunner(a) // leaves kubeContext empty, as a real unresolved lookup does
-		})
-		if err != nil {
-			t.Fatalf("remove broker err = %v, want nil", err)
-		}
+	_, err := runRootWith(t, withEnv("broker", "remove", "--platform", "kubernetes"), func(a *App) {
+		a.Interactive = func() bool { return false }
+		echoRunner(a) // leaves kubeContext empty, as a real unresolved lookup does
 	})
-	if !strings.Contains(errOut, "namespace solace") {
-		t.Errorf("prompt = %q, want it to still name the namespace", errOut)
+	if err == nil {
+		t.Fatal("remove broker err = nil, want the no-terminal refusal")
 	}
-	if strings.Contains(errOut, "context") {
-		t.Errorf("prompt = %q, want no context clause when none was resolved", errOut)
+	if !strings.Contains(err.Error(), "namespace solace") {
+		t.Errorf("refusal = %q, want it to still name the namespace", err)
+	}
+	if strings.Contains(err.Error(), "context") {
+		t.Errorf("refusal = %q, want no context clause when none was resolved", err)
 	}
 }
 
@@ -3555,17 +3567,18 @@ func TestK8sRestartRollsOrTargetsOnePod(t *testing.T) {
 	})
 }
 
-// TestK8sRestartConfirmGate covers opK8sRestart's confirmation gate: a
-// non-interactive run (no --no-prompt) must bounce nothing, whether restarting every pod
-// or a single one, and a bad role is rejected before any prompt is even possible.
+// TestK8sRestartConfirmGate covers opK8sRestart's confirmation gate: a run with no
+// terminal and no --no-prompt must bounce nothing and fail naming the flag, whether
+// restarting every pod or a single one, and a bad role is rejected before any prompt is
+// even possible.
 func TestK8sRestartConfirmGate(t *testing.T) {
 	t.Run("restart broker (all) declined (no --no-prompt)", func(t *testing.T) {
 		out, err := runRootWith(t, withEnv("broker", "restart", "--platform", "kubernetes"), func(a *App) {
 			a.Interactive = func() bool { return false }
 			echoRunner(a)
 		})
-		if err != nil {
-			t.Fatalf("restart broker declined err = %v, want nil", err)
+		if err == nil || !strings.Contains(err.Error(), "pass --no-prompt instead") {
+			t.Fatalf("restart broker refused err = %v, want one naming --no-prompt", err)
 		}
 		if strings.Contains(out, "+ kubectl") {
 			t.Errorf("restart broker declined stdout = %q, want no kubectl echo", out)
@@ -3576,8 +3589,8 @@ func TestK8sRestartConfirmGate(t *testing.T) {
 			a.Interactive = func() bool { return false }
 			echoRunner(a)
 		})
-		if err != nil {
-			t.Fatalf("restart broker --pod backup declined err = %v, want nil", err)
+		if err == nil || !strings.Contains(err.Error(), "pass --no-prompt instead") {
+			t.Fatalf("restart broker --pod backup refused err = %v, want one naming --no-prompt", err)
 		}
 		if strings.Contains(out, "+ kubectl") {
 			t.Errorf("restart broker --pod backup declined stdout = %q, want no kubectl echo", out)
@@ -3592,16 +3605,16 @@ func TestK8sRestartConfirmGate(t *testing.T) {
 }
 
 // TestCtrConfirmDeclined covers opCtrRemoveBroker's confirm-declined branch, the
-// container-side counterpart of TestK8sConfirmDeclined: a non-interactive removal
-// (no --no-prompt) must issue zero runtime calls.
+// container-side counterpart of TestK8sConfirmDeclined: a removal with no terminal and
+// no --no-prompt must fail naming the flag and issue zero runtime calls.
 func TestCtrConfirmDeclined(t *testing.T) {
 	path := writeCtrStandaloneEnv(t)
 	out, err := runRootWith(t, []string{"broker", "remove", "--env", path, "--platform", "docker"}, func(a *App) {
 		a.Interactive = func() bool { return false }
 		echoRunner(a)
 	})
-	if err != nil {
-		t.Fatalf("docker remove broker declined err = %v, want nil", err)
+	if err == nil || !strings.Contains(err.Error(), "pass --no-prompt instead") {
+		t.Fatalf("docker remove broker refused err = %v, want one naming --no-prompt", err)
 	}
 	if strings.Contains(out, "+ docker") {
 		t.Errorf("docker remove broker declined stdout = %q, want no docker echo", out)
@@ -3609,9 +3622,9 @@ func TestCtrConfirmDeclined(t *testing.T) {
 }
 
 // TestCtrRestartConfirmGate covers opCtrRestartBroker's confirmAction gate, the
-// container-side counterpart of TestK8sRestartConfirmGate: a non-interactive run
-// (no --no-prompt) must bounce nothing, and --no-prompt must issue the restart, on
-// both docker and podman.
+// container-side counterpart of TestK8sRestartConfirmGate: a run with no terminal and no
+// --no-prompt must bounce nothing and fail naming the flag, and --no-prompt must issue
+// the restart, on both docker and podman.
 func TestCtrRestartConfirmGate(t *testing.T) {
 	path := writeCtrStandaloneEnv(t)
 	cases := []struct {
@@ -3636,8 +3649,11 @@ func TestCtrRestartConfirmGate(t *testing.T) {
 				a.Interactive = func() bool { return false }
 				echoRunner(a)
 			})
-			if err != nil {
+			if tc.noPrompt && err != nil {
 				t.Fatalf("%s err = %v, want nil", name, err)
+			}
+			if !tc.noPrompt && (err == nil || !strings.Contains(err.Error(), "pass --no-prompt instead")) {
+				t.Fatalf("%s err = %v, want one naming --no-prompt", name, err)
 			}
 			gotIssue := strings.Contains(out, tc.wantEcho)
 			if gotIssue != tc.wantIssue {
@@ -3647,41 +3663,17 @@ func TestCtrRestartConfirmGate(t *testing.T) {
 	}
 }
 
-// TestStdinCanAnswerClosedFile covers stdinCanAnswer's fail-safe branch: a stdin whose
-// Stat() cannot be evaluated (a closed file, on both Windows and POSIX) is a stream no
-// reply can arrive on, so the question must not even be asked.
-func TestStdinCanAnswerClosedFile(t *testing.T) {
-	f, err := os.CreateTemp(t.TempDir(), "closed-*")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatalf("close temp file: %v", err)
-	}
-	old := os.Stdin
-	os.Stdin = f
-	defer func() { os.Stdin = old }()
-
-	if stdinCanAnswer() {
-		t.Error("stdinCanAnswer with a closed stdin = true, want false (fail-safe)")
-	}
-	if interactive(&App{}) {
-		t.Error("interactive with a closed stdin = true, want false")
-	}
-}
-
-// TestPromptAsksWhenStdinIsNotATTY is the regression for the live failure that started
-// this: `export-config -o <existing file>` refused to overwrite WITHOUT ASKING, on a
-// terminal where the operator was sitting right there. The cause was that interactive()
-// asked isTTY(os.Stdin), and that shell's stdin was a pipe rather than a character
-// device -- which silently turned EVERY confirm in the tool (broker remove, broker
-// restart, the import tear-down gate) into a refusal.
+// TestAPipeIsRefusedAndNeverRead is the decided rule, stated end to end on the production
+// path (no seams): a stdin that is a pipe is not a terminal, so a destructive
+// confirmation without --no-prompt fails at once with an error naming the flag. The
+// question is not written and the pipe is not read -- the reply waiting in it is still
+// there afterwards -- so a stale `yes |` can never approve anything.
 //
-// A pipe carrying a reply is now exactly as good as a console: the question is asked,
-// and the answer on stdin is honoured. Note what this test does NOT do -- it does not
-// open a terminal. The first attempt at this fix read /dev/tty / CONIN$ directly, which
-// hung forever in a shell where the keystrokes go to the pipe instead.
-func TestPromptAsksWhenStdinIsNotATTY(t *testing.T) {
+// This replaces TestPromptAsksWhenStdinIsNotATTY, which pinned the opposite: that a pipe
+// carrying a reply was as good as a console. It stays a non-terminal here for the same
+// reason the old code gave up on /dev/tty -- a mintty-style shell hands over a pipe, and
+// the operator there passes --no-prompt.
+func TestAPipeIsRefusedAndNeverRead(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)
@@ -3696,67 +3688,63 @@ func TestPromptAsksWhenStdinIsNotATTY(t *testing.T) {
 	defer func() { os.Stdin = old }()
 
 	a := &App{} // no seams: the production path, end to end
-	if !interactive(a) {
-		t.Fatal("interactive with a pipe on stdin = false, want true")
+	if a.prompter().Terminal() {
+		t.Fatal("a pipe on stdin counts as a terminal, want false")
 	}
 
 	var ok bool
-	stderrText := captureStderr(t, func() { ok = confirmAction(a, "Overwrite", "overwrite", "out.cli") })
-	if !ok {
-		t.Error(`confirmAction answered "y" on a piped stdin = false, want true`)
+	var gateErr error
+	stderrText := captureStderr(t, func() { ok, gateErr = confirmAction(a, "Overwrite", "overwrite", "out.cli") })
+	if ok {
+		t.Error(`confirmAction on a pipe holding "y" = true, want false`)
 	}
-	if !strings.Contains(stderrText, "Overwrite out.cli?") {
-		t.Errorf("the question was not asked: %q", stderrText)
+	if gateErr == nil || !strings.Contains(gateErr.Error(), "pass --no-prompt instead") ||
+		!strings.Contains(gateErr.Error(), "overwrite out.cli") {
+		t.Errorf("err = %v, want the Gate error for the overwrite naming --no-prompt", gateErr)
+	}
+	if strings.Contains(stderrText, "Overwrite out.cli?") {
+		t.Errorf("the question was written to a stream nobody can answer on: %q", stderrText)
+	}
+	left, err := io.ReadAll(r)
+	if err != nil || string(left) != "y\n" {
+		t.Errorf("the pipe holds %q (err %v), want the untouched \"y\\n\": a pipe must never be read", left, err)
 	}
 }
 
-// TestUnansweredPromptStillRefuses covers the genuinely unattended run. Stdin is
-// readable but ends immediately, so the question is ASKED and then goes unanswered --
-// which must refuse and name --no-prompt, exactly as the old non-TTY branch did.
-//
-// Asking before knowing whether a reply can arrive is the deliberate trade this design
-// makes. The question now appears in an unattended run's stderr above its refusal,
-// which is strictly more informative than the silence it replaced.
+// TestUnansweredPromptStillRefuses covers end of input AT a terminal: the question is
+// asked and the input ends before a reply, which is an error with the cause
+// "reading input: EOF" and the flag named -- not a quiet "no" and not an exit 0.
 func TestUnansweredPromptStillRefuses(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	w.Close()
-	defer r.Close()
-	old := os.Stdin
-	os.Stdin = r
-	defer func() { os.Stdin = old }()
-
-	a := &App{}
+	a := &App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("")}
 	var ok bool
-	stderrText := captureStderr(t, func() { ok = confirmAction(a, "Overwrite", "overwrite", "out.cli") })
+	var gateErr error
+	stderrText := captureStderr(t, func() { ok, gateErr = confirmAction(a, "Overwrite", "overwrite", "out.cli") })
 	if ok {
 		t.Error("confirmAction with nobody to answer = true, want false")
 	}
 	if !strings.Contains(stderrText, "Overwrite out.cli?") {
-		t.Errorf("the question was not asked before refusing: %q", stderrText)
+		t.Errorf("the question was not asked before failing: %q", stderrText)
 	}
-	if !strings.Contains(stderrText, "--no-prompt") {
-		t.Errorf("the refusal did not name --no-prompt: %q", stderrText)
+	if gateErr == nil || !strings.Contains(gateErr.Error(), "reading input: EOF") ||
+		!strings.Contains(gateErr.Error(), "pass --no-prompt instead") {
+		t.Errorf("err = %v, want the unanswered Gate error naming --no-prompt", gateErr)
 	}
 
-	// interactive/promptSource have always tolerated a nil App; keep it that way.
-	if promptSource(nil) == nil {
-		t.Error("promptSource(nil) = nil, want a reader over os.Stdin")
+	// A nil App has always been tolerated by the confirm helpers; keep it that way.
+	var nilApp *App
+	if nilApp.prompter() == nil {
+		t.Error("(*App)(nil).prompter() = nil, want a Prompter over the default seams")
 	}
 }
 
 // TestPromptKeepsBufferedAnswersForLaterQuestions covers a command that asks TWO
 // questions in one run, which `broker remove --delete-data` does.
 //
-// promptLine used to build a fresh bufio.Reader per call and discard it, losing
-// every byte that reader had buffered past the newline it returned. A pipe
-// delivers `y\nyes\n` in ONE read, so the first question consumed all of it,
-// answered "y", and threw "yes\n" away -- and the second question saw EOF,
-// reported itself unanswered, and refused. The operator had supplied both answers
-// and was told they had supplied neither. One reader per run, memoised on the App,
-// is the fix; this asserts the second answer survives the first question.
+// A fresh bufio.Reader per question would discard every byte it had buffered past the
+// newline it returned, and a pipe delivers `y\nyes\n` in ONE read -- so the second question
+// would see EOF. The shared Prompter's one reader, memoised on the App, is the fix; this
+// asserts the second answer survives the first question. It is kept here, and not left to
+// the confirm package's own tests, because the memoisation on the App is this package's.
 func TestPromptKeepsBufferedAnswersForLaterQuestions(t *testing.T) {
 	// deleteLayer is what RAISES confirmLayer's question at all (see confirmLayer).
 	a := &App{
@@ -3766,10 +3754,14 @@ func TestPromptKeepsBufferedAnswersForLaterQuestions(t *testing.T) {
 	}
 
 	var first, second bool
+	var err1, err2 error
 	_ = captureStderr(t, func() {
-		first = confirmAction(a, "Delete", "delete", "broker x")
-		second = confirmLayer(a, layerData)
+		first, err1 = confirmAction(a, "Delete", "delete", "broker x")
+		second, err2 = confirmLayer(a, layerData)
 	})
+	if err1 != nil || err2 != nil {
+		t.Fatalf("errs = %v, %v, want nil", err1, err2)
+	}
 	if !first {
 		t.Error(`first question answered "y" = false, want true`)
 	}
@@ -3780,16 +3772,19 @@ func TestPromptKeepsBufferedAnswersForLaterQuestions(t *testing.T) {
 
 // TestPromptSeamsBeatStdin pins the precedence the ~200 wiring tests depend on: an App
 // carrying explicit Interactive/PromptIn seams must never touch os.Stdin, or a test
-// would inherit whatever the suite happens to be launched from.
+// would inherit whatever the suite happens to be launched from. TestMain leaves stdin on
+// a closed pipe, which is not a terminal, so a Prompter that ignored the seam would
+// refuse here.
 func TestPromptSeamsBeatStdin(t *testing.T) {
 	a := &App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("y\n")}
-	if src := promptSource(a); src == os.Stdin {
-		t.Error("promptSource ignored App.PromptIn")
+	if !a.prompter().Terminal() {
+		t.Error("prompter ignored App.Interactive: stdin is not a terminal under TestMain")
 	}
 	var ok bool
-	_ = captureStderr(t, func() { ok = confirmAction(a, "Overwrite", "overwrite", "out.cli") })
-	if !ok {
-		t.Error("confirmAction through the App seams = false, want true")
+	var err error
+	_ = captureStderr(t, func() { ok, err = confirmAction(a, "Overwrite", "overwrite", "out.cli") })
+	if err != nil || !ok {
+		t.Errorf("confirmAction through the App seams = (%v, %v), want (true, nil)", ok, err)
 	}
 }
 
@@ -4182,15 +4177,15 @@ func TestRemoveServerCertsOverTheCLI(t *testing.T) {
 		}
 	})
 
-	t.Run("no terminal and no --no-prompt keeps the certificate", func(t *testing.T) {
+	t.Run("no terminal and no --no-prompt fails and keeps the certificate", func(t *testing.T) {
 		out, err := runRootWith(t,
 			[]string{"broker", "configure", "server-certs", "--remove", "--env", path, "--platform", "docker"},
 			func(a *App) {
 				a.Interactive = func() bool { return false }
 				echoRunner(a)
 			})
-		if err != nil {
-			t.Fatalf("an unanswerable prompt keeps the certificate rather than failing: %v", err)
+		if err == nil || !strings.Contains(err.Error(), "pass --no-prompt instead") {
+			t.Fatalf("an unanswerable prompt must fail naming --no-prompt, got %v", err)
 		}
 		if strings.Contains(out, "remove-server-certs") {
 			t.Error("a removal nobody could confirm must not run")
@@ -4264,8 +4259,8 @@ func TestRemoveProductKeysOverTheCLI(t *testing.T) {
 // direction: it deletes trust anchors from a live broker, so it now takes the same
 // gate server-certs/product-keys already did. Three properties, the same ones those
 // two pin: the confirmed form actually runs; declining changes nothing; and a
-// non-interactive run with no --no-prompt keeps the certificates rather than
-// removing them silently.
+// run with no terminal and no --no-prompt fails naming the flag and keeps the
+// certificates rather than removing them silently.
 func TestRemoveDomainCertsOverTheCLI(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "domaincerts-ctr.yaml")
 	content := "redundancy:\n  enabled: false\n" +
@@ -4305,15 +4300,15 @@ func TestRemoveDomainCertsOverTheCLI(t *testing.T) {
 		}
 	})
 
-	t.Run("no terminal and no --no-prompt keeps the certificates", func(t *testing.T) {
+	t.Run("no terminal and no --no-prompt fails and keeps the certificates", func(t *testing.T) {
 		out, err := runRootWith(t,
 			[]string{"broker", "configure", "domain-certs", "--remove", "--env", path, "--platform", "docker"},
 			func(a *App) {
 				a.Interactive = func() bool { return false }
 				echoRunner(a)
 			})
-		if err != nil {
-			t.Fatalf("an unanswerable prompt keeps the certificates rather than failing: %v", err)
+		if err == nil || !strings.Contains(err.Error(), "pass --no-prompt instead") {
+			t.Fatalf("an unanswerable prompt must fail naming --no-prompt, got %v", err)
 		}
 		if strings.Contains(out, "remove-domain-certs") {
 			t.Error("a removal nobody could confirm must not run")
@@ -4363,15 +4358,15 @@ func TestDisableDefaultVPNConfirmGate(t *testing.T) {
 		}
 	})
 
-	t.Run("no terminal and no --no-prompt keeps the VPN up", func(t *testing.T) {
+	t.Run("no terminal and no --no-prompt fails and keeps the VPN up", func(t *testing.T) {
 		out, err := runRootWith(t,
 			[]string{"broker", "configure", "default-vpn", "--env", path, "--platform", "docker"},
 			func(a *App) {
 				a.Interactive = func() bool { return false }
 				echoRunner(a)
 			})
-		if err != nil {
-			t.Fatalf("an unanswerable prompt keeps the VPN up rather than failing: %v", err)
+		if err == nil || !strings.Contains(err.Error(), "pass --no-prompt instead") {
+			t.Fatalf("an unanswerable prompt must fail naming --no-prompt, got %v", err)
 		}
 		if strings.Contains(out, "disable-default-vpn") {
 			t.Error("a shutdown nobody could confirm must not run")
@@ -4425,15 +4420,15 @@ func TestDisableDefaultUsersConfirmGate(t *testing.T) {
 		}
 	})
 
-	t.Run("no terminal and no --no-prompt keeps the users up", func(t *testing.T) {
+	t.Run("no terminal and no --no-prompt fails and keeps the users up", func(t *testing.T) {
 		out, err := runRootWith(t,
 			[]string{"broker", "configure", "default-users", "--env", path, "--platform", "docker"},
 			func(a *App) {
 				a.Interactive = func() bool { return false }
 				echoRunner(a)
 			})
-		if err != nil {
-			t.Fatalf("an unanswerable prompt keeps the users up rather than failing: %v", err)
+		if err == nil || !strings.Contains(err.Error(), "pass --no-prompt instead") {
+			t.Fatalf("an unanswerable prompt must fail naming --no-prompt, got %v", err)
 		}
 		if strings.Contains(out, "show-vpn") {
 			t.Error("a shutdown nobody could confirm must not run")

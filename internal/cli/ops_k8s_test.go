@@ -61,8 +61,33 @@ func opsK8sAnswer(reply string) func(*App) {
 }
 
 // opsK8sUnattended is an App seam for a run with nobody at the terminal: no question is
-// asked, and a gate that needs an answer refuses and names --no-prompt.
+// asked, and a gate that needs an answer fails with an error naming --no-prompt.
 func opsK8sUnattended(a *App) { a.Interactive = func() bool { return false } }
+
+// opsK8sGate is the error a gate returns when nobody can be asked and --no-prompt was not
+// passed: confirm.Prompter.Gate's wording around doing, the noun phrase the gate names.
+func opsK8sGate(doing string) string {
+	return "confirming " + doing + " interactively: stdin is not a terminal, so this prompt " +
+		"cannot be answered interactively; pass --no-prompt instead"
+}
+
+// opsK8sIsGate reports whether want is such an error, which a run returns rather than prints.
+func opsK8sIsGate(want string) bool { return strings.HasSuffix(want, "pass --no-prompt instead") }
+
+// opsK8sCheckGate fails the test unless err matches want: the Gate error when want is one,
+// nil otherwise.
+func opsK8sCheckGate(t *testing.T, err error, want string) {
+	t.Helper()
+	if opsK8sIsGate(want) {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want the Gate error %q", err, want)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+}
 
 // opsK8sSilenced is --no-prompt: every question is answered yes without being asked.
 func opsK8sSilenced(a *App) {
@@ -345,7 +370,7 @@ func TestOpsK8sPodRolesAnnouncesWhatItNarrows(t *testing.T) {
 // when --pod says so, and rewrites no Secret. Declined or unanswerable, nothing reaches a pod.
 func TestOpsK8sRemoveServerCertsConfirmsThenSpansTheGroup(t *testing.T) {
 	const question = `Remove the TLS server certificate from broker dev-broker in namespace solace (context "prod-cluster")? [y/N] `
-	const refusal = `refusing to remove the TLS server certificate from broker dev-broker in namespace solace (context "prod-cluster") without confirmation; pass --no-prompt to proceed`
+	refusal := opsK8sGate(`remove the TLS server certificate from broker dev-broker in namespace solace (context "prod-cluster")`)
 	narrowed := func(a *App) {
 		opsK8sSilenced(a)
 		a.pod = "backup"
@@ -360,7 +385,7 @@ func TestOpsK8sRemoveServerCertsConfirmsThenSpansTheGroup(t *testing.T) {
 		{"--no-prompt removes it from every node without asking", opsK8sSilenced, "pbm", false, ""},
 		{"a yes at the prompt removes it from every node", opsK8sAnswer("y\n"), "pbm", true, question},
 		{"a no at the prompt leaves every node alone", opsK8sAnswer("n\n"), "", true, question},
-		{"no terminal and no --no-prompt leaves every node alone and names the flag", opsK8sUnattended, "", false, refusal},
+		{"no terminal and no --no-prompt leaves every node alone and fails naming the flag", opsK8sUnattended, "", false, refusal},
 		{"--pod narrows the removal to that node and says so", narrowed, "b", false, "--pod b narrows this to 1 of 3 node(s)"},
 	}
 	for _, tc := range cases {
@@ -369,9 +394,7 @@ func TestOpsK8sRemoveServerCertsConfirmsThenSpansTheGroup(t *testing.T) {
 			a := &App{Cfg: writeK8sDeployAllEnv(t, "true"), Platform: config.K8s, Runner: rr, flagRemove: true, kubeContext: "prod-cluster"}
 			tc.set(a)
 			_, errOut, err := opsK8sRun(t, func() error { return opK8sConfigServerCerts(a) })
-			if err != nil {
-				t.Fatalf("configure server-certs --remove err = %v, want nil", err)
-			}
+			opsK8sCheckGate(t, err, tc.stderr)
 			if got := opsK8sPods(rr); got != tc.wantPods {
 				t.Errorf("the removal reached pods %q, want %q:\n%s", got, tc.wantPods, rr.dump())
 			}
@@ -387,7 +410,7 @@ func TestOpsK8sRemoveServerCertsConfirmsThenSpansTheGroup(t *testing.T) {
 			if removals != len(tc.wantPods) {
 				t.Errorf("%d removal script(s) ran, want one per node (%d)", removals, len(tc.wantPods))
 			}
-			if tc.stderr != "" && !strings.Contains(errOut, tc.stderr) {
+			if tc.stderr != "" && !opsK8sIsGate(tc.stderr) && !strings.Contains(errOut, tc.stderr) {
 				t.Errorf("stderr = %q, want it to carry %q", errOut, tc.stderr)
 			}
 			if asked := strings.Contains(errOut, "[y/N]"); asked != tc.asked {
@@ -434,7 +457,7 @@ func TestOpsK8sDomainCertsResolveBeforeAnythingIsAskedOrIssued(t *testing.T) {
 // the one --pod names otherwise -- never the whole group.
 func TestOpsK8sRemoveDomainCertsConfirmsAndTargetsOneNode(t *testing.T) {
 	const question = "Remove the configured domain CA certificates from broker dev-broker in namespace solace? [y/N] "
-	const refusal = "refusing to remove the configured domain CA certificates from broker dev-broker in namespace solace without confirmation; pass --no-prompt to proceed"
+	refusal := opsK8sGate("remove the configured domain CA certificates from broker dev-broker in namespace solace")
 	backup := func(a *App) {
 		opsK8sSilenced(a)
 		a.pod = "backup"
@@ -449,7 +472,7 @@ func TestOpsK8sRemoveDomainCertsConfirmsAndTargetsOneNode(t *testing.T) {
 		{"--no-prompt removes the configured CA from the primary", opsK8sSilenced, "p", false, ""},
 		{"a yes at the prompt removes it from the primary", opsK8sAnswer("y\n"), "p", true, question},
 		{"a no at the prompt removes nothing", opsK8sAnswer("n\n"), "", true, question},
-		{"no terminal and no --no-prompt removes nothing and names the flag", opsK8sUnattended, "", false, refusal},
+		{"no terminal and no --no-prompt removes nothing and fails naming the flag", opsK8sUnattended, "", false, refusal},
 		{"--pod backup removes it from the backup node only", backup, "b", false, ""},
 	}
 	for _, tc := range cases {
@@ -460,9 +483,7 @@ func TestOpsK8sRemoveDomainCertsConfirmsAndTargetsOneNode(t *testing.T) {
 			a := &App{Cfg: cfg, Platform: config.K8s, Runner: rr, flagRemove: true}
 			tc.set(a)
 			_, errOut, err := opsK8sRun(t, func() error { return opK8sConfigDomainCerts(a) })
-			if err != nil {
-				t.Fatalf("configure domain-certs --remove err = %v, want nil", err)
-			}
+			opsK8sCheckGate(t, err, tc.stderr)
 			if got := opsK8sPods(rr); got != tc.wantPods {
 				t.Errorf("the removal reached pods %q, want %q:\n%s", got, tc.wantPods, rr.dump())
 			}
@@ -475,7 +496,7 @@ func TestOpsK8sRemoveDomainCertsConfirmsAndTargetsOneNode(t *testing.T) {
 			if removals != len(tc.wantPods) {
 				t.Errorf("%d removal script(s) for CA myca ran, want %d:\n%s", removals, len(tc.wantPods), rr.dump())
 			}
-			if tc.stderr != "" && !strings.Contains(errOut, tc.stderr) {
+			if tc.stderr != "" && !opsK8sIsGate(tc.stderr) && !strings.Contains(errOut, tc.stderr) {
 				t.Errorf("stderr = %q, want it to carry %q", errOut, tc.stderr)
 			}
 			if asked := strings.Contains(errOut, "[y/N]"); asked != tc.asked {
@@ -493,7 +514,7 @@ func TestOpsK8sRemoveDomainCertsConfirmsAndTargetsOneNode(t *testing.T) {
 // the script on stdin and never appears in an argv, where it would be logged and echoed.
 func TestOpsK8sProductKeysGoToTheLicensedNodesOnly(t *testing.T) {
 	const question = "Revoke every configured product key from broker dev-broker in namespace solace? [y/N] "
-	const refusal = "refusing to revoke the product keys from broker dev-broker in namespace solace without confirmation; pass --no-prompt to proceed"
+	refusal := opsK8sGate("revoke the product keys from broker dev-broker in namespace solace")
 	const applied = "product-key KEY-ONE\nproduct-key KEY-TWO\n"
 	const revoked = "no product-key KEY-ONE\nno product-key KEY-TWO\n"
 	narrowed := func(a *App) {
@@ -512,7 +533,7 @@ func TestOpsK8sProductKeysGoToTheLicensedNodesOnly(t *testing.T) {
 		{"--remove --no-prompt revokes on the same two nodes", true, opsK8sSilenced, "pb", revoked, ""},
 		{"--remove answered yes revokes on the same two nodes", true, opsK8sAnswer("y\n"), "pb", revoked, question},
 		{"--remove answered no revokes nothing", true, opsK8sAnswer("n\n"), "", "", question},
-		{"--remove with no terminal revokes nothing and names the flag", true, opsK8sUnattended, "", "", refusal},
+		{"--remove with no terminal revokes nothing and fails naming the flag", true, opsK8sUnattended, "", "", refusal},
 		{"--remove --pod backup revokes on that node only and says so", true, narrowed, "b", revoked, "--pod b narrows this to 1 of 2 node(s)"},
 	}
 	for _, tc := range cases {
@@ -522,9 +543,7 @@ func TestOpsK8sProductKeysGoToTheLicensedNodesOnly(t *testing.T) {
 			a.Cfg.Broker.ProductKeys = []string{"KEY-ONE", "KEY-TWO"}
 			tc.set(a)
 			_, errOut, err := opsK8sRun(t, func() error { return opK8sConfigProductKeys(a) })
-			if err != nil {
-				t.Fatalf("configure product-keys err = %v, want nil", err)
-			}
+			opsK8sCheckGate(t, err, tc.stderr)
 			if got := opsK8sPods(rr); got != tc.wantPods {
 				t.Errorf("the keys reached pods %q, want %q:\n%s", got, tc.wantPods, rr.dump())
 			}
@@ -540,7 +559,7 @@ func TestOpsK8sProductKeysGoToTheLicensedNodesOnly(t *testing.T) {
 			if scripts != len(tc.wantPods) {
 				t.Errorf("%d script(s) carried the expected lines, want one per licensed node (%d):\n%s", scripts, len(tc.wantPods), rr.dump())
 			}
-			if tc.stderr != "" && !strings.Contains(errOut, tc.stderr) {
+			if tc.stderr != "" && !opsK8sIsGate(tc.stderr) && !strings.Contains(errOut, tc.stderr) {
 				t.Errorf("stderr = %q, want it to carry %q", errOut, tc.stderr)
 			}
 		})
@@ -613,7 +632,7 @@ func TestOpsK8sHardeningLeavesAskOnlyBeforeDisturbingClients(t *testing.T) {
 		{"--no-prompt shuts it down without asking", false, opsK8sSilenced, true, ""},
 		{"a yes at the prompt shuts it down", false, opsK8sAnswer("y\n"), true, "question"},
 		{"a no at the prompt leaves it up", false, opsK8sAnswer("n\n"), false, "question"},
-		{"no terminal and no --no-prompt leaves it up and names the flag", false, opsK8sUnattended, false, "refusal"},
+		{"no terminal and no --no-prompt leaves it up and fails naming the flag", false, opsK8sUnattended, false, "refusal"},
 		{"--enable starts it back up without a question", true, opsK8sAnswer("n\n"), true, ""},
 		{"--enable with no terminal still starts it back up", true, opsK8sUnattended, true, ""},
 	}
@@ -629,8 +648,11 @@ func TestOpsK8sHardeningLeavesAskOnlyBeforeDisturbingClients(t *testing.T) {
 				a := &App{Cfg: writeK8sDeployAllEnv(t, "true"), Platform: config.K8s, Runner: rr, flagEnable: sc.enable}
 				sc.set(a)
 				_, errOut, err := opsK8sRun(t, func() error { return lf.op(a) })
-				if err != nil {
-					t.Fatalf("%s err = %v, want nil", lf.name, err)
+				refusal := opsK8sGate("shut down " + lf.what)
+				if sc.wantText == "refusal" {
+					opsK8sCheckGate(t, err, refusal)
+				} else {
+					opsK8sCheckGate(t, err, "")
 				}
 				ran, other := lf.downName, lf.upName
 				if sc.enable {
@@ -662,22 +684,14 @@ func TestOpsK8sHardeningLeavesAskOnlyBeforeDisturbingClients(t *testing.T) {
 					}
 				}
 				question := "Shut down " + lf.what + "? [y/N] "
-				refusal := "refusing to shut down " + lf.what + " without confirmation; pass --no-prompt to proceed"
-				switch sc.wantText {
-				case "question":
-					if !strings.Contains(errOut, question) {
-						t.Errorf("stderr = %q, want the question %q", errOut, question)
-					}
-				case "refusal":
-					if !strings.Contains(errOut, refusal) {
-						t.Errorf("stderr = %q, want the refusal %q", errOut, refusal)
-					}
+				if sc.wantText == "question" && !strings.Contains(errOut, question) {
+					t.Errorf("stderr = %q, want the question %q", errOut, question)
 				}
 				if asked := strings.Contains(errOut, "[y/N]"); asked != (sc.wantText == "question") {
 					t.Errorf("a question was asked = %v, want %v:\n%s", asked, sc.wantText == "question", errOut)
 				}
-				if refused := strings.Contains(errOut, "refusing"); refused != (sc.wantText == "refusal") {
-					t.Errorf("a refusal line was printed = %v, want %v:\n%s", refused, sc.wantText == "refusal", errOut)
+				if strings.Contains(errOut, "refusing") {
+					t.Errorf("a refusal line was printed; the gate's error is the refusal now:\n%s", errOut)
 				}
 			})
 		}
@@ -914,7 +928,7 @@ func TestOpsK8sOperatorStartScalesUpAndWaitsWithoutAsking(t *testing.T) {
 func TestOpsK8sOperatorStopConfirmsBecauseItFreezesEveryNamespace(t *testing.T) {
 	const what = "the operator, freezing reconciliation for every broker it watches"
 	const question = "Stop " + what + ` (context "prod-cluster")? [y/N] `
-	const refusal = "refusing to stop " + what + ` (context "prod-cluster") without confirmation; pass --no-prompt to proceed`
+	refusal := opsK8sGate("stop " + what + ` (context "prod-cluster")`)
 	cases := []struct {
 		name   string
 		set    func(*App)
@@ -925,7 +939,7 @@ func TestOpsK8sOperatorStopConfirmsBecauseItFreezesEveryNamespace(t *testing.T) 
 		{"--no-prompt scales it to zero without asking", opsK8sSilenced, true, false, "the operator is stopped"},
 		{"a yes at the prompt scales it to zero", opsK8sAnswer("y\n"), true, true, question},
 		{"a no at the prompt leaves it running", opsK8sAnswer("n\n"), false, true, question},
-		{"no terminal and no --no-prompt leaves it running and names the flag", opsK8sUnattended, false, false, refusal},
+		{"no terminal and no --no-prompt leaves it running and fails naming the flag", opsK8sUnattended, false, false, refusal},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -935,9 +949,7 @@ func TestOpsK8sOperatorStopConfirmsBecauseItFreezesEveryNamespace(t *testing.T) 
 			a := &App{Cfg: cfg, Platform: config.K8s, Runner: rr, kubeContext: "prod-cluster"}
 			tc.set(a)
 			_, errOut, err := opsK8sRun(t, func() error { return opK8sOperatorStop(a) })
-			if err != nil {
-				t.Fatalf("opK8sOperatorStop err = %v, want nil", err)
-			}
+			opsK8sCheckGate(t, err, tc.stderr)
 			var acted []string
 			for _, c := range rr.calls {
 				if !opCanI(c) {
@@ -951,7 +963,7 @@ func TestOpsK8sOperatorStopConfirmsBecauseItFreezesEveryNamespace(t *testing.T) 
 			case !tc.scaled && len(rr.calls) != 0:
 				t.Errorf("a stop that was not confirmed must not reach the cluster:\n%s", rr.dump())
 			}
-			if !strings.Contains(errOut, tc.stderr) {
+			if !opsK8sIsGate(tc.stderr) && !strings.Contains(errOut, tc.stderr) {
 				t.Errorf("stderr = %q, want it to carry %q", errOut, tc.stderr)
 			}
 			if asked := strings.Contains(errOut, "[y/N]"); asked != tc.asked {
@@ -1270,8 +1282,8 @@ func TestOpsK8sRemoveNamespaceIfEmptyKeepsTheNamespaceInDoubt(t *testing.T) {
 			"could not list what is left in namespace"},
 		{"an empty namespace the operator declines stays", "solace", false, opsK8sAnswer("n\n"), false, false,
 			"Delete the now-empty namespace solace? [y/N] "},
-		{"an empty namespace with no terminal and no --no-prompt stays and names the flag", "solace", false, opsK8sUnattended, false, false,
-			"refusing to delete the now-empty namespace solace without confirmation; pass --no-prompt to proceed"},
+		{"an empty namespace with no terminal and no --no-prompt stays and fails naming the flag", "solace", false, opsK8sUnattended, false, false,
+			opsK8sGate("delete the now-empty namespace solace")},
 		{"an empty namespace the operator accepts is deleted", "solace", false, opsK8sAnswer("y\n"), true, false,
 			"Delete the now-empty namespace solace? [y/N] "},
 	}
@@ -1291,9 +1303,7 @@ func TestOpsK8sRemoveNamespaceIfEmptyKeepsTheNamespaceInDoubt(t *testing.T) {
 			a := &App{Cfg: cfg, Platform: config.K8s, Runner: rr}
 			tc.set(a)
 			_, errOut, err := opsK8sRun(t, func() error { return removeNamespaceIfEmpty(a, k8sCluster(a)) })
-			if err != nil {
-				t.Fatalf("removeNamespaceIfEmpty err = %v, want nil: keeping the namespace is not a failure", err)
-			}
+			opsK8sCheckGate(t, err, tc.stderr) // keeping the namespace is not a failure; being unable to ask is
 			deleted := false
 			for _, c := range rr.calls {
 				if len(c.args) > 1 && c.args[0] == "delete" && c.args[1] == "namespace" {
@@ -1306,40 +1316,39 @@ func TestOpsK8sRemoveNamespaceIfEmptyKeepsTheNamespaceInDoubt(t *testing.T) {
 			if tc.noCalls && len(rr.calls) != 0 {
 				t.Errorf("a protected namespace must not even be listed:\n%s", rr.dump())
 			}
-			if !strings.Contains(errOut, tc.stderr) {
+			if !opsK8sIsGate(tc.stderr) && !strings.Contains(errOut, tc.stderr) {
 				t.Errorf("stderr = %q, want it to carry %q", errOut, tc.stderr)
 			}
 		})
 	}
 }
 
-// TestOpsK8sClusterConfirmIsTheDowngradeGateWithNoWayAround covers the one question the
-// Kubernetes package asks, as k8sCluster wires it: whether to install an operator OLDER than
-// the cluster-scoped one already running, which rolls back every broker it watches. The
-// wiring must reach confirmDowngrade and not the removal gate, so --no-prompt is no side
-// door -- it neither answers the question nor lets an unattended run through -- and only a
-// yes typed by a human proceeds. Nobody answering at all refuses and says to re-run
-// interactively, not to pass a flag this command does not have.
-func TestOpsK8sClusterConfirmIsTheDowngradeGateWithNoWayAround(t *testing.T) {
+// TestOpsK8sClusterConfirmIsTheDowngradeGate covers the downgrade question the Kubernetes
+// package asks, as k8sCluster wires it: whether to install an operator OLDER than the
+// cluster-scoped one already running, which rolls back every broker it watches. The wiring
+// must reach confirmDowngrade and not the removal gate. --no-prompt on `operator deploy`
+// approves it without asking; at a terminal a yes proceeds and a no declines; and a run
+// with no terminal and no --no-prompt fails naming the flag.
+func TestOpsK8sClusterConfirmIsTheDowngradeGate(t *testing.T) {
 	const question = "Install an operator older than the one running?"
-	const refusal = "refusing to downgrade the operator without confirmation; re-run interactively to confirm the downgrade"
+	gate := opsK8sGate("the operator downgrade")
 	cases := []struct {
 		name    string
 		app     *App
 		want    bool
 		stderr  string
-		refused bool
+		wantErr string
 	}{
 		{"a yes at the prompt lets the downgrade through",
-			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("y\n")}, true, question + " [y/N] ", false},
-		{"a no at the prompt declines without a refusal line",
-			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("n\n")}, false, question + " [y/N] ", false},
-		{"--no-prompt does not answer a question that is asked",
-			&App{noPrompt: true, Interactive: func() bool { return true }, PromptIn: strings.NewReader("n\n")}, false, question + " [y/N] ", false},
-		{"--no-prompt does not let an unattended run through",
-			&App{noPrompt: true, Interactive: func() bool { return false }}, false, refusal, true},
-		{"nobody answering refuses and says to re-run interactively",
-			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("")}, false, refusal, true},
+			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("y\n")}, true, question + " [y/N] ", ""},
+		{"a no at the prompt declines without an error",
+			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("n\n")}, false, question + " [y/N] ", ""},
+		{"--no-prompt approves the downgrade without asking",
+			&App{noPrompt: true, Interactive: func() bool { return false }}, true, "", ""},
+		{"no terminal and no --no-prompt fails naming the flag",
+			&App{Interactive: func() bool { return false }}, false, "", gate},
+		{"nobody answering at a terminal is an error",
+			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("")}, false, question + " [y/N] ", "reading input: EOF"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1348,15 +1357,77 @@ func TestOpsK8sClusterConfirmIsTheDowngradeGateWithNoWayAround(t *testing.T) {
 				t.Fatal("k8sCluster did not wire Cluster.Confirm: the operator downgrade would be declined for everyone")
 			}
 			var got bool
-			errOut := captureStderr(t, func() { got = c.Confirm(question) })
+			var err error
+			errOut := captureStderr(t, func() { got, err = c.Confirm(question) })
 			if got != tc.want {
 				t.Errorf("Confirm = %v, want %v", got, tc.want)
+			}
+			if tc.wantErr == "" && err != nil {
+				t.Errorf("Confirm err = %v, want nil", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Errorf("Confirm err = %v, want it to carry %q", err, tc.wantErr)
 			}
 			if !strings.Contains(errOut, tc.stderr) {
 				t.Errorf("stderr = %q, want it to carry %q", errOut, tc.stderr)
 			}
-			if refused := strings.Contains(errOut, "refusing"); refused != tc.refused {
-				t.Errorf("a refusal line was printed = %v, want %v:\n%s", refused, tc.refused, errOut)
+		})
+	}
+}
+
+// TestOpsK8sClusterConfirmScopeNeedsATerminal covers the other question, widening the
+// operator's watch to every namespace, as k8sCluster wires it on its own seam. --no-prompt
+// is NOT an answer to it: a run with no terminal is refused whether or not the flag was
+// passed, with an error that says it needs a terminal and names the env-file setting that
+// selects the watched namespaces. At a terminal the human answers, and --no-prompt does not
+// change the question or the answer.
+func TestOpsK8sClusterConfirmScopeNeedsATerminal(t *testing.T) {
+	const question = "Let the operator watch EVERY namespace in this cluster?"
+	const key = "kubernetes.operator.watchNamespaces"
+	cases := []struct {
+		name    string
+		app     *App
+		want    bool
+		asked   bool
+		wantErr []string
+	}{
+		{"a yes at the prompt widens the watch",
+			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("y\n")}, true, true, nil},
+		{"a no at the prompt declines without an error",
+			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("n\n")}, false, true, nil},
+		{"--no-prompt does not answer the question that is asked",
+			&App{noPrompt: true, Interactive: func() bool { return true }, PromptIn: strings.NewReader("n\n")}, false, true, nil},
+		{"--no-prompt does not widen the watch with no terminal",
+			&App{noPrompt: true, Interactive: func() bool { return false }}, false, false,
+			[]string{"needs a terminal", "--no-prompt does not answer it", "stdin is not a terminal", key}},
+		{"no terminal and no flag is refused naming the setting",
+			&App{Interactive: func() bool { return false }}, false, false, []string{"needs a terminal", key}},
+		{"nobody answering at a terminal is refused naming the setting",
+			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("")}, false, true,
+			[]string{"needs a terminal", "reading input: EOF", key}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := k8sCluster(tc.app)
+			if c.ConfirmScope == nil {
+				t.Fatal("k8sCluster did not wire Cluster.ConfirmScope: the watch widening would be declined for everyone")
+			}
+			var got bool
+			var err error
+			errOut := captureStderr(t, func() { got, err = c.ConfirmScope(question) })
+			if got != tc.want {
+				t.Errorf("ConfirmScope = %v, want %v", got, tc.want)
+			}
+			if len(tc.wantErr) == 0 && err != nil {
+				t.Errorf("ConfirmScope err = %v, want nil", err)
+			}
+			for _, w := range tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), w) {
+					t.Errorf("ConfirmScope err = %v, want it to carry %q", err, w)
+				}
+			}
+			if asked := strings.Contains(errOut, question+" [y/N] "); asked != tc.asked {
+				t.Errorf("the question was asked = %v, want %v:\n%s", asked, tc.asked, errOut)
 			}
 		})
 	}

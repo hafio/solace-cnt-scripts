@@ -1146,7 +1146,7 @@ one removal teaches the other:
 | no | either | either | Layer **kept**. Nothing is asked about it. |
 | yes | no | yes | Prompted; only an exact, case-insensitive `yes` deletes it. |
 | yes | yes | either | **Deleted**, unattended. |
-| yes | no | no | Layer **kept**, with a loud warning naming `--no-prompt`. The removal itself still proceeds. |
+| yes | no | no | **Fails** with exit 1 and an error naming `--no-prompt`, before anything is deleted. |
 
 So a fully unattended removal that also drops the data is `--delete-data --no-prompt`: the
 two flags answer different questions and deliberately **compose**. There is no global
@@ -1154,7 +1154,7 @@ two flags answer different questions and deliberately **compose**. There is no g
 
 The last row is the one worth reading twice. A scripted removal cannot lose data by
 omission, and it cannot lose it by *asking* either: without a terminal to answer the
-question, the layer survives and the run says so rather than proceeding in silence.
+question, the run fails and names `--no-prompt` rather than proceeding in silence.
 
 On docker and podman the directory `--delete-data` empties is exactly
 `<platform>.container.dataDir`, which is why that key is **required to be an absolute path**
@@ -1263,18 +1263,25 @@ deletes certificate authorities already configured on the broker. So does
 `broker perform assert-leader` on a docker/podman host that is, or looks like, the backup --
 asserting there makes that node's router and message-VPN configuration the copy config-sync
 pushes to the primary -- though only once its read has shown it holds activity; it never asks
-on Kubernetes or on the primary. An interactive terminal is
-asked `[y/N]`; a session that does not answer, and was not given `--no-prompt`, refuses
-loudly rather than destroying anything unattended.
+on Kubernetes or on the primary. A terminal is asked `[y/N]`; a
+session without one, and without `--no-prompt`, fails at once with exit 1 and an error that
+names `--no-prompt`, rather than destroying anything unattended. Declining at a terminal is an
+answer, not a failure: it prints nothing more and exits 0.
 
-**What counts as "answered" is decided by reading, not by what kind of stream stdin is.**
-The question always goes to stderr and the answer is always read from stdin, so a shell
-that hands this tool a pipe rather than a console -- Git Bash, and anything that wraps the
-binary -- is asked and answered normally. An input that ends without a reply is the
-unattended case, and the refusal names `--no-prompt`. The one case with no good answer is
-a scripted run whose stdin is an open pipe that nothing ever writes to and nothing ever
-closes: it waits at the question instead of refusing it. **Pass `--no-prompt` in any
-unattended run** -- CI, cron, a systemd unit -- and none of this arises.
+**A human is present when stdin is a terminal, and nothing else counts.** A terminal here is a
+character device. Without one, a destructive confirmation fails before asking: the question is
+not written and **a pipe is never read**, so a stale `yes |` can never approve a deletion. End of
+input at a terminal (`Ctrl-D`) is the same kind of error, with "reading input: EOF" as its cause.
+`/dev/null` is a character device too, so `solace-util broker remove < /dev/null` is asked, reads
+end of input at once, and fails naming the flag. A shell that hands this tool a pipe instead of a
+console -- Git Bash and other mintty-style shells, and anything that wraps the binary -- cannot be
+asked, so **pass `--no-prompt`** there, and in every unattended run: CI, cron, a systemd unit.
+
+`operator deploy` takes `--no-prompt` too, with a narrower meaning: it approves an operator
+**downgrade** and nothing else. Letting the operator watch **every** namespace is a
+least-privilege decision no flag makes for you, so that question needs a terminal; without one,
+or when the input ends unanswered, the deploy fails and names the env-file setting that selects
+the watched namespaces instead, `kubernetes.operator.watchNamespaces`.
 
 On Kubernetes, deleting a pod is graceful, not abrupt: it sends SIGTERM and honours
 `terminationGracePeriodSeconds`, and only `--force --grace-period=0` would kill outright --

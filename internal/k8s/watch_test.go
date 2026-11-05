@@ -340,7 +340,8 @@ func TestAmbiguousOperatorAbortsTheDeploy(t *testing.T) {
 	rr := &recRunner{out: []byte(`{"items":[` + items + `]}`)}
 	c := NewCluster(rr, cfg, nil, nil)
 	asked := false
-	c.Confirm = func(string) bool { asked = true; return true }
+	c.Confirm = func(string) (bool, error) { asked = true; return true, nil }
+	c.ConfirmScope = c.Confirm
 
 	err := c.OperatorApply(context.Background())
 	if !errors.Is(err, errAmbiguousOperator) {
@@ -685,7 +686,8 @@ func TestOperatorApplyDoesNotAskForAFirstInstallThatWatchesEveryNamespace(t *tes
 	buf := &bytes.Buffer{}
 	c := NewCluster(rr, cfg, func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) }, buf)
 	asked := false
-	c.Confirm = func(string) bool { asked = true; return false }
+	c.Confirm = func(string) (bool, error) { asked = true; return false, nil }
+	c.ConfirmScope = c.Confirm
 	if err := c.OperatorApply(context.Background()); err != nil {
 		t.Fatalf("OperatorApply: %v\n%s", err, buf.String())
 	}
