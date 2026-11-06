@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -447,7 +448,7 @@ func TestApplyDefaultsDocker(t *testing.T) {
 
 func TestApplyDefaultsPodmanRootful(t *testing.T) {
 	c := &Config{}
-	c.Podman.Rootless = false
+	c.Podman.Rootful = true
 	c.ApplyDefaults(Podman)
 
 	if c.Podman.Command.String() != "podman" {
@@ -478,8 +479,13 @@ func TestApplyDefaultsPodmanRootlessXDG(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 
 	c := &Config{}
-	c.Podman.Rootless = true
 	c.ApplyDefaults(Podman)
+	// Rootless is the default, and its quadlet directory is not ApplyDefaults': it
+	// can fail, so resolveQuadletDir fills it, after the defaults and before the
+	// home-directory expansion.
+	if err := c.resolveQuadletDir(Podman); err != nil {
+		t.Fatalf("resolveQuadletDir: %v", err)
+	}
 
 	want := filepath.ToSlash(filepath.Join(tmp, "containers", "systemd"))
 	if c.Podman.QuadletDir != want {
@@ -545,24 +551,111 @@ func TestRootlessRunUserFitsAStockSubuidRange(t *testing.T) {
 }
 
 func TestApplyDefaultsPodmanRootlessHomeDir(t *testing.T) {
-	// Empty XDG_CONFIG_HOME exercises the UserHomeDir branch.
+	// Empty XDG_CONFIG_HOME exercises the home-directory branch.
 	t.Setenv("XDG_CONFIG_HOME", "")
 
-	c := &Config{}
-	c.Podman.Rootless = true
+	c := &Config{homeDir: func() (string, error) { return "/home/op", nil }}
 	c.ApplyDefaults(Podman)
-
-	if c.Podman.QuadletDir == "" {
-		t.Fatal("rootless QuadletDir should be derived, got empty")
+	if c.Podman.QuadletDir != "" {
+		t.Fatalf("ApplyDefaults must leave the rootless QuadletDir to resolveQuadletDir, got %q", c.Podman.QuadletDir)
 	}
-	if !strings.HasSuffix(c.Podman.QuadletDir, "containers/systemd") {
-		t.Errorf("rootless QuadletDir = %q, want suffix containers/systemd", c.Podman.QuadletDir)
+	if err := c.resolveQuadletDir(Podman); err != nil {
+		t.Fatalf("resolveQuadletDir: %v", err)
+	}
+
+	if want := "/home/op/.config/containers/systemd"; c.Podman.QuadletDir != want {
+		t.Errorf("rootless QuadletDir = %q, want %q", c.Podman.QuadletDir, want)
 	}
 	if c.Podman.SystemctlUser != "--user" {
 		t.Errorf("rootless SystemctlUser = %q, want --user", c.Podman.SystemctlUser)
 	}
 	if c.Podman.WantedBy != "default.target" {
 		t.Errorf("rootless WantedBy = %q, want default.target", c.Podman.WantedBy)
+	}
+}
+
+// TestResolveQuadletDirRefusals: a rootless quadlet directory that cannot be resolved
+// is a load error, never a guess. A relative XDG_CONFIG_HOME is one podman's generator
+// cannot use either, and an unresolvable or empty home leaves nothing to build on.
+// Each refusal names the way out, and a quadletDir the operator set skips the lookup.
+func TestResolveQuadletDirRefusals(t *testing.T) {
+	home := func() (string, error) { return "/home/op", nil }
+	for _, tc := range []struct {
+		name    string
+		xdg     string
+		home    func() (string, error)
+		preset  string
+		wantErr string
+	}{
+		{name: "relative XDG_CONFIG_HOME", xdg: "rel/config", home: home, wantErr: "not an absolute path"},
+		{name: "unresolvable home", home: func() (string, error) { return "", fmt.Errorf("no home for this user") },
+			wantErr: "no home for this user"},
+		{name: "empty home", home: func() (string, error) { return "", nil }, wantErr: "home directory"},
+		{name: "operator-set quadletDir skips the lookup", xdg: "rel/config", home: home, preset: "/srv/units"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", tc.xdg)
+			c := &Config{homeDir: tc.home}
+			c.Podman.QuadletDir = tc.preset
+			err := c.resolveQuadletDir(Podman)
+			if tc.wantErr == "" {
+				if err != nil || c.Podman.QuadletDir != tc.preset {
+					t.Fatalf("a set quadletDir must stand: dir=%q err=%v", c.Podman.QuadletDir, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("want an error mentioning %q, got dir %q", tc.wantErr, c.Podman.QuadletDir)
+			}
+			for _, want := range []string{tc.wantErr, "podman.quadletDir"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q should mention %q", err, want)
+				}
+			}
+			if c.Podman.QuadletDir != "" {
+				t.Errorf("a refused resolve must leave quadletDir unset, got %q", c.Podman.QuadletDir)
+			}
+		})
+	}
+}
+
+// TestResolveQuadletDirOnlyForRootlessPodman: a rootful config keeps the system
+// directory ApplyDefaults gave it, and another platform has no quadlet unit, so its
+// load never depends on this account's home.
+func TestResolveQuadletDirOnlyForRootlessPodman(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "rel/config")
+	rootful := &Config{}
+	rootful.Podman.Rootful = true
+	rootful.ApplyDefaults(Podman)
+	if err := rootful.resolveQuadletDir(Podman); err != nil || rootful.Podman.QuadletDir != "/etc/containers/systemd" {
+		t.Errorf("rootful: dir=%q err=%v, want the system directory and no error", rootful.Podman.QuadletDir, err)
+	}
+	docker := &Config{}
+	docker.ApplyDefaults(Docker)
+	if err := docker.resolveQuadletDir(Docker); err != nil || docker.Podman.QuadletDir != "" {
+		t.Errorf("docker: dir=%q err=%v, want untouched and no error", docker.Podman.QuadletDir, err)
+	}
+}
+
+// TestLoadRefusesTheRetiredPodmanRootlessKey: podman.rootless was replaced by
+// podman.rootful and its default flipped, so the old key is refused by name -- with
+// either value -- rather than silently read as the opposite of what it said.
+func TestLoadRefusesTheRetiredPodmanRootlessKey(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, v := range []string{"true", "false"} {
+		path := filepath.Join(t.TempDir(), "env.yaml")
+		if err := os.WriteFile(path, []byte("podman:\n  rootless: "+v+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(path, Podman)
+		if err == nil {
+			t.Fatalf("rootless: %s must be refused", v)
+		}
+		for _, want := range []string{"podman.rootless", "podman.rootful", "default", "rootful: true"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("rootless: %s error %q should mention %q", v, err, want)
+			}
+		}
 	}
 }
 

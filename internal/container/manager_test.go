@@ -49,6 +49,9 @@ func ctrCfg(p config.Platform, redundancy string) *config.Config {
 	switch p {
 	case config.Podman:
 		c.Podman.Command = config.Command{"podman"}
+		// Rootful, as the tests below were written against: the schema default is
+		// rootless now, so a test that wants it sets Rootful = false.
+		c.Podman.Rootful = true
 		c.Podman.Container.Name = "sol-pod"
 		c.Podman.Container.RunUser = "1000:0" // config.RootlessRunUser, which ctrCfg skips deriving
 		c.Podman.Container.Mem = "6898m"
@@ -183,7 +186,7 @@ func TestManagerCheckDryRun(t *testing.T) {
 func TestCheckEnvReportsBaseDirOnlyWhenSet(t *testing.T) {
 	for _, tc := range []struct{ base, want, unwanted string }{
 		{"/srv/solace-base", "baseDir=/srv/solace-base (legacy bundle clean-up only)", ""},
-		{"", "rootless=false quadletDir=/etc/containers/systemd", "baseDir="},
+		{"", "rootful=true quadletDir=/etc/containers/systemd", "baseDir="},
 	} {
 		cfg := ctrCfg(config.Podman, "false")
 		cfg.Podman.BaseDir = tc.base
@@ -221,7 +224,7 @@ func TestManagerCheckStandaloneDNSWarnsOnly(t *testing.T) {
 
 func TestManagerPrepHostRootlessUsesUnshareChown(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "false") // standalone -> PSK step is skipped
-	cfg.Podman.Rootless = true
+	cfg.Podman.Rootful = false
 	m, rr, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 1000 } // rootless as non-root: euid guard passes
 	// PrepHost runs the whole podman host-readiness block first (rootless.go), so
@@ -256,7 +259,7 @@ func TestManagerPrepHostRootlessUsesUnshareChown(t *testing.T) {
 // there -- a directory made for a private key that never arrives is just clutter.
 func TestManagerPrepHostLeavesBaseDirAlone(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "false")
-	cfg.Podman.Rootless = true
+	cfg.Podman.Rootful = false
 	cfg.Podman.BaseDir = "/srv/solace-base"
 	m, rr, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 1000 }
@@ -276,7 +279,7 @@ func TestManagerPrepHostLeavesBaseDirAlone(t *testing.T) {
 // bare "permission denied" says neither of.
 func TestManagerPrepHostDirectoryErrors(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "false")
-	cfg.Podman.Rootless = true
+	cfg.Podman.Rootful = false
 	m, rr, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 1000 }
 	rr.outFor = healthyRootlessOut(healthyNrOpen)
@@ -297,7 +300,7 @@ func TestManagerPrepHostDirectoryErrors(t *testing.T) {
 // skipped assertions -- the same shape Preflight uses, one level up.
 func TestPrepHostRootlessDryRunSkipsTheReadinessBlock(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "false")
-	cfg.Podman.Rootless = true
+	cfg.Podman.Rootful = false
 	m, buf := newEchoMgr(cfg, config.Podman)
 	if err := m.PrepHost(context.Background()); err != nil {
 		t.Fatalf("PrepHost: %v", err)
@@ -768,46 +771,174 @@ func containsStr(list []string, want string) bool {
 // values -- a test diagnostic must not print a secret either.
 func maskedKeys(env []string) string { return runner.MaskEnv(env) }
 
+// versionAnswer makes the capRunner answer `podman version` with v and nothing else,
+// which is all the secrets path asks of it.
+func versionAnswer(rr *capRunner, v string) {
+	rr.outFor = func(name string, args []string) []byte {
+		if name == "podman" && len(args) > 0 && args[0] == "version" {
+			return []byte(v)
+		}
+		return nil
+	}
+}
+
+// TestManagerDeployPodmanCreatesSecrets covers both create paths, chosen by the
+// podman client version (asked once per deploy): 4.7 and later replaces in one
+// `secret create --replace`, anything older removes the secret and then creates it.
 func TestManagerDeployPodmanCreatesSecrets(t *testing.T) {
-	cfg := ctrCfg(config.Podman, "true")
-	cfg.Redundancy.PSK = "test-psk"
+	names := []string{"sol-pod-admin-password", "sol-pod-redundancy-psk"}
+	for _, tc := range []struct {
+		name, version string
+		replace       bool
+	}{
+		{"podman 4.6.1 removes then creates", "4.6.1\n", false},
+		{"podman 5.2.0 replaces in one create", "5.2.0\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := ctrCfg(config.Podman, "true")
+			cfg.Redundancy.PSK = "test-psk"
+			cfg.Podman.QuadletDir = t.TempDir()
+			m, rr, _ := newCapMgr(cfg, config.Podman)
+			m.Geteuid = func() int { return -1 }
+			versionAnswer(rr, tc.version)
+			if err := m.Deploy(context.Background(), config.Primary); err != nil {
+				t.Fatalf("Deploy: %v", err)
+			}
+			if n := countCalls(rr, "podman", []string{"version", "--format", "{{.Client.Version}}"}); n != 1 {
+				t.Errorf("the client version is asked once per deploy, was asked %d times:\n%+v", n, rr.calls)
+			}
+			// Names carry the container name, so two brokers on one host cannot overwrite
+			// each other's entries in the shared podman store.
+			for _, name := range names {
+				rm := hasCall(rr, "podman", []string{"secret", "rm", "--ignore", name})
+				plain := hasCall(rr, "podman", []string{"secret", "create", name, "-"})
+				replaced := hasCall(rr, "podman", []string{"secret", "create", "--replace", name, "-"})
+				if tc.replace && (rm || plain || !replaced) {
+					t.Errorf("%s: want one `secret create --replace` alone (rm=%v plain=%v replace=%v):\n%+v",
+						name, rm, plain, replaced, rr.calls)
+				}
+				if !tc.replace && (!rm || !plain || replaced) {
+					t.Errorf("%s: want `secret rm --ignore` then a plain create (rm=%v plain=%v replace=%v):\n%+v",
+						name, rm, plain, replaced, rr.calls)
+				}
+				if !tc.replace {
+					rmAt := callIndex(rr, "podman", []string{"secret", "rm", "--ignore", name})
+					createAt := callIndex(rr, "podman", []string{"secret", "create", name, "-"})
+					if rmAt > createAt {
+						t.Errorf("%s: the rm must come before the create, got rm at %d and create at %d", name, rmAt, createAt)
+					}
+				}
+			}
+			// The values ride stdin, so they must never appear in an argv.
+			for _, c := range rr.calls {
+				for _, a := range c.args {
+					for _, leak := range []string{"secret-pass", "test-psk"} {
+						if strings.Contains(a, leak) {
+							t.Errorf("secret value reached an argv: %s %v", c.name, c.args)
+						}
+					}
+				}
+			}
+			assertMode(t, filepath.Join(cfg.Podman.QuadletDir, "sol-pod.container"), 0o600)
+		})
+	}
+}
+
+// TestManagerDeployPodmanReplaceOnlyOnPodman47 is the floor, from the other side: the
+// pin that no argv may carry --replace is gone, since podman 4.7 and later has it and the
+// deploy uses it there. What stays pinned is that it is NEVER sent below 4.7, nor when the
+// version cannot be read or parsed, which is what keeps the older floor working.
+func TestManagerDeployPodmanReplaceOnlyOnPodman47(t *testing.T) {
+	for _, tc := range []struct {
+		name, version string
+		fail          bool
+		want          bool
+	}{
+		{"4.6.9 is below the floor", "4.6.9\n", false, false},
+		{"4.7.0 is the floor", "4.7.0\n", false, true},
+		{"surrounding space is ignored", "  5.2.0 \n", false, true},
+		{"an unparseable version", "podman\n", false, false},
+		{"an empty answer", "", false, false},
+		{"a probe that fails", "5.2.0\n", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := ctrCfg(config.Podman, "false")
+			cfg.Podman.QuadletDir = t.TempDir()
+			m, rr, _ := newCapMgr(cfg, config.Podman)
+			m.Geteuid = func() int { return -1 }
+			versionAnswer(rr, tc.version)
+			if tc.fail {
+				rr.outFail = func(name string, args []string) error {
+					if len(args) > 0 && args[0] == "version" {
+						return errors.New("boom")
+					}
+					return nil
+				}
+			}
+			if err := m.Deploy(context.Background(), config.Primary); err != nil {
+				t.Fatalf("Deploy: %v", err)
+			}
+			got := false
+			for _, c := range rr.calls {
+				if slices.Contains(c.args, "--replace") {
+					got = true
+				}
+			}
+			if got != tc.want {
+				t.Errorf("--replace sent = %v, want %v:\n%+v", got, tc.want, rr.calls)
+			}
+		})
+	}
+}
+
+// TestManagerDeployPreviewNeverReplaces: the Echo runner probes nothing, so a preview
+// shows the remove-then-create pair that works on every supported podman.
+func TestManagerDeployPreviewNeverReplaces(t *testing.T) {
+	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = t.TempDir()
-	m, rr, _ := newCapMgr(cfg, config.Podman)
-	m.Geteuid = func() int { return -1 }
+	m, buf := newEchoMgr(cfg, config.Podman)
 	if err := m.Deploy(context.Background(), config.Primary); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
-	// Names carry the container name, so two brokers on one host cannot overwrite
-	// each other's entries in the shared podman store.
-	for _, name := range []string{"sol-pod-admin-password", "sol-pod-redundancy-psk"} {
-		// Remove-then-create, not `create --replace`: --replace needs podman 4.7
-		// while the rest of the wiring needs 4.5, and `rm --ignore` makes the pair
-		// idempotent the same way.
-		if !hasCall(rr, "podman", []string{"secret", "rm", "--ignore", name}) {
-			t.Errorf("Deploy should remove any existing podman secret %s first:\n%+v", name, rr.calls)
-		}
-		if !hasCall(rr, "podman", []string{"secret", "create", name, "-"}) {
-			t.Errorf("Deploy should create podman secret %s:\n%+v", name, rr.calls)
-		}
+	out := buf.String()
+	if strings.Contains(out, "--replace") || strings.Contains(out, "{{.Client.Version}}") {
+		t.Errorf("a preview must not probe the version or echo --replace:\n%s", out)
 	}
-	// The floor is the point, so pin the flag's absence rather than only the new
-	// shape's presence: this is what stops --replace creeping back in.
+	if !strings.Contains(out, "secret rm --ignore") {
+		t.Errorf("a preview shows the remove-then-create pair:\n%s", out)
+	}
+}
+
+// TestManagerDeployRestartsAReloadingUnit: `systemctl is-active` exits 0 for
+// "reloading" as well as "active", and a unit in either state is running, so a changed
+// unit is restarted rather than handed a start that does nothing.
+func TestManagerDeployRestartsAReloadingUnit(t *testing.T) {
+	cfg := ctrCfg(config.Podman, "false")
+	cfg.Podman.QuadletDir = t.TempDir()
+	m, rr, _ := newCapMgr(cfg, config.Podman)
+	m.Geteuid = func() int { return -1 }
+	m.RestartApproved = true
+	rr.out = []byte("reloading\n")
+	if err := m.Deploy(context.Background(), config.Primary); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if !hasCall(rr, "systemctl", withUser(cfg, "restart", "sol-pod.service")) {
+		t.Errorf("a reloading unit must be restarted:\n%+v", rr.calls)
+	}
+	if hasCall(rr, "systemctl", withUser(cfg, "start", "sol-pod.service")) {
+		t.Errorf("a start on a running unit does nothing, so it must not be the answer:\n%+v", rr.calls)
+	}
+}
+
+// countCalls is hasCall's counting form, for the probes that must run exactly once.
+func countCalls(rr *capRunner, name string, args []string) int {
+	n := 0
 	for _, c := range rr.calls {
-		if strings.Contains(strings.Join(c.args, " "), "--replace") {
-			t.Errorf("no argv may carry --replace, which would raise the podman floor to 4.7: %v", c.args)
+		if c.name == name && eqArgs(c.args, args) {
+			n++
 		}
 	}
-	// The values ride stdin, so they must never appear in an argv.
-	for _, c := range rr.calls {
-		for _, a := range c.args {
-			for _, leak := range []string{"secret-pass", "test-psk"} {
-				if strings.Contains(a, leak) {
-					t.Errorf("secret value reached an argv: %s %v", c.name, c.args)
-				}
-			}
-		}
-	}
-	assertMode(t, filepath.Join(cfg.Podman.QuadletDir, "sol-pod.container"), 0o600)
+	return n
 }
 
 func TestManagerDeployRejectsEmptySecret(t *testing.T) {
@@ -880,7 +1011,7 @@ func TestManagerDeployPodmanWritesUnit(t *testing.T) {
 	// Match this process's euid so the rootless/rootful guard passes on any host
 	// (on Windows Geteuid()<0 and the guard is skipped entirely).
 	if os.Geteuid() != 0 {
-		cfg.Podman.Rootless = true
+		cfg.Podman.Rootful = false
 		cfg.Podman.SystemctlUser = "--user"
 	}
 	m, rr, _ := newCapMgr(cfg, config.Podman)
@@ -1070,7 +1201,7 @@ func TestManagerDeletePodmanRemovesSecrets(t *testing.T) {
 
 func TestManagerDeletePodmanPurgeRootless(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "false")
-	cfg.Podman.Rootless = true
+	cfg.Podman.Rootful = false
 	cfg.Podman.QuadletDir = t.TempDir()
 	m, buf := newEchoMgr(cfg, config.Podman)
 	if err := m.Delete(context.Background(), true); err != nil {
@@ -1220,7 +1351,7 @@ func TestManagerStopAndRemoveStopFailsProbeUnansweredBlocks(t *testing.T) {
 // TestManagerLifecyclePodmanSystemctl covers Start/Stop/Restart on podman: all
 // three drive systemd rather than the engine directly, since the quadlet unit
 // owns the container's lifecycle. Both rootful and rootless are covered because
-// systemctlArgs prepends `--user` only in the rootless case.
+// the user flag (`--user`) is set only in the rootless case.
 func TestManagerLifecyclePodmanSystemctl(t *testing.T) {
 	for _, rootless := range []bool{false, true} {
 		label := "rootful"
@@ -1524,7 +1655,7 @@ func TestManagerPrepHostChownError(t *testing.T) {
 
 func TestManagerPrepHostRootlessUnshareChownError(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "false")
-	cfg.Podman.Rootless = true
+	cfg.Podman.Rootful = false
 	m, rr, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 1000 } // avoid the rootless-as-root WARN noise
 	// The whole readiness block has to PASS for the chown to be reached at all --
@@ -1595,7 +1726,7 @@ func TestManagerDeployPodmanStartError(t *testing.T) {
 
 func TestManagerDeployPodmanEUIDGuardFails(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "false")
-	cfg.Podman.Rootless = true
+	cfg.Podman.Rootful = false
 	cfg.Podman.QuadletDir = t.TempDir()
 	m, _, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 0 } // rootless as root -> guard rejects
@@ -1642,15 +1773,17 @@ func TestManagerDeployDockerComposeUpError(t *testing.T) {
 func TestManagerDeployPodmanSecretError(t *testing.T) {
 	// "--ignore" appears only in the remove argv, "create" only in the create argv,
 	// so each subtest fails exactly one half.
-	for _, tc := range []struct{ name, failOnToken string }{
-		{"remove half fails", "--ignore"},
-		{"create half fails", "create"},
+	for _, tc := range []struct{ name, failOnToken, version string }{
+		{"remove half fails", "--ignore", "4.6.1\n"},
+		{"create half fails", "create", "4.6.1\n"},
+		{"create --replace fails", "create", "5.2.0\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := ctrCfg(config.Podman, "false")
 			cfg.Podman.QuadletDir = t.TempDir()
 			m, rr, _ := newCapMgr(cfg, config.Podman)
 			m.Geteuid = func() int { return -1 }
+			versionAnswer(rr, tc.version)
 			rr.fail = failOn(tc.failOnToken)
 			err := m.Deploy(context.Background(), config.Primary)
 			if err == nil {
@@ -2022,40 +2155,42 @@ func TestStatusListingCarriesNoPortsColumn(t *testing.T) {
 
 // TestGuardPodmanEUID is the ONE definition of the rootless/rootful invariant, the
 // same function cli.prepare runs before any podman command and Deploy/PrepHost run
-// again at the two sites where a wrong-account run does lasting damage. The three
-// passes are as load-bearing as the two failures: docker has no rootless mode in
-// this schema, a preview reaches no host, and a platform with no POSIX euid still
-// has to render.
+// again at the two sites where a wrong-account run does lasting damage. Rootless is
+// the default (rootful false), and rootful is only ever deployed by root, on request.
+// The passes are as load-bearing as the refusals: docker has no rootless mode in this
+// schema, a preview reaches no host, and a platform with no POSIX euid still has to
+// render.
 func TestGuardPodmanEUID(t *testing.T) {
 	cases := []struct {
 		name     string
 		platform config.Platform
 		echo     bool
-		rootless bool
+		rootful  bool
 		euid     int
 		wantErr  bool
 	}{
-		{"rootless as root fails", config.Podman, false, true, 0, true},
-		{"rootful as non-root fails", config.Podman, false, false, 1000, true},
-		{"rootless as non-root passes", config.Podman, false, true, 1000, false},
-		{"rootful as root passes", config.Podman, false, false, 0, false},
-		{"non-posix euid skips guard", config.Podman, false, false, -1, false},
-		{"docker is never guarded", config.Docker, false, true, 0, false},
-		{"docker as non-root too", config.Docker, false, false, 1000, false},
-		{"echo runner reaches no host", config.Podman, true, false, 1000, false},
+		{"root without rootful is refused", config.Podman, false, false, 0, true},
+		{"rootful as non-root is refused", config.Podman, false, true, 1000, true},
+		{"rootless as non-root passes", config.Podman, false, false, 1000, false},
+		{"rootful as root passes", config.Podman, false, true, 0, false},
+		{"non-posix euid keeps the setting (rootless)", config.Podman, false, false, -1, false},
+		{"non-posix euid keeps the setting (rootful)", config.Podman, false, true, -1, false},
+		{"docker is never guarded", config.Docker, false, false, 0, false},
+		{"docker as non-root too", config.Docker, false, true, 1000, false},
+		{"echo runner reaches no host", config.Podman, true, true, 1000, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := ctrCfg(tc.platform, "false")
-			cfg.Podman.Rootless = tc.rootless
+			cfg.Podman.Rootful = tc.rootful
 			var r runner.Runner = &capRunner{}
 			if tc.echo {
 				r = runner.Echo{W: io.Discard}
 			}
 			err := GuardPodmanEUID(cfg, tc.platform, r, tc.euid)
 			if tc.wantErr != (err != nil) {
-				t.Errorf("GuardPodmanEUID %s rootless=%t euid=%d: err=%v, wantErr=%t",
-					tc.platform, tc.rootless, tc.euid, err, tc.wantErr)
+				t.Errorf("GuardPodmanEUID %s rootful=%t euid=%d: err=%v, wantErr=%t",
+					tc.platform, tc.rootful, tc.euid, err, tc.wantErr)
 			}
 		})
 	}
@@ -2063,19 +2198,22 @@ func TestGuardPodmanEUID(t *testing.T) {
 
 // TestGuardPodmanEUIDMessagesNameTheKeyAndTheFix: both refusals are read by an
 // operator who has to decide between re-running differently and editing the file,
-// so each names the key, the account it found, and both ways out.
+// so each names the key (podman.rootful, passed to the shared rule), the account it
+// found, and the ways out.
 func TestGuardPodmanEUIDMessagesNameTheKeyAndTheFix(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "false")
-	cfg.Podman.Rootless = true
+	cfg.Podman.Rootful = false
 	err := GuardPodmanEUID(cfg, config.Podman, &capRunner{}, 0)
-	for _, want := range []string{"podman.rootless=true", "running as root", "without sudo", "podman.rootless=false"} {
+	for _, want := range []string{"running as root", "podman.rootful=true", "rootful podman is deployed only when asked for",
+		"without sudo"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("the rootless-as-root refusal should name %q, got: %v", want, err)
+			t.Errorf("the root-without-rootful refusal should name %q, got: %v", want, err)
 		}
 	}
-	cfg.Podman.Rootless = false
+	cfg.Podman.Rootful = true
 	err = GuardPodmanEUID(cfg, config.Podman, &capRunner{}, 1000)
-	for _, want := range []string{"podman.rootless=false", "requires root", "euid 1000", "sudo", "podman.rootless=true"} {
+	for _, want := range []string{"podman.rootful=true", "requires root", "euid 1000", "sudo",
+		"remove podman.rootful to deploy rootless"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("the rootful-as-non-root refusal should name %q, got: %v", want, err)
 		}
@@ -2083,18 +2221,18 @@ func TestGuardPodmanEUIDMessagesNameTheKeyAndTheFix(t *testing.T) {
 }
 
 // TestManagerPrepHostRootlessAsRootFailsHard covers B6/M6: PrepHost used to only
-// WARN when podman.rootless=true but the process is root, then went on to
+// WARN when deploying rootless but the process is root, then went on to
 // mkdir/chown under root's namespace mapping -- leaving a data directory the
 // later rootless deploy cannot use. It now shares Deploy's checkPodmanEUID and
 // must stop before either, so the invariant has one definition and one message.
 func TestManagerPrepHostRootlessAsRootFailsHard(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "false")
-	cfg.Podman.Rootless = true
+	cfg.Podman.Rootful = false
 	m, rr, _ := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 0 }
 	err := m.PrepHost(context.Background())
 	if err == nil {
-		t.Fatal("PrepHost must fail when podman.rootless=true but running as root")
+		t.Fatal("PrepHost must fail when podman.rootful is unset (rootless) but running as root")
 	}
 	if !strings.Contains(err.Error(), "running as root") {
 		t.Errorf("error should name the invariant, got: %v", err)

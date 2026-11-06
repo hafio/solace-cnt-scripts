@@ -15,7 +15,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/podman"
 	"github.com/hafio/go-deploy-utility/runner"
+	"github.com/hafio/go-deploy-utility/systemd"
 
 	"solace/internal/config"
 	"solace/internal/engine"
@@ -289,11 +291,11 @@ func (m *Manager) CheckEnv() {
 		// server certificate now rides podman's secret store, and the directory is
 		// consulted only to delete the bundle file an earlier build wrote there
 		// (removeLegacyCertBundle).
-		podman := fmt.Sprintf("rootless=%t quadletDir=%s", cfg.Podman.Rootless, cfg.Podman.QuadletDir)
+		podmanRow := fmt.Sprintf("rootful=%t quadletDir=%s", cfg.Podman.Rootful, cfg.Podman.QuadletDir)
 		if cfg.Podman.BaseDir != "" {
-			podman += fmt.Sprintf(" baseDir=%s (legacy bundle clean-up only)", cfg.Podman.BaseDir)
+			podmanRow += fmt.Sprintf(" baseDir=%s (legacy bundle clean-up only)", cfg.Podman.BaseDir)
 		}
-		rows = append(rows, output.KV{Key: "podman", Value: podman})
+		rows = append(rows, output.KV{Key: "podman", Value: podmanRow})
 	} else {
 		// The configured value, like the runtime line above -- CheckEnv reports what
 		// the env file says, and Reachable (next in Check) is what fails loud if the
@@ -568,10 +570,12 @@ func certDigest(bundle string, preview bool) string {
 // value on stdin so it never reaches an argv or the echoed command. It reports
 // whether the server certificate changed since the last deploy.
 //
-// Remove-then-create, rather than `create --replace`: written when the floor was 4.5
-// and --replace needed 4.7, and kept because the pair is idempotent the same way --
-// `rm --ignore` makes a missing secret a success, so a redeploy with a rotated value
-// works, and a first deploy with nothing in the store works.
+// `create --replace` where podman has it (4.7 and later, asked once per call through
+// podman.Version and podman.SupportsReplace), and remove-then-create below that: the
+// pair is idempotent the same way -- `rm --ignore` makes a missing secret a success, so
+// a redeploy with a rotated value works, and a first deploy with nothing in the store
+// works. A version that cannot be read, or the Echo runner, takes the older pair, so a
+// preview shows the argv that works on every supported podman.
 //
 // A failure of the rm half is NOT warned away. --ignore already absorbs the only
 // benign case, so anything left is real -- a store this user cannot write, say --
@@ -591,9 +595,11 @@ func (m *Manager) createPodmanSecrets(ctx context.Context, secrets []render.Cont
 	if err != nil {
 		return false, err
 	}
+	base := r.Argv()
+	replace := len(secrets) > 0 && m.secretReplace(ctx, base)
 	var certChanged bool
 	for _, s := range secrets {
-		create := []string{"secret", "create"}
+		var labels []string
 		if len(s.SourceFiles) > 0 {
 			digest := certDigest(s.Value, m.isEcho())
 			if m.certSecretHash(ctx, r, s.Name) == digest {
@@ -602,18 +608,36 @@ func (m *Manager) createPodmanSecrets(ctx context.Context, secrets []render.Cont
 				continue
 			}
 			certChanged = true
-			create = append(create, "--label", render.CertDigestLabel+"="+digest)
+			labels = append(labels, render.CertDigestLabel+"="+digest)
 		}
-		if err := engine.Run(ctx, m.R, runner.Cmd{Argv: r.Argv("secret", "rm", "--ignore", s.Name)}); err != nil {
-			return false, fmt.Errorf("remove the existing podman secret %q before recreating it (from %s): %w",
-				s.Name, s.ConfigKey, err)
+		if !replace {
+			if rm, ok := podman.RemoveSecrets(base, s.Name); ok {
+				if err := engine.Run(ctx, m.R, rm); err != nil {
+					return false, fmt.Errorf("remove the existing podman secret %q before recreating it (from %s): %w",
+						s.Name, s.ConfigKey, err)
+				}
+			}
 		}
-		if err := engine.Run(ctx, m.R, runner.Cmd{
-			Argv: r.Argv(append(create, s.Name, "-")...), Stdin: []byte(s.Value)}); err != nil {
+		if err := engine.Run(ctx, m.R, podman.CreateSecret(base, s.Name, []byte(s.Value), replace, labels...)); err != nil {
 			return false, fmt.Errorf("create podman secret %q from %s: %w", s.Name, s.ConfigKey, err)
 		}
 	}
 	return certChanged, nil
+}
+
+// secretReplace reports whether this host's podman has `secret create --replace`, from
+// its client version (stdout alone: podman can warn on stderr first). Under the Echo
+// runner nothing is probed and the answer is no. A probe that fails is no as well, which
+// is the safe side: remove-then-create works on every podman this tool supports.
+func (m *Manager) secretReplace(ctx context.Context, base []string) bool {
+	if m.isEcho() {
+		return false
+	}
+	out, err := engine.Output(ctx, m.R, podman.Version(base))
+	if err != nil {
+		return false
+	}
+	return podman.SupportsReplace(string(out))
 }
 
 // UpdateServerCertSecret is the persistence half of `broker configure server-certs` on
@@ -775,7 +799,8 @@ func (m *Manager) deployPodman(ctx context.Context, id config.NodeIdentity, cert
 	changed = changed || certChanged
 	// daemon-reload runs either way: a unit that was already correct may still be
 	// unknown to systemd (a fresh host, or a manual removal).
-	if err := m.systemctl(ctx, "daemon-reload"); err != nil {
+	user := m.systemctlUser()
+	if err := m.systemctl(ctx, systemd.DaemonReload(user)); err != nil {
 		return err
 	}
 	// ASSUMED, NOT VERIFIED: quadlet replaces the container on each service start, so
@@ -794,7 +819,7 @@ func (m *Manager) deployPodman(ctx context.Context, id config.NodeIdentity, cert
 	// (If the ASSUMED note above turns out to be false and a start DOES replace the
 	// container, that changes -- this branch would then need the same guard.)
 	if !m.serviceActive(ctx) {
-		return m.systemctl(ctx, "start", svc)
+		return m.systemctl(ctx, systemd.Start(user, svc))
 	}
 	// `systemctl start` on an active unit is a no-op, so an already-running broker
 	// would silently keep the old image. Restart is the only way to apply a change.
@@ -804,7 +829,7 @@ func (m *Manager) deployPodman(ctx context.Context, id config.NodeIdentity, cert
 		// secret needs the same explicit restart docker's does.
 		if m.RestartApproved {
 			m.progress().Info("unit unchanged; restarting %s to apply any rotated secret.", svc)
-			return m.systemctl(ctx, "restart", svc)
+			return m.systemctl(ctx, systemd.Restart(user, svc))
 		}
 		m.progress().Info("%s is already active on this unit -- nothing to do.", svc)
 		m.progress().Info("if you rotated a secret, re-run with --restart to restart the service with it.")
@@ -814,7 +839,7 @@ func (m *Manager) deployPodman(ctx context.Context, id config.NodeIdentity, cert
 		m.staleWarning("the quadlet unit")
 		return nil
 	}
-	return m.systemctl(ctx, "restart", svc)
+	return m.systemctl(ctx, systemd.Restart(user, svc))
 }
 
 func (m *Manager) deployDocker(ctx context.Context, id config.NodeIdentity) error {
@@ -922,15 +947,16 @@ func (m *Manager) dockerCertChanged(ctx context.Context) (bool, error) {
 }
 
 // serviceActive reports whether this host's broker unit is already active, so
-// Deploy can restart it instead of issuing a no-op start. Under the Echo runner no host
-// state is probed (matching checkPodmanEUID/checkDNS) and the answer is "not
-// active", so the preview shows the plain start path.
+// Deploy can restart it instead of issuing a no-op start. "reloading" counts
+// (systemd.Active): the unit is running, so a changed one needs the restart. Under the
+// Echo runner no host state is probed (matching checkPodmanEUID/checkDNS) and the
+// answer is "not active", so the preview shows the plain start path.
 func (m *Manager) serviceActive(ctx context.Context) bool {
 	if m.isEcho() {
 		return false
 	}
 	state, _ := m.serviceState(ctx)
-	return state == "active"
+	return systemd.Active(state)
 }
 
 // serviceState returns systemd's own word for this unit ("active", "inactive",
@@ -945,16 +971,9 @@ func (m *Manager) serviceActive(ctx context.Context) bool {
 // reached at all. The state TEXT is what separates them; an empty reply is what
 // says the probe itself failed.
 func (m *Manager) serviceState(ctx context.Context) (state string, answered bool) {
-	out, _ := m.systemctlOutput(ctx, "is-active", m.name()+".service")
-	state = strings.TrimSpace(string(out))
-	return state, state != ""
+	out, _ := m.systemctlOutput(ctx, systemd.IsActive(m.systemctlUser(), m.name()+".service"))
+	return systemd.State(string(out))
 }
-
-// stoppedStates are the systemd states that CONFIRM the unit is not running.
-// "unknown" belongs here because it is systemd saying it has no such unit, which
-// is equally safe to remove. Every other answer -- including no answer -- leaves
-// the broker possibly serving, so a teardown refuses rather than guessing.
-var stoppedStates = map[string]bool{"inactive": true, "failed": true, "unknown": true}
 
 // containerRunningKnown reports whether this host's broker container is up, plus the
 // two things a bare bool cannot express: whether the probe answered at all, and its own
@@ -1038,7 +1057,8 @@ func (m *Manager) Delete(ctx context.Context, purge bool) error {
 
 func (m *Manager) deletePodman(ctx context.Context) error {
 	svc := m.name() + ".service"
-	if err := m.systemctl(ctx, "stop", svc); err != nil {
+	user := m.systemctlUser()
+	if err := m.systemctl(ctx, systemd.Stop(user, svc)); err != nil {
 		// "podman info" (Preflight) proves the engine is reachable, not that this
 		// unit actually stopped, so a failed stop needs systemd's own confirmation
 		// before the unit is removed out from under a broker that is still serving
@@ -1047,15 +1067,19 @@ func (m *Manager) deletePodman(ctx context.Context) error {
 		// and "no answer at all" both stop here, because the case this exists for
 		// (an unreachable rootless user session) produces the second one.
 		state, answered := m.serviceState(ctx)
-		if !answered || !stoppedStates[state] {
+		// systemd.Stopped: inactive, failed and "unknown" (systemd saying it has no such
+		// unit, which is equally safe to remove) confirm it. Every other answer, no
+		// answer included, leaves the broker possibly serving, so a teardown refuses
+		// rather than guessing.
+		if !answered || !systemd.Stopped(state) {
 			reported := "state " + state
 			if !answered {
 				reported = "nothing -- the state probe itself failed"
 			}
 			return fmt.Errorf("stop %s failed and it is NOT confirmed stopped (systemd reports %s); "+
 				"the quadlet unit and the data directory are left in place. Stop it by hand "+
-				"(`systemctl %s`) and re-run: %w",
-				svc, reported, strings.Join(m.systemctlArgs([]string{"status", svc}), " "), err)
+				"(`%s`) and re-run: %w",
+				svc, reported, strings.Join(systemd.Systemctl(user, "status", svc).Argv, " "), err)
 		}
 		m.progress().Warn("stopping %s failed but systemd reports it %s; continuing: %v", svc, state, err)
 	}
@@ -1067,7 +1091,7 @@ func (m *Manager) deletePodman(ctx context.Context) error {
 	} else {
 		m.progress().OK("removed quadlet unit %s", unit)
 	}
-	if err := m.systemctl(ctx, "daemon-reload"); err != nil {
+	if err := m.systemctl(ctx, systemd.DaemonReload(user)); err != nil {
 		return err
 	}
 	// With the other things the container consumed, now that the unit is gone. Both
@@ -1095,17 +1119,20 @@ func (m *Manager) removePodmanSecrets(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	base := r.Argv()
 	var keyErr error
 	for _, s := range secrets {
 		if m.isEcho() {
 			m.progress().Info("would remove podman secret %s (skipped in preview).", s.Name)
 			continue
 		}
-		// --ignore, matching createPodmanSecrets so one argv shape serves both call
-		// sites. It also makes the warning below honest: "already removed" stops
+		// podman.RemoveSecrets is --ignore, the same argv createPodmanSecrets' rm half
+		// runs. It also makes the warning below honest: "already removed" stops
 		// being a plausible cause once a missing secret is a success, so what is
-		// left really is a failure worth naming.
-		if err := engine.Run(ctx, m.R, runner.Cmd{Argv: r.Argv("secret", "rm", "--ignore", s.Name)}); err != nil {
+		// left really is a failure worth naming. One secret per call, so one failure
+		// is attributable to its name.
+		rm, _ := podman.RemoveSecrets(base, s.Name)
+		if err := engine.Run(ctx, m.R, rm); err != nil {
 			if len(s.SourceFiles) > 0 {
 				keyErr = fmt.Errorf("remove podman secret %q: it holds the broker's PRIVATE KEY and must not be "+
 					"left in this host's secret store -- remove it by hand (`%s`) and re-run: %w",
@@ -1212,7 +1239,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		return err
 	}
 	if m.P == config.Podman {
-		return m.systemctl(ctx, "start", m.name()+".service")
+		return m.systemctl(ctx, systemd.Start(m.systemctlUser(), m.name()+".service"))
 	}
 	if file := m.composeFile(); m.isEcho() || fileExists(file) {
 		return m.compose(ctx, "-f", file, "start")
@@ -1227,7 +1254,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 		return err
 	}
 	if m.P == config.Podman {
-		return m.systemctl(ctx, "stop", m.name()+".service")
+		return m.systemctl(ctx, systemd.Stop(m.systemctlUser(), m.name()+".service"))
 	}
 	if file := m.composeFile(); m.isEcho() || fileExists(file) {
 		return m.compose(ctx, "-f", file, "stop")
@@ -1242,7 +1269,7 @@ func (m *Manager) Restart(ctx context.Context) error {
 		return err
 	}
 	if m.P == config.Podman {
-		return m.systemctl(ctx, "restart", m.name()+".service")
+		return m.systemctl(ctx, systemd.Restart(m.systemctlUser(), m.name()+".service"))
 	}
 	if file := m.composeFile(); m.isEcho() || fileExists(file) {
 		return m.compose(ctx, "-f", file, "restart")
@@ -1386,7 +1413,7 @@ func (m *Manager) Status(ctx context.Context) error {
 		// The unit is podman's half of "is it up": a quadlet container that systemd
 		// never started has no engine-side row to find.
 		svc := m.name() + ".service"
-		if err := m.systemctl(ctx, "status", svc, "--no-pager"); err != nil {
+		if err := m.systemctl(ctx, systemd.Systemctl(m.systemctlUser(), "status", svc, "--no-pager")); err != nil {
 			m.progress().Warn("systemctl status %s reported non-zero (unit not active?): %v", svc, err)
 		}
 	}
@@ -1419,7 +1446,7 @@ func (m *Manager) statusDetail(ctx context.Context) error {
 func (m *Manager) Describe(ctx context.Context) error {
 	if m.P == config.Podman {
 		svc := m.name() + ".service"
-		if err := m.systemctl(ctx, "cat", svc); err != nil {
+		if err := m.systemctl(ctx, systemd.Systemctl(m.systemctlUser(), "cat", svc)); err != nil {
 			m.progress().Warn("systemctl cat %s failed (unit not installed?): %v", svc, err)
 		}
 	}
@@ -1532,9 +1559,14 @@ func (m *Manager) Shell(ctx context.Context) error {
 
 // --- helpers ----------------------------------------------------------------
 
-// systemctl runs `systemctl [--user] args...` through the Runner, honoring the
-// rootless (`--user`) vs rootful mode derived in config.
-func (m *Manager) systemctl(ctx context.Context, args ...string) error {
+// systemctlUser says whether systemctl talks to the user manager (`--user`): rootless
+// podman, which config derives into SystemctlUser from podman.rootful. It is the one
+// source for the flag every systemd.* builder takes.
+func (m *Manager) systemctlUser() bool { return m.Cfg.Podman.SystemctlUser != "" }
+
+// systemctl runs c, a systemctl command built by the systemd package, through the
+// Runner.
+func (m *Manager) systemctl(ctx context.Context, c runner.Cmd) error {
 	// Every podman systemd path goes through here, not just validate and deploy:
 	// `broker start`/`stop`/`restart`/`remove`/`status` drive systemctl without ever
 	// calling PrepHost, and on rootless they need the same user bus. ensureUserSession
@@ -1542,27 +1574,18 @@ func (m *Manager) systemctl(ctx context.Context, args ...string) error {
 	if err := m.ensureUserSession(ctx); err != nil {
 		return err
 	}
-	return engine.Run(ctx, m.R, runner.Cmd{Argv: append([]string{"systemctl"}, m.systemctlArgs(args)...)})
+	return engine.Run(ctx, m.R, c)
 }
 
-// systemctlOutput captures a systemctl subcommand's stdout, for the state probes
-// (`is-active`) whose answer picks the next step rather than being shown.
-func (m *Manager) systemctlOutput(ctx context.Context, args ...string) ([]byte, error) {
+// systemctlOutput captures c's stdout, for the state probes (`is-active`,
+// `show -p NRestarts`) whose answer picks the next step rather than being shown.
+func (m *Manager) systemctlOutput(ctx context.Context, c runner.Cmd) ([]byte, error) {
 	// Same reason as systemctl above: the state probes run from commands that never
 	// reach PrepHost, and a missing XDG_RUNTIME_DIR would read as "unit not found".
 	if err := m.ensureUserSession(ctx); err != nil {
 		return nil, err
 	}
-	return engine.Output(ctx, m.R, runner.Cmd{Argv: append([]string{"systemctl"}, m.systemctlArgs(args)...)})
-}
-
-// systemctlArgs prepends the `--user` token when the config is rootless, honoring
-// the rootless vs rootful mode derived in config.
-func (m *Manager) systemctlArgs(args []string) []string {
-	if u := m.Cfg.Podman.SystemctlUser; u != "" {
-		return append([]string{u}, args...)
-	}
-	return args
+	return engine.Output(ctx, m.R, c)
 }
 
 // checkPodmanEUID is the executor-side call of the one guard definition

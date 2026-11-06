@@ -44,8 +44,8 @@ An env file that cannot be found, cannot be parsed, fails validation, declares n
 section or declares several without `--platform` is therefore **2**, not 1 -- you chose that
 file, and no amount of waiting fixes it. So is a command or flag that does not apply to the
 platform the file selected, a bad `--pod`/`--platform`/`--since` value,
-`--allow-command` on a command that renders without executing, a `podman.rootless`
-that disagrees with the account you ran as -- `true` under `sudo`, or `false` without it --
+`--allow-command` on a command that renders without executing, a `podman.rootful`
+that disagrees with the account you ran as -- `rootful: true` without root, or root without it --
 a `cli-script`/`shell-script` argument that is a path, or names no file in
 `broker.cliScriptsDir`, and a `--interval` that is not a duration, is below 1s, or comes
 without `--watch`.
@@ -89,9 +89,9 @@ there is no flag to skip it: previewing a command's effect without touching a cl
 what `generate` is for, and a render-only command never runs the preflight because it never
 runs anything.
 
-On podman one check precedes even that probe. The declared `podman.rootless` is compared
-with the account running the command, and a mismatch is refused before `podman info` can
-run as the wrong one -- a rootful `info` succeeding as root says nothing true about the
+On podman one check precedes even that probe. The declared `podman.rootful` (unset is rootless)
+is compared with the account running the command, and a mismatch is refused before `podman info`
+can run as the wrong one -- a rootful `info` succeeding as root says nothing true about the
 rootless user's session. `generate` alone does not check, because it renders from anywhere.
 
 ## Permissions
@@ -184,6 +184,7 @@ of them at runtime**:
 | --- | --- | --- | --- |
 | Docker Compose | 2.23.1 | The `environment:` secret source in the generated compose file | `broker deploy` fails on the secret source. Loud. On a host with only the standalone v1 binary, set `docker.compose: docker-compose` |
 | podman | 4.7 | `ShmSize=` and `Ulimit=` in the quadlet unit. Below them: `HostName=` (4.6), `Secret=...,type=mount` with an absolute target and the `Health*=` keys (4.5), `NoNewPrivileges=` and `DropCapability=` (4.4), and `secret create --label` for the certificate's change-detection label (4.3). The memory cap rides `PodmanArgs=--memory=` rather than quadlet's own `Memory=` key, which needs **5.5** | Quadlet refuses a unit carrying a key it does not know, so the unit fails to load at deploy time. Loud. `TestQuadletKeysAreWithinTheFloor` holds every key the unit emits to this floor |
+| podman 4.7 (adaptive) | 4.7 | `secret create --replace`, which `broker deploy` uses to store a secret in one command | Not a floor: the deploy asks `podman version` once and, when the answer is older than 4.7 or cannot be read, removes the secret with `secret rm --ignore` and then creates it. A preview shows that older pair |
 | Solace broker image | 10.26 | The built-in readiness endpoint the opt-in health check uses with no `cmd` of its own | Refused at load: an older tag and an unidentifiable one are both rejected. This is the one floor that IS checked, because the tag is in the env file rather than on the host |
 | EventBroker operator | bundled 1.4.2 | The `PubSubPlusEventBroker` schema this tool renders | `operator deploy` installs the bundled version. A newer operator already in the cluster prompts before a downgrade -- one the deploy can see; an identity that cannot list Deployments cluster-wide sees only the operator namespace ([Bringing up a fresh cluster](#bringing-up-a-fresh-cluster)) |
 | kubectl / oc | none | Namespace, Secret and the custom resource are all core API shapes plus the operator's own CRD | n/a |
@@ -192,7 +193,9 @@ of them at runtime**:
 Why nothing enforces them: `version` reports this tool's own build, the preflight probes
 reachability and one permission, and `validate` proves only that the runtime answers
 `version`. Parsing an engine's version string is its own class of problem, so the floors are
-documented rather than gated. The consequence worth knowing is that a floor failure is loud on
+documented rather than gated. The one version the deploy does read is podman's own, to choose
+between `secret create --replace` and remove-then-create ([Podman secret flags](#podman-secret-flags)).
+The consequence worth knowing is that a floor failure is loud on
 every row above, so an under-versioned engine tells you at deploy time rather than running a
 broker that quietly cannot read its own credentials.
 
@@ -569,9 +572,11 @@ fields there are not what the engine's own `ps` or a `--format` template would g
 *Health* is read under whichever spelling this engine uses -- docker nests it at
 `State.Health`, podman at `State.Healthcheck` -- and "no healthcheck configured" is printed
 distinctly from "unknown", because those are a deployment choice and a missing answer. On
-podman the *restart count* comes from `systemctl show -p NRestarts`, not from the engine:
+podman the *restart count* comes from `systemctl show <unit> -p NRestarts --value`, not from the engine:
 systemd restarts a quadlet unit by replacing the container, so the engine's own counter
-reads 0 on a broker that has restarted twenty times. `broker status --all` discovers
+reads 0 on a broker that has restarted twenty times. A negative or non-numeric answer, or none
+(systemd answers a unit it does not know with an empty value), is shown as unknown rather than
+as a number. `broker status --all` discovers
 containers by image, and any it finds that this env file does not name gets the engine's
 counter instead -- this deployment's unit is not their unit. `--detail` adds the full
 `inspect` dump on top. The container's **environment is never printed** on either platform:
@@ -676,13 +681,13 @@ group table every host renders, and no host can fill in another machine's.
 
 Both artifacts always carry a `-u` equivalent -- quadlet `User=`/`Group=`, compose `user:` --
 so `container.runUser` overrides whatever USER the image declares. The default is chosen by
-platform, and for podman by `rootless`:
+platform, and for podman by whether it is rootful (`podman.rootful`, default rootless):
 
 | Deployment | Default `runUser` | Why |
 | --- | --- | --- |
 | docker | `1000001:0` | the image's own user and group. The engine is privileged, so container uid 0 would be **host root** |
 | podman, rootful | `1000001:0` | same reason |
-| podman, rootless | `1000:0` | the image's uid is unreachable here (below), so a low id the stock subuid allocation covers |
+| podman, rootless (the default) | `1000:0` | the image's uid is unreachable here (below), so a low id the stock subuid allocation covers |
 
 The rootless split is arithmetic, not preference. A rootless container's uids are drawn from
 the invoking user's subuid range, and a range has to reach the id itself -- so uid `1000001`
@@ -692,7 +697,8 @@ would need **1000002** entries against the 65536 `useradd` allocates by default.
 **The gid is 0 everywhere**, which is the group the broker image expects and also the one gid
 that costs nothing on either side: rootful maps it to the root group, and rootless maps
 container gid 0 to the invoking user's own primary group. So a rootless deployment needs a
-**subuid** allocation but no subgid one.
+**subuid** allocation but no subgid one: id 0 always passes the `id mapping` row, even for a
+user with no subgid allocation at all.
 
 It is worth being explicit about what uid 0 means in each mode, because it is the usual
 source of confusion:
@@ -754,7 +760,7 @@ TLS) and, on an HA member, the redundancy ports 8300-8302 and 8741.
 
 ### Rootless podman prerequisites
 
-`podman.rootless: true` deploys as an ordinary user, and a rootless host needs preparation
+Rootless is the default (`podman.rootful` unset): it deploys as an ordinary user, and a rootless host needs preparation
 most of which this tool deliberately does **not** perform. `validate` and the first step of
 `broker deploy` read the same block, so there is one definition of a ready host; they differ
 only in what they are allowed to do about it. `validate` never changes anything, as its help
@@ -762,10 +768,10 @@ promises:
 
 | Row | What it asserts | If it fails |
 | --- | --- | --- |
-| `euid` | not root when `rootless: true`, root when `false` | refused before any row is read and before `podman info` runs, exit 2. Re-run as the account the file names, or change `podman.rootless`. Probed as the wrong account every row below would answer about a user the deploy never uses |
-| `user session` | `XDG_RUNTIME_DIR` names a directory that exists | you are under `sudo`/`su`/cron, or the user has no session |
-| `id mapping` | this user has a subuid/subgid allocation **and** it reaches `container.runUser` | an administrator allocates or widens it (below), then you run `podman system migrate` |
-| `linger` | `loginctl show-user <uid> --property=Linger` reports `yes` | **`broker deploy` enables it for you**; `validate` reports it |
+| `euid` | rootless (the default): not root. `podman.rootful: true`: root. Root without `rootful: true` is refused, and so is `rootful: true` as an ordinary user | refused before any row is read and before `podman info` runs, exit 2. Re-run as the account the file names -- the rootless user itself, without `sudo` -- or set `podman.rootful: true` and run as root. Rootful is never assumed. Probed as the wrong account every row below would answer about a user the deploy never uses |
+| `user session` | `XDG_RUNTIME_DIR` names a directory that exists (`sh -c 'test -d <dir>'`: exit status 1 is a missing directory, any other failure is a probe that could not run) | you are under `sudo`/`su`/cron, or the user has no session |
+| `id mapping` | `podman info` shows a subuid/subgid range that reaches `container.runUser`; container id 0 is the invoking user and always passes | an administrator allocates or widens it (below), then you run `podman system migrate` |
+| `linger` | `loginctl show-user <uid> --property=Linger` reports `yes` | **`broker deploy` enables it for you**; `validate` reports it, and its refusal names the account and the `loginctl enable-linger` command |
 | `user systemd` | `systemctl --user` answers | `systemctl --user start podman.socket` |
 | `data dir` | `container.dataDir`'s nearest existing parent is writable, or the directory is already writable inside the user namespace | move `dataDir`, or pre-create and chown it |
 
@@ -870,11 +876,20 @@ podman system migrate
 storage that already exist. Setting `podman.container.dataDir` to something under your own
 home (`~/solace/data`) removes the third step entirely.
 
+**The quadlet directory.** A rootless unit is written to `$XDG_CONFIG_HOME/containers/systemd`, or
+`$HOME/.config/containers/systemd` when that is unset, unless `podman.quadletDir` says
+otherwise. The directory is worked out when the env file loads, and a relative `XDG_CONFIG_HOME`
+(which podman's generator cannot use either) or a home directory that cannot be resolved stops the
+load with exit 2 instead of writing the unit somewhere systemd never looks. The generator runs
+under the user's systemd manager, so an `XDG_CONFIG_HOME` exported only from a shell profile is
+not seen there: set it for the manager too, or set `podman.quadletDir`.
+
 **The session variables are set for you too.** `systemctl --user` and
 `loginctl` reach the user bus through `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`, and
 both are unset under `sudo`, `su` and bare cron. Those describe *this invocation* rather than
 the host, so when either is empty it is derived -- `XDG_RUNTIME_DIR=/run/user/<uid>` and
-`DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus`. A value you already set is never
+`DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus` (the shared `rootless.UserSession` rule,
+exported once per run). A value you already set is never
 overwritten, and the report says which half came from where:
 
 ```
@@ -890,8 +905,8 @@ bus.
 
 Boot-start is where linger bites hardest, and why prep enables it rather than asking: the
 quadlet carries `WantedBy=default.target`, but without lingering systemd tears the user's
-instance down at logout and starts nothing at boot, so the broker simply disappears when you
-log out. It is worth knowing that linger is scoped to the **account**, not to this
+instance down at logout and starts nothing at boot, so the user's units -- the broker among
+them -- simply disappear when you log out. It is worth knowing that linger is scoped to the **account**, not to this
 deployment -- it makes every one of that user's services survive logout, and `broker remove`
 does not turn it off again.
 
@@ -917,7 +932,10 @@ what is already on disk, so the three outcomes are distinguishable:
   by hand, check `<runtime> ps` and re-run. A probe that answers and simply finds no match
   (genuinely absent, or stopped) is unaffected. Podman's equivalent path issues a plain
   `systemctl start`, a no-op on an already-active unit, so it carries no such risk and still
-  treats an unanswered probe as "not active".
+  treats an unanswered probe as "not active". The unit's state is the word `systemctl
+  is-active` prints on stdout (its exit status says nothing a stopped unit and an unreachable
+  systemd do not share): `active` and `reloading` both count as running, so a changed unit that
+  is mid-reload is restarted rather than handed a start that does nothing.
 - **Changed, broker not running** -- written and started.
 - **Changed, broker running** -- written, then you are asked before it is bounced.
   `--restart` pre-approves; a non-interactive run declines, leaving the new artifact in
@@ -933,8 +951,9 @@ is rewritten but the running container keeps the previous image.
 **Secrets.** `broker deploy` externalizes every secret before applying the artifact, so no
 value is ever written into the compose file or quadlet unit (see the table under
 [Rendering without applying](#rendering-without-applying) for the names and
-paths). Podman loads them into its own secret store (`podman secret rm --ignore` then
-`podman secret create`, value on stdin) and the unit mounts them; Docker's compose file names a host environment
+paths). Podman loads them into its own secret store (`podman secret create --replace` on 4.7
+and later, else `podman secret rm --ignore` then `podman secret create`; value on stdin) and the
+unit mounts them; Docker's compose file names a host environment
 variable per secret, and `broker deploy` sets those variables for its own `docker compose`
 process, so no value ever reaches an argv or a file beside the compose file. A missing
 value fails the deploy loudly rather than starting a broker without a password.
@@ -1017,7 +1036,7 @@ mate). The rest of the `redundancy.*`
 table and `redundancy.psk` are consumed earlier, by `broker deploy`, which externalizes the
 key as a secret -- it does not create it, and no command here writes to an env file.
 Container-only knobs live under `docker.*` /
-`podman.*` (runtime, compose invocation, container name, data dir, network mode, rootless).
+`podman.*` (runtime, compose invocation, container name, data dir, network mode, rootful).
 See a bare `solace-util examples`, or the same text at [env/sample.yaml](../env/sample.yaml).
 
 ## Rendering without applying
@@ -1027,7 +1046,7 @@ apply before it touches a cluster or a host. There is no `--dry-run` and no per-
 render flag. It prints to stdout and changes nothing: it runs no external command at all,
 which is what makes it the safe way to inspect an env file you did not write (see
 [The command fields are executable content](configuration.md#the-command-fields-are-executable-content)).
-On podman it is also the one command that does not check `podman.rootless` against your
+On podman it is also the one command that does not check `podman.rootful` against your
 account, for the same reason -- a rootless file renders under `sudo` and a rootful one
 renders on a laptop, so what you read is the artifact the file describes:
 
@@ -1894,8 +1913,9 @@ error: session nofile is 524288, needs 1048576.
 ```
 
 The session's hard **core** limit is held to `ulimits.core` the same way the user manager's
-`LimitCORE` is -- `unlimited` for the default `-1`, nothing for `0`. It is read from
-`/proc/self/limits`, which counts bytes whatever shell `sh` is. Hardened baselines often set
+`LimitCORE` is -- `unlimited` for the default `-1`, nothing for `0`. It is read with `cat /proc/self/limits`,
+the `Max core file size` line, which counts bytes whatever shell `sh` is; a host with no
+`/proc` answers nothing and the row is skipped, while an answer that does not parse is refused. Hardened baselines often set
 `* hard core 0`; the container then starts fine, but `podman exec` -- and so every
 `broker cli`, `shell`, `configure` and `perform` command -- fails with
 `crun: setrlimit RLIMIT_CORE: Operation not permitted`. A line naming the user overrides the
@@ -1903,7 +1923,7 @@ The session's hard **core** limit is held to `ulimits.core` the same way the use
 
 ```
 [FAIL] session core: 0 (need infinity)
-error: session core is 0, needs infinity: podman exec, and so every command run inside the broker, would fail with `setrlimit RLIMIT_CORE: Operation not permitted`.
+error: session core is 0, needs infinity: podman exec, and so every command run inside the container, would fail with `setrlimit RLIMIT_CORE: Operation not permitted`. Raise this user's hard core limit to infinity, or lower the container's core ulimit to 0 or less.
   Create /etc/security/limits.d/99-solace.conf as root:
     solace hard core unlimited
     solace soft core unlimited
@@ -1928,16 +1948,18 @@ artifact. And the two drop-ins are not alternatives -- the unit one is the conta
 ceiling, the `limits.d` one is your shell's, and a rootless host wants both.
 
 `validate` reports all of this and changes nothing -- once it is running as the account
-`podman.rootless` names. The wrong account is refused before the first row.
+`podman.rootful` selects. The wrong account is refused before the first row.
 
 ### Podman secret flags
 
-`broker deploy` stores the broker's secrets with `podman secret rm --ignore` followed by
-`podman secret create` (value on stdin) and mounts them into the container (`type=mount`),
-none of which the oldest podman builds support. The symptom is an unknown-flag or unknown-
-directive error at deploy time, because `validate` proves only that the runtime answers
-`version`. See [Version floors](#version-floors) for the floor and why `--replace` is
-deliberately not used.
+`broker deploy` stores the broker's secrets with `podman secret create --replace` (value on
+stdin) when `podman version` reports 4.7 or later, and with `podman secret rm --ignore` followed
+by `podman secret create` below that, or when the version cannot be read; it mounts them into the
+container (`type=mount`), none of which the oldest podman builds support. The symptom is an
+unknown-flag or unknown-directive error at deploy time, because `validate` proves only that the
+runtime answers `version`. See [Version floors](#version-floors) for the floors. The version is
+asked once per deploy, from stdout alone, and a preview (the Echo runner) never asks and shows the
+remove-then-create pair. `broker remove` removes each secret with its own `secret rm --ignore`.
 
 ### Docker compose secrets need compose 2.23.1+
 

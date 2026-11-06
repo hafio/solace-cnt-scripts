@@ -483,7 +483,23 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 				}
 				d.kv("composeFile", v.s("DOCKER_COMPOSE_FILE"))
 			} else {
-				boolean(d, "rootless", "PODMAN_ROOTLESS")
+				// podman.rootless became podman.rootful and the default flipped with it:
+				// rootless is the default now, and the legacy default was rootful. So a
+				// converted file asks for the rootful engine whenever the source did,
+				// by saying PODMAN_ROOTLESS=false or by leaving it unset, and says
+				// nothing for PODMAN_ROOTLESS=true. Either way it keeps its meaning.
+				rootless := false
+				if raw := v.s("PODMAN_ROOTLESS"); raw != "" {
+					b, ok := boolOf(raw)
+					if !ok {
+						warns = append(warns, fmt.Sprintf("PODMAN_ROOTLESS=%q is neither true/yes nor false/no, "+
+							"read as false (rootful)", raw))
+					}
+					rootless = b
+				}
+				if !rootless {
+					d.raw("rootful: true")
+				}
 				d.kv("quadletDir", v.s("QUADLET_DIR"))
 				// No podman.baseDir: it is optional, and its only remaining use is
 				// deleting a certificate file an earlier build of THIS tool wrote --

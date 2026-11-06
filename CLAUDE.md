@@ -28,7 +28,7 @@ env-file reference, [docs/operations.md](docs/operations.md) the day-2 lifecycle
 govulncheck's JSON through, so a fixable vulnerability fails the gate and one with no released
 fix warns.
 
-Shared code (`exitcode`, `notice`, `paritydoc`, `abbrev`, `execguard`, `envref`, `containerart`) comes from `github.com/hafio/go-deploy-utility`.
+Shared code (`exitcode`, `notice`, `paritydoc`, `abbrev`, `execguard`, `envref`, `containerart`, `podman`, `systemd`, `rootless`) comes from `github.com/hafio/go-deploy-utility`.
 Tools build against that module's checkout through an untracked `go.work` (see the module's
 docs/consuming.md) until a tag is pinned.
 
@@ -37,7 +37,7 @@ The layering is enforced by convention, not by a compiler, so it is stated here:
 - **`output` and `examples` import nothing but the stdlib.** That is what lets any
   package use them, and it is why `output` can define the `==> ` prefix once for both `engine`
   and `cli`.
-- **`config` imports only the shared module's `abbrev`, `execguard` and `envref`.** It must never import `convert` (which is why
+- **`config` imports only the shared module's `abbrev`, `execguard`, `envref` and `podman`.** It must never import `convert` (which is why
   `config.Load`'s invalid-YAML hint carries its own bash-file sniff) and never `render` (which
   is why `validate.go` keeps a small copy of the environment-variable folding `render` owns).
 - **`k8s` and `container` import `broker`; the reverse would be a cycle.** `broker.CLIRunner`

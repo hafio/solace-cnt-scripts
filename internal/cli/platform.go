@@ -188,7 +188,7 @@ func prepare(app *App, cmd *cobra.Command) error {
 		return exitcode.AsUsage(err)
 	}
 	// Last, because it needs the config and the runner load built. The DECLARED
-	// podman.rootless is checked against the account running this command before
+	// podman.rootful (unset: rootless) is checked against the account running this command before
 	// ANY podman command -- version, info, exec, cp -- so a mismatch never probes,
 	// deploys into or reads the wrong account's engine. Every executing container
 	// command passes through here, including the fifteen that reach the broker over

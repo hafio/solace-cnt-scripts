@@ -39,13 +39,16 @@ Both tools follow every rule in this section today.
 
 4. **Podman units are driven through systemd.** After the unit file is written the tool runs
    `systemctl [--user] daemon-reload`, then `start`, `stop` or `restart <service>`. The
-   restart count is read with `systemctl [--user] show <unit> -p NRestarts --value`.
+   restart count is read with `systemctl [--user] show <unit> -p NRestarts --value`. Both
+   tools build these commands with the shared `podman`, `systemd` and `rootless` packages.
    `solmq-conn-util`: `internal/runner/runner.go` (`PodmanDeploy`). `solace-util`:
    `internal/container/manager.go`, `internal/container/inspect.go`.
 
 5. **Podman secrets arrive on stdin.** `podman secret create <name> -` reads the value from
-   stdin. A value never appears on argv. Stale secrets go with `podman secret rm --ignore`.
-   `solmq-conn-util`: `internal/runner/runner.go` (`PodmanSecretCreate`). `solace-util`:
+   stdin. A value never appears on argv. On podman 4.7 and later a secret is replaced with
+   `secret create --replace`; below that it is removed with `podman secret rm --ignore`
+   first. Stale secrets go with `podman secret rm --ignore`. `solmq-conn-util`:
+   `internal/runner/runner.go` (`PodmanSecretCreate`). `solace-util`:
    `internal/container/manager.go` (`createPodmanSecrets`).
 
 6. **Exec, logs and upload share one argv shape.** Kubernetes uses
@@ -109,16 +112,16 @@ Both tools follow every rule in this section today.
 | --- | --- | --- | --- |
 | Compose file | handed to compose on stdin, never written | written beside the env file and compared on redeploy | decided, not yet applied: stdin |
 | Confirmation without a terminal | fails at once with exit 1 and names `--no-prompt` | fails at once with exit 1 and names `--no-prompt` | aligned |
-| Rootless podman | derived from the effective uid | declared as `podman.rootless`; a uid mismatch is refused; `XDG_RUNTIME_DIR` and the DBus address are repaired | decided, not yet applied |
-| Quadlet directory | `$HOME/.config/containers/systemd`; `XDG_CONFIG_HOME` is not read | `$XDG_CONFIG_HOME/containers/systemd`, configurable | adopt: solmq-conn-util honours `XDG_CONFIG_HOME` |
-| Host checks for rootless podman | none; a short subuid range warns | linger, session core limit, `fs.nr_open`, user manager limits, session nofile; a short subuid range refuses | adopt: solmq-conn-util takes linger, session repair and the core limit |
+| Rootless podman | rootless unless `podman.rootful: true`, which needs root; root without it is refused; `XDG_RUNTIME_DIR` and the DBus address are repaired | the same | aligned |
+| Quadlet directory | `$XDG_CONFIG_HOME/containers/systemd`, else `$HOME/.config/containers/systemd`; a relative `XDG_CONFIG_HOME` is refused | the same, and `podman.quadletDir` overrides it | aligned |
+| Host checks for rootless podman | linger, which deploy enables for its own account; session repair | the same, plus the limits under Inherent differences | aligned |
 | Namespace on deploy | the Namespace document is applied on every deploy | read by name and created only when absent | adopt: solmq-conn-util |
 | Waiting after a change | none | `rollout status --timeout=300s`, then the resource is read back | adopt: solmq-conn-util |
 | Permission probes | one per verb, including status, logs and cli | every kind before the first write; none for status, logs and exec | adopt: solmq-conn-util probes every kind it writes; read probes in solace-util are open |
 | `can-i` answer parsing | `no` and `no - ...` | last line; `no`, `no - ...` and `no (...)`; anything but `yes` refuses; unanswered is distinct from refused | adopt: solmq-conn-util takes the wider parser |
-| Podman secret replace | `secret create --replace` on podman 4.7 and later, remove then create below | remove then create; skipped when the digest label is unchanged | adopt: solace-util uses `--replace` on 4.7 and later |
+| Podman secret replace | `secret create --replace` on podman 4.7 and later, remove then create below | the same; skipped when the digest label is unchanged | aligned |
 | Redeploy over a running service | restarts or recreates without asking | compares the artifact and the certificate digest, then asks; `--restart` pre-approves | open |
-| subuid range too small | warning | error | open |
+| subuid range too small | asked of `podman info` and refused, with a `usermod` fix naming both ranges, in deploy and validate | the same | aligned |
 | Namespace gate details | discounts objects owned by the deployment; does not probe `delete namespaces` | counts every object; probes `delete namespaces` first | open |
 | Output | buffered; one `ok:` or `error:` line at the end | streamed as it happens | open |
 
@@ -131,10 +134,10 @@ Both tools follow every rule in this section today.
 fails at once with exit 1. The message names `--no-prompt`. No answer is read from a pipe.
 Under a mintty-style shell stdin is a pipe even at a terminal, so pass `--no-prompt` there.
 
-**Rootless podman.** A non-root invoker deploys rootless. A declared `rootless: false` under a
-non-root uid is an error that names the uid. Root follows the declared value. A declared
-rootless deploy as root means deploying for the declared non-root user. Until that is built,
-both tools refuse that combination with the same message.
+**Rootless podman.** Rootless is the default: a non-root invoker deploys rootless as itself.
+Rootful podman is deployed only when `podman.rootful: true` asks for it, and only by root; a
+non-root invoker asking for it is refused, naming the uid. Root without it is refused too,
+since rootful is never assumed. Root deploying on behalf of a rootless user is a later step.
 
 **Redeploy over a running service.** The platform decides what changed. Compose recreates a
 container whose configuration changed. systemd restarts a unit whose file changed. Whether a
@@ -150,8 +153,8 @@ These follow from what each tool deploys and stay as they are.
   `solace-util` starts `bash` or `cli -A` in the broker pod.
 - **Registry.** `solmq-conn-util` pulls the image to read its entrypoint. `solace-util` logs
   in to the registry and never pulls.
-- **Host limits.** The `fs.nr_open`, nofile, memlock and shm checks match the broker's needs
-  and stay in `solace-util`.
+- **Host limits.** The `fs.nr_open`, nofile, memlock, shm and session core checks match the
+  broker's needs and stay in `solace-util`. `solmq-conn-util`'s unit asks for no core limit.
 
 ## Runner seams
 

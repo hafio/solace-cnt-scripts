@@ -107,6 +107,22 @@ func load(t *testing.T, p config.Platform) *config.Config {
 	return c
 }
 
+// loadRootful is the podman sample under the rootful engine. The sample deploys
+// rootless, the default, so the flag is set and the two setDefault fields that
+// follow from it are cleared for the second ApplyDefaults pass to derive: RunUser
+// would otherwise keep the rootless 1000:0 in a rootful unit, and QuadletDir the
+// account's own XDG directory. WantedBy and SystemctlUser are assigned
+// unconditionally and need no clearing.
+func loadRootful(t *testing.T) *config.Config {
+	t.Helper()
+	c := load(t, config.Podman)
+	c.Podman.Rootful = true
+	c.Podman.Container.RunUser = ""
+	c.Podman.QuadletDir = ""
+	c.ApplyDefaults(config.Podman)
+	return c
+}
+
 // healthCheckFixture enables the health check with no cmd, so the goldens show the
 // built-in readiness probe, and with the timings ApplyDefaults fills. Shared by the
 // quadlet and compose cases so the two goldens differ only in framing.
@@ -272,22 +288,13 @@ func TestGolden(t *testing.T) {
 			},
 		},
 		{
-			// The rootless framing of the same unit: no cpuset, and the run user and
-			// install target that follow from the same flag. The sample says
-			// rootless: false, so the flag is flipped and RunUser -- a setDefault
-			// field -- is cleared so the second pass derives the rootless one instead
-			// of leaving the rootful one in a rootless unit. WantedBy and
-			// SystemctlUser are assigned unconditionally and need no clearing;
-			// QuadletDir is left rootful deliberately, since it is where the file is
-			// WRITTEN rather than anything in it, and its rootless value is
-			// $XDG_CONFIG_HOME-derived.
-			name: "podman quadlet rootless",
-			file: "podman_quadlet_rootless.golden",
+			// The rootful framing of the same unit: the run user and install target
+			// that follow from podman.rootful: true. The sample leaves it unset, so
+			// every other podman golden is rootless, the default.
+			name: "podman quadlet rootful",
+			file: "podman_quadlet_rootful.golden",
 			gen: func(t *testing.T) []byte {
-				c := load(t, config.Podman)
-				c.Podman.Rootless = true
-				c.Podman.Container.RunUser = ""
-				c.ApplyDefaults(config.Podman)
+				c := loadRootful(t)
 				return Quadlet(c, c.ResolveNode(config.Primary))
 			},
 		},
@@ -978,8 +985,8 @@ func TestScalingTierReachesEveryArtifact(t *testing.T) {
 		t.Errorf("compose missing the 100000-tier limits:\n%s", compose)
 	}
 
-	// Rootful, but only incidentally: a rootless unit carries the same cpuset
-	// (TestRootlessQuadletCarriesTheSameCaps).
+	// Rootless, the sample's default, but only incidentally: a rootful unit carries
+	// the same cpuset (TestRootlessQuadletCarriesTheSameCaps).
 	p := load(t, config.Podman)
 	p.Scaling.MaxConnections = 100000
 	p.Podman.Container.Mem = ""
@@ -1120,13 +1127,10 @@ func TestComposeQuotesTheCpuset(t *testing.T) {
 // and container.checkLimits refuses a host without it. So the two units carry the
 // same caps and differ only in the run user and the install target.
 func TestRootlessQuadletCarriesTheSameCaps(t *testing.T) {
-	rootful := load(t, config.Podman)
+	rootful := loadRootful(t)
 	unit := string(Quadlet(rootful, rootful.ResolveNode(config.Primary)))
 
 	rootless := load(t, config.Podman)
-	rootless.Podman.Rootless = true
-	rootless.Podman.Container.RunUser = ""
-	rootless.ApplyDefaults(config.Podman)
 	ru := string(Quadlet(rootless, rootless.ResolveNode(config.Primary)))
 
 	for _, want := range []string{
@@ -1145,6 +1149,9 @@ func TestRootlessQuadletCarriesTheSameCaps(t *testing.T) {
 	if !strings.Contains(ru, "User=1000\n") || !strings.Contains(ru, "WantedBy=default.target") {
 		t.Errorf("rootless should change the run user and the install target:\n%s", ru)
 	}
+	if !strings.Contains(unit, "User=1000001\n") || !strings.Contains(unit, "WantedBy=multi-user.target") {
+		t.Errorf("rootful should take the image's own user and the system install target:\n%s", unit)
+	}
 }
 
 // renderedArtifact is one compose file or quadlet unit, named by the shape that
@@ -1156,7 +1163,7 @@ type renderedArtifact struct {
 
 // containerArtifacts renders every compose and quadlet shape the renderers produce
 // from the sample: each role, standalone, the opt-in health check, bridge networking
-// with ports published, the host-networking opt-in, and on podman rootless too. The
+// with ports published, the host-networking opt-in, and on podman rootful too. The
 // sample sets no network, so every shape but those two renders the default: bridge,
 // nothing published. The privilege tests run over all of them, so a line emitted on
 // one branch and lost on another -- or a widening token added behind a conditional
@@ -1209,11 +1216,8 @@ func containerArtifacts(t *testing.T) (compose, quadlet []renderedArtifact) {
 			}
 		}
 	}
-	rootless := load(t, config.Podman)
-	rootless.Podman.Rootless = true
-	rootless.Podman.Container.RunUser = ""
-	rootless.ApplyDefaults(config.Podman)
-	quadlet = append(quadlet, renderedArtifact{"rootless", string(Quadlet(rootless, rootless.ResolveNode(config.Primary)))})
+	rootful := loadRootful(t)
+	quadlet = append(quadlet, renderedArtifact{"rootful", string(Quadlet(rootful, rootful.ResolveNode(config.Primary)))})
 	return compose, quadlet
 }
 
@@ -1631,7 +1635,7 @@ const quadletFloor = "4.7"
 // not know, so every [Container] key is a version floor, and a key newer than the
 // documented one fails a deploy on every older host -- the way Memory= (5.5) did
 // on 4.7-5.4. Every key the renderer emits, across the shapes that add keys
-// (health check, bridge ports, host networking, TLS, HA, rootless, the monitor), must
+// (health check, bridge ports, host networking, TLS, HA, rootful, the monitor), must
 // be in artifacttest's release table at or below quadletFloor. A key missing from the
 // table fails too: add it there with the release that introduced it, and raise the
 // documented floor if that is newer.
@@ -1644,10 +1648,7 @@ func TestQuadletKeysAreWithinTheFloor(t *testing.T) {
 	full.Podman.Network.Mode = "bridge"
 	full.Podman.Network.Ports = []string{"8080:8080"}
 	full.TLS.CertPassphrase = "cert-pass"
-	rootless := load(t, config.Podman)
-	rootless.Podman.Rootless = true
-	rootless.Podman.Container.RunUser = ""
-	rootless.ApplyDefaults(config.Podman)
+	rootful := loadRootful(t)
 	// Host networking is no longer the default, so it needs a unit of its own for
 	// Network= to be checked at all.
 	hostNet := load(t, config.Podman)
@@ -1657,7 +1658,7 @@ func TestQuadletKeysAreWithinTheFloor(t *testing.T) {
 	for i, unit := range [][]byte{
 		Quadlet(full, full.ResolveNode(config.Primary)),
 		Quadlet(full, full.ResolveNode(config.Monitor)),
-		Quadlet(rootless, rootless.ResolveNode(config.Primary)),
+		Quadlet(rootful, rootful.ResolveNode(config.Primary)),
 		Quadlet(hostNet, hostNet.ResolveNode(config.Primary)),
 	} {
 		artifacttest.AssertQuadletKeys(t, "fixture unit "+strconv.Itoa(i), string(unit), quadletFloor)

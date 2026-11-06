@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/systemd"
+
 	"solace/internal/config"
 	"solace/internal/output"
 )
@@ -140,11 +142,14 @@ func (m *Manager) restartCount(ctx context.Context, s containerState) (int, bool
 	if m.P != config.Podman || s.containerName() != m.name() {
 		return s.RestartCount, true
 	}
-	out, err := m.systemctlOutput(ctx, "show", "-p", "NRestarts", "--value", m.name()+".service")
+	out, err := m.systemctlOutput(ctx, systemd.NRestarts(m.systemctlUser(), m.name()+".service"))
 	if err != nil {
 		return 0, false
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	// ParseNRestarts refuses a negative or non-numeric answer, and systemd answers a
+	// unit it does not know with an empty value: either way the count is unknown, and
+	// its text is not printed.
+	n, err := systemd.ParseNRestarts(string(out))
 	if err != nil {
 		return 0, false
 	}

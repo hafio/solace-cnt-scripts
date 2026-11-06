@@ -433,12 +433,17 @@ docker:
 
 podman:
   # command: podman                 # same rules as docker.command; only `podman`
-  rootless: false                   # true = user systemd + `podman unshare` chown, and
-                                    # runUser defaults to 1000:0 instead of 1000001:0.
-                                    # Declared, then checked against who runs the
-                                    # command: true refuses under sudo, false requires
-                                    # it. `generate` alone does not check
-  # quadletDir: /etc/containers/systemd   # rootless: $XDG_CONFIG_HOME/containers/systemd
+  # rootful: true                   # unset (or false) = rootless, the DEFAULT: user
+                                    # systemd + `podman unshare` chown, runUser 1000:0,
+                                    # run as this user. true = the rootful engine:
+                                    # system systemd, runUser 1000001:0, and the command
+                                    # needs root. Declared, then checked against who
+                                    # runs the command: true refuses a non-root user,
+                                    # and root without it is refused. `generate` alone
+                                    # does not check. Replaces the removed `rootless:`,
+                                    # which is refused by name
+  # quadletDir: /etc/containers/systemd   # rootless: $XDG_CONFIG_HOME or ~/.config, then
+                                    # containers/systemd; a relative XDG_CONFIG_HOME is refused
   # baseDir: /opt/solace            # optional and UNUSED. Earlier builds wrote the
                                     # server-certificate bundle (the PRIVATE KEY) here;
                                     # it now rides podman's secret store. When set, must
@@ -448,7 +453,7 @@ podman:
     dataDir: /opt/solace/data       # mandatory, must be ABSOLUTE (see docker above)
   #   name: solace
   #   runUser: "1000:0"             # rootful defaults to the image's own 1000001:0;
-                                    # ROOTLESS defaults to 1000:0, because a rootless
+                                    # rootless (the default) is 1000:0, because a rootless
                                     # container's uids come out of this user's subuid
                                     # range and 1000001 would need 1000002 entries
                                     # against a stock 65536. Needs >= 1001 subuids, but
@@ -457,13 +462,13 @@ podman:
                                     # the cost of in-container isolation
   #   mem: 6898m                    # same rules as docker.container.mem
   #   cpuset: 0-1                   # same rules as docker.container.cpuset. Under
-                                    # rootless: true the user@<uid>.service drop-in
+                                    # rootless the user@<uid>.service drop-in
                                     # must delegate the cpuset controller; deploy
                                     # refuses a host where it is missing
   #   monitorCpuset: 0              # same rules as docker.container.monitorCpuset
   #   ulimits:
   #     core: -1                    # same rules as docker.container.ulimits.core. Under
-                                    # rootless: true user@<uid>.service must grant it
+                                    # rootless user@<uid>.service must grant it
   #   healthCheck:                  # same shape as docker.container.healthCheck
   #     enabled: true               # built-in readiness probe; needs broker 10.26+
   # network:                        # same rules as docker.network

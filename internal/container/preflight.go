@@ -57,7 +57,7 @@ func (m *Manager) Preflight(ctx context.Context) error {
 // using.
 func (m *Manager) engineHint() string {
 	if m.P == config.Podman {
-		if m.Cfg.Podman.Rootless {
+		if !m.Cfg.Podman.Rootful {
 			// The three things a rootless `info` fails on, in the order they are worth
 			// trying. The subuid line is here because podman refuses outright on an
 			// account with no allocation, which is how a `useradd --system` or a
@@ -67,8 +67,8 @@ func (m *Manager) engineHint() string {
 				"(and `loginctl enable-linger` so it survives logout); if podman named /etc/subuid, " +
 				"this account has no subuid range and an administrator has to allocate one " +
 				"(`sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $(id -un)`, " +
-				"then `podman system migrate`) -- do NOT use sudo for podman itself, " +
-				"podman.rootless=true deploys as this user"
+				"then `podman system migrate`) -- do NOT use sudo for podman itself; " +
+				"a rootless deployment runs as this user"
 		}
 		return "start the engine: `sudo systemctl start podman.socket`, and re-run with the privileges " +
 			"rootful podman needs"

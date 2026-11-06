@@ -141,7 +141,7 @@ func TestPreflightHintIsPlatformShaped(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := ctrCfg(tc.p, "false")
-			cfg.Podman.Rootless = tc.rootless
+			cfg.Podman.Rootful = !tc.rootless
 			m, rr, _ := newCapMgr(cfg, tc.p)
 			rr.outFail = failOn("info")
 

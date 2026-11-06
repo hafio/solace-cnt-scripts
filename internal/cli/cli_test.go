@@ -122,8 +122,11 @@ func runCtr(t *testing.T, path string, args ...string) (string, error) {
 //
 // An env file must declare its platform section -- even an empty one -- or
 // resolvePlatform refuses it ("declares no platform section"). This fixture
-// declares BOTH docker: {} and podman: {} so the one file still serves either
-// platform; every caller is therefore ambiguous and must pass --platform.
+// declares BOTH a docker and a podman section so the one file still serves either
+// platform; every caller is therefore ambiguous and must pass --platform. The podman
+// section asks for the rootful engine, which every caller here was written against
+// when rootful was the default: rootless would change the quadlet directory, the
+// systemctl argv and the euid every one of them is checked at.
 func writeCtrStandaloneEnv(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ctr-standalone.yaml")
@@ -136,7 +139,8 @@ func writeCtrStandaloneEnv(t *testing.T) string {
 		"semp:\n" +
 		"  adminPass: " + smokeAdminPass + "\n" +
 		"docker: {}\n" +
-		"podman: {}\n"
+		"podman:\n" +
+		"  rootful: true\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write container standalone env: %v", err)
 	}
@@ -880,8 +884,8 @@ func TestGenerateEmitsSecretsBeforeTheCR(t *testing.T) {
 // transcript Echo cannot give, and redundancy-test, which fails over and polls) and
 // secret-bearing prep are covered by the guard, standalone, prompt and error tests
 // instead, so nothing here blocks on a poll loop. The sample is
-// docker compose mode and rootful podman, so status/remove take the compose path
-// and podman systemctl carries no --user.
+// docker compose mode and rootless podman, the default, so status/remove take the
+// compose path and podman systemctl carries --user.
 func TestCtrWiredDryRun(t *testing.T) {
 	cases := []struct {
 		name string
@@ -905,7 +909,7 @@ func TestCtrWiredDryRun(t *testing.T) {
 		{"docker deploy makes the data dir", []string{"broker", "deploy", "--pod", "primary", "--platform", "docker"}, "+ mkdir -p"},
 		{"docker deploy owns the data dir", []string{"broker", "deploy", "--pod", "primary", "--platform", "docker"}, "+ chown"},
 		{"docker deploy broker primary", []string{"broker", "deploy", "--pod", "primary", "--platform", "docker"}, "+ docker compose"},
-		{"podman deploy broker primary", []string{"broker", "deploy", "--pod", "primary", "--platform", "podman"}, "+ systemctl daemon-reload"},
+		{"podman deploy broker primary", []string{"broker", "deploy", "--pod", "primary", "--platform", "podman"}, "+ systemctl --user daemon-reload"},
 		{"docker remove broker", []string{"broker", "remove", "--no-prompt", "--platform", "docker"}, "+ docker compose"},
 		{"podman remove broker", []string{"broker", "remove", "--no-prompt", "--platform", "podman"}, "+ systemctl"},
 	}

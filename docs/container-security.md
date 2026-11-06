@@ -133,8 +133,8 @@ get wrong:
 
 | Engine | Identity | Why |
 | --- | --- | --- |
-| docker, rootful podman | the image's own uid (`1000001`), group `0` | the engine maps container uids straight onto host uids, so container uid 0 **is** host root |
-| rootless podman | a low uid (`1000`), group `0` | it has to fall inside a stock 65536-entry subuid range; a uid near 1000001 would need an allocation no `useradd` default provides |
+| docker, rootful podman (`podman.rootful: true`, which needs root) | the image's own uid (`1000001`), group `0` | the engine maps container uids straight onto host uids, so container uid 0 **is** host root |
+| rootless podman (the default: `podman.rootful` unset) | a low uid (`1000`), group `0` | it has to fall inside a stock 65536-entry subuid range; a uid near 1000001 would need an allocation no `useradd` default provides |
 | Kubernetes | non-zero `runAsUser`, `runAsGroup`, `fsGroup` | the pod security context and the container security context are separate fields and both matter |
 
 Group 0 is not root-the-user: the Solace image expects gid 0 for its own files, and under
@@ -149,8 +149,8 @@ a concrete uid outside that range fails admission. A tool that suggests a litera
 sample configuration should say this next to the suggestion.
 
 The same identity governs the data directory: chown it to the run user on every deploy, and
-under rootless podman do it inside the namespace (`podman unshare chown`), since the host-side
-owner is a subuid nobody can become.
+under rootless podman (the default here) do it inside the namespace (`podman unshare chown`), since
+the host-side owner is a subuid nobody can become.
 
 ### 4. Bind only non-root ports
 
@@ -197,7 +197,7 @@ Six properties make the difference between using that mechanism and only appeari
   and a `*filepath` pointer elsewhere breaks with no error. On RHEL and OpenShift, CRI-O also
   bind-mounts host subscription data over `/run/secrets`. Name the full path you point at.
 - **Values never on argv.** Feed the engine's secret store on stdin (`podman secret create
-  <name> -`), or hand the value to the child process environment, or apply a manifest with
+  [--replace] <name> -`, `--replace` needing podman 4.7), or hand the value to the child process environment, or apply a manifest with
   `kubectl apply -f -`. A command line is visible to every process on the host.
 - **Mode and owner on the mount.** Both docker compose and podman default a mounted secret to
   uid 0, mode 0444 -- world-readable inside the container, and not owned by the non-root user

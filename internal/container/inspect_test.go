@@ -174,7 +174,7 @@ func TestRestartCountComesFromSystemdOnPodman(t *testing.T) {
 		t.Fatalf("podman restart count = (%d, %v), want (12, true) -- systemd's NRestarts, "+
 			"not the engine's %d", got, ok, s.RestartCount)
 	}
-	if !hasCall(rr, "systemctl", []string{"show", "-p", "NRestarts", "--value", "sol-pod.service"}) {
+	if !hasCall(rr, "systemctl", []string{"show", "sol-pod.service", "-p", "NRestarts", "--value"}) {
 		t.Errorf("expected systemd to be asked for NRestarts on the unit:\n%+v", rr.calls)
 	}
 }
@@ -237,6 +237,7 @@ func TestRestartCountUnknownRatherThanZero(t *testing.T) {
 	for _, tc := range []struct{ name, reply string }{
 		{"not a number", "n/a\n"},
 		{"empty", ""},
+		{"negative", "-1\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, rr, buf := newCapMgr(ctrCfg(config.Podman, "false"), config.Podman)

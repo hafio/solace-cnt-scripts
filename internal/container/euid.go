@@ -1,18 +1,19 @@
 package container
 
 import (
-	"fmt"
-
+	"github.com/hafio/go-deploy-utility/rootless"
 	"github.com/hafio/go-deploy-utility/runner"
 
 	"solace/internal/config"
 	"solace/internal/engine"
 )
 
-// GuardPodmanEUID checks the DECLARED podman.rootless against the account actually
-// running this command: rootless must not be root, rootful must be.
+// GuardPodmanEUID checks the DECLARED podman.rootful against the account actually
+// running this command, through the shared rootless.Decide: rootless is the default
+// and runs as an ordinary user, rootful is deployed only when asked for and needs
+// root, and root without podman.rootful is refused.
 //
-// podman.rootless is declared rather than detected from the euid, and this is the
+// podman.rootful is declared rather than detected from the euid, and this is the
 // other half of that decision. The value decides where the unit is installed, which
 // systemd instance loads it, which uid:gid the container runs as and where the
 // server private key lands -- so one env file has to render one artifact from any
@@ -29,7 +30,7 @@ import (
 // Three cases pass without asking: docker, which has no rootless mode in this
 // schema; the Echo runner, whose preview reaches no host; and a platform with no
 // POSIX euid (Windows returns -1), where there is nothing to compare against and
-// the artifact still has to render.
+// the artifact still has to render (Decide keeps the setting for it).
 func GuardPodmanEUID(cfg *config.Config, p config.Platform, r runner.Runner, euid int) error {
 	if p != config.Podman {
 		return nil
@@ -37,16 +38,10 @@ func GuardPodmanEUID(cfg *config.Config, p config.Platform, r runner.Runner, eui
 	if engine.IsEcho(r) {
 		return nil
 	}
-	if euid < 0 {
-		return nil
-	}
-	if cfg.Podman.Rootless && euid == 0 {
-		return fmt.Errorf("podman.rootless=true but running as root (euid 0); run as the rootless user itself, " +
-			"without sudo -- or set podman.rootless=false to deploy the rootful engine")
-	}
-	if !cfg.Podman.Rootless && euid != 0 {
-		return fmt.Errorf("podman.rootless=false requires root, but running as euid %d; re-run with sudo -- "+
-			"or set podman.rootless=true to deploy as this user", euid)
-	}
-	return nil
+	_, err := rootless.Decide(euid, cfg.Podman.Rootful, podmanRootfulKey)
+	return err
 }
+
+// podmanRootfulKey is how this tool names the setting in its env file, which is what
+// rootless.Decide's refusals quote.
+const podmanRootfulKey = "podman.rootful"

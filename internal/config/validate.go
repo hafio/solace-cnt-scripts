@@ -171,10 +171,11 @@ func (c *Config) validateDomainCerts() error {
 	return nil
 }
 
-// validateRenamedKeys refuses the six keys renamed away from this schema,
-// naming the replacement -- the same pattern scaling.go's retired maxPool
-// uses, rather than a silent alias: an env file setting both the old and the
-// new spelling would otherwise have no defined winner.
+// validateRenamedKeys refuses the keys renamed away from this schema
+// (podman.rootless among them, whose meaning also flipped), naming the
+// replacement -- the same pattern scaling.go's retired maxPool uses, rather than
+// a silent alias: an env file setting both the old and the new spelling would
+// otherwise have no defined winner.
 //
 // Every field checked here is retained in config.go specifically so it decodes
 // (rather than failing strict-decoding with a bare unknown-field error) and is
@@ -189,6 +190,11 @@ func (c *Config) validateRenamedKeys() error {
 	}
 	if len(c.Podman.Runtime) > 0 {
 		return fmt.Errorf("podman.runtime was renamed to podman.command (got: %q)", c.Podman.Runtime.String())
+	}
+	if c.Podman.Rootless != nil {
+		return fmt.Errorf("podman.rootless was replaced by podman.rootful (got: rootless: %t): rootless is now "+
+			"the default, so drop the key to deploy rootless as this user; set `rootful: true` only to deploy "+
+			"the rootful engine, which needs root", *c.Podman.Rootless)
 	}
 	if c.Broker.CLIScriptsFolder != "" {
 		return fmt.Errorf("broker.cliScriptsFolder was renamed to broker.cliScriptsDir (got: %q)",
@@ -304,7 +310,8 @@ func (c *Config) validateHostPaths(p Platform) error {
 			// The quadlet dir is never rebased: the unit has to live where systemd
 			// scans, so a relative value is an operator error rather than
 			// something to resolve helpfully. A '~' one is not relative by the time
-			// it arrives here -- expandHomePaths ran first.
+			// it arrives here -- expandHomePaths ran first, and a rootless default is
+			// filled in before that (resolveQuadletDir).
 			struct{ field, value string }{"podman.quadletDir", c.Podman.QuadletDir},
 			// Likewise never rebased, and held absolute above when set: deploy
 			// and remove delete a legacy key file under it, and resolving a

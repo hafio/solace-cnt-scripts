@@ -364,6 +364,41 @@ func TestDeployPodmanLoadsTheBundleIntoTheStore(t *testing.T) {
 	}
 }
 
+// TestDeployPodmanReplacesTheBundleOnPodman47: with `secret create --replace` available
+// the labelled bundle is written by one create alone, with --replace ahead of the label
+// and no rm, and the digest label is still read first so an unchanged certificate is
+// left in place.
+func TestDeployPodmanReplacesTheBundleOnPodman47(t *testing.T) {
+	cfg := ctrCfg(config.Podman, "false")
+	want := certFixture(t, cfg)
+	cfg.Podman.QuadletDir = t.TempDir()
+
+	m, rr, _ := newCapMgr(cfg, config.Podman)
+	m.Geteuid = func() int { return -1 }
+	versionAnswer(rr, "5.2.0\n")
+	if err := m.Deploy(context.Background(), config.Primary); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	const name = "sol-pod-tls-servercertificate"
+	c, ok := certCreate(rr, name)
+	if !ok {
+		t.Fatalf("no `secret create` for %s:\n%+v", name, rr.calls)
+	}
+	wantArgs := []string{"secret", "create", "--replace", "--label", "solace-util.sha256=" + bundleHash(want), name, "-"}
+	if !eqArgs(c.args, wantArgs) {
+		t.Errorf("create argv = %v, want %v", c.args, wantArgs)
+	}
+	if c.stdin != want {
+		t.Errorf("the secret's stdin = %q, want the key then the certificate", c.stdin)
+	}
+	for _, other := range []string{name, "sol-pod-admin-password"} {
+		if hasCall(rr, "podman", []string{"secret", "rm", "--ignore", other}) {
+			t.Errorf("--replace makes the rm unnecessary, but %s was removed:\n%+v", other, rr.calls)
+		}
+	}
+}
+
 // TestDeployPodmanFailsBeforeWritingAnythingOnABadCert is podman's half of the
 // "nothing happened" property: the bundle is read before the store is touched, so a
 // failure loads no secret, leaves no unit and issues no systemctl call.

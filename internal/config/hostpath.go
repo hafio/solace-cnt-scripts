@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/hafio/go-deploy-utility/execguard"
+	"github.com/hafio/go-deploy-utility/podman"
 )
 
 // A host path is not a command token, and the difference is the whole reason this
@@ -324,15 +325,10 @@ func (c *Config) hostPath(p string) string {
 // bundle under baseDir the same way, and creates, chowns and `rm -rf`s dataDir
 // through local subprocesses of its own (Manager.PrepHost, purgeData) before the
 // locally-invoked engine ever reads it as a bind-mount source. The rootless
-// quadletDir DEFAULT is itself built from os.UserHomeDir (load.go's xdgConfigHome),
-// so the field was already answering for this machine's home before any of this.
-// The exclusion cost the operator the one platform where a home-relative directory
-// is most natural, and bought nothing.
-//
-// One knock-on worth knowing: xdgConfigHome falls back to the literal string "~"
-// when it cannot resolve a home directory, and that default now flows through this
-// pass, which fails naming the unresolvable home -- where before it reached the
-// charset gate and was refused for the wrong reason.
+// quadletDir DEFAULT is itself built from os.UserHomeDir (resolveQuadletDir), so the
+// field was already answering for this machine's home before any of this. The
+// exclusion cost the operator the one platform where a home-relative directory is
+// most natural, and bought nothing.
 func (c *Config) expandHomePaths() error {
 	home := c.home()
 	expand := func(field string, p *string) error {
@@ -393,6 +389,28 @@ func (c *Config) expandHomePaths() error {
 		}
 		c.Broker.DomainCerts.Files[ca] = v
 	}
+	return nil
+}
+
+// resolveQuadletDir fills an unset rootless podman.quadletDir with podman.QuadletDir:
+// $XDG_CONFIG_HOME/containers/systemd, or $HOME/.config/containers/systemd. It is not
+// part of ApplyDefaults because it can fail: a relative XDG_CONFIG_HOME, which podman's
+// generator cannot use either, and a home directory that cannot be resolved are both
+// load errors (podman.QuadletDir words them), and defaulting to a guess would write
+// the unit where systemd never looks. It runs after ApplyDefaults and before
+// expandHomePaths, and only for podman: another platform has no quadlet unit, so its
+// load must not depend on this account's home. A set quadletDir is the operator's and
+// is left alone, as is a rootful one, which ApplyDefaults has already filled.
+func (c *Config) resolveQuadletDir(p Platform) error {
+	if p != Podman || c.Podman.Rootful || c.Podman.QuadletDir != "" {
+		return nil
+	}
+	dir, err := podman.QuadletDir(true, os.Getenv, c.home())
+	if err != nil {
+		return fmt.Errorf("podman.quadletDir is unset, so it defaults to the rootless quadlet directory, "+
+			"which cannot be resolved: %w -- or set podman.quadletDir", err)
+	}
+	c.Podman.QuadletDir = dir
 	return nil
 }
 
@@ -483,7 +501,7 @@ func tildeHome(p string, homeDir func() (string, error)) (string, error) {
 	// out of the env file, which is routinely authored on Windows and run on
 	// Linux. ToSlash therefore answered `~\certs\tls.crt` two different ways for
 	// the same file, normalising it on Windows and leaving `<home>\certs\tls.crt`
-	// on Linux, where that whole value is one filename. (load.go's xdgConfigHome
+	// on Linux, where that whole value is one filename. (podman.QuadletDir
 	// keeps ToSlash correctly: its separators come from a filepath.Join on the
 	// machine running, so there is only ever one to rewrite.)
 	// Whitespace in the resolved home is left to the two callers above: it is

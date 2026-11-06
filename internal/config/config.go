@@ -984,14 +984,17 @@ type DockerConfig struct {
 type PodmanConfig struct {
 	Command Command `yaml:"command"` // CONTAINER_RUNTIME override (default: podman)
 
-	// Rootless is DECLARED, never detected from the invoking euid. It decides where
+	// Rootful is DECLARED, never detected from the invoking euid, and false (rootless)
+	// is the default: rootful podman is deployed only when asked for. It decides where
 	// the unit is installed, which systemd instance loads it, which uid:gid the
 	// container runs as and where the private key lands -- so one env file must
 	// render one artifact from any account and any OS, which is what `generate`
 	// promises. The euid is then checked AGAINST it before any podman command runs
 	// (container.GuardPodmanEUID, called by cli.prepare), rather than being allowed
 	// to pick the other mode silently: `sudo` is a refusal, not a second deployment.
-	Rootless   bool   `yaml:"rootless"`   // PODMAN_ROOTLESS
+	// It replaces the retired podman.rootless (Rootless below), whose default was
+	// rootful.
+	Rootful    bool   `yaml:"rootful"`
 	QuadletDir string `yaml:"quadletDir"` // QUADLET_DIR override
 	// BaseDir is OPTIONAL and UNUSED, bar one legacy clean-up. It is not
 	// Config.BaseDir(), which is the directory the env FILE was loaded from.
@@ -1016,9 +1019,16 @@ type PodmanConfig struct {
 	Network   Network   `yaml:"network"`
 	Container Container `yaml:"container"`
 
-	// Derived from Rootless in ApplyDefaults (not read from YAML).
+	// Derived from Rootful in ApplyDefaults (not read from YAML).
 	SystemctlUser string `yaml:"-"`
 	WantedBy      string `yaml:"-"`
+
+	// Rootless is retained so an env file carrying the retired podman.rootless fails
+	// with an actionable message (validateRenamedKeys) instead of a bare
+	// unknown-field decode error. A pointer, because the old key's false was a real
+	// answer (rootful) that must be refused too. NEVER defaulted, and never read
+	// anywhere else: the mode is Rootful alone.
+	Rootless *bool `yaml:"rootless"`
 
 	// Runtime is retained so an env file carrying the removed podman.runtime
 	// fails with an actionable rename error (validateRenamedKeys) instead of a

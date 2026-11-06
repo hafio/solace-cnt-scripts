@@ -7,7 +7,7 @@ After=network-online.target
 Image=registry.example.com/solace-pubsub-standard:10.26.0.8755
 ContainerName=solace
 HostName=solace-primary
-User=1000001
+User=1000
 Group=0
 NoNewPrivileges=true
 DropCapability=all
@@ -61,4 +61,4 @@ LimitCORE=infinity
 Restart=always
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

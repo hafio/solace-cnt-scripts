@@ -442,8 +442,11 @@ func TestConvertPlatformDetection(t *testing.T) {
 func TestConvertPodmanSection(t *testing.T) {
 	res := convertOK(t, ctrEnv+"PODMAN_ROOTLESS=\"true\"\nQUADLET_DIR=\"/home/u/.config/containers/systemd\"\n", "")
 	c := strictDecode(t, res.YAML)
-	if !c.Podman.Rootless {
-		t.Error("podman.rootless should be true")
+	if c.Podman.Rootful {
+		t.Error("PODMAN_ROOTLESS=true is the default now, so podman.rootful must not be set")
+	}
+	if c.Podman.Rootless != nil {
+		t.Errorf("the retired podman.rootless must never be written:\n%s", res.YAML)
 	}
 	if c.Podman.QuadletDir != "/home/u/.config/containers/systemd" {
 		t.Errorf("podman.quadletDir = %q", c.Podman.QuadletDir)
@@ -454,6 +457,35 @@ func TestConvertPodmanSection(t *testing.T) {
 	// The docker section must stay empty when podman was selected.
 	if strings.Contains(string(res.YAML), "\ndocker:") {
 		t.Errorf("podman conversion emitted a docker section:\n%s", res.YAML)
+	}
+}
+
+// TestConvertPodmanRootfulKeepsTheLegacyMeaning: the legacy default was rootful, and
+// rootless is the schema default now, so a source that meant rootful -- PODMAN_ROOTLESS
+// false, or unset -- must come out as `rootful: true` to keep its meaning. An unreadable
+// value is read the way the legacy script did, as not true, with a warning.
+func TestConvertPodmanRootfulKeepsTheLegacyMeaning(t *testing.T) {
+	for _, tc := range []struct {
+		name, extra string
+		wantWarn    bool
+	}{
+		{"false", "PODMAN_ROOTLESS=\"false\"\n", false},
+		{"unset", "QUADLET_DIR=\"/etc/containers/systemd\"\n", false},
+		{"unreadable", "PODMAN_ROOTLESS=\"maybe\"\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := convertOK(t, ctrEnv+tc.extra, config.Podman)
+			c := strictDecode(t, res.YAML)
+			if !c.Podman.Rootful {
+				t.Errorf("a rootful source must emit podman.rootful: true:\n%s", res.YAML)
+			}
+			if c.Podman.Rootless != nil {
+				t.Errorf("the retired key must not be written:\n%s", res.YAML)
+			}
+			if got := hasWarning(res.Warnings, "read as false (rootful)"); got != tc.wantWarn {
+				t.Errorf("warning for an unreadable value = %v, want %v: %v", got, tc.wantWarn, res.Warnings)
+			}
+		})
 	}
 }
 

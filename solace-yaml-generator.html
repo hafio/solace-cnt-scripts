@@ -395,10 +395,10 @@ body{font-family:'Inter',system-ui,sans-serif;font-size:.88rem;color:var(--tp);b
     </div>
     <div class="plat-podman">
       <div class="sub">Podman</div>
-      <div class="tgl"><input type="checkbox" id="i-pdrootless" onchange="gen()"><label for="i-pdrootless">Rootless (user systemd; runUser defaults to 1000:0)</label></div>
+      <div class="tgl"><input type="checkbox" id="i-pdrootful" onchange="gen()"><label for="i-pdrootful">Rootful (system systemd, needs root; runUser defaults to 1000001:0)</label></div>
       <div class="fr">
         <div class="f"><label>Runtime command</label><input id="i-pdcmd" placeholder="podman" oninput="gen()"></div>
-        <div class="f"><label>Quadlet dir</label><input id="i-pdquadlet" placeholder="/etc/containers/systemd (rootless: XDG config)" oninput="gen()"></div>
+        <div class="f"><label>Quadlet dir</label><input id="i-pdquadlet" placeholder="XDG config (rootful: /etc/containers/systemd)" oninput="gen()"></div>
         <div class="f"><label>Legacy base dir</label><input id="i-pdbasedir" placeholder="(unused)" oninput="gen()"><div class="h">Set only so deploy/remove delete a certificate file an earlier build wrote there.</div></div>
       </div>
     </div>
@@ -408,7 +408,7 @@ body{font-family:'Inter',system-ui,sans-serif;font-size:.88rem;color:var(--tp);b
     <div class="h" style="margin-bottom:.5rem">Written to every ticked container platform. The artifacts always run with privileged off, every capability dropped and no-new-privileges.</div>
     <div class="fr">
       <div class="f"><label>Container name</label><input id="i-cname" placeholder="solace" oninput="gen()"></div>
-      <div class="f"><label>Run user (uid[:gid])</label><input id="i-cuser" placeholder="(1000001:0; rootless podman 1000:0)" oninput="gen()"><div class="h">0:0 is host root on docker and rootful podman.</div></div>
+      <div class="f"><label>Run user (uid[:gid])</label><input id="i-cuser" placeholder="(1000001:0; podman 1000:0, rootful 1000001:0)" oninput="gen()"><div class="h">0:0 is host root on docker and rootful podman.</div></div>
     </div>
     <div class="fr">
       <div class="f"><label>Data directory</label><input id="i-cdata" placeholder="/opt/solace/data" oninput="gen()"><div class="h">Absolute. Bind-mounted at /var/lib/solace.</div></div>
@@ -829,7 +829,7 @@ function readModel() {
       lb: { ip: V('i-lbip'), pool: V('i-ippool'), annotations: L('i-lbanotn') },
       ports: portEntries() },
     docker: { command: V('i-dkcmd'), compose: V('i-dkcompose'), composeFile: V('i-dkfile') },
-    podman: { command: V('i-pdcmd'), rootless: CHK('i-pdrootless'), quadletDir: V('i-pdquadlet'), baseDir: V('i-pdbasedir') },
+    podman: { command: V('i-pdcmd'), rootful: CHK('i-pdrootful'), quadletDir: V('i-pdquadlet'), baseDir: V('i-pdbasedir') },
     ctr: { name: V('i-cname'), runUser: V('i-cuser'), dataDir: V('i-cdata'), mem: V('i-cmem'), cpuset: V('i-ccpuset'), monitorCpuset: V('i-cmoncpuset'), core: V('i-ccore'),
       hc: { on: CHK('i-hcon'), cmd: LINES(RAW('i-hccmd')), interval: V('i-hcint'), timeout: V('i-hcto'), retries: V('i-hcret'), startPeriod: V('i-hcsp') },
       netMode: V('i-netmode'), netPorts: L('i-netports') },
@@ -931,7 +931,7 @@ function emitEnv(M) {
     y += '\ndocker:' + (b ? '\n' + b : ' {}\n');
   }
   if (M.plat.podman) {
-    const b = kv('command', M.podman.command, S(2)) + (M.podman.rootless ? S(2) + 'rootless: true\n' : '') + kv('quadletDir', M.podman.quadletDir, S(2)) +
+    const b = kv('command', M.podman.command, S(2)) + (M.podman.rootful ? S(2) + 'rootful: true\n' : '') + kv('quadletDir', M.podman.quadletDir, S(2)) +
       kv('baseDir', M.podman.baseDir, S(2)) + blk('network', net, S(2)) + blk('container', ctr, S(2));
     y += '\npodman:' + (b ? '\n' + b : ' {}\n');
   }
@@ -1220,7 +1220,7 @@ function validateCtr(M, err, note) {
   const c = M.ctr, D = GEN.defaults;
   if (c.name && (!engineContainerNameRE.test(c.name) || c.name.length > 100)) err('container.name', `${goQuote(c.name)}: a letter or digit first, then letters, digits, . _ -, at most 100`);
   if (c.runUser && !runUserRE.test(c.runUser)) err('container.runUser', `${goQuote(c.runUser)} is not uid[:gid]`);
-  if (/^0(:|$)/.test(c.runUser)) note('container.runUser', 'uid 0 is host root on docker and rootful podman; rootless podman maps it to you');
+  if (/^0(:|$)/.test(c.runUser)) note('container.runUser', 'uid 0 is host root on docker and rootful podman; rootless podman (the default) maps it to you');
   path('container.dataDir', c.dataDir, true);
   if (c.mem && !containerMemRE.test(c.mem)) err('container.mem', `${goQuote(c.mem)}: a number with a b, k, m or g suffix -- not the Mi/Gi Kubernetes takes`);
   const tier = D.tiers[M.scaling.maxConnections || String(D.scalingContainer.maxConnections)];
@@ -1649,8 +1649,8 @@ function init() {
   [['i-opimg', D.operatorImage], ['i-opns', D.operatorNamespace], ['i-opcpu', D.operatorCpu], ['i-opmem', D.operatorMem],
     ['i-kmonsize', D.monNodeSize], ['i-kcmd', D.kubernetesCommand], ['i-clidir', D.cliScriptsDir], ['i-diagdir', D.hostDiagnosticDir],
     ['i-dkcmd', D.dockerCommand], ['i-dkcompose', D.dockerCompose], ['i-pdcmd', D.podmanCommand],
-    ['i-pdquadlet', D.podmanQuadletDir + ' (rootless: XDG config)'], ['i-cname', D.containerName],
-    ['i-cuser', `${D.runUserDocker}; rootless podman ${D.runUserPodmanRootless}`], ['i-cdata', D.dataDir],
+    ['i-pdquadlet', 'XDG config (rootful: ' + D.podmanQuadletDir + ')'], ['i-cname', D.containerName],
+    ['i-cuser', `${D.runUserDocker}; podman ${D.runUserPodmanRootless}, rootful ${D.runUserPodman}`], ['i-cdata', D.dataDir],
     ['i-cmoncpuset', D.monitorCpuset], ['i-ccore', D.ulimitsCore + ' (unlimited)'], ['i-hcint', D.healthCheck.interval],
     ['i-hcto', D.healthCheck.timeout], ['i-hcret', String(D.healthCheck.retries)], ['i-hcsp', D.healthCheck.startPeriod]].forEach(([id, v]) => { $(id).placeholder = v; });
   $('i-kupd').options[0].textContent = `default (${D.updateStrategy})`;
