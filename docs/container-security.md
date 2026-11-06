@@ -54,7 +54,7 @@ reason rule 7 gives.
 A podman quadlet unit -- the systemd `.container` file podman generates a container service
 from -- has no `Privileged=` key at all, so the negative cannot be stated
 there; what matters is that nothing reaches `PodmanArgs=` carrying `--privileged`, and that
-`AddCapability=`, `SecurityLabelDisable=` and `SeccompProfile=` stay absent. An SELinux
+`AddCapability`, `SecurityLabelDisable` and `SeccompProfile=` stay absent. An SELinux
 relabel suffix on a volume (`:Z`, `:ro,Z`) is not a widening -- it is the opposite.
 
 **Not adding a capability is not the same as dropping one.** Both engines start a container
@@ -83,11 +83,17 @@ that CR cannot state this rule either way. The operator hardcodes `privileged: f
 `capabilities: drop: [ALL]` on the broker container, so the rule is met there by the operator
 version you install, which makes the operator version part of your security posture.
 
-The widening tokens, in every spelling this document checks for -- rule 7's negative test and
-the audit greps at the end use this list, the compose keys anchored to their colon
-(`devices:`, `sysctls:`) so a prose mention does not count: `privileged: true`, `--privileged`,
-`cap_add`, `AddCapability=`, `devices`, `AddDevice=`, `sysctls`, `Sysctl=`,
-`SecurityLabelDisable=`, `SeccompProfile=`, `unconfined`, `pid: host`, `ipc: host`. Host
+The widening tokens, in every spelling this document checks for. The list lives in
+`containerart/artifacttest.Widening()` of the shared go-deploy-utility module, the union of
+this tool's and solmq-conn-util's lists, and rule 7's negative test and the audit greps at
+the end use it. The compose keys are anchored to their colon (`devices:`, `sysctls:`) so a
+prose mention does not count: `privileged: true`, `--privileged`, `Privileged=true`,
+`no-new-privileges:false`, `no-new-privileges=false`, `NoNewPrivileges=false`, `cap_add`,
+`AddCapability`, `SYS_ADMIN`, `devices:`, `AddDevice`, `sysctls:`, `Sysctl=`,
+`SecurityLabelDisable`, `label=disable`, `label:disable`, `SeccompProfile=`, `unconfined`,
+`Unconfined`, `pid: host`, `ipc: host`. The test squeezes spaces, tabs and quotes out of the
+artifact and each token before it matches, so `privileged:true` and a quoted key are caught
+too, and it matches inside a longer word, so it errs on the strict side. Host
 networking is deliberately not in that list, since it is permitted on request; the fifth audit
 grep finds it instead, in the spellings `network_mode: host`, `Network=host` and
 `hostNetwork: true`.
@@ -272,7 +278,8 @@ accepted since 4.4, so the key, not the path, is the 4.5 dependency). Quadlet re
 carrying a key it does not know, so every key is a floor: `ShmSize=` and `Ulimit=` need 4.7,
 and `Memory=` needs 5.5 -- a memory cap written as `PodmanArgs=--memory=` needs only the
 podman run flag, which every supported podman has. Check each key against the release that
-introduced it, and pin that in a test rather than a comment. This tool documents
+introduced it, and pin that in a test rather than a comment: `artifacttest.AssertQuadletKeys`
+holds every `[Container]` key to a release table kept in the shared module. This tool documents
 Compose 2.23.1 as its floor for the `environment:` secret source; the public record (compose
 PR #10084, merged 2022-12, already applying uid/gid to environment-sourced secrets) shows the
 source accepted well before that, so treat such a number as the floor a project chose, not the
@@ -305,7 +312,7 @@ cannot hide in the file type one grep skips.
 grep -rn -iE 'no-new-privileges|NoNewPrivileges|allowPrivilegeEscalation' --include='*.golden' --include='*.yaml' --include='*.go' .   # 1
 grep -rn -E 'privileged: *false' --include='*.golden' --include='*.yaml' --include='*.go' .   # 2
 grep -rn -E 'cap_drop|DropCapability=' --include='*.golden' --include='*.yaml' --include='*.go' .   # 3
-grep -rn -E 'privileged: *true|--privileged|cap_add|AddCapability=|devices:|AddDevice=|sysctls:|Sysctl=|SecurityLabelDisable=|SeccompProfile=|unconfined|pid: *host|ipc: *host' --include='*.golden' --include='*.yaml' --include='*.go' .   # 4
+grep -rn -E 'privileged: *true|--privileged|Privileged=true|no-new-privileges[:=] *false|NoNewPrivileges=false|cap_add|AddCapability|SYS_ADMIN|devices:|AddDevice|sysctls:|Sysctl=|SecurityLabelDisable|label[=:]disable|SeccompProfile=|[Uu]nconfined|pid: *host|ipc: *host' --include='*.golden' --include='*.yaml' --include='*.go' .   # 4
 grep -rn -E 'network_mode: *host|Network=host|hostNetwork: *true' --include='*.golden' --include='*.yaml' --include='*.go' .   # 5
 grep -rn -E 'read_only:|ReadOnly=|--read-only|readOnlyRootFilesystem' --include='*.golden' --include='*.yaml' .   # 6
 grep -rn -E 'runAsUser|runAsGroup|fsGroup|^ *user:|^User=|^Group=' --include='*.golden' .   # 7

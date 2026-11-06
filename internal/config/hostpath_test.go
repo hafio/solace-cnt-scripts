@@ -124,6 +124,10 @@ func TestCheckHostPathRejects(t *testing.T) {
 		// The unsupported ~user form is refused BY NAME at expand time
 		// (TestExpandTilde); reaching this gate it is just another leading tilde.
 		{"~bob/certs", "not loaded from a file"},
+		// A raw byte that is not UTF-8 would reach compose.Quote as a volume entry
+		// and come out as a different code point; refused first, before the rune checks
+		// see U+FFFD in its place.
+		{"certs/tls\xff.crt", "not valid UTF-8"},
 	}
 	for _, tc := range cases {
 		err := CheckHostPath("tls.cert", tc.path)

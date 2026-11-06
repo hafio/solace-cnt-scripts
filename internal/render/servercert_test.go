@@ -228,19 +228,14 @@ func TestFileBackedSecretIsExemptFromSecretPreflight(t *testing.T) {
 // gate permits them on purpose. Unescaped, an undefined variable would become empty
 // and a defined one would be silently substituted.
 func TestComposeEscapesTheDollarSign(t *testing.T) {
-	if got := composeEscape("a$b${c}d"); got != "a$$b$${c}d" {
-		t.Errorf("composeEscape = %q, want every '$' doubled", got)
-	}
-	if got := composeEscape("no dollars"); got != "no dollars" {
-		t.Errorf("composeEscape must not disturb a value with no '$': %q", got)
-	}
-
 	c := load(t, config.Docker)
 	c.Docker.Container.HealthCheck = config.HealthCheck{
 		Enabled: true, Interval: "5s", Timeout: "5s", Retries: 3, StartPeriod: "60s",
 		Cmd: []string{"sh", "-c", "curl -sf http://localhost:$PORT/health || exit 1"},
 	}
 	c.Image.Tag = modernTag
+	// config.Validate refuses a '$' in the timezone at load, so no env file reaches
+	// this value; it is built in code to hold the render-side backstop.
 	c.Timezone = "Etc/GMT$0"
 
 	body := string(Compose(c, c.ResolveNode(config.Primary)))
@@ -255,7 +250,7 @@ func TestComposeEscapesTheDollarSign(t *testing.T) {
 	}
 
 	// The quadlet sink must NOT be escaped this way: systemd expands '%', not '$',
-	// and quadletEscape already handles its own syntax.
+	// and quadlet.Escape already handles its own syntax.
 	quadlet := string(Quadlet(c, c.ResolveNode(config.Primary)))
 	if strings.Contains(quadlet, "$$PORT") {
 		t.Errorf("the quadlet must not carry compose's escaping:\n%s", quadlet)
@@ -320,7 +315,7 @@ func TestComposeLabelsTheCertificateDigest(t *testing.T) {
 		t.Errorf("compose must label the container with the interpolated digest (%q):\n%s", want, compose)
 	}
 	if strings.Contains(compose, "$${"+cert.DigestEnvVar()) {
-		t.Error("the digest variable must not be composeEscape'd, or compose would never fill it")
+		t.Error("the digest variable must not be escaped, or compose would never fill it")
 	}
 
 	c.TLS.Cert, c.TLS.CertKey = "", ""

@@ -282,6 +282,8 @@ func TestValidateProbeCommandRejects(t *testing.T) {
 		{"empty argument", Command{"curl", ""}, "docker.container.healthCheck.cmd[1] is an empty argument"},
 		{"newline", Command{"curl\n-f"}, "docker.container.healthCheck.cmd[0] contains a control character"},
 		{"NUL", Command{"cu\x00rl"}, "docker.container.healthCheck.cmd[0] contains a control character"},
+		{"zero-width space", Command{"curl", "-f", "http://localhost\u200b/"}, "docker.container.healthCheck.cmd[2] contains an invisible formatting character"},
+		{"invalid UTF-8", Command{"curl", "\xff"}, "docker.container.healthCheck.cmd[1] is not valid UTF-8"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

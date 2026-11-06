@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/hafio/go-deploy-utility/execguard"
 )
@@ -104,6 +105,13 @@ func (c *Config) Validate(p Platform) error {
 	// unit, the compose file and the broker CR -- so it is held to the reference
 	// grammar once here (artifactvalues.go).
 	if err := c.validateImage(); err != nil {
+		return err
+	}
+
+	// The timezone is the one free-text value every platform writes into its
+	// artifact (TZ in compose and quadlet, timezone in the CR), so it is held to an
+	// IANA-name charset here, before anything renders (artifactvalues.go).
+	if err := checkTimezone("timezone", c.Timezone); err != nil {
 		return err
 	}
 
@@ -322,7 +330,8 @@ func (c *Config) validateHostPaths(p Platform) error {
 // `sh -c 'curl ... || exit 1'`, and the engine, not this process, decides what it
 // means. What still applies is the exec-boundary check the field always had: an
 // empty argument, or a control character carried in from a converted bash file,
-// can only ever fail obscurely.
+// can only ever fail obscurely. Invalid UTF-8 and an invisible formatting character
+// are refused for the same reason: neither survives the artifact as written.
 //
 // An empty Command is not an error: ApplyDefaults runs before Validate on every
 // path and fills the platform default, so "empty" means "unset" exactly as it
@@ -332,9 +341,20 @@ func validateProbeCommand(field string, cmd Command) error {
 		if tok == "" {
 			return fmt.Errorf("%s[%d] is an empty argument; remove it or quote the intended value", field, i)
 		}
+		// First: a raw byte that is not UTF-8 reaches the compose scalar as a
+		// different code point, and the rune checks below would see U+FFFD instead.
+		if !utf8.ValidString(tok) {
+			return fmt.Errorf("%s[%d] is not valid UTF-8: %q; re-save the env file as UTF-8", field, i, tok)
+		}
 		if j := strings.IndexFunc(tok, execguard.IsControl); j >= 0 {
 			return fmt.Errorf("%s[%d] contains a control character (0x%02x) at offset %d: %q",
 				field, i, tok[j], j, tok)
+		}
+		// Whitespace and shell syntax stay allowed (a probe may be sh -c '...'), but
+		// an invisible formatting character cannot be seen in a review or a log line.
+		if j := strings.IndexFunc(tok, execguard.IsInvisible); j >= 0 {
+			return fmt.Errorf("%s[%d] contains an invisible formatting character at offset %d: %q; it cannot "+
+				"be seen in a review or a log line, so it is not allowed in a probe", field, i, j, tok)
 		}
 	}
 	return nil

@@ -81,6 +81,9 @@ Both tools follow every rule in this section today.
 11. **Hardening is written into every artifact.** Compose files carry `privileged: false`,
     `cap_drop: [ALL]`, `security_opt: no-new-privileges=true` and an explicit `user:`.
     Quadlet units carry `DropCapability=all`, `NoNewPrivileges=true`, `User=` and `Group=`.
+    A compose value taken from the operator or from a name is quoted, and every quadlet
+    `Environment=` is quoted whole. Both tools write these lines with the shared
+    `containerart` packages and check every rendered artifact with `containerart/artifacttest`.
     `solmq-conn-util`: `internal/dockergen`, `internal/podmangen`. `solace-util`:
     `internal/render/render.go`.
 

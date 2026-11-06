@@ -38,6 +38,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/containerart/compose"
+	"github.com/hafio/go-deploy-utility/containerart/quadlet"
+
 	"solace/internal/config"
 )
 
@@ -739,23 +742,6 @@ func ContainerSecrets(c *config.Config, p config.Platform) []ContainerSecret {
 	return secrets
 }
 
-// composeEscape doubles every '$' so compose hands the value on unchanged.
-//
-// Compose interpolates `$VAR` and `${VAR}` across the WHOLE document, from its own
-// environment, and turns `$$` back into a single `$`. So a value this tool writes
-// literally is not what the container receives: an undefined variable becomes empty
-// and compose warns, and a defined one is silently substituted.
-//
-// The case that makes this necessary rather than defensive is `healthCheck.cmd`.
-// That command is deliberately allowed to carry a `$` -- it is a shell command the
-// ENGINE runs inside the broker, so `$(...)` and `$VAR` are legitimate there and
-// validateProbeCommand permits them on purpose. Without this, compose would consume
-// them before the container ever saw the command.
-//
-// It is NOT needed for the quadlet sink: systemd does its own `%`-expansion, not
-// `$`-expansion, and quadletEscape already handles that.
-func composeEscape(s string) string { return strings.ReplaceAll(s, "$", "$$") }
-
 // ServerCertBundlePath is where an EARLIER build wrote podman's copy of the
 // server-certificate bundle, as a host file the quadlet unit bind-mounted at
 // certMount. Nothing writes or mounts it any more -- the certificate rides podman's
@@ -909,8 +895,9 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 	if gid != "" {
 		fmt.Fprintf(&b, "Group=%s\n", gid)
 	}
-	// Deny privilege escalation (docs/container-security.md, rule 2). Quadlet
-	// defaults this to false, so leaving it out leaves no_new_privs unset. It
+	// Deny privilege escalation and drop every capability (docs/container-security.md,
+	// rules 1 and 2), as quadlet.Posture states them. NoNewPrivileges=true is rule 2:
+	// quadlet defaults it to false, so leaving it out leaves no_new_privs unset. It
 	// belongs HERE in [Container], where quadlet turns it into
 	// --security-opt=no-new-privileges on the container: [Service] has a
 	// same-named systemd key that would bind the podman process instead, and
@@ -918,13 +905,13 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 	// TestArtifactsStateTheirPrivilegePosture pins the section. Quadlet has no
 	// Privileged= key, so rule 1's privileged half has nothing to state here and is
 	// guarded by TestArtifactsCarryNoWideningTokens alone.
-	fmt.Fprint(&b, "NoNewPrivileges=true\n")
-	// Drop every capability (rule 1). Quadlet, like `podman run`, drops nothing unless
+	//
+	// DropCapability=all is rule 1: quadlet, like `podman run`, drops nothing unless
 	// told to, so without this line the broker keeps podman's default set --
 	// DAC_OVERRIDE, SETUID, SETGID and the rest -- none of which a non-root broker
 	// binding only unprivileged ports uses. The Solace operator drops ALL for the same
 	// image on Kubernetes. Quadlet passes it on as --cap-drop=all.
-	fmt.Fprint(&b, "DropCapability=all\n")
+	b.WriteString(quadlet.Posture)
 	// Both caps ride PodmanArgs -- the documented escape hatch for a podman run
 	// flag quadlet does not map. The cpuset has no quadlet key at all. Memory has
 	// one, but only from podman 5.5, and quadlet REFUSES a key it does not know, so
@@ -970,11 +957,11 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 		// and the line dropped. Quotes and backslashes are deliberately left alone,
 		// unlike Environment= -- these values are unquoted and podman splits the
 		// command line itself, so escaping them here would corrupt the probe.
-		fmt.Fprintf(&b, "HealthCmd=%s\n", escapePercent(strings.Join(healthCmd(hc), " ")))
-		fmt.Fprintf(&b, "HealthInterval=%s\n", escapePercent(hc.Interval))
-		fmt.Fprintf(&b, "HealthTimeout=%s\n", escapePercent(hc.Timeout))
+		fmt.Fprintf(&b, "HealthCmd=%s\n", quadlet.EscapePercent(strings.Join(healthCmd(hc), " ")))
+		fmt.Fprintf(&b, "HealthInterval=%s\n", quadlet.EscapePercent(hc.Interval))
+		fmt.Fprintf(&b, "HealthTimeout=%s\n", quadlet.EscapePercent(hc.Timeout))
 		fmt.Fprintf(&b, "HealthRetries=%d\n", hc.Retries)
-		fmt.Fprintf(&b, "HealthStartPeriod=%s\n", escapePercent(hc.StartPeriod))
+		fmt.Fprintf(&b, "HealthStartPeriod=%s\n", quadlet.EscapePercent(hc.StartPeriod))
 	}
 	// Host networking only when the operator asked for it (the default is bridge);
 	// bridge publishes network.ports as written, and nothing when the list is empty.
@@ -987,7 +974,7 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 	}
 	fmt.Fprintf(&b, "Volume=%s:%s:Z\n", cb.DataDir, dataMount)
 	for _, pair := range EnvPairs(c, id) {
-		fmt.Fprintf(&b, "Environment=\"%s\"\n", quadletEscape(pair.Assignment()))
+		fmt.Fprintf(&b, "%s\n", quadlet.Environment(pair.Key, pair.Value))
 	}
 	// Secrets ride podman's own secret store: the unit names them, podman mounts
 	// each one at the absolute target= below (the EnvPairs above already point the
@@ -997,7 +984,7 @@ func Quadlet(c *config.Config, id config.NodeIdentity) []byte {
 	// anywhere (ContainerSecret.Target). The server certificate bundle is one of these
 	// too (ContainerSecrets). Needs podman 4.5 or later.
 	for _, s := range ContainerSecrets(c, p) {
-		fmt.Fprintf(&b, "Secret=%s,type=mount,target=%s\n", s.Name, s.Target())
+		fmt.Fprintf(&b, "%s\n", quadlet.Secret(s.Name, s.Target()))
 	}
 	fmt.Fprint(&b, "\n")
 	fmt.Fprint(&b, "[Service]\n")
@@ -1063,7 +1050,7 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 	// compose's own precedence puts that environment variable above a file's `name:`
 	// and below a `-p` flag. A `-p` here would silently beat an operator who set the
 	// variable deliberately.
-	fmt.Fprintf(&b, "name: %q\n", ComposeProject(cb.Name))
+	fmt.Fprintf(&b, "name: %s\n", compose.Quote(ComposeProject(cb.Name)))
 	// The identifier scalars are QUOTED, and the reason is not the charset -- it is
 	// YAML 1.1. A container named `yes`, `no`, `on`, `off`, `true` or `false` is
 	// perfectly legal to both engines, and so are `0123` and `1.5`; bare, compose
@@ -1071,15 +1058,16 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 	// hostname stop being the string the operator wrote. Tightening the name grammar
 	// cannot fix that, because those really are valid container names.
 	fmt.Fprint(&b, "services:\n")
-	fmt.Fprintf(&b, "  %q:\n", cb.Name)
-	fmt.Fprintf(&b, "    image: %s\n", composeEscape(c.Image.Ref()))
-	fmt.Fprintf(&b, "    container_name: %q\n", cb.Name)
-	fmt.Fprintf(&b, "    hostname: %q\n", id.Hostname)
-	fmt.Fprintf(&b, "    user: %q\n", cb.RunUser)
+	fmt.Fprintf(&b, "  %s:\n", compose.Quote(cb.Name))
+	fmt.Fprintf(&b, "    image: %s\n", compose.Escape(c.Image.Ref()))
+	fmt.Fprintf(&b, "    container_name: %s\n", compose.Quote(cb.Name))
+	fmt.Fprintf(&b, "    hostname: %s\n", compose.Quote(id.Hostname))
+	fmt.Fprintf(&b, "    user: %s\n", compose.Quote(cb.RunUser))
 	fmt.Fprint(&b, "    restart: always\n")
 	// Deny extended privileges and privilege escalation (docs/container-security.md,
-	// rules 1 and 2). privileged: false is docker's default and is stated anyway,
-	// so the artifact shows its posture and a test can pin it (rule 7);
+	// rules 1 and 2), as compose.Posture states them. privileged: false is docker's
+	// default and is stated anyway, so the artifact shows its posture and a test can
+	// pin it (rule 7);
 	// no-new-privileges is OFF by default and is the setting that actually
 	// changes anything. The `=` separator, not `:`, because dockerd logs a
 	// deprecation warning for the `:` form on every create. privileged is a bare
@@ -1089,11 +1077,7 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 	// DAC_OVERRIDE, SETUID and the rest -- none of which a non-root broker binding
 	// only unprivileged ports uses; the Solace operator drops ALL for the same image
 	// on Kubernetes. Not dropping them is the widening docker does by default.
-	fmt.Fprint(&b, "    privileged: false\n")
-	fmt.Fprint(&b, "    cap_drop:\n")
-	fmt.Fprint(&b, "      - ALL\n")
-	fmt.Fprint(&b, "    security_opt:\n")
-	fmt.Fprint(&b, "      - no-new-privileges=true\n")
+	b.WriteString(compose.Posture)
 	// Service-level cpuset:/mem_limit: rather than deploy.resources.limits. For
 	// memory that is a choice: the standalone v1 docker-compose binary -- the
 	// documented fallback behind docker.compose -- ignores deploy.resources without
@@ -1116,7 +1100,7 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 		set, mem = cb.MonitorCPUSet, config.MonitorMem
 	}
 	if set != "" {
-		fmt.Fprintf(&b, "    cpuset: %q\n", set)
+		fmt.Fprintf(&b, "    cpuset: %s\n", compose.Quote(set))
 	}
 	if mem != "" {
 		fmt.Fprintf(&b, "    mem_limit: %s\n", mem)
@@ -1132,13 +1116,10 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 	fmt.Fprintf(&b, "      core: %s\n", cb.CoreLimit())
 	if hc := cb.HealthCheck; hc.Enabled {
 		fmt.Fprint(&b, "    healthcheck:\n")
-		fmt.Fprint(&b, "      test: [\"CMD\"")
-		for _, tok := range healthCmd(hc) {
-			// Escaped, not merely quoted: this command legitimately carries `$`,
-			// because the ENGINE runs it as a shell command inside the broker.
-			fmt.Fprintf(&b, ", %q", composeEscape(tok))
-		}
-		fmt.Fprint(&b, "]\n")
+		// Escaped, not merely quoted (FlowList sends each token through
+		// compose.Quote): this command legitimately carries `$`, because the ENGINE
+		// runs it as a shell command inside the broker.
+		b.WriteString("      test: " + compose.FlowList(append([]string{"CMD"}, healthCmd(hc)...)) + "\n")
 		fmt.Fprintf(&b, "      interval: %s\n", hc.Interval)
 		fmt.Fprintf(&b, "      timeout: %s\n", hc.Timeout)
 		fmt.Fprintf(&b, "      retries: %d\n", hc.Retries)
@@ -1152,19 +1133,20 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 	} else if len(net.Ports) > 0 {
 		fmt.Fprint(&b, "    ports:\n")
 		for _, port := range net.Ports {
-			fmt.Fprintf(&b, "      - %q\n", port)
+			fmt.Fprintf(&b, "      - %s\n", compose.Quote(port))
 		}
 	}
 	fmt.Fprint(&b, "    volumes:\n")
-	fmt.Fprintf(&b, "      - %q\n", cb.DataDir+":"+dataMount+":Z")
+	fmt.Fprintf(&b, "      - %s\n", compose.Quote(cb.DataDir+":"+dataMount+":Z"))
 	// No certificate volume here: the bundle rides the secret machinery below,
 	// sourced from the compose child's environment, so nothing of it is written
 	// beside this file.
 	fmt.Fprint(&b, "    environment:\n")
 	for _, pair := range EnvPairs(c, id) {
 		// Keys derive from identifier-checked config, so only the value can carry a
-		// `$` -- timezone is the free-text one today.
-		fmt.Fprintf(&b, "      %s: %q\n", pair.Key, composeEscape(pair.Value))
+		// `$`. Timezone is the free-text one, and config.Validate refuses a `$` in it
+		// at load; Quote doubles it anyway, as the render-side backstop.
+		fmt.Fprintf(&b, "      %s: %s\n", pair.Key, compose.Quote(pair.Value))
 	}
 	// Secrets are mounted as files under the name of the setting they feed (the
 	// *filepath pointers are already among the EnvPairs above), and their values
@@ -1176,25 +1158,24 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 	// counterpart of the label podman's store secret carries. It is interpolated from
 	// the compose child's environment like the secret itself, so this file stays
 	// byte-identical across a renewal and holds no digest of the key. The `$` is
-	// deliberately NOT composeEscape'd: interpolation is the point.
+	// deliberately NOT escaped: interpolation is the point.
 	for _, s := range secrets {
 		if len(s.SourceFiles) > 0 {
 			fmt.Fprint(&b, "    labels:\n")
 			fmt.Fprintf(&b, "      %s: \"${%s}\"\n", CertDigestLabel, s.DigestEnvVar())
 		}
 	}
-	fmt.Fprint(&b, "    secrets:\n")
+	// The secrets: blocks used to be written unconditionally. ServiceSecrets and
+	// TopSecrets write nothing for an empty list, but the list is never empty here:
+	// containerSecretSpecs always leads with the admin password, so the bytes are
+	// the same. Names are quoted for the same reason as the service key above: the
+	// secret name is derived from container.name, so it inherits whatever that is.
+	shared := make([]compose.Secret, 0, len(secrets))
 	for _, s := range secrets {
-		fmt.Fprintf(&b, "      - source: %q\n", s.Name)
-		fmt.Fprintf(&b, "        target: %s\n", s.Target())
+		shared = append(shared, compose.Secret{Name: s.Name, Target: s.Target(), EnvVar: s.EnvVar()})
 	}
-	fmt.Fprint(&b, "secrets:\n")
-	for _, s := range secrets {
-		// Quoted for the same reason as the service key above: the secret name is
-		// derived from container.name, so it inherits whatever that is.
-		fmt.Fprintf(&b, "  %q:\n", s.Name)
-		fmt.Fprintf(&b, "    environment: %s\n", s.EnvVar())
-	}
+	b.WriteString(compose.ServiceSecrets(shared))
+	b.WriteString(compose.TopSecrets(shared))
 	return []byte(b.String())
 }
 
@@ -1304,20 +1285,6 @@ func cut(s, sep string) (before, after string) {
 	}
 	return s, ""
 }
-
-// quadletEscape escapes a value for a systemd Environment="..." assignment:
-// backslash, double-quote, and '%' (systemd expands %-specifiers). Ports
-// gen_quadlet's inline escaping.
-func quadletEscape(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	return escapePercent(s)
-}
-
-// escapePercent doubles '%' so systemd does not read it as a specifier. It applies
-// to every assignment in a unit file, not just the quoted ones, so the unquoted
-// Health* keys need it too even though they must not have quotes escaped.
-func escapePercent(s string) string { return strings.ReplaceAll(s, "%", "%%") }
 
 func boolStr(b bool) string {
 	if b {

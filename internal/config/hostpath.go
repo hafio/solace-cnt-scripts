@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/hafio/go-deploy-utility/execguard"
 )
@@ -71,6 +72,11 @@ const hostPathAdmits = `\`
 func CheckHostPath(field, p string) error {
 	if p == "" {
 		return nil
+	}
+	// First: a host path reaches compose.Quote as a volume entry, and YAML cannot
+	// carry a raw byte that is not UTF-8.
+	if !utf8.ValidString(p) {
+		return fmt.Errorf("%s = %q is not valid UTF-8; re-save the env file as UTF-8", field, p)
 	}
 	if j := strings.IndexFunc(p, execguard.IsControl); j >= 0 {
 		return fmt.Errorf("%s contains a control character (0x%02x) at offset %d: %q", field, p[j], j, p)

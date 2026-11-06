@@ -7,6 +7,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/hafio/go-deploy-utility/execguard"
 )
 
 // The values in this file reach a rendered artifact as they were written: a quadlet
@@ -37,6 +40,45 @@ var imageRepoRE = regexp.MustCompile(`^(?:` + refDomain + `/)?` + refPathCompone
 // imageTagRE is the reference grammar's tag. A digest is not a tag, and Ref always
 // joins with ':', so a digest cannot be expressed here at all.
 var imageTagRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`)
+
+// checkTimezone holds the top-level timezone to a plain IANA-name charset. The value
+// is written as a compose environment scalar (TZ), a quadlet Environment= assignment
+// and a field of the broker CR, and nothing else checks it: the broker image
+// accepts any string and falls back to UTC for a name it does not know. So the load
+// refuses what no zone name carries -- invalid UTF-8, a control or invisible
+// formatting character, whitespace, and the shell and quoting characters of
+// execguard.UnsafeChars -- and leaves the name itself to the image. Empty passes: an
+// omitted timezone keeps the image default.
+//
+// Zone names such as Etc/GMT+8 and America/Argentina/Buenos_Aires pass; a '$' does
+// not, which is why Etc/GMT$0 is refused here although the compose writer would
+// escape it.
+func checkTimezone(field, tz string) error {
+	if tz == "" {
+		return nil
+	}
+	if !utf8.ValidString(tz) {
+		return fmt.Errorf("%s = %q is not valid UTF-8; re-save the env file as UTF-8 and write an IANA zone "+
+			"name such as Europe/London", field, tz)
+	}
+	if j := strings.IndexFunc(tz, execguard.IsControl); j >= 0 {
+		return fmt.Errorf("%s = %q contains a control character (0x%02x) at offset %d; write an IANA zone "+
+			"name such as Europe/London", field, tz, tz[j], j)
+	}
+	if j := strings.IndexFunc(tz, execguard.IsInvisible); j >= 0 {
+		return fmt.Errorf("%s = %q contains an invisible formatting character at offset %d; it cannot be "+
+			"seen in a review or a log line. Write an IANA zone name such as Europe/London", field, tz, j)
+	}
+	if j := strings.IndexFunc(tz, isSpace); j >= 0 {
+		return fmt.Errorf("%s = %q contains whitespace at offset %d; an IANA zone name has none. Write a "+
+			"name such as Europe/London", field, tz, j)
+	}
+	if j := strings.IndexAny(tz, execguard.UnsafeChars); j >= 0 {
+		return fmt.Errorf("%s = %q contains %q, which no IANA zone name carries and which is written "+
+			"into the generated artifacts. Write a name such as Europe/London", field, tz, string(tz[j]))
+	}
+	return nil
+}
 
 // validateImage holds the three image fields to the reference grammar. Empty values
 // are skipped: image.repo and image.tag are required per platform, image.registry is

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/containerart/artifacttest"
 	"gopkg.in/yaml.v3"
 
 	"solace/internal/config"
@@ -947,13 +948,6 @@ func TestParseToleration(t *testing.T) {
 	}
 }
 
-// TestQuadletEscape guards the systemd Environment=" " escaping.
-func TestQuadletEscape(t *testing.T) {
-	if got := quadletEscape(`a%b"c\d`); got != `a%%b\"c\\d` {
-		t.Errorf("quadletEscape = %q", got)
-	}
-}
-
 // TestScalingTierReachesEveryArtifact pins the point of the change: one tier
 // value in the env file decides the CPU cap in all three artifacts, and the
 // goldens only ever show the default tier. 100000 is not the default on any
@@ -1229,73 +1223,30 @@ func containerArtifacts(t *testing.T) (compose, quadlet []renderedArtifact) {
 // on both engines, and neither engine drops a single capability unless told to, so
 // these lines are what actually set them.
 //
-// The quadlet checks are positional, not a substring: NoNewPrivileges= is ALSO a
-// systemd [Service] key, where it would bind the podman process rather than the
-// container and break rootless podman's setuid id-mapping helpers, and
-// DropCapability= means nothing outside [Container]. A unit carrying a line in the
-// wrong section would satisfy a plain Contains.
+// The checks are artifacttest's, shared with solmq-conn-util. The quadlet one is
+// positional, not a substring: NoNewPrivileges= is ALSO a systemd [Service] key,
+// where it would bind the podman process rather than the container and break
+// rootless podman's setuid id-mapping helpers, and DropCapability= means nothing
+// outside [Container]. A unit carrying a line in the wrong section would satisfy a
+// plain Contains.
 func TestArtifactsStateTheirPrivilegePosture(t *testing.T) {
 	compose, quadlet := containerArtifacts(t)
 	for _, a := range compose {
-		if n := strings.Count(a.body, "    privileged: false\n"); n != 1 {
-			t.Errorf("%s compose file: want exactly one service-level `privileged: false`, got %d:\n%s", a.name, n, a.body)
-		}
-		if n := strings.Count(a.body, "    cap_drop:\n      - ALL\n"); n != 1 {
-			t.Errorf("%s compose file: want exactly one service-level `cap_drop:` listing ALL, got %d:\n%s", a.name, n, a.body)
-		}
-		if !strings.Contains(a.body, "    security_opt:\n      - no-new-privileges=true\n") {
-			t.Errorf("%s compose file: want `security_opt:` listing `no-new-privileges=true` at service level:\n%s", a.name, a.body)
-		}
-		// The `:` spelling works, but dockerd logs a deprecation warning for it on
-		// every container create.
-		if strings.Contains(a.body, "no-new-privileges:") {
-			t.Errorf("%s compose file: use `no-new-privileges=true`, not the deprecated `:` separator:\n%s", a.name, a.body)
-		}
+		artifacttest.AssertComposePosture(t, a.name+" compose file", a.body)
 	}
 	for _, a := range quadlet {
-		ctr := strings.Index(a.body, "[Container]\n")
-		svc := strings.Index(a.body, "[Service]\n")
-		for _, line := range []struct{ text, why string }{
-			{"NoNewPrivileges=true\n", "in [Service] it is systemd's own key, binds podman instead of the " +
-				"container, and breaks rootless podman"},
-			{"DropCapability=all\n", "quadlet reads it nowhere else, so anywhere else the broker keeps " +
-				"podman's whole default capability set"},
-		} {
-			if n := strings.Count(a.body, line.text); n != 1 {
-				t.Errorf("%s quadlet: want exactly one %q, got %d:\n%s", a.name, line.text, n, a.body)
-				continue
-			}
-			at := strings.Index(a.body, line.text)
-			if ctr < 0 || at < ctr || (svc >= 0 && at > svc) {
-				t.Errorf("%s quadlet: %q must sit inside [Container] -- %s:\n%s", a.name, line.text, line.why, a.body)
-			}
-		}
+		artifacttest.AssertQuadletPosture(t, a.name+" quadlet", a.body)
 	}
-}
-
-// wideningTokens is rule 1's list in docs/container-security.md, in the spellings
-// that section gives: anything in a compose file or quadlet unit that would hand the
-// broker extended privileges, extra capabilities, host devices, kernel tunables, a
-// relaxed SELinux or seccomp confinement, or the host's pid or ipc namespace. The
-// compose keys carry their colon so a word inside a value cannot trip them. The
-// document's audit greps use the same list; change both together.
-//
-// Host networking is the one widening NOT listed, because it is not forbidden: it is
-// an explicit opt-in (network.mode: host), which TestHostNetworkingIsOptIn pins.
-var wideningTokens = []string{
-	"privileged: true", "--privileged",
-	"cap_add", "AddCapability=",
-	"devices:", "AddDevice=",
-	"sysctls:", "Sysctl=",
-	"SecurityLabelDisable=", "SeccompProfile=", "unconfined",
-	"pid: host", "ipc: host",
 }
 
 // TestArtifactsCarryNoWideningTokens is the negative half of rule 7, and the half
 // that survives a refactor: the privileged posture above is only as good as the
 // absence of anything that undoes it. It runs over every rendered shape, so a token
 // smuggled in behind a conditional -- a PodmanArgs= for one role, a key only bridge
-// mode writes -- still fails here.
+// mode writes -- still fails here. The list is artifacttest.Widening(): rule 1 of
+// docs/container-security.md names it as its home. Host networking is the one
+// widening NOT in it, because it is not forbidden: it is an explicit opt-in
+// (network.mode: host), which TestHostNetworkingIsOptIn pins.
 func TestArtifactsCarryNoWideningTokens(t *testing.T) {
 	compose, quadlet := containerArtifacts(t)
 	// Guards the guard: an empty render list would make every loop below pass.
@@ -1304,21 +1255,10 @@ func TestArtifactsCarryNoWideningTokens(t *testing.T) {
 	}
 	for kind, set := range map[string][]renderedArtifact{"compose file": compose, "quadlet": quadlet} {
 		for _, a := range set {
-			for _, tok := range wideningTokens {
-				if strings.Contains(a.body, tok) {
-					t.Errorf("%s %s carries %q, which widens the broker container's privileges "+
-						"(docs/container-security.md, rule 1). Remove it; if the broker genuinely needs it, "+
-						"change the rule first and say why:\n%s", a.name, kind, tok, a.body)
-				}
-			}
+			artifacttest.AssertAbsent(t, a.name+" "+kind, a.body, artifacttest.Widening())
 		}
 	}
 }
-
-// hostNetworkTokens are host networking in each artifact's spelling. The document's
-// audit grep for it uses these two plus Kubernetes' `hostNetwork: true`, which nothing
-// here renders; change them together.
-var hostNetworkTokens = []string{"network_mode: host", "Network=host"}
 
 // TestHostNetworkingIsOptIn: host networking hands the broker the host's network
 // namespace -- every interface, loopback included -- so it is rule 1's one PERMITTED
@@ -1329,9 +1269,9 @@ var hostNetworkTokens = []string{"network_mode: host", "Network=host"}
 func TestHostNetworkingIsOptIn(t *testing.T) {
 	compose, quadlet := containerArtifacts(t)
 	for kind, set := range map[string][]renderedArtifact{"compose file": compose, "quadlet": quadlet} {
-		want := hostNetworkTokens[0]
+		want := artifacttest.HostNetwork()[0]
 		if kind == "quadlet" {
-			want = hostNetworkTokens[1]
+			want = artifacttest.HostNetwork()[1]
 		}
 		for _, a := range set {
 			if a.name == "host network" {
@@ -1341,13 +1281,7 @@ func TestHostNetworkingIsOptIn(t *testing.T) {
 				}
 				continue
 			}
-			for _, tok := range hostNetworkTokens {
-				if strings.Contains(a.body, tok) {
-					t.Errorf("%s %s carries %q without asking for it: the default is bridge, and host "+
-						"networking is an opt-in widening (docs/container-security.md, rule 1):\n%s",
-						a.name, kind, tok, a.body)
-				}
-			}
+			artifacttest.AssertAbsent(t, a.name+" "+kind+" (no host networking asked for)", a.body, artifacttest.HostNetwork())
 		}
 	}
 }
@@ -1593,6 +1527,14 @@ func TestSecretTargetsAreAbsolutePaths(t *testing.T) {
 			t.Errorf("secret %q setting %q must be the *filepath variant naming %q", s.Name, s.FilePathKey(), want)
 		}
 	}
+	// What the struct promises has to be what the writers emit, in every shape.
+	compose, quadlet := containerArtifacts(t)
+	for _, a := range compose {
+		artifacttest.AssertSecretTargets(t, a.name+" compose file", a.body)
+	}
+	for _, a := range quadlet {
+		artifacttest.AssertSecretTargets(t, a.name+" quadlet", a.body)
+	}
 }
 
 // TestSecretsAndCertDoNotNest pins that no secret's file can collide with the
@@ -1685,49 +1627,14 @@ func TestComposeProjectFoldsToComposesGrammar(t *testing.T) {
 // quadletFloor is the podman floor docs/operations.md documents.
 const quadletFloor = "4.7"
 
-// quadletKeysByRelease is the podman release that first accepts each [Container]
-// key, read from pkg/systemd/quadlet/quadlet.go at each tag. Memory is listed
-// although nothing emits it: it is the key that set the floor at 5.5 before the
-// memory cap moved to PodmanArgs=--memory=, and it stays here so reintroducing it
-// fails below.
-var quadletKeysByRelease = []struct {
-	since string
-	keys  []string
-}{
-	{"4.4", []string{"Image", "ContainerName", "User", "Group", "NoNewPrivileges", "DropCapability", "PodmanArgs",
-		"Network", "PublishPort", "Volume", "Environment"}},
-	{"4.5", []string{"HealthCmd", "HealthInterval", "HealthTimeout", "HealthRetries", "HealthStartPeriod",
-		"Secret"}},
-	{"4.6", []string{"HostName"}},
-	{"4.7", []string{"ShmSize", "Ulimit"}},
-	{"5.5", []string{"Memory"}},
-}
-
-// versionAtMost reports whether major.minor a is at or below b.
-func versionAtMost(t *testing.T, a, b string) bool {
-	t.Helper()
-	parse := func(v string) (int, int) {
-		major, minor, ok := strings.Cut(v, ".")
-		x, err1 := strconv.Atoi(major)
-		y, err2 := strconv.Atoi(minor)
-		if !ok || err1 != nil || err2 != nil {
-			t.Fatalf("bad version %q", v)
-		}
-		return x, y
-	}
-	am, an := parse(a)
-	bm, bn := parse(b)
-	return am < bm || (am == bm && an <= bn)
-}
-
 // TestQuadletKeysAreWithinTheFloor: quadlet REFUSES a unit carrying a key it does
 // not know, so every [Container] key is a version floor, and a key newer than the
 // documented one fails a deploy on every older host -- the way Memory= (5.5) did
 // on 4.7-5.4. Every key the renderer emits, across the shapes that add keys
 // (health check, bridge ports, host networking, TLS, HA, rootless, the monitor), must
-// be in the table at or below quadletFloor. A key missing from the table fails too:
-// add it with the release that introduced it, and raise the documented floor if that
-// is newer.
+// be in artifacttest's release table at or below quadletFloor. A key missing from the
+// table fails too: add it there with the release that introduced it, and raise the
+// documented floor if that is newer.
 func TestQuadletKeysAreWithinTheFloor(t *testing.T) {
 	full := load(t, config.Podman)
 	full.Image.Tag = modernTag
@@ -1746,39 +1653,22 @@ func TestQuadletKeysAreWithinTheFloor(t *testing.T) {
 	hostNet := load(t, config.Podman)
 	hostNet.Podman.Network.Mode = "host"
 
-	quadletKeySince := map[string]string{}
-	for _, r := range quadletKeysByRelease {
-		for _, k := range r.keys {
-			quadletKeySince[k] = r.since
-		}
-	}
 	seen := map[string]bool{}
-	for _, unit := range [][]byte{
+	for i, unit := range [][]byte{
 		Quadlet(full, full.ResolveNode(config.Primary)),
 		Quadlet(full, full.ResolveNode(config.Monitor)),
 		Quadlet(rootless, rootless.ResolveNode(config.Primary)),
 		Quadlet(hostNet, hostNet.ResolveNode(config.Primary)),
 	} {
+		artifacttest.AssertQuadletKeys(t, "fixture unit "+strconv.Itoa(i), string(unit), quadletFloor)
 		section := ""
 		for _, line := range strings.Split(string(unit), "\n") {
 			if strings.HasPrefix(line, "[") {
 				section = line
 				continue
 			}
-			key, _, ok := strings.Cut(line, "=")
-			if section != "[Container]" || !ok {
-				continue
-			}
-			seen[key] = true
-			since, known := quadletKeySince[key]
-			if !known {
-				t.Errorf("quadlet key %s= is not in quadletKeySince: add it with the podman release that "+
-					"introduced it (pkg/systemd/quadlet/quadlet.go at that tag)", key)
-				continue
-			}
-			if !versionAtMost(t, since, quadletFloor) {
-				t.Errorf("quadlet key %s= needs podman %s, above the documented floor %s: quadlet refuses an "+
-					"unknown key, so every older host would fail to load the unit", key, since, quadletFloor)
+			if key, _, ok := strings.Cut(line, "="); ok && section == "[Container]" {
+				seen[key] = true
 			}
 		}
 	}
