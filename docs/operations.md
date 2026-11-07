@@ -47,7 +47,7 @@ platform the file selected, a bad `--pod`/`--platform`/`--since` value,
 `--allow-command` on a command that renders without executing, a `podman.rootful`
 that disagrees with the account you ran as -- `rootful: true` without root, or root without it --
 a `cli-script`/`shell-script` argument that is a path, or names no file in
-`broker.cliScriptsDir`, and a `--interval` that is not a duration, is below 1s, or comes
+`broker.cliScriptsDir`, and a `--interval` that is not a duration, is below 1s or above 1h, or comes
 without `--watch`.
 
 **One documented exception:** a mistyped *top-level* command exits **1**, not 2
@@ -592,14 +592,17 @@ paths that name them.
 
 **`--watch` keeps the report on screen.** `broker status` (with or without `--all` and
 `--detail`) and `operator status` take `--watch`, which re-runs the same report every
-`--interval` (default `5s`, at least `1s`) until Ctrl-C. On a terminal each refresh clears
+`--interval` (default `5s`, at least `1s`, at most `1h`) until Ctrl-C. On a terminal each refresh clears
 the screen and redraws under a header naming the command, the interval and the time; on
 Windows the console is first asked to interpret the escape sequence, and an old console
 that refuses falls back to appending. Piped or redirected -- into a log, through `tee`, or
 under Git Bash, whose terminal is a pipe -- nothing is cleared: each report is appended under
 its own timestamped `===` line, so the output stays plain text. A refresh that fails, such
 as an unreachable cluster or engine, prints its error on stderr and the watch carries on;
-the screen clears before each read, so it stays blank for as long as the read takes.
+the screen clears before each read, so it stays blank for as long as the read takes. The loop
+and the interval bounds are the shared `watch` package's, the same one `solmq-conn-util` runs.
+An interval above `1h` is refused as a usage error: a report refreshed less often than hourly
+is better run by hand or by a scheduler.
 
 `broker logs --previous` is Kubernetes only, because a container engine keeps no prior-run
 log to read; `--since` is re-serialised through Go's duration parser before it reaches

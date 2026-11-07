@@ -986,7 +986,7 @@ Also available as: sts
 | `--all` | `false` | report every Solace broker found, not just the one this env file describes (Kubernetes: across all namespaces; docker/podman: every Solace container on this host) |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 | `--detail` | `false` | include the static artifacts, not just the running ones (Kubernetes: secrets, configmaps and PVCs; docker/podman: mounts, which is also where secrets appear) |
-| `--interval` | (none) | how often --watch refreshes, as a duration such as 5s or 1m (default 5s, at least 1s) |
+| `--interval` | (none) | how often --watch refreshes, as a duration such as 5s or 1m (default 5s, at least 1s, at most 1h) |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 | `--watch` | `false` | re-run the report every --interval until Ctrl-C; on a terminal the screen is redrawn in place |
 
@@ -1279,7 +1279,7 @@ Applies to: kubernetes. On any other platform this command fails rather than doi
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 | `--detail` | `false` | include the full description of the operator deployment |
-| `--interval` | (none) | how often --watch refreshes, as a duration such as 5s or 1m (default 5s, at least 1s) |
+| `--interval` | (none) | how often --watch refreshes, as a duration such as 5s or 1m (default 5s, at least 1s, at most 1h) |
 | `--watch` | `false` | re-run the report every --interval until Ctrl-C; on a terminal the screen is redrawn in place |
 
 

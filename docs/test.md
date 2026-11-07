@@ -66,7 +66,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-90 test files, 1662 test functions. One of those is not a test: `TestMain` in
+90 test files, 1661 test functions. One of those is not a test: `TestMain` in
 `internal/cli`, which points `os.Stdin` at an already-closed pipe for the whole package.
 That pipe is not a terminal under `confirm.StdinIsTerminal`, so a test that reaches a confirm
 helper without injecting `App.Interactive` gets the "pass --no-prompt instead" error at once
@@ -78,7 +78,7 @@ own tests carry the os/exec helper-process shim.
 | --- | --- | --- |
 | internal/k8s | 20 | 304 |
 | internal/broker | 24 | 507 |
-| internal/cli | 14 | 268 |
+| internal/cli | 14 | 267 |
 | internal/config | 16 | 237 |
 | internal/container | 8 | 211 |
 | internal/convert | 1 | 42 |
@@ -87,7 +87,7 @@ own tests carry the os/exec helper-process shim.
 | internal/output | 1 | 16 |
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/examples | 1 | 8 |
-| **Total** | **90** | **1662** |
+| **Total** | **90** | **1661** |
 
 
 ## Coverage
@@ -95,6 +95,15 @@ own tests carry the os/exec helper-process shim.
 Last recorded run, from `scripts/logs/cov.log` (2026-11-07), total **97.9%**. Re-run `cov`
 after any change; these figures go stale the moment tests move, and the previous total is
 the floor the next run has to hold.
+
+**S8, measured at 97.9%, unchanged: the watch loop adopted from the shared module.** `watchLoop` now calls
+`watch.Loop`; the screen-clear and section-line formats, the retry on a failed refresh and the
+quiet end on Ctrl-C are unchanged (the appended section line is the same 60-column `===` line
+`output.Section` printed). `stdoutIsTerminal`, `(*App).sleep`, `enableVT`
+(`watch_other.go`, `watch_windows.go`) and the two constants are gone, and with them
+`TestWatchSleepHonoursCtrlC` (shared: `watch.TestDefaultSleepHonoursCancel`), so the total can
+move either way. New: `--interval` above 1h is refused, covered by the new case and the 1s/1h
+bounds in `TestWatchIntervalIsValidated`.
 
 **S7, measured at 97.9%, unchanged: containercli and inspect adopted.** The compose file goes to compose
 on stdin and is never written, the deploy digest label replaces the per-certificate one, every
@@ -844,7 +853,7 @@ without a live broker;
 fixtures stand in for a captured `show current-config` transcript; and
 `exportconfigReadCounter` wraps `App.PromptIn` to prove a confirmation prompt was never
 actually read, not merely that the command did not block.
-268 tests across 14 files.
+267 tests across 14 files.
 
 Because the platform is a flag rather than the first word of a command, the
 invocations here name it explicitly (`--platform docker`) rather than relying on
@@ -1282,9 +1291,8 @@ The Kubernetes handlers of `ops_k8s.go`, driven directly over `opRunner` rather 
 | `TestWatchAppendsWhenNotATerminal` | Piped or redirected, no escape byte is written; each report is appended under its own timestamped `===` line, at the 5s default |
 | `TestWatchKeepsGoingAfterAFailedRefresh` | A refresh the engine refuses is shown on stderr with the retry, and the next refresh still runs |
 | `TestWatchEndsQuietlyWhenInterrupted` | A read that fails because Ctrl-C cancelled the watch ends it with nil, after one run and with no retry message |
-| `TestWatchSleepHonoursCtrlC` | The real timer waits out an interval, and returns `context.Canceled` at once when the context is already cancelled |
-| `TestWatchNeverRedrawsIntoAPipe` | With no seam, stdout being a pipe means no redraw, so escape bytes never land in a pipe |
-| `TestWatchIntervalIsValidated` | `--interval` below 1s, not a duration, or given without `--watch` is a usage error (exit 2) refused before anything runs |
+| `TestWatchNeverRedrawsIntoAPipe` | With no seam, `canRedraw` falls back to `watch.CanRedraw`, and stdout being a pipe means no redraw, so escape bytes never land in a pipe |
+| `TestWatchIntervalIsValidated` | `--interval` below 1s, above 1h, not a duration, or given without `--watch` is a usage error (exit 2) refused before anything runs; 1s and 1h exactly are accepted |
 | `TestStatusWithoutWatchRunsOnce` | Without `--watch` the report runs exactly once and never waits |
 | `TestOperatorStatusWatches` | `operator status --detail --watch` refreshes the same way, its header naming `--detail` |
 

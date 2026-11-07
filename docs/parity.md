@@ -99,8 +99,14 @@ Both tools follow every rule in this section today.
     session inside the instance returns the child's own code. `solmq-conn-util`:
     `cmd/solmq-conn-util/shell.go`. `solace-util`: `internal/cli/exit.go`.
 
-13. **Watch loops redraw in place and Ctrl-C exits 0.** `solmq-conn-util`:
-    `cmd/solmq-conn-util/status.go`. `solace-util`: `internal/cli/watch.go`.
+13. **Watch loops redraw in place and Ctrl-C exits 0.** Both tools run the shared `watch`
+    loop. On a terminal each refresh clears the screen and prints the header
+    `Every <interval>: <title>   <time>   Ctrl-C to stop`; anywhere else (a pipe, a file, a
+    console without escape processing) each refresh is appended under a timestamped section
+    line and no escape byte is written. A failed refresh is reported and retried, the loop
+    pauses for the interval after each refresh, and the interval is 1s to 1h.
+    `solmq-conn-util`: `cmd/solmq-conn-util/status.go`. `solace-util`:
+    `internal/cli/watch.go`.
 
 14. **Command binaries are bare names from an allowlist.** `command:` must name `kubectl`,
     `oc`, `docker` or `podman` without a path. The name is resolved through `PATH`, and a

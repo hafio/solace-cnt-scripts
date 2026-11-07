@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/watch"
 	"github.com/spf13/cobra"
 
 	"solace/internal/broker"
@@ -162,19 +163,17 @@ func addWatchFlags(c *cobra.Command, app *App) {
 	c.Flags().BoolVar(&app.watch, "watch", false,
 		"re-run the report every --interval until Ctrl-C; on a terminal the screen is redrawn in place")
 	c.Flags().StringVar(&app.interval, "interval", "",
-		"how often --watch refreshes, as a duration such as 5s or 1m (default 5s, at least 1s)")
+		"how often --watch refreshes, as a duration such as 5s or 1m (default 5s, at least 1s, at most 1h)")
 	registerFlagCompletion(c, "interval", cobra.NoFileCompletions)
 }
 
-// defaultWatchInterval is how often --watch refreshes when --interval is not given.
-const defaultWatchInterval = 5 * time.Second
-
 // watchInterval reads --interval. It is refused without --watch -- a script passing it
-// alone expects a watch it would not get -- and below 1s, since every refresh re-reads the
-// cluster or the engine. Each refusal is a usage error: a different command line fixes it.
+// alone expects a watch it would not get -- below 1s, since every refresh re-reads the
+// cluster or the engine, and above 1h (both bounds are the shared watch package's). Each
+// refusal is a usage error: a different command line fixes it.
 func watchInterval(a *App) (time.Duration, error) {
 	if a.interval == "" {
-		return defaultWatchInterval, nil
+		return watch.DefaultInterval, nil
 	}
 	if !a.watch {
 		return 0, exitcode.Usagef("--interval %q sets how often --watch refreshes, so it means nothing without "+
@@ -184,9 +183,13 @@ func watchInterval(a *App) (time.Duration, error) {
 	if err != nil {
 		return 0, exitcode.Usagef("--interval %q is not a duration: use a number with a unit, like 5s, 30s or 1m", a.interval)
 	}
-	if d < time.Second {
+	if d < watch.MinInterval {
 		return 0, exitcode.Usagef("--interval %q is below 1s: every refresh re-reads the cluster or the engine, "+
 			"so it must be at least 1s", a.interval)
+	}
+	if d > watch.MaxInterval {
+		return 0, exitcode.Usagef("--interval %q is above 1h: a watch that refreshes less often than hourly is "+
+			"better run by hand or by a scheduler; pick 1h or less", a.interval)
 	}
 	return d, nil
 }

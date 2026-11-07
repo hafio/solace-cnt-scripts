@@ -10,6 +10,7 @@ import (
 
 	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/hafio/go-deploy-utility/runner"
+	"github.com/hafio/go-deploy-utility/watch"
 )
 
 // stopAfter is a Sleep seam that records each interval it was asked to wait and ends the
@@ -41,7 +42,7 @@ func TestWatchRedrawsInPlaceOnATerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want nil: the watch ends cleanly", err)
 	}
-	if got := strings.Count(out, clearScreen); got != 2 {
+	if got := strings.Count(out, watch.ClearScreen); got != 2 {
 		t.Errorf("cleared the screen %d times, want once per refresh (2):\n%q", got, out)
 	}
 	if got := strings.Count(out, "Every 1s: solace-util broker status --all"); got != 2 {
@@ -75,7 +76,7 @@ func TestWatchAppendsWhenNotATerminal(t *testing.T) {
 	if got := len(watchSection.FindAllString(out, -1)); got != 2 {
 		t.Errorf("found %d timestamped section lines, want one per refresh (2):\n%s", got, out)
 	}
-	if len(slept) != 2 || slept[0] != defaultWatchInterval {
+	if len(slept) != 2 || slept[0] != watch.DefaultInterval {
 		t.Errorf("slept %v, want the 5s default each time", slept)
 	}
 }
@@ -137,26 +138,9 @@ func TestWatchEndsQuietlyWhenInterrupted(t *testing.T) {
 	}
 }
 
-// TestWatchSleepHonoursCtrlC covers the real timer: it waits out an interval, and returns
-// at once when the context is already cancelled rather than finishing the wait.
-func TestWatchSleepHonoursCtrlC(t *testing.T) {
-	a := &App{}
-	if err := a.sleep(context.Background(), time.Millisecond); err != nil {
-		t.Errorf("a completed wait returned %v, want nil", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	start := time.Now()
-	if err := a.sleep(ctx, time.Hour); !errors.Is(err, context.Canceled) {
-		t.Errorf("a cancelled wait returned %v, want context.Canceled", err)
-	}
-	if time.Since(start) > time.Minute {
-		t.Error("a cancelled wait did not return at once")
-	}
-}
-
-// TestWatchNeverRedrawsIntoAPipe: with no seam, a redraw needs stdout to be a terminal, so
-// output going into a pipe -- as a test's captured stdout does -- is never sent escape bytes.
+// TestWatchNeverRedrawsIntoAPipe: with no seam, canRedraw falls back to watch.CanRedraw,
+// which needs stdout to be a terminal, so output going into a pipe -- as a test's captured
+// stdout does -- is never sent escape bytes.
 func TestWatchNeverRedrawsIntoAPipe(t *testing.T) {
 	var redraw bool
 	captureStdout(t, func() { redraw = (&App{}).canRedraw() })
@@ -167,7 +151,8 @@ func TestWatchNeverRedrawsIntoAPipe(t *testing.T) {
 
 // TestWatchIntervalIsValidated: each bad --interval is a usage error (exit 2) refused before
 // anything runs -- the echo runner prints nothing -- including an --interval given without
-// --watch, which a script would expect to start a watch it never gets.
+// --watch, which a script would expect to start a watch it never gets. An --interval above
+// 1h is refused too, while 1s and 1h exactly are accepted.
 func TestWatchIntervalIsValidated(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -176,6 +161,7 @@ func TestWatchIntervalIsValidated(t *testing.T) {
 	}{
 		{"below 1s", []string{"--watch", "--interval", "500ms"}, "below 1s"},
 		{"not a duration", []string{"--watch", "--interval", "soon"}, "not a duration"},
+		{"above 1h", []string{"--watch", "--interval", "61m"}, "above 1h"},
 		{"without --watch", []string{"--interval", "10s"}, "means nothing without --watch"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,6 +180,15 @@ func TestWatchIntervalIsValidated(t *testing.T) {
 				t.Errorf("a refused --interval still ran the report: %q", out)
 			}
 		})
+	}
+	for _, edge := range []string{"1s", "1h"} {
+		d, err := watchInterval(&App{watch: true, interval: edge})
+		if err != nil {
+			t.Errorf("--interval %s refused: %v, want it accepted as a bound", edge, err)
+		}
+		if want, _ := time.ParseDuration(edge); d != want {
+			t.Errorf("--interval %s = %s, want %s", edge, d, want)
+		}
 	}
 }
 
