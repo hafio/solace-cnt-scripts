@@ -249,7 +249,6 @@ func (c *Config) rebaseHostPaths() {
 		&c.TLS.CertKey,
 		&c.Broker.CLIScriptsDir,
 		&c.Broker.HostDiagnosticDir,
-		&c.Docker.ComposeFile,
 	} {
 		*p = c.hostPath(*p)
 	}
@@ -354,9 +353,6 @@ func (c *Config) expandHomePaths() error {
 		return err
 	}
 	if err := expand("broker.hostDiagnosticDir", &c.Broker.HostDiagnosticDir); err != nil {
-		return err
-	}
-	if err := expand("docker.composeFile", &c.Docker.ComposeFile); err != nil {
 		return err
 	}
 	// The four container-host directories, expanded for the machine that actually

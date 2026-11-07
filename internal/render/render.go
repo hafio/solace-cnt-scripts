@@ -685,15 +685,25 @@ func (s ContainerSecret) EnvVar() string {
 	return b.String()
 }
 
-// CertDigestLabel is the label carrying the sha256 of the server certificate bundle,
-// which is how a redeploy tells a renewed certificate from an unchanged one without
-// reading the key back: podman puts it on the store secret, docker on the container.
+// CertDigestLabel is the annotation carrying the sha256 of the server certificate bundle
+// on the Kubernetes TLS Secret, which is how a redeploy tells a renewed certificate from an
+// unchanged one without reading the key back. The container platforms do not use it: podman
+// compares the stored secret's value itself, and docker compares the deploy digest.
 const CertDigestLabel = "solace-util.sha256"
 
-// DigestEnvVar is the compose-environment variable that fills the container's
-// CertDigestLabel, for the one secret that has a digest: the server certificate. It
-// derives from EnvVar, so it keeps that name's fixed suffix and its de-confliction.
-func (s ContainerSecret) DigestEnvVar() string { return s.EnvVar() + "_SHA256" }
+// DeployDigestLabel is the container label docker's compose file carries to make a
+// change to a secret's VALUE visible to compose: compose compares a service's
+// configuration, not the content of a secret, so a rotated password under an unchanged
+// file would keep the old container. The label's value is interpolated from the compose
+// child's environment (DeployDigestEnvVar), where the deploy sets the digest of the
+// file and every value the child receives, so any change recreates the container and an
+// unchanged deploy changes nothing.
+const DeployDigestLabel = "solace-util.deploy-sha256"
+
+// DeployDigestEnvVar is the compose-environment variable that fills DeployDigestLabel.
+// It is a fixed name, so no config text can fold into a name the child's loader reads,
+// and it cannot equal a secret's EnvVar, which always ends in a different suffix.
+const DeployDigestEnvVar = "SOLACE_DEPLOY_SHA256"
 
 // secretFilePath is the in-container path of the secret feeding setting envKey.
 func secretFilePath(envKey string) string { return secretMount + "/" + envKey }
@@ -1153,18 +1163,16 @@ func Compose(c *config.Config, id config.NodeIdentity) []byte {
 	// come from this host's environment -- which `deploy` sets for the compose
 	// process -- so nothing secret is written beside this file.
 	secrets := ContainerSecrets(c, p)
-	// The certificate's digest as a container label, so a redeploy can ask the
-	// running container which certificate it was created with -- the docker
-	// counterpart of the label podman's store secret carries. It is interpolated from
-	// the compose child's environment like the secret itself, so this file stays
-	// byte-identical across a renewal and holds no digest of the key. The `$` is
-	// deliberately NOT escaped: interpolation is the point.
-	for _, s := range secrets {
-		if len(s.SourceFiles) > 0 {
-			fmt.Fprint(&b, "    labels:\n")
-			fmt.Fprintf(&b, "      %s: \"${%s}\"\n", CertDigestLabel, s.DigestEnvVar())
-		}
-	}
+	// The deploy digest as a container label, so a redeploy can ask the running
+	// container which file and which secret values it was created with, and so compose
+	// recreates it when one of them changes (see DeployDigestLabel). It is interpolated
+	// from the compose child's environment like the secrets themselves, so this file
+	// stays byte-identical across a rotation and holds no digest of a secret. The `$` is
+	// deliberately NOT escaped: interpolation is the point. The `:-` default keeps a
+	// hand-run `docker compose` of `broker generate`'s output, and `compose down`, from
+	// needing the variable.
+	fmt.Fprint(&b, "    labels:\n")
+	fmt.Fprintf(&b, "      %s: \"${%s:-}\"\n", DeployDigestLabel, DeployDigestEnvVar)
 	// The secrets: blocks used to be written unconditionally. ServiceSecrets and
 	// TopSecrets write nothing for an empty list, but the list is never empty here:
 	// containerSecretSpecs always leads with the admin password, so the bytes are

@@ -293,34 +293,50 @@ func TestComposeQuotesIdentifierScalars(t *testing.T) {
 	}
 }
 
-// TestComposeLabelsTheCertificateDigest pins docker's half of the certificate's
-// change detection. Compose keeps no secret object to label, so the digest is a
-// container label, interpolated from the compose child's environment: the file must
-// name the variable -- unescaped, since interpolation is the point -- and never a
-// digest, so it stays byte-identical across a renewal. No certificate, no label.
-func TestComposeLabelsTheCertificateDigest(t *testing.T) {
+// TestComposeLabelsTheDeployDigest pins docker's change detection. Compose compares a
+// service's configuration, not the content of a secret, so the file carries one container
+// label whose value is interpolated from the compose child's environment: the file must
+// name the variable -- unescaped, since interpolation is the point, and with an empty
+// default so a hand-run compose and a down need not set it -- and never a digest, so it
+// stays byte-identical across a rotation. The label is there with or without a
+// certificate, because a rotated password is as much a change as a renewed certificate.
+func TestComposeLabelsTheDeployDigest(t *testing.T) {
 	c := load(t, config.Docker)
-	var cert ContainerSecret
-	for _, s := range ContainerSecrets(c, config.Docker) {
-		if len(s.SourceFiles) > 0 {
-			cert = s
+	want := "    labels:\n      " + DeployDigestLabel + ": \"${" + DeployDigestEnvVar + ":-}\"\n"
+	for _, withCert := range []bool{true, false} {
+		if !withCert {
+			c.TLS.Cert, c.TLS.CertKey = "", ""
+		}
+		compose := string(Compose(c, c.ResolveNode(config.Primary)))
+		if !strings.Contains(compose, want) {
+			t.Errorf("cert=%v: compose must label the container with the interpolated digest (%q):\n%s",
+				withCert, want, compose)
+		}
+		if strings.Contains(compose, "$${"+DeployDigestEnvVar) {
+			t.Error("the digest variable must not be escaped, or compose would never fill it")
+		}
+		if strings.Contains(compose, CertDigestLabel) {
+			t.Errorf("the per-certificate label is gone from compose:\n%s", compose)
 		}
 	}
-	if want := cert.EnvVar() + "_SHA256"; cert.DigestEnvVar() != want {
-		t.Errorf("DigestEnvVar = %q, want %q (EnvVar's name and fixed suffix, plus _SHA256)", cert.DigestEnvVar(), want)
-	}
-	compose := string(Compose(c, c.ResolveNode(config.Primary)))
-	want := "    labels:\n      " + CertDigestLabel + ": \"${" + cert.DigestEnvVar() + "}\"\n"
-	if !strings.Contains(compose, want) {
-		t.Errorf("compose must label the container with the interpolated digest (%q):\n%s", want, compose)
-	}
-	if strings.Contains(compose, "$${"+cert.DigestEnvVar()) {
-		t.Error("the digest variable must not be escaped, or compose would never fill it")
-	}
+}
 
-	c.TLS.Cert, c.TLS.CertKey = "", ""
-	compose = string(Compose(c, c.ResolveNode(config.Primary)))
-	if strings.Contains(compose, "labels:") || strings.Contains(compose, "_SHA256") {
-		t.Errorf("with no certificate there is no digest to label:\n%s", compose)
+// TestDeployDigestEnvVarIsFixedAndDistinct pins why DeployDigestEnvVar is safe to put in
+// a child's environment: it is not a name the loader reads, and no secret's EnvVar can
+// equal it, whatever the container is called.
+func TestDeployDigestEnvVarIsFixedAndDistinct(t *testing.T) {
+	for _, bad := range []string{"PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "IFS", "BASH_ENV", "SHELL"} {
+		if strings.EqualFold(DeployDigestEnvVar, bad) {
+			t.Errorf("DeployDigestEnvVar = %q, a name the child's loader reads", DeployDigestEnvVar)
+		}
+	}
+	c := load(t, config.Docker)
+	for _, name := range []string{"solace", "SOLACE_DEPLOY_SHA256", "x"} {
+		c.Docker.Container.Name = name
+		for _, s := range ContainerSecrets(c, config.Docker) {
+			if s.EnvVar() == DeployDigestEnvVar {
+				t.Errorf("container %q: secret %s folds to %q, the deploy digest's variable", name, s.Name, s.EnvVar())
+			}
+		}
 	}
 }

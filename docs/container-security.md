@@ -198,7 +198,11 @@ Six properties make the difference between using that mechanism and only appeari
   bind-mounts host subscription data over `/run/secrets`. Name the full path you point at.
 - **Values never on argv.** Feed the engine's secret store on stdin (`podman secret create
   [--replace] <name> -`, `--replace` needing podman 4.7), or hand the value to the child process environment, or apply a manifest with
-  `kubectl apply -f -`. A command line is visible to every process on the host.
+  `kubectl apply -f -`. A command line is visible to every process on the host. This tool
+  also feeds docker's compose file to `compose -f -` on stdin, so no compose file is left on
+  disk. It compares a podman secret with the configured value by reading the stored one
+  back on stdout (`podman secret inspect --showsecret`, 4.7 and later) and never puts
+  anything derived from a value on a command line, label or log.
 - **Mode and owner on the mount.** Both docker compose and podman default a mounted secret to
   uid 0, mode 0444 -- world-readable inside the container, and not owned by the non-root user
   from rule 3. Set them. On compose that only works for a secret sourced from `environment:`;
@@ -280,7 +284,8 @@ and `Memory=` needs 5.5 -- a memory cap written as `PodmanArgs=--memory=` needs 
 podman run flag, which every supported podman has. Check each key against the release that
 introduced it, and pin that in a test rather than a comment: `artifacttest.AssertQuadletKeys`
 holds every `[Container]` key to a release table kept in the shared module. This tool documents
-Compose 2.23.1 as its floor for the `environment:` secret source; the public record (compose
+Compose 2.23.1 as its floor for the `environment:` secret source (and for reading the file
+from stdin, `-f -`, which v2, standalone v1 and nerdctl compose all document); the public record (compose
 PR #10084, merged 2022-12, already applying uid/gid to environment-sourced secrets) shows the
 source accepted well before that, so treat such a number as the floor a project chose, not the
 one the feature needs, and say which. Put them in the same table as your other floors and say

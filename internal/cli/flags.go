@@ -217,7 +217,7 @@ func addOutFlags(c *cobra.Command, app *App) {
 // decision, the same way deleting its data is.
 func addRestartFlag(c *cobra.Command, app *App) {
 	c.Flags().BoolVar(&app.restart, "restart", false,
-		"restart an already-running broker when the deploy changed its artifact or its server certificate (otherwise you are asked, and a non-interactive run leaves it running)")
+		"restart or recreate an already-running broker without asking, for a changed artifact, secret or server certificate and also for an unchanged one (otherwise docker/podman ask, and fail with no terminal unless --no-prompt is given; Kubernetes asks only about a renewed certificate)")
 }
 
 // addAllowCommandFlag wires --allow-command onto one command that executes. It is the

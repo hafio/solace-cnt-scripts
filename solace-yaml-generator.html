@@ -390,7 +390,6 @@ body{font-family:'Inter',system-ui,sans-serif;font-size:.88rem;color:var(--tp);b
       <div class="fr">
         <div class="f"><label>Runtime command</label><input id="i-dkcmd" placeholder="docker" oninput="gen()"><div class="h">docker, docker-compose or nerdctl first.</div></div>
         <div class="f"><label>Compose command</label><input id="i-dkcompose" placeholder="(the runtime plus compose)" oninput="gen()"><div class="h">docker-compose for the standalone v1 binary.</div></div>
-        <div class="f"><label>Compose file</label><input id="i-dkfile" placeholder="docker-compose.yml" oninput="gen()"></div>
       </div>
     </div>
     <div class="plat-podman">
@@ -828,7 +827,7 @@ function readModel() {
       nodeReq: parseExprs(V('i-nareq')), podAff: podTerms('paff-list'), podAnti: podTerms('panti-list'),
       lb: { ip: V('i-lbip'), pool: V('i-ippool'), annotations: L('i-lbanotn') },
       ports: portEntries() },
-    docker: { command: V('i-dkcmd'), compose: V('i-dkcompose'), composeFile: V('i-dkfile') },
+    docker: { command: V('i-dkcmd'), compose: V('i-dkcompose') },
     podman: { command: V('i-pdcmd'), rootful: CHK('i-pdrootful'), quadletDir: V('i-pdquadlet'), baseDir: V('i-pdbasedir') },
     ctr: { name: V('i-cname'), runUser: V('i-cuser'), dataDir: V('i-cdata'), mem: V('i-cmem'), cpuset: V('i-ccpuset'), monitorCpuset: V('i-cmoncpuset'), core: V('i-ccore'),
       hc: { on: CHK('i-hcon'), cmd: LINES(RAW('i-hccmd')), interval: V('i-hcint'), timeout: V('i-hcto'), retries: V('i-hcret'), startPeriod: V('i-hcsp') },
@@ -926,7 +925,7 @@ function emitEnv(M) {
   const ctr = kv('name', c.name, S(4)) + kv('runUser', c.runUser, S(4)) + kv('dataDir', c.dataDir, S(4)) + kv('mem', c.mem, S(4)) +
     kv('cpuset', c.cpuset, S(4)) + kv('monitorCpuset', c.monitorCpuset, S(4)) + blk('ulimits', kv('core', c.core, S(6)), S(4)) + health;
   if (M.plat.docker) {
-    const b = kv('command', M.docker.command, S(2)) + kv('compose', M.docker.compose, S(2)) + kv('composeFile', M.docker.composeFile, S(2)) +
+    const b = kv('command', M.docker.command, S(2)) + kv('compose', M.docker.compose, S(2)) +
       blk('network', net, S(2)) + blk('container', ctr, S(2));
     y += '\ndocker:' + (b ? '\n' + b : ' {}\n');
   }
@@ -1249,7 +1248,6 @@ function validateCtr(M, err, note) {
   if (M.plat.docker) {
     cmdNote('docker.command', M.docker.command, COMMANDS.docker);
     cmdNote('docker.compose', M.docker.compose, COMMANDS.docker);
-    path('docker.composeFile', M.docker.composeFile);
   }
   if (M.plat.podman) {
     cmdNote('podman.command', M.podman.command, COMMANDS.podman);

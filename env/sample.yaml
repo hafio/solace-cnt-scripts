@@ -379,10 +379,6 @@ docker:
                                     # `sudo solace-util broker deploy` instead
   # compose: docker compose         # omitted -> the runtime plus `compose`. Set to
                                     # `docker-compose` for the standalone v1 binary
-  # composeFile: docker-compose.yml # path of the generated compose file. It names the
-                                    # secrets it needs; `broker deploy` supplies the
-                                    # values through the process environment, so no
-                                    # secret is written beside it
   container:
     dataDir: /opt/solace/data       # mandatory, must be ABSOLUTE. Also what
                                     # `broker remove --delete-data` empties (the directory

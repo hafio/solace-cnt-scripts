@@ -589,8 +589,10 @@ solace-util broker copy into files... [flags]
 Deploy the broker and its prerequisites
 
 Applies every prerequisite -- namespace, secrets, TLS -- then the broker, and is
-safe to re-run. A running broker is restarted for a change only on consent or
---restart. Kubernetes readiness is not waited on; `broker status` watches it.
+safe to re-run. A running broker is restarted for a change only on consent, or
+with --restart (docker/podman also take --no-prompt, which approves; with no
+terminal and no --no-prompt the deploy fails before it changes anything).
+Kubernetes readiness is not waited on; `broker status` watches it.
 
 ```
 solace-util broker deploy [flags]
@@ -601,8 +603,9 @@ Also available as: dp
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask (docker/podman only) |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (docker/podman only) |
-| `--restart` | `false` | restart an already-running broker when the deploy changed its artifact or its server certificate (otherwise you are asked, and a non-interactive run leaves it running) |
+| `--restart` | `false` | restart or recreate an already-running broker without asking, for a changed artifact, secret or server certificate and also for an unchanged one (otherwise docker/podman ask, and fail with no terminal unless --no-prompt is given; Kubernetes asks only about a renewed certificate) |
 
 
 ### solace-util broker generate

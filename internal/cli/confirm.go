@@ -100,12 +100,26 @@ func confirmActionStrict(a *App, title, lower, what string) (bool, error) {
 		lower+" "+what)
 }
 
-// confirmRestart asks whether a running broker may be bounced to apply a changed deploy
-// artifact. A session with no terminal declines: the caller then leaves the new artifact
-// in place and warns, so a scripted deploy never drops messaging traffic unattended.
+// confirmRedeploy gates a container deploy that would restart or recreate a running
+// broker because its artifact or a secret changed. --no-prompt approves without asking;
+// a terminal is asked [y/N]; no terminal and no --no-prompt is an error naming
+// --no-prompt, so a scripted deploy never drops messaging traffic unattended and never
+// does so silently either. A reply of `n` is (false, nil): the deploy has written and
+// restarted nothing, and says so. --restart is not read here: it pre-approves in the
+// Manager, before this is asked.
 //
-// It takes the App so the prompt goes through the same seams as the other confirm helpers;
 // ops_container wires it to Manager.Confirm as a closure.
+func confirmRedeploy(a *App, question string) (bool, error) {
+	return a.prompter().Gate(a.noPrompt, confirm.Lenient, question+" [y/N] ", "the redeploy")
+}
+
+// confirmRestart asks whether a running Kubernetes broker may be rolled to serve a renewed
+// server certificate. A session with no terminal declines: the caller then leaves the
+// broker running and warns. It stays lenient where the container deploy's gate is not
+// because --no-prompt is not a flag of `deploy` on Kubernetes, so an error naming it
+// there would be one the operator cannot act on.
+//
+// It takes the App so the prompt goes through the same seams as the other confirm helpers.
 func confirmRestart(a *App, question string) bool {
 	p := a.prompter()
 	if !p.Terminal() {

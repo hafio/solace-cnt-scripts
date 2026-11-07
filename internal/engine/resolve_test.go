@@ -80,12 +80,13 @@ func TestChildEnvNamesAreNotSystemVariables(t *testing.T) {
 		"PATH", "Path", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
 		"PATHEXT", "SHELL", "IFS", "BASH_ENV", "ENV",
 	}
-	// The names this tool really passes, from render.ContainerSecret.EnvVar.
+	// The names this tool really passes, from render.ContainerSecret.EnvVar and render.DeployDigestEnvVar.
 	passed := []string{
 		"SOLACE_ADMIN_PASSWORD=x",
 		"SOLACE_REDUNDANCY_PSK=y",
 		"SOLACE_TLS_PASSPHRASE=z",
 		"SOLACE_USER_APPUSER_PASSWORD=w",
+		"SOLACE_DEPLOY_SHA256=d", // render.DeployDigestEnvVar, set by the compose deploy
 	}
 	for _, pair := range passed {
 		name, _, _ := strings.Cut(pair, "=")
@@ -97,7 +98,7 @@ func TestChildEnvNamesAreNotSystemVariables(t *testing.T) {
 	}
 	// And the masking that keeps values out of echoed output still holds for them.
 	masked := runner.MaskEnv(passed)
-	for _, secret := range []string{"x", "y", "z", "w"} {
+	for _, secret := range []string{"x", "y", "z", "w", "d"} {
 		if strings.Contains(masked, "="+secret) {
 			t.Errorf("runner.MaskEnv(%v) leaked a value: %q", passed, masked)
 		}

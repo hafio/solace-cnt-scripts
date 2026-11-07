@@ -188,7 +188,7 @@ git tag v0.1.0 && git push origin v0.1.0
 | `internal/render` | Templating for the broker CR, operator bundle, compose/run/quadlet artifacts. The shared pieces (scalar quoting and escaping, the privilege posture, secret wiring) come from the module's `containerart` packages; the artifacts are checked with `containerart/artifacttest`. |
 | `internal/broker` | Platform-agnostic config/verify operations over an injected transport. |
 | `internal/k8s` | Kubernetes cluster/operator operations and the kubectl transport. |
-| `internal/container` | Docker/Podman host operations (Manager) and the node-local `<runtime> exec`/`cp` transport. |
+| `internal/container` | Docker/Podman host operations (Manager) and the node-local `<runtime> exec`/`cp` transport. Its engine commands (info, compose on stdin, lifecycle, listing, exec, upload, logs) come from the module's `containercli`, container reads from `containercli/inspect`, and secret labels from `podman`; the Manager compares, asks, then writes (`deployPodman`, `deployDocker`). |
 | `internal/convert` | Legacy bash env -> YAML converter behind `solace-util convert`. |
 | `internal/output` | The one package that owns every stdout/stderr shape (tags, sections, tables). |
 | `internal/cli` | Cobra command tree and handlers. |

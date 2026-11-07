@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/hafio/go-deploy-utility/containercli"
 	"github.com/hafio/go-deploy-utility/exitcode"
 
 	"solace/internal/broker"
@@ -44,15 +45,15 @@ func ctrOps(a *App) *broker.Ops {
 	return o
 }
 
-// ctrManager builds a container host Manager, wiring stdout as the report sink and
-// stdin as the prompt source. The env path is deliberately NOT passed: nothing in this
+// ctrManager builds a container host Manager, wiring stdout as the report sink, stdin
+// as the prompt source and the redeploy gate (confirmRedeploy) as its Confirm. The env path is deliberately NOT passed: nothing in this
 // tool writes to an env file, now that the redundancy pre-shared key is the operator's
 // to supply rather than something a first deploy invented and wrote back.
 func ctrManager(a *App) *container.Manager {
 	m := container.NewManager(a.Runner, a.Cfg, a.Platform, lineSink(), os.Stdout)
 	m.In = os.Stdin
 	m.RestartApproved = a.restart
-	m.Confirm = func(question string) bool { return confirmRestart(a, question) }
+	m.Confirm = func(question string) (bool, error) { return confirmRedeploy(a, question) }
 	return m
 }
 
@@ -351,11 +352,13 @@ func ctrLogin(a *App, o *broker.Ops) error {
 // day-2 ops (node-local)
 func opCtrStatus(a *App) error { return ctrManager(a).Status(bg()) }
 func opCtrLogs(a *App) error {
-	args, err := logArgs(a)
+	since, err := logSince(a)
 	if err != nil {
 		return err
 	}
-	return ctrManager(a).Logs(bg(), args...)
+	return ctrManager(a).Logs(bg(), containercli.LogOptions{
+		Follow: a.follow, Timestamps: a.timestamps, Tail: a.tail, Since: since,
+	}, a.previous)
 }
 
 // opCtrCLI / opCtrShell hand the terminal over, so the session's own exit status is

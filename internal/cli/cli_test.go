@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"solace/internal/config"
+	"solace/internal/container"
 	"solace/internal/k8s"
 	"solace/internal/render"
 )
@@ -725,7 +726,7 @@ func TestFlagsRegistered(t *testing.T) {
 		path  []string
 		flags []string
 	}{
-		{[]string{"broker", "deploy"}, []string{"restart"}},
+		{[]string{"broker", "deploy"}, []string{"restart", "no-prompt"}},
 		{[]string{"broker", "remove"}, []string{"delete-data", "no-prompt"}},
 		{[]string{"operator", "remove"}, []string{"delete-crd", "no-prompt"}},
 		{[]string{"broker", "perform", "gather-diagnostics"}, []string{"days", "encrypt"}},
@@ -902,8 +903,8 @@ func TestCtrWiredDryRun(t *testing.T) {
 		// which made the flag a no-op there and meant a plain `logs` never returned.
 		{"docker logs broker", []string{"broker", "logs", "--platform", "docker"}, "+ docker logs solace"},
 		{"docker logs broker --follow", []string{"broker", "logs", "--follow", "--platform", "docker"}, "+ docker logs -f"},
-		{"docker cli", []string{"broker", "cli", "--platform", "docker"}, "+ docker exec -it"},
-		{"docker shell", []string{"broker", "shell", "--platform", "docker"}, "+ docker exec -it"},
+		{"docker cli", []string{"broker", "cli", "--platform", "docker"}, "+ docker exec -i -t"},
+		{"docker shell", []string{"broker", "shell", "--platform", "docker"}, "+ docker exec -i -t"},
 		// The host prerequisites are folded into deploy now, so the mkdir/chown that
 		// `prepare host` used to issue must show up on the deploy path itself.
 		{"docker deploy makes the data dir", []string{"broker", "deploy", "--pod", "primary", "--platform", "docker"}, "+ mkdir -p"},
@@ -3790,22 +3791,221 @@ func TestPromptSeamsBeatStdin(t *testing.T) {
 	}
 }
 
-// TestCtrManagerConfirmWiring covers confirmRestart's wiring into ctrManager: a
-// regression here (ctrManager forgetting to set m.Confirm, or confirmRestart
-// losing its interactive guard) would silently let a non-interactive deploy bounce
-// a live broker container unattended. It drives the closure through the App's
-// Interactive seam rather than the ambient os.Stdin, so the outcome is
-// deterministic on any host.
+// TestCtrManagerConfirmWiring covers confirmRedeploy's wiring into ctrManager: a
+// regression here (ctrManager forgetting to set m.Confirm, or the gate losing its
+// no-terminal refusal) would silently let a non-interactive deploy bounce a live broker
+// container unattended. It drives the closure through the App's Interactive seam rather
+// than the ambient os.Stdin, so the outcome is deterministic on any host. With no
+// terminal and no --no-prompt the question cannot be asked and is an error naming the
+// flag; --no-prompt answers yes without asking.
 func TestCtrManagerConfirmWiring(t *testing.T) {
 	a := &App{Interactive: func() bool { return false }}
 	m := ctrManager(a)
 	if m.Confirm == nil {
 		t.Fatal("ctrManager did not wire Manager.Confirm")
 	}
-	if m.Confirm("restart now?") {
-		t.Error("Confirm (non-interactive) = true, want false")
+	yes, err := m.Confirm("restart now?")
+	if yes || err == nil || !strings.Contains(err.Error(), "pass --no-prompt instead") ||
+		!strings.Contains(err.Error(), "the redeploy") {
+		t.Errorf("Confirm (non-interactive) = (%v, %v), want (false, an error naming --no-prompt)", yes, err)
+	}
+	if code := exitcode.Code(err); code != 1 {
+		t.Errorf("the refusal exits %d, want 1", code)
+	}
+
+	a = &App{Interactive: func() bool { return false }, noPrompt: true}
+	if yes, err := ctrManager(a).Confirm("restart now?"); !yes || err != nil {
+		t.Errorf("Confirm (--no-prompt) = (%v, %v), want (true, nil)", yes, err)
+	}
+
+	for _, tc := range []struct {
+		reply string
+		want  bool
+	}{{"y\n", true}, {"n\n", false}} {
+		a = &App{Interactive: func() bool { return true }, PromptIn: strings.NewReader(tc.reply)}
+		var yes bool
+		var err error
+		captureStdout(t, func() { yes, err = ctrManager(a).Confirm("restart now?") })
+		if yes != tc.want || err != nil {
+			t.Errorf("Confirm (terminal, %q) = (%v, %v), want (%v, nil)", tc.reply, yes, err, tc.want)
+		}
 	}
 }
+
+// ctrRedeployApp builds an App over a fake runner that reports this deployment's
+// container as RUNNING and created from some other deploy: docker's `ps` lists it and its
+// `container inspect` carries a stale deploy label, podman's unit is active and the store
+// holds no label. Either way a deploy has something to restart, so it must ask.
+//
+// The Manager is built the way the CLI builds it (ctrManager), then pointed at a temp
+// quadlet directory and past the euid guard, so nothing here can touch the real host.
+func ctrRedeployApp(t *testing.T, p config.Platform) (*App, *container.Manager, *opRunner) {
+	t.Helper()
+	cfg, err := config.Load(writeCtrStandaloneEnv(t), p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	name := cfg.ContainerBlock(p).Name
+	cfg.Podman.QuadletDir = t.TempDir()
+	rr := &opRunner{output: func(c opCall) []byte {
+		switch {
+		case c.name == "systemctl" && opArgvMatch(c, "is-active"):
+			return []byte("active\n")
+		case opArgvMatch(c, "inspect") && p == config.Docker:
+			return []byte(`[{"Name": "/` + name + `", "State": {"Running": true}, "Config": {"Image": "i",` +
+				` "Labels": {"` + render.DeployDigestLabel + `": "stale"}}}]`)
+		case opArgvMatch(c, "status=running"):
+			return []byte(name + "\timg\tUp 1 hour\n")
+		}
+		return nil
+	}}
+	a := &App{Cfg: cfg, Platform: p, Runner: rr, Interactive: func() bool { return false }}
+	m := ctrManager(a)
+	m.Geteuid = func() int { return -1 }
+	return a, m, rr
+}
+
+// TestCtrRedeployGate is the redeploy rule through the CLI's own wiring, on both
+// platforms: a deploy that would restart or recreate a running broker because something
+// changed (1) with no terminal and no flag fails, exit 1, naming --no-prompt, and changes
+// nothing; (2) with --no-prompt applies it without asking; (3) at a terminal asks, and a
+// "no" changes nothing and is not an error; (4) with --restart applies it without asking.
+func TestCtrRedeployGate(t *testing.T) {
+	// An exact argument, not a substring: the project directory in a compose argv is a
+	// temp path named after the test.
+	ran := func(rr *opRunner, token string) bool {
+		for _, c := range rr.calls {
+			for _, a := range c.args {
+				if a == token {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	applied := func(rr *opRunner, p config.Platform) bool {
+		if p == config.Docker {
+			return ran(rr, "up")
+		}
+		return ran(rr, "restart")
+	}
+	for _, p := range []config.Platform{config.Docker, config.Podman} {
+		t.Run(string(p)+" no terminal fails naming --no-prompt", func(t *testing.T) {
+			_, m, rr := ctrRedeployApp(t, p)
+			var err error
+			captureStdout(t, func() { err = m.Deploy(bg(), config.Primary) })
+			if err == nil || !strings.Contains(err.Error(), "pass --no-prompt instead") {
+				t.Fatalf("Deploy err = %v, want one naming --no-prompt", err)
+			}
+			if code := exitcode.Code(err); code != 1 {
+				t.Errorf("exit code = %d, want 1", code)
+			}
+			if applied(rr, p) || ran(rr, "create") || ran(rr, "daemon-reload") {
+				t.Errorf("a refused question must change nothing:\n%s", rr.dump())
+			}
+			if _, statErr := os.Stat(filepath.Join(m.Cfg.Podman.QuadletDir, m.Cfg.ContainerBlock(p).Name+".container")); statErr == nil {
+				t.Error("a refused question must not write the unit")
+			}
+		})
+		t.Run(string(p)+" --no-prompt approves", func(t *testing.T) {
+			a, m, rr := ctrRedeployApp(t, p)
+			a.noPrompt = true
+			var err error
+			captureStdout(t, func() { err = m.Deploy(bg(), config.Primary) })
+			if err != nil {
+				t.Fatalf("Deploy: %v", err)
+			}
+			if !applied(rr, p) {
+				t.Errorf("--no-prompt should apply the change:\n%s", rr.dump())
+			}
+		})
+		t.Run(string(p)+" a no at the terminal changes nothing", func(t *testing.T) {
+			a, m, rr := ctrRedeployApp(t, p)
+			a.Interactive = func() bool { return true }
+			a.PromptIn = strings.NewReader("n\n")
+			var err error
+			captureStdout(t, func() { err = m.Deploy(bg(), config.Primary) })
+			if err != nil {
+				t.Fatalf("Deploy: %v (a \"no\" is a decision, not a failure)", err)
+			}
+			if applied(rr, p) || ran(rr, "create") || ran(rr, "daemon-reload") {
+				t.Errorf("a \"no\" must change nothing:\n%s", rr.dump())
+			}
+		})
+		t.Run(string(p)+" a yes at the terminal applies", func(t *testing.T) {
+			a, m, rr := ctrRedeployApp(t, p)
+			a.Interactive = func() bool { return true }
+			a.PromptIn = strings.NewReader("y\n")
+			var err error
+			captureStdout(t, func() { err = m.Deploy(bg(), config.Primary) })
+			if err != nil || !applied(rr, p) {
+				t.Fatalf("Deploy = %v, applied=%v, want the change applied:\n%s", err, applied(rr, p), rr.dump())
+			}
+		})
+		t.Run(string(p)+" --restart approves without a terminal", func(t *testing.T) {
+			a, m, rr := ctrRedeployApp(t, p)
+			a.restart = true
+			m.RestartApproved = a.restart // ctrManager has already run; the flag is read when it builds
+			var err error
+			captureStdout(t, func() { err = m.Deploy(bg(), config.Primary) })
+			if err != nil || !applied(rr, p) {
+				t.Fatalf("Deploy = %v, applied=%v, want the change applied:\n%s", err, applied(rr, p), rr.dump())
+			}
+		})
+	}
+}
+
+// TestCtrManagerReadsTheRestartFlag: ctrManager hands --restart to the Manager, which is
+// what pre-approves a redeploy.
+func TestCtrManagerReadsTheRestartFlag(t *testing.T) {
+	if ctrManager(&App{}).RestartApproved {
+		t.Error("RestartApproved is set without --restart")
+	}
+	if !ctrManager(&App{restart: true}).RestartApproved {
+		t.Error("--restart must reach the Manager as RestartApproved")
+	}
+}
+
+// TestCtrDeployEchoesTheProjectDirectory: the compose file goes in on stdin, and compose is
+// anchored at the env file's own directory, so relative paths resolve the same wherever
+// the tool is run from. A preview shows it, asks nothing and writes nothing.
+func TestCtrDeployEchoesTheProjectDirectory(t *testing.T) {
+	path := writeCtrStandaloneEnv(t)
+	out, err := runRootWith(t, []string{"broker", "deploy", "--platform", "docker", "--env", path},
+		func(a *App) { a.Interactive = func() bool { return false }; echoRunner(a) })
+	if err != nil {
+		t.Fatalf("deploy over echo: %v", err)
+	}
+	want := "+ docker compose -f - --project-directory " + filepath.Dir(path) + " up -d"
+	if !strings.Contains(out, want) {
+		t.Errorf("echo should show %q:\n%s", want, out)
+	}
+	if strings.Contains(out, smokeAdminPass) {
+		t.Errorf("the echo leaked the admin password:\n%s", out)
+	}
+}
+
+// TestDeployNoPromptIsRegisteredOnContainersOnly: --no-prompt answers the redeploy question,
+// which only docker and podman ask, so Kubernetes refuses it by name instead of accepting
+// and ignoring it. (Kubernetes asks one question on deploy, about a renewed certificate,
+// answered by --restart or a terminal.)
+func TestDeployNoPromptIsRegisteredOnContainersOnly(t *testing.T) {
+	cmd := findCmd(t, newRootCmd(&App{}), "broker", "deploy")
+	f := cmd.Flags().Lookup("no-prompt")
+	if f == nil {
+		t.Fatal("broker deploy has no --no-prompt")
+	}
+	if !strings.Contains(f.Usage, "docker/podman only") {
+		t.Errorf("--no-prompt usage = %q, want it scoped to docker/podman", f.Usage)
+	}
+	path := writePlatformEnv(t, config.K8s, config.Docker, config.Podman)
+	_, err := runRootWith(t, []string{"broker", "deploy", "--no-prompt", "--platform", string(config.K8s), "--env", path},
+		func(a *App) { a.Interactive = func() bool { return false }; echoRunner(a) })
+	if err == nil || !strings.Contains(err.Error(), "--no-prompt") {
+		t.Errorf("--no-prompt on kubernetes deploy err = %v, want it refused by name", err)
+	}
+}
+
 
 // TestK8sLoginOutcomes covers k8sLogin's two real, distinct SEMP outcomes -- a
 // transport failure (error propagates) vs. a successful login (nil) -- which

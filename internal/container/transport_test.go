@@ -340,3 +340,34 @@ func TestTransportEchoHidesSEMPConfig(t *testing.T) {
 		t.Errorf("Echo leaked the admin password:\n%s", out)
 	}
 }
+
+// TestTransportRefusesWhatContainercliRefuses: the exec and upload argv come from
+// containercli, which refuses an exec with no command, one with no container name and an
+// upload with no destination. A transport built over a config with no container name, or
+// asked for an empty command, must fail before anything reaches the runner.
+func TestTransportRefusesWhatContainercliRefuses(t *testing.T) {
+	ctx := context.Background()
+	rr := &capRunner{}
+	tr := NewTransport(rr, dockerCfg(), config.Docker)
+	if err := tr.Run(ctx, config.Primary); err == nil || !strings.Contains(err.Error(), "needs a command") {
+		t.Errorf("Run with no command err = %v, want containercli's refusal", err)
+	}
+	if _, err := tr.Output(ctx, config.Primary); err == nil {
+		t.Error("Output with no command must be refused")
+	}
+	if _, err := tr.OutputInput(ctx, config.Primary, []byte("x")); err == nil {
+		t.Error("OutputInput with no command must be refused")
+	}
+	if err := tr.Upload(ctx, config.Primary, []byte("x"), ""); err == nil || !strings.Contains(err.Error(), "destination") {
+		t.Errorf("Upload with no destination err = %v, want containercli's refusal", err)
+	}
+	nameless := dockerCfg()
+	nameless.Docker.Container.Name = ""
+	if err := NewTransport(rr, nameless, config.Docker).Run(ctx, config.Primary, "ls"); err == nil ||
+		!strings.Contains(err.Error(), "container name") {
+		t.Errorf("Run with no container name err = %v, want containercli's refusal", err)
+	}
+	if len(rr.calls) != 0 {
+		t.Errorf("a refused command must not reach the runner: %+v", rr.calls)
+	}
+}

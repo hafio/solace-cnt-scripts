@@ -481,7 +481,14 @@ func emitYAML(v *vars, p config.Platform, source string) (string, []string) {
 					warns = append(warns, `DOCKER_MODE="run" is no longer supported: docker deploys through compose only, `+
 						`so it was dropped. Set docker.compose if this host uses the standalone docker-compose binary`)
 				}
-				d.kv("composeFile", v.s("DOCKER_COMPOSE_FILE"))
+				// docker.composeFile was retired the same way: the compose file goes to
+				// compose on stdin and is never written, so there is no path to carry. The
+				// read still happens so the variable counts as mapped, and a value says
+				// that it is no longer used.
+				if f := strings.TrimSpace(v.s("DOCKER_COMPOSE_FILE")); f != "" {
+					warns = append(warns, fmt.Sprintf("DOCKER_COMPOSE_FILE=%q is no longer used: the compose file is "+
+						"fed to compose on stdin and never written to disk, so it was dropped", f))
+				}
 			} else {
 				// podman.rootless became podman.rootful and the default flipped with it:
 				// rootless is the default now, and the legacy default was rootful. So a

@@ -968,10 +968,16 @@ type DockerConfig struct {
 	// plugin is a runtime subcommand (`docker compose`), the standalone v1 binary
 	// is its own executable (`docker-compose`). Unset defaults to the configured
 	// runtime plus `compose`; this tool appends every argument after it.
-	Compose     Command   `yaml:"compose"`
-	ComposeFile string    `yaml:"composeFile"` // DOCKER_COMPOSE_FILE
-	Network     Network   `yaml:"network"`
-	Container   Container `yaml:"container"`
+	Compose   Command   `yaml:"compose"`
+	Network   Network   `yaml:"network"`
+	Container Container `yaml:"container"`
+
+	// ComposeFile is retained so an env file carrying the retired docker.composeFile
+	// fails with an actionable message (validateRenamedKeys) instead of a bare
+	// unknown-field decode error. The compose file is no longer a file at all: it goes
+	// to compose on stdin, so there is no path to choose. NEVER defaulted, expanded or
+	// rebased.
+	ComposeFile string `yaml:"composeFile"`
 
 	// Runtime is retained so an env file carrying the removed docker.runtime
 	// fails with an actionable rename error (validateRenamedKeys) instead of a

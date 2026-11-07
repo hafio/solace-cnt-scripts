@@ -196,6 +196,12 @@ func (c *Config) validateRenamedKeys() error {
 			"the default, so drop the key to deploy rootless as this user; set `rootful: true` only to deploy "+
 			"the rootful engine, which needs root", *c.Podman.Rootless)
 	}
+	if c.Docker.ComposeFile != "" {
+		return fmt.Errorf("docker.composeFile was retired (got: %q): the compose file is no longer written to "+
+			"disk, it is fed to compose on stdin with --project-directory set to the env file's directory, so "+
+			"there is no path to choose; drop the key. A compose file an earlier build left behind is no longer "+
+			"read, and can be deleted", c.Docker.ComposeFile)
+	}
 	if c.Broker.CLIScriptsFolder != "" {
 		return fmt.Errorf("broker.cliScriptsFolder was renamed to broker.cliScriptsDir (got: %q)",
 			c.Broker.CLIScriptsFolder)
@@ -303,7 +309,6 @@ func (c *Config) validateHostPaths(p Platform) error {
 	case Docker:
 		fields = append(fields,
 			struct{ field, value string }{"docker.container.dataDir", c.Docker.Container.DataDir},
-			struct{ field, value string }{"docker.composeFile", c.Docker.ComposeFile},
 		)
 	case Podman:
 		fields = append(fields,

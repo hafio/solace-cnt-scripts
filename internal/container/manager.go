@@ -3,18 +3,16 @@ package container
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
-	"regexp"
-	"slices"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/containercli"
+	"github.com/hafio/go-deploy-utility/containercli/inspect"
 	"github.com/hafio/go-deploy-utility/podman"
 	"github.com/hafio/go-deploy-utility/runner"
 	"github.com/hafio/go-deploy-utility/systemd"
@@ -71,15 +69,19 @@ type Manager struct {
 	sessionOnce bool
 	sessionErr  error
 	sessionDesc string
-	// RestartApproved pre-approves bouncing an already-running broker when the
-	// deploy artifact changed (the --restart flag on `deploy broker`). It is an
-	// approval, not an instruction: Restart() is the command that bounces one on
-	// purpose.
+	// RestartApproved is --restart on `deploy broker`: it pre-approves restarting or
+	// recreating a running broker whose artifact or secrets changed, so nothing is
+	// asked, and it also recreates one that did not change. It is an approval, not
+	// an instruction for any other command: Restart() is the one that bounces a
+	// broker on purpose.
 	RestartApproved bool
-	// Confirm asks the operator a yes/no question. nil declines, which is what a
-	// non-interactive run must do: re-deploying should never bounce a running
-	// broker unattended. The CLI wires it to the same prompt style as delete.
-	Confirm func(question string) bool
+	// Confirm asks the operator a yes/no question before a deploy restarts or
+	// recreates a running broker. An error is a question that could not be asked (no
+	// terminal and no --no-prompt) and fails the deploy; (false, nil) is a "no", which
+	// leaves the host as it was. nil declines, which is what a Manager built without
+	// the CLI must do: re-deploying should never bounce a running broker unattended.
+	// The CLI wires it to the shared confirmation gate, where --no-prompt approves.
+	Confirm func(question string) (bool, error)
 	// SysctlDropIn is where a raised fs.nr_open is persisted (limits.go). A field
 	// rather than a constant so a test can point it at a temp directory instead of
 	// writing to /etc. NewManager sets the default.
@@ -150,13 +152,23 @@ func (m *Manager) run(ctx context.Context, args ...string) error {
 	return engine.Run(ctx, m.R, runner.Cmd{Argv: r.Argv(args...)})
 }
 
-// output captures a runtime subcommand's stdout through the Runner.
-func (m *Manager) output(ctx context.Context, args ...string) ([]byte, error) {
+// base is the guarded runtime argv the containercli and podman builders extend.
+func (m *Manager) base() ([]string, error) {
 	r, err := m.runtime()
 	if err != nil {
 		return nil, err
 	}
-	return engine.Output(ctx, m.R, runner.Cmd{Argv: r.Argv(args...)})
+	return r.Argv(), nil
+}
+
+// runCmd runs the command build makes from the guarded runtime argv, for the containercli
+// builders that take it.
+func (m *Manager) runCmd(ctx context.Context, build func(base []string) runner.Cmd) error {
+	base, err := m.base()
+	if err != nil {
+		return err
+	}
+	return engine.Run(ctx, m.R, build(base))
 }
 
 // composeCmd is the guarded compose invocation (docker only): whatever
@@ -166,39 +178,24 @@ func (m *Manager) output(ctx context.Context, args ...string) ([]byte, error) {
 // exactly what Validate approved.
 func (m *Manager) composeCmd() (config.Command, error) { return m.Cfg.ComposeCommand() }
 
-// compose runs a compose subcommand (`<compose> args...`) through the Runner with
-// this deployment's secret values in the child's environment, which is where the
-// rendered compose file reads them from. Every compose call gets them, not just
-// `up`: compose interpolates the whole model on `down` and `ps` too, and the
-// values are always available from the config, so there is no case where leaving
-// them out would be right.
-func (m *Manager) compose(ctx context.Context, args ...string) error {
-	c, err := m.composeCmd()
-	if err != nil {
-		return err
+// projectDir is the directory compose resolves the file's relative paths against, and
+// reads a `.env` from: the directory of the env file this deployment was loaded from.
+// A Config built in code has none, and gets the working directory.
+func (m *Manager) projectDir() string {
+	if d := m.Cfg.BaseDir(); d != "" {
+		return d
 	}
-	// preview here means "do not read the certificate from disk". It is true under
-	// the Echo runner, and ALSO true for every verb that does not need a secret's
-	// value: compose requires each declared secret to be DEFINED for `down`, `stop`,
-	// `restart` and `ps`, but never reads it, so a moved certificate must not block
-	// a teardown. Only `up` actually consumes the bytes.
-	env, err := m.composeSecretEnv(m.isEcho() || !composeNeedsSecretValues(args))
-	if err != nil {
-		return err
-	}
-	return engine.Run(ctx, m.R, runner.Cmd{Argv: c.Argv(args...), Env: env})
+	return "."
 }
-
-// composeNeedsSecretValues reports whether this compose invocation will actually
-// read a secret's contents. Only `up` creates containers and therefore materializes
-// secrets; `down`, `stop`, `start`, `restart` and `ps` operate on what already
-// exists. Keeping the list positive rather than negative means a new verb defaults
-// to NOT reading a private key from disk.
-func composeNeedsSecretValues(args []string) bool { return slices.Contains(args, "up") }
 
 // composeSecretEnv is the "VAR=value" list backing the compose file's
 // environment-sourced secrets. It is the only place a secret value enters a child
 // process, and it never reaches an argv.
+//
+// preview means "do not read the certificate from disk". It is true under the Echo
+// runner, and ALSO true for `down`, which needs each declared secret to be DEFINED
+// but never reads it, so a moved certificate must not block a teardown. Only `up`
+// consumes the bytes.
 func (m *Manager) composeSecretEnv(preview bool) ([]string, error) {
 	secrets, err := ResolveSecretValues(m.Cfg, m.P, preview)
 	if err != nil {
@@ -207,11 +204,6 @@ func (m *Manager) composeSecretEnv(preview bool) ([]string, error) {
 	env := make([]string, 0, len(secrets)+1)
 	for _, s := range secrets {
 		env = append(env, s.EnvVar()+"="+s.Value)
-		// The certificate's digest rides beside it, filling the container label the
-		// compose file interpolates (render.CertDigestLabel) -- see dockerCertChanged.
-		if len(s.SourceFiles) > 0 {
-			env = append(env, s.DigestEnvVar()+"="+certDigest(s.Value, preview))
-		}
 	}
 	return env, nil
 }
@@ -301,7 +293,7 @@ func (m *Manager) CheckEnv() {
 		// the env file says, and Reachable (next in Check) is what fails loud if the
 		// execution guard rejects it.
 		rows = append(rows, output.KV{Key: "docker", Value: fmt.Sprintf(
-			"compose=%s composeFile=%s", cfg.Docker.Compose, m.composeFile())})
+			"compose=%s", cfg.Docker.Compose)})
 	}
 	rows = append(rows, output.KV{Key: "secrets", Value: secretSummary(m.P, render.ContainerSecrets(cfg, m.P))})
 	if cfg.RedundancyEnabled() {
@@ -488,13 +480,17 @@ func (m *Manager) registryLogin(ctx context.Context) error {
 // --- Deploy -----------------------------------------------------------------
 
 // Deploy renders and starts the broker container for role's identity. Podman
-// uses a systemd quadlet unit; docker uses a compose file. The broker's secret
-// settings are externalized first, since the rendered artifact only references
-// them by name.
+// uses a systemd quadlet unit; docker uses a compose file, fed to compose on stdin.
+// The broker's secret settings are externalized first, since the rendered artifact
+// only references them by name.
+//
+// The order is compare, ask, write. Nothing is written to the host, and nothing is
+// restarted, until the operator has answered for a running service whose artifact or
+// secrets changed; a "no" leaves the host exactly as it was.
 func (m *Manager) Deploy(ctx context.Context, role config.Role) error {
-	// Ahead of every write and every mutating call: prepareSecrets loads values
-	// into podman's store and writeArtifact drops a unit/compose file on disk, so
-	// an engine that cannot be reached must stop the deploy before either.
+	// Ahead of every write and every mutating call: deployPodman loads values into
+	// podman's store and drops a unit on disk, so an engine that cannot be reached
+	// must stop the deploy before either.
 	if err := m.Preflight(ctx); err != nil {
 		return err
 	}
@@ -504,32 +500,30 @@ func (m *Manager) Deploy(ctx context.Context, role config.Role) error {
 			return err
 		}
 	}
-	certChanged, err := m.prepareSecrets(ctx)
+	secrets, err := m.prepareSecrets()
 	if err != nil {
 		return err
 	}
 	if m.P == config.Podman {
-		return m.deployPodman(ctx, id, certChanged)
+		return m.deployPodman(ctx, id, secrets)
 	}
 	return m.deployDocker(ctx, id)
 }
 
-// prepareSecrets externalizes the broker's secret settings so the deploy artifact
-// can reference them instead of carrying them: podman loads each into its own
-// secret store, while docker needs nothing prepared -- its compose secrets read
-// this deployment's values from the environment `compose` is given (see compose),
-// so no secret is written beside the compose file. That is not the same as never
-// reaching this host's disk: compose tars an environment-sourced secret into the
-// container's own filesystem (CopyToContainer, mode 0444), where it rests in the
-// writable layer for the container's lifetime -- docs/operations.md says so under
-// Re-deploying. An empty value fails loud here
-// rather than deploying a broker with no password -- except under the Echo runner, which
-// must stay previewable before `broker deploy` has generated the HA pre-shared key.
+// prepareSecrets resolves the broker's secret settings so the deploy artifact can
+// reference them instead of carrying them: podman loads each into its own secret
+// store, while docker needs nothing prepared -- its compose secrets read this
+// deployment's values from the environment `compose` is given (see deployDocker), so no
+// secret is written beside anything. That is not the same as never reaching this
+// host's disk: compose tars an environment-sourced secret into the container's own
+// filesystem (CopyToContainer, mode 0444), where it rests in the writable layer for the
+// container's lifetime -- docs/operations.md says so under Re-deploying. An empty value
+// fails loud here rather than deploying a broker with no password -- except under the
+// Echo runner, which must stay previewable before `broker deploy` has generated the HA
+// pre-shared key.
 //
-// It reports whether the server certificate in podman's store changed
-// (createPodmanSecrets); docker always reports false, since compose re-reads the
-// certificate from the environment on every `up`.
-func (m *Manager) prepareSecrets(ctx context.Context) (bool, error) {
+// It only reads: the podman store is written later, after the operator has answered.
+func (m *Manager) prepareSecrets() ([]render.ContainerSecret, error) {
 	// Skipped under the Echo runner: a preview must not need secret values on disk, and
 	// `broker generate` renders name-level references only, so there is nothing to check.
 	if !m.isEcho() {
@@ -537,92 +531,89 @@ func (m *Manager) prepareSecrets(ctx context.Context) (bool, error) {
 		// file that is both pre-`broker deploy` (empty PSK) and missing its cert files
 		// should report the PSK and its `broker deploy` hint, not the certificate.
 		if err := render.SecretPreflight(m.Cfg, m.P); err != nil {
-			return false, err
+			return nil, err
 		}
 	}
-	// Resolve on BOTH platforms, and discard the result on docker. Docker needs no
-	// secret prepared -- its values ride the compose child's environment -- but
-	// reading the certificate HERE is what makes an unreadable one fail before
-	// deployDocker rewrites the compose file, so "nothing happened" stays true. The
-	// podman side gets the same invariant by loading its store before the unit.
-	secrets, err := ResolveSecretValues(m.Cfg, m.P, m.isEcho())
+	// Resolve on BOTH platforms. Docker re-reads the values for its child environment,
+	// but reading the certificate HERE is what makes an unreadable one fail before
+	// anything is asked or written, so "nothing happened" stays true.
+	return ResolveSecretValues(m.Cfg, m.P, m.isEcho())
+}
+
+// storedMatches reports whether podman's store already holds exactly s's value, by
+// reading it back (podman.SecretData, which needs podman 4.7: replace says the host has
+// it, as asked once per deploy) and comparing in memory (podman.SecretMatches). The value
+// arrives on stdout alone and is never printed, logged or put in an error: the runner's
+// trace shows argv only. A probe that fails, a secret that is absent, a value that
+// differs, a podman below 4.7 and the Echo runner (which probes nothing) all read as
+// "changed", which costs at most a consent-gated restart.
+func (m *Manager) storedMatches(ctx context.Context, base []string, s render.ContainerSecret, replace bool) bool {
+	if m.isEcho() || !replace {
+		return false
+	}
+	c, err := podman.SecretData(base, s.Name)
 	if err != nil {
-		return false, err
+		return false
 	}
-	if m.P == config.Podman {
-		return m.createPodmanSecrets(ctx, secrets)
+	out, err := engine.Output(ctx, m.R, c)
+	if err != nil {
+		return false
 	}
-	return false, nil
+	return podman.SecretMatches(string(out), []byte(s.Value))
 }
 
-// certDigest is the render.CertDigestLabel value for a certificate bundle: its
-// sha256 in hex. A preview's value is the placeholder, and a hash of it would read as
-// a real digest in the echoed argv, so a preview gets the placeholder itself.
-func certDigest(bundle string, preview bool) string {
-	if preview {
-		return previewValue
-	}
-	sum := sha256.Sum256([]byte(bundle))
-	return hex.EncodeToString(sum[:])
+// podmanReplace asks once per deploy whether this host's podman has `secret create
+// --replace` and `secret inspect --showsecret` (both 4.7), or false when there are no
+// secrets to ask about.
+func (m *Manager) podmanReplace(ctx context.Context, base []string, secrets []render.ContainerSecret) bool {
+	return len(secrets) > 0 && m.secretReplace(ctx, base)
 }
 
-// createPodmanSecrets loads each secret into podman's secret store, feeding the
-// value on stdin so it never reaches an argv or the echoed command. It reports
-// whether the server certificate changed since the last deploy.
+// changedSecrets is the secrets whose stored value differs from the one configured
+// now. A secret that matches is reported as left in place. A first deploy, a secret an
+// earlier build stored, an unreadable one or a podman below 4.7 counts as changed.
+// Nothing is written here.
+func (m *Manager) changedSecrets(ctx context.Context, base []string, secrets []render.ContainerSecret, replace bool) []render.ContainerSecret {
+	var changed []render.ContainerSecret
+	for _, s := range secrets {
+		if m.storedMatches(ctx, base, s, replace) {
+			m.progress().Info("podman secret %s already holds this value, left in place.", s.Name)
+			continue
+		}
+		changed = append(changed, s)
+	}
+	return changed
+}
+
+// writePodmanSecrets loads each given secret into podman's secret store, feeding the
+// value on stdin so it never reaches an argv or the echoed command. No label is written:
+// a label rides `secret create`'s argv, which any local user can read, so the next deploy
+// compares by reading the stored value back instead (storedMatches).
 //
-// `create --replace` where podman has it (4.7 and later, asked once per call through
-// podman.Version and podman.SupportsReplace), and remove-then-create below that: the
-// pair is idempotent the same way -- `rm --ignore` makes a missing secret a success, so
-// a redeploy with a rotated value works, and a first deploy with nothing in the store
-// works. A version that cannot be read, or the Echo runner, takes the older pair, so a
-// preview shows the argv that works on every supported podman.
+// `create --replace` where replace holds (podman 4.7 and later), and remove-then-create
+// otherwise: the pair is idempotent the same way -- `rm --ignore` makes a missing secret
+// a success, so a redeploy with a rotated value works, and a first deploy with nothing in
+// the store works. The Echo runner takes the older pair, so a preview shows the argv that
+// works on every supported podman.
 //
 // A failure of the rm half is NOT warned away. --ignore already absorbs the only
 // benign case, so anything left is real -- a store this user cannot write, say --
 // and continuing would create a secret next to one that could not be removed.
-//
-// The server certificate (the one secret with SourceFiles) is the only one whose
-// change bounces the broker, and it is the only one labelled: the unit names secrets
-// rather than values, so without the label a renewed certificate would leave the unit
-// byte-identical and deployPodman would report "nothing to do". Its name is derived,
-// so the label decides alone: a matching digest leaves the secret in place, and a
-// different or missing one -- a first deploy, or a host an earlier build deployed
-// with the bundle as a host file -- overwrites it and reports the change, which costs
-// at most a consent-gated restart. Every other credential keeps "rotate, then
-// --restart".
-func (m *Manager) createPodmanSecrets(ctx context.Context, secrets []render.ContainerSecret) (bool, error) {
-	r, err := m.runtime()
-	if err != nil {
-		return false, err
-	}
-	base := r.Argv()
-	replace := len(secrets) > 0 && m.secretReplace(ctx, base)
-	var certChanged bool
+func (m *Manager) writePodmanSecrets(ctx context.Context, base []string, secrets []render.ContainerSecret, replace bool) error {
 	for _, s := range secrets {
-		var labels []string
-		if len(s.SourceFiles) > 0 {
-			digest := certDigest(s.Value, m.isEcho())
-			if m.certSecretHash(ctx, r, s.Name) == digest {
-				m.progress().Info("server certificate unchanged: podman secret %s already holds it (sha256 matches), "+
-					"left in place.", s.Name)
-				continue
-			}
-			certChanged = true
-			labels = append(labels, render.CertDigestLabel+"="+digest)
-		}
 		if !replace {
 			if rm, ok := podman.RemoveSecrets(base, s.Name); ok {
 				if err := engine.Run(ctx, m.R, rm); err != nil {
-					return false, fmt.Errorf("remove the existing podman secret %q before recreating it (from %s): %w",
+					return fmt.Errorf("remove the existing podman secret %q before recreating it (from %s): %w",
 						s.Name, s.ConfigKey, err)
 				}
 			}
 		}
-		if err := engine.Run(ctx, m.R, podman.CreateSecret(base, s.Name, []byte(s.Value), replace, labels...)); err != nil {
-			return false, fmt.Errorf("create podman secret %q from %s: %w", s.Name, s.ConfigKey, err)
+		if err := engine.Run(ctx, m.R, podman.CreateSecret(base, s.Name, []byte(s.Value), replace)); err != nil {
+			return fmt.Errorf("create podman secret %q from %s: %w", s.Name, s.ConfigKey, err)
 		}
 	}
-	return certChanged, nil
+	return nil
 }
 
 // secretReplace reports whether this host's podman has `secret create --replace`, from
@@ -644,11 +635,11 @@ func (m *Manager) secretReplace(ctx context.Context, base []string) bool {
 // a container host; the CLI load that follows it is what the running broker serves. It
 // never restarts anything.
 //
-// Podman: the store secret is overwritten under the deploy rule -- a matching digest
-// label leaves it, a different or missing one replaces it -- so the next start of the
+// Podman: the store secret is overwritten under the deploy rule -- a stored value
+// that matches leaves it, a different or unreadable one replaces it -- so the next start of the
 // unit mounts the new certificate. Docker keeps no secret object: the container holds
 // the certificate it was created with, so there is nothing to update, and the next
-// `broker deploy` offers to recreate it because the digest label no longer matches. With
+// `broker deploy` offers to recreate it because the deploy digest no longer matches. With
 // no certificate configured it does nothing, and the CLI load reports why.
 func (m *Manager) UpdateServerCertSecret(ctx context.Context) error {
 	if m.Cfg.TLS.Cert == "" || m.Cfg.TLS.CertKey == "" {
@@ -672,24 +663,12 @@ func (m *Manager) UpdateServerCertSecret(ctx context.Context) error {
 			cert = append(cert, s)
 		}
 	}
-	_, err = m.createPodmanSecrets(ctx, cert)
-	return err
-}
-
-// certSecretHash is the render.CertDigestLabel value on the podman secret name, or empty when
-// the secret is absent, unlabelled or the probe fails -- all of which the caller reads
-// as "changed". Under the Echo runner it answers empty without probing, so a preview
-// counts the certificate as changed, the way it counts every artifact.
-func (m *Manager) certSecretHash(ctx context.Context, r config.Command, name string) string {
-	if m.isEcho() {
-		return ""
-	}
-	out, err := engine.Output(ctx, m.R, runner.Cmd{Argv: r.Argv("secret", "inspect", "--format",
-		`{{index .Spec.Labels "`+render.CertDigestLabel+`"}}`, name)})
+	base, err := m.base()
 	if err != nil {
-		return ""
+		return err
 	}
-	return strings.TrimSpace(string(out))
+	replace := m.podmanReplace(ctx, base, cert)
+	return m.writePodmanSecrets(ctx, base, m.changedSecrets(ctx, base, cert, replace), replace)
 }
 
 // removeLegacyCertBundle deletes the server-certificate bundle an earlier build wrote
@@ -726,11 +705,23 @@ func (m *Manager) removeLegacyCertBundle() error {
 	return nil
 }
 
-// writeArtifact writes a rendered deploy artifact, reporting whether it differs
-// from what was already on disk. An unchanged artifact is not rewritten, which is
-// what lets Deploy tell "nothing to do" apart from "the running broker is now
-// stale and needs a bounce". Under the Echo runner nothing is written and the artifact
-// counts as changed, so the preview shows the work a real run would do.
+// unitChanged reports whether the quadlet unit at path is missing or differs from body,
+// without writing anything: the deploy compares first so it can ask before it writes.
+// Under the Echo runner nothing is read and the unit counts as changed, so the preview
+// shows the work a real run would do.
+func (m *Manager) unitChanged(path string, body []byte) bool {
+	if m.isEcho() {
+		return true
+	}
+	existing, err := os.ReadFile(path)
+	return err != nil || !bytes.Equal(existing, body)
+}
+
+// writeArtifact writes a rendered artifact (the quadlet unit, the sysctl drop-in),
+// reporting whether it differs from what was already on disk. An unchanged artifact is
+// not rewritten. Under the Echo runner nothing is written and the artifact counts as
+// changed, so the preview shows the work a real run would do. deployPodman has already
+// compared the unit (unitChanged) so that it can ask before this writes it.
 func (m *Manager) writeArtifact(path string, body []byte, what string, dirMode os.FileMode) (bool, error) {
 	if m.isEcho() {
 		m.progress().Info("would write %s %s (skipped in preview).", what, path)
@@ -753,197 +744,200 @@ func (m *Manager) writeArtifact(path string, body []byte, what string, dirMode o
 	return true, nil
 }
 
-// approveRestart decides whether an already-running broker may be bounced to pick
-// up a changed artifact. --restart pre-approves it; otherwise the Confirm seam
-// asks. A non-interactive run without --restart declines, so a scripted deploy
-// leaves the new artifact in place and says so rather than dropping messaging
-// traffic on its own. Deliberately its own flag: bouncing a live broker is its own
-// decision, the same separation --delete-data has from --no-prompt.
-func (m *Manager) approveRestart(what string) bool {
+// approve decides whether a running broker may be restarted or recreated to pick up a
+// change. --restart pre-approves it; otherwise the Confirm seam asks, and an error from
+// it (no terminal and no --no-prompt) is the deploy's. A nil seam declines, so a Manager
+// built without the CLI never bounces a running broker. Deliberately a decision of its
+// own: bouncing a live broker is not something --restart's absence leaves to chance, and
+// --no-prompt is what answers it for a script.
+func (m *Manager) approve(question string) (bool, error) {
 	if m.RestartApproved {
-		return true
+		return true, nil
 	}
 	if m.Confirm == nil {
-		return false
+		return false, nil
 	}
-	return m.Confirm(fmt.Sprintf("Restart %s now to apply the change?", what))
+	return m.Confirm(question)
 }
 
-// staleWarning tells the operator the artifact is applied but the running broker
-// is still on the old one, and how to finish the job.
-func (m *Manager) staleWarning(what string) {
-	m.progress().Warn("%s is applied, but the running broker still uses the previous one.", what)
-	m.progress().Warn("re-run with --restart (or restart it yourself) to pick up the change.")
+// cancelled says a declined deploy changed nothing, and that the next one asks again.
+func (m *Manager) cancelled() {
+	m.progress().Info("cancelled; nothing was changed. The next deploy asks again.")
 }
 
-// deployPodman writes the unit and starts or restarts the service. certChanged is
-// createPodmanSecrets' answer: the store was loaded before this runs, so a
-// certificate that could not be read has already aborted the deploy before any unit
-// was written.
-func (m *Manager) deployPodman(ctx context.Context, id config.NodeIdentity, certChanged bool) error {
+// deployPodman compares, asks, then writes: the unit rendered now against the file on
+// disk, and each secret's value against the one read back from the store (podman 4.7+; older counts as changed). Only a change
+// restarts the service, and only after the operator has agreed to restart a running one;
+// an unchanged deploy writes nothing and restarts nothing. secrets are the values
+// prepareSecrets resolved, so a certificate that could not be read has already aborted
+// the deploy before anything was touched.
+//
+// `daemon-reload` runs only when something was written. `systemctl start` on an active
+// unit is a no-op and a reload never restarts, so a running service picks a change up only
+// through the restart below.
+//
+// ASSUMED, NOT VERIFIED: quadlet replaces the container on each service start, so
+// starting a stopped unit re-reads the store and picks up a rotated secret. Docker's
+// equivalent branch does NOT behave that way -- compose keeps a stopped container and
+// starts it with the credentials it was created with, which is what the deploy digest
+// label is for. To check on podman: stop the unit, rotate a value, `systemctl start`,
+// then read /mnt/secrets/username_admin_password inside the container.
+//
+// serviceActive is read in its LOSSY form on purpose, unlike deployDocker, which aborts
+// when its probe cannot answer (containerRunningKnown). An unanswered probe here reads as
+// "not active" and takes the plain start path, which systemd makes a no-op on a running
+// unit; the only cost is that the change is written but the running service keeps its old
+// unit until it is restarted (`broker restart`).
+func (m *Manager) deployPodman(ctx context.Context, id config.NodeIdentity, secrets []render.ContainerSecret) error {
 	unit := filepath.ToSlash(filepath.Join(m.Cfg.Podman.QuadletDir, m.name()+".container"))
 	svc := m.name() + ".service"
-	changed, err := m.writeArtifact(unit, render.Quadlet(m.Cfg, id), "quadlet unit", 0o755)
+	body := render.Quadlet(m.Cfg, id)
+
+	unitChanged := m.unitChanged(unit, body)
+	base, err := m.base()
 	if err != nil {
 		return err
+	}
+	replace := m.podmanReplace(ctx, base, secrets)
+	changedSecrets := m.changedSecrets(ctx, base, secrets, replace)
+	changed := unitChanged || len(changedSecrets) > 0
+	active := m.serviceActive(ctx)
+
+	if changed && active {
+		what := "its quadlet unit changed"
+		switch {
+		case unitChanged && len(changedSecrets) > 0:
+			what = "its quadlet unit and secrets changed"
+		case !unitChanged:
+			what = "its secrets changed"
+		}
+		ok, err := m.approve(fmt.Sprintf("Service %s is running and %s. Restart it now to apply the change?", svc, what))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			m.cancelled()
+			return nil
+		}
+	}
+
+	if err := m.writePodmanSecrets(ctx, base, changedSecrets, replace); err != nil {
+		return err
+	}
+	if unitChanged {
+		if _, err := m.writeArtifact(unit, body, "quadlet unit", 0o755); err != nil {
+			return err
+		}
 	}
 	// Now that no unit on disk bind-mounts it. A running container started from the
 	// old unit keeps its own mount of the file until it is restarted.
 	if err := m.removeLegacyCertBundle(); err != nil {
 		return err
 	}
-	// A rotated certificate under a byte-identical unit must still bounce the broker.
-	// `changed` is the ONLY input to the restart decision below, so without this a
-	// renewed certificate would print "nothing to do" and the broker would keep
-	// serving the old one.
-	changed = changed || certChanged
-	// daemon-reload runs either way: a unit that was already correct may still be
-	// unknown to systemd (a fresh host, or a manual removal).
 	user := m.systemctlUser()
-	if err := m.systemctl(ctx, systemd.DaemonReload(user)); err != nil {
-		return err
-	}
-	// ASSUMED, NOT VERIFIED: quadlet replaces the container on each service start, so
-	// starting a stopped unit re-reads the store and picks up a rotated secret. Docker's
-	// equivalent branch does NOT behave that way -- a stopped container is started with
-	// the credentials it was created with, which is why deployDocker force-recreates. If
-	// podman turns out to share that behaviour, this branch needs the same fix. To check:
-	// stop the unit, rotate a value, `systemctl start`, then read
-	// /mnt/secrets/username_admin_password inside the container.
-	// serviceActive is read in its LOSSY form here on purpose, unlike deployDocker,
-	// which aborts when its probe cannot answer (containerRunningKnown). The
-	// consequence of guessing differs entirely: an unanswered probe here sends an
-	// already-running unit a `systemctl start`, which systemd makes a no-op, while
-	// the docker branch below would force-recreate and destroy a live container.
-	// Guessing wrong is free on this side, so it is not worth failing a deploy over.
-	// (If the ASSUMED note above turns out to be false and a start DOES replace the
-	// container, that changes -- this branch would then need the same guard.)
-	if !m.serviceActive(ctx) {
-		return m.systemctl(ctx, systemd.Start(user, svc))
-	}
-	// `systemctl start` on an active unit is a no-op, so an already-running broker
-	// would silently keep the old image. Restart is the only way to apply a change.
-	if !changed {
-		// The store secrets were just replaced, but a running container holds the
-		// values it started with, and the unit is byte-identical -- so a rotated
-		// secret needs the same explicit restart docker's does.
-		if m.RestartApproved {
-			m.progress().Info("unit unchanged; restarting %s to apply any rotated secret.", svc)
-			return m.systemctl(ctx, systemd.Restart(user, svc))
-		}
-		m.progress().Info("%s is already active on this unit -- nothing to do.", svc)
-		m.progress().Info("if you rotated a secret, re-run with --restart to restart the service with it.")
-		return nil
-	}
-	if !m.approveRestart(svc) {
-		m.staleWarning("the quadlet unit")
-		return nil
-	}
-	return m.systemctl(ctx, systemd.Restart(user, svc))
-}
-
-func (m *Manager) deployDocker(ctx context.Context, id config.NodeIdentity) error {
-	file := m.composeFile()
-	changed, err := m.writeArtifact(file, render.Compose(m.Cfg, id), "compose file", 0)
-	if err != nil {
-		return err
-	}
-	// --force-recreate rather than a plain up: a container that exists but is
-	// stopped would otherwise be *started*, and a compose secret's value is baked in
-	// at creation -- so a start replays the credentials it was created with and a
-	// rotated password would be silently ignored. Recreating costs nothing here (a
-	// stopped broker carries no traffic, and the data dir is a host bind mount), and
-	// it makes the postcondition honest: after a deploy, the running container
-	// reflects the current config AND the current secrets. With no container at all
-	// the flag changes nothing -- compose creates one either way.
-	//
-	// "no container at all" has to be ANSWERED, not assumed (M4): a `ps` that
-	// cannot run says nothing about whether the container exists, and reading that
-	// silence as "not running" would take
-	// this branch and force-recreate a LIVE broker on a transient engine failure,
-	// with none of the consent the artifact-changed branch below requires for the
-	// identical action. containerRunningKnown is read directly so an unanswered
-	// probe stops here instead of guessing either way; both branches below assume
-	// the state IS known.
-	running, answered, probeErr := m.containerRunningKnown(ctx)
-	if !answered {
-		return fmt.Errorf("cannot tell whether container %s is running -- the `ps` probe itself "+
-			"failed, so it is unsafe to guess whether to create or recreate it; check `%s ps` by "+
-			"hand and re-run: %w", m.name(), m.Cfg.ContainerRuntime(m.P).Name(), probeErr)
-	}
-	if !running {
-		return m.compose(ctx, "-f", file, "up", "-d", "--force-recreate")
-	}
-	// A renewed certificate under a byte-identical compose file is still a change:
-	// the running container holds the bundle it was created with.
-	what := "the compose file"
-	up := []string{"-f", file, "up", "-d"}
-	if !changed {
-		certChanged, err := m.dockerCertChanged(ctx)
-		if err != nil {
+	if changed {
+		if err := m.systemctl(ctx, systemd.DaemonReload(user)); err != nil {
 			return err
 		}
-		if certChanged {
-			m.progress().Info("server certificate differs from the one container %s was created with.", m.name())
-			// --force-recreate so the recreate does not rest on compose noticing the
-			// label's new value in its own config hash.
-			changed, what, up = true, "the server certificate", append(up, "--force-recreate")
-		}
 	}
-	// `compose up -d` recreates the container when the file changed, which bounces
-	// a running broker -- the same hazard podman has, so it takes the same consent.
+	if !active {
+		return m.systemctl(ctx, systemd.Start(user, svc))
+	}
 	if changed {
-		if !m.approveRestart("container " + m.name()) {
-			m.staleWarning(what)
-			return nil
-		}
-		return m.compose(ctx, up...)
+		return m.systemctl(ctx, systemd.Restart(user, svc))
 	}
-	// Nothing changed in the artifact or the certificate -- but a rotated credential
-	// is invisible here by design: the value lives only in the config and this host's
-	// environment, so there is no on-disk copy to diff. --restart is therefore the explicit way to
-	// push a rotated password or key into the running broker, and it has to force
-	// the recreate that an unchanged compose file would otherwise skip.
 	if m.RestartApproved {
-		m.progress().Info("compose file unchanged; recreating container %s to apply any rotated secret.", m.name())
-		return m.compose(ctx, "-f", file, "up", "-d", "--force-recreate")
+		m.progress().Info("unit and secrets unchanged; restarting %s because --restart was given.", svc)
+		return m.systemctl(ctx, systemd.Restart(user, svc))
 	}
-	m.progress().Info("container %s is already running on this compose file -- nothing to do.", m.name())
-	m.progress().Info("if you rotated a secret, re-run with --restart to recreate the container with it.")
+	m.progress().Info("%s is already active on this unit and these secrets -- unchanged, left running.", svc)
+	m.progress().Info("`broker restart` (or deploy with --restart) restarts it anyway.")
 	return nil
 }
 
-// dockerCertChanged reports whether the running container was created with a
-// different server certificate from the one configured now, by comparing its
-// render.CertDigestLabel with the current bundle's digest -- docker's counterpart of
-// the podman store secret's label, since compose keeps no secret object to label. A
-// match is "unchanged"; a different or missing label (a container an earlier build
-// created) or a failed inspect counts as changed, which costs at most a
-// consent-gated recreate. With no certificate configured there is nothing to compare.
-func (m *Manager) dockerCertChanged(ctx context.Context) (bool, error) {
-	if m.isEcho() {
-		return false, nil
-	}
-	secrets, err := ResolveSecretValues(m.Cfg, m.P, false)
+// deployDocker feeds the compose file to compose on stdin (nothing is written to disk)
+// with the secret values in the child's environment, and lets compose decide what to
+// recreate. Compose compares a service's configuration, but a secret's CONTENT is not
+// part of it, so the file carries one label (render.DeployDigestLabel) whose value is
+// interpolated from render.DeployDigestEnvVar, set here to the digest of the file and of
+// every value the child receives (containercli.ComposeDigest, taken before the variable
+// is added). A changed file, a rotated password or a renewed certificate therefore all
+// change the configuration, and compose recreates the container; an unchanged deploy
+// changes nothing, whether the container is running (left alone) or stopped (started).
+//
+// The digest is also what predicts the recreate, so the operator is asked first: a
+// running container whose label differs from the digest -- or has none, or cannot be
+// inspected -- is about to be recreated by `up -d`. --restart pre-approves it, and also
+// forces the recreate of an unchanged running container. A "no" runs nothing.
+//
+// "Running" has to be ANSWERED, not assumed (M4): a `ps` that cannot run says nothing
+// about whether the container exists, and reading that silence as "not running" would let
+// a transient engine failure skip the question for a LIVE broker. containerRunningKnown is
+// read directly so an unanswered probe stops here instead of guessing either way.
+func (m *Manager) deployDocker(ctx context.Context, id config.NodeIdentity) error {
+	c, err := m.composeCmd()
 	if err != nil {
-		return false, err
+		return err
 	}
-	for _, s := range secrets {
-		if len(s.SourceFiles) == 0 {
-			continue
-		}
-		r, err := m.runtime()
-		if err != nil {
-			return false, err
-		}
-		out, err := engine.Output(ctx, m.R, runner.Cmd{Argv: r.Argv("inspect", "--type", "container", "--format",
-			`{{index .Config.Labels "`+render.CertDigestLabel+`"}}`, m.name())})
-		if err != nil {
-			return true, nil
-		}
-		return strings.TrimSpace(string(out)) != certDigest(s.Value, false), nil
+	base, err := m.base()
+	if err != nil {
+		return err
 	}
-	return false, nil
+	file := render.Compose(m.Cfg, id)
+	env, err := m.composeSecretEnv(m.isEcho())
+	if err != nil {
+		return err
+	}
+	digest := containercli.ComposeDigest(file, env)
+	env = append(env, render.DeployDigestEnvVar+"="+digest)
+
+	running, answered, probeErr := m.containerRunningKnown(ctx, base)
+	if !answered {
+		return fmt.Errorf("cannot tell whether container %s is running -- the `ps` probe itself "+
+			"failed, so it is unsafe to guess whether the deploy would recreate it; check `%s ps` by "+
+			"hand and re-run: %w", m.name(), m.Cfg.ContainerRuntime(m.P).Name(), probeErr)
+	}
+	changed := running && m.deployedDigest(ctx, base) != digest
+	if changed {
+		m.progress().Info("container %s was created from a different compose file or different secrets.", m.name())
+		ok, err := m.approve(fmt.Sprintf("Container %s is running and its compose file or a secret changed. "+
+			"Recreate it now to apply the change?", m.name()))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			m.cancelled()
+			return nil
+		}
+	}
+	recreate := running && !changed && m.RestartApproved
+	if recreate {
+		m.progress().Info("deploy unchanged; recreating container %s because --restart was given.", m.name())
+	}
+	if err := engine.Run(ctx, m.R, containercli.ComposeUp(c.Argv(), file, m.projectDir(), env, recreate)); err != nil {
+		return err
+	}
+	if running && !changed && !recreate {
+		m.progress().Info("container %s is already running this deploy -- unchanged, left running.", m.name())
+		m.progress().Info("`broker restart` (or deploy with --restart) restarts it anyway.")
+	}
+	return nil
+}
+
+// deployedDigest is the render.DeployDigestLabel value of the running container, or
+// empty when it carries none, cannot be inspected or the answer cannot be read -- all of
+// which the caller reads as "changed", which costs at most a consent-gated recreate.
+func (m *Manager) deployedDigest(ctx context.Context, base []string) string {
+	c, _ := inspect.Containers(base, m.name())
+	out, err := engine.Output(ctx, m.R, c)
+	if err != nil {
+		return ""
+	}
+	cs, err := inspect.Decode(string(out))
+	if err != nil || len(cs) == 0 {
+		return ""
+	}
+	return cs[0].Labels[render.DeployDigestLabel]
 }
 
 // serviceActive reports whether this host's broker unit is already active, so
@@ -977,52 +971,25 @@ func (m *Manager) serviceState(ctx context.Context) (state string, answered bool
 
 // containerRunningKnown reports whether this host's broker container is up, plus the
 // two things a bare bool cannot express: whether the probe answered at all, and its own
-// error when it didn't.
+// error when it didn't. base is the guarded runtime argv.
 //
-// The name is matched in Go rather than by `--filter name=`, which both engines treat as
-// an unanchored REGEX: a bare name is a substring match, so a `solace` deployment would
-// see a running `solace-edge` as its own, and a name carrying '.' (which the schema
-// allows) would match any character there. Anchoring the pattern fixes the first but
-// leaves the decision resting on regex semantics that vary by engine. Comparing the
+// The name is matched in Go (containercli.HasName) rather than by `--filter name=`,
+// which both engines treat as an unanchored REGEX: a bare name is a substring match, so
+// a `solace` deployment would see a running `solace-edge` as its own, and a name
+// carrying '.' (which the schema allows) would match any character there. Comparing the
 // listed names exactly depends on nothing.
-// A `ps` that could not run says nothing about the container, and a
-// caller that reads that silence as "not running" would act on a guess --
-// stopAndRemove refuses a teardown on it (the docker half of the systemd case
-// serviceState documents) and deployDocker refuses a force-recreate on it, for
-// the same reason.
-func (m *Manager) containerRunningKnown(ctx context.Context) (running, answered bool, err error) {
+// A `ps` that could not run says nothing about the container, and a caller that reads
+// that silence as "not running" would act on a guess -- deployDocker refuses to guess
+// whether to ask before recreating a live broker.
+func (m *Manager) containerRunningKnown(ctx context.Context, base []string) (running, answered bool, err error) {
 	if m.isEcho() {
 		return false, true, nil
 	}
-	running, err = m.psHasName(ctx, "--filter", "status=running")
+	out, err := engine.Output(ctx, m.R, containercli.List(base, true))
 	if err != nil {
 		return false, false, err
 	}
-	return running, true, nil
-}
-
-// psHasName runs `<runtime> ps <filter...> --format {{.Names}}` and reports whether
-// this deployment's container is in the listing.
-//
-// The name is matched HERE, in Go, on an exact string, rather than through the engine's
-// own `--filter name=`: that filter is an unanchored REGEX on both engines, so a bare
-// name substring-matches a sibling deployment, and an unescaped '.' -- which the
-// container-name schema allows -- matches any character.
-func (m *Manager) psHasName(ctx context.Context, filter ...string) (bool, error) {
-	args := make([]string, 0, len(filter)+3)
-	args = append(args, "ps")
-	args = append(args, filter...)
-	args = append(args, "--format", "{{.Names}}")
-	out, err := m.output(ctx, args...)
-	if err != nil {
-		return false, err
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.TrimSpace(line) == m.name() {
-			return true, nil
-		}
-	}
-	return false, nil
+	return containercli.HasName(containercli.ParseList(string(out)), m.name()), true, nil
 }
 
 // --- Delete -----------------------------------------------------------------
@@ -1147,58 +1114,25 @@ func (m *Manager) removePodmanSecrets(ctx context.Context) error {
 	return keyErr
 }
 
+// deleteDocker takes the compose project down, with the file rendered now fed on stdin
+// like the deploy's, so no compose file has to be on this host. compose finds the project
+// by the file's own name: key, so a deployment an earlier build created from a file on
+// disk comes down the same way, and a project that is not there is not an error. Down
+// interpolates the whole model, so every secret is DEFINED (as a placeholder: nothing
+// reads a value, which is why a moved certificate cannot block a teardown) and the
+// deploy-digest variable falls back to its empty default. Primary is the identity
+// because a down needs the service and project names, which no role changes.
 func (m *Manager) deleteDocker(ctx context.Context) error {
-	file := m.composeFile()
-	if m.isEcho() || fileExists(file) {
-		return m.compose(ctx, "-f", file, "down")
-	}
-	// No compose file on disk: fall back to stop/rm by container name.
-	return m.stopAndRemove(ctx)
-}
-
-func (m *Manager) stopAndRemove(ctx context.Context) error {
-	if !m.containerExists(ctx) {
-		// `docker rm` on a name that was never deployed exits non-zero, which would
-		// otherwise turn "reset after a failed deploy" into an error -- every other
-		// removal path in the tool (--ignore-not-found) no-ops instead, and this is
-		// that same case for the no-compose-file fallback.
-		m.progress().Info("no container named %s on this host -- nothing to remove.", m.name())
-		return nil
-	}
-	if err := m.run(ctx, "stop", m.name()); err != nil {
-		// Mirrors deletePodman's stop check: "docker info" (Preflight) proves the
-		// engine is reachable, not that this container actually stopped. A probe
-		// that cannot answer counts as "still running" for the same reason it does
-		// there -- silence is not confirmation.
-		running, answered, probeErr := m.containerRunningKnown(ctx)
-		if running || !answered {
-			why := "it is still running"
-			if !answered {
-				// The probe's own error is named, not discarded: this branch's message
-				// says the probe failed, and an operator diagnosing that needs to know
-				// WHY it failed -- deployDocker's near-identical check already wraps it.
-				why = fmt.Sprintf("it could not be confirmed stopped (the `ps` probe itself failed: %v)", probeErr)
-			}
-			return fmt.Errorf("stop container %s failed and %s; stop it by hand (check `%s ps`) "+
-				"and re-run: %w", m.name(), why, m.Cfg.ContainerRuntime(m.P).Name(), err)
-		}
-		m.progress().Warn("stopping container %s failed (already stopped?): %v", m.name(), err)
-	}
-	return m.run(ctx, "rm", m.name())
-}
-
-// containerExists reports whether this host has ANY container -- running or stopped --
-// with this deployment's name, so stopAndRemove can no-op when nothing was ever
-// deployed instead of running stop/rm into a guaranteed docker failure.
-func (m *Manager) containerExists(ctx context.Context) bool {
-	if m.isEcho() {
-		return false // unreachable in practice: deleteDocker takes the compose branch under Echo
-	}
-	found, err := m.psHasName(ctx, "--all")
+	c, err := m.composeCmd()
 	if err != nil {
-		return true // let stop/rm run and surface the real engine error rather than hiding it
+		return err
 	}
-	return found
+	env, err := m.composeSecretEnv(true)
+	if err != nil {
+		return err
+	}
+	file := render.Compose(m.Cfg, m.Cfg.ResolveNode(config.Primary))
+	return engine.Run(ctx, m.R, containercli.ComposeDown(c.Argv(), file, m.projectDir(), env))
 }
 
 // purgeData empties container.dataDir and LEAVES THE DIRECTORY. Removing it would
@@ -1241,10 +1175,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	if m.P == config.Podman {
 		return m.systemctl(ctx, systemd.Start(m.systemctlUser(), m.name()+".service"))
 	}
-	if file := m.composeFile(); m.isEcho() || fileExists(file) {
-		return m.compose(ctx, "-f", file, "start")
-	}
-	return m.run(ctx, "start", m.name())
+	return m.runCmd(ctx, func(base []string) runner.Cmd { return containercli.Start(base, m.name()) })
 }
 
 // Stop shuts the broker down without removing it. The container and its data
@@ -1256,14 +1187,11 @@ func (m *Manager) Stop(ctx context.Context) error {
 	if m.P == config.Podman {
 		return m.systemctl(ctx, systemd.Stop(m.systemctlUser(), m.name()+".service"))
 	}
-	if file := m.composeFile(); m.isEcho() || fileExists(file) {
-		return m.compose(ctx, "-f", file, "stop")
-	}
-	return m.run(ctx, "stop", m.name())
+	return m.runCmd(ctx, func(base []string) runner.Cmd { return containercli.Stop(base, m.name()) })
 }
 
 // Restart bounces the broker in place. It applies nothing new: a changed deploy
-// artifact needs `deploy broker --restart`, which rewrites the artifact first.
+// artifact needs `deploy broker`, which asks before it restarts.
 func (m *Manager) Restart(ctx context.Context) error {
 	if err := m.Preflight(ctx); err != nil {
 		return err
@@ -1271,10 +1199,7 @@ func (m *Manager) Restart(ctx context.Context) error {
 	if m.P == config.Podman {
 		return m.systemctl(ctx, systemd.Restart(m.systemctlUser(), m.name()+".service"))
 	}
-	if file := m.composeFile(); m.isEcho() || fileExists(file) {
-		return m.compose(ctx, "-f", file, "restart")
-	}
-	return m.run(ctx, "restart", m.name())
+	return m.runCmd(ctx, func(base []string) runner.Cmd { return containercli.Restart(base, m.name()) })
 }
 
 // --- Status / Logs / CLI / Shell --------------------------------------------
@@ -1286,23 +1211,27 @@ func (m *Manager) Restart(ctx context.Context) error {
 // the name is the operator's to choose (container.name) while the image is not.
 const solaceImageMarker = "solace-pubsub"
 
-// psFormat is the row this tool prints for a discovered container. Explicit rather
-// than the engine's default table, so the columns are the same on docker and podman.
-const psFormat = "{{.Names}}\t{{.Image}}\t{{.Status}}"
+// listContainers lists every container on this host through containercli.List and
+// reads the answer. Matching is done in Go on the rows (HasName, ByImage), because both
+// engines treat `--filter name=` as an unanchored regular expression.
+func (m *Manager) listContainers(ctx context.Context) ([]containercli.Row, error) {
+	base, err := m.base()
+	if err != nil {
+		return nil, err
+	}
+	out, err := engine.Output(ctx, m.R, containercli.List(base, false))
+	if err != nil {
+		return nil, err
+	}
+	return containercli.ParseList(string(out)), nil
+}
 
-// psTableFormat is psFormat with the ENGINE rendering the header and column widths, for
-// Status, which streams `ps` straight through rather than parsing it the way StatusAll
-// does.
-//
-// It exists to drop PORTS. A broker publishes a dozen or more ports, so the engine's
-// default table spends most of a terminal line on
-// "0.0.0.0:55555->55555/tcp, [::]:55555->55555/tcp, 0.0.0.0:8080->8080/tcp, ..." and wraps
-// every other column into illegibility -- on the one report whose whole job is to answer
-// "is it up". Nothing is lost: the ports are in the env file that chose them, in the
-// artifact `broker generate` prints, and in the inspect block this same command appends
-// below. NAMES, IMAGE and STATUS are what this report is for, and naming them explicitly
-// also keeps docker and podman showing the same columns in the same order.
-const psTableFormat = "table " + psFormat
+// printableRow is a listing row as it reaches a table: every field is engine-supplied
+// text about a container this tool did not necessarily create, so each passes through
+// inspect.Printable first.
+func printableRow(r containercli.Row) []string {
+	return []string{inspect.Printable(r.Name), inspect.Printable(r.Image), inspect.Printable(r.Status)}
+}
 
 // StatusAll lists every Solace broker container on this host, not just the one this
 // env file names -- the container answer to `--all`, which on Kubernetes surveys the
@@ -1315,11 +1244,11 @@ const psTableFormat = "table " + psFormat
 // makeup behind the running row.
 func (m *Manager) StatusAll(ctx context.Context, detail bool) error {
 	r := m.report()
-	raw, err := m.output(ctx, "ps", "--all", "--format", psFormat)
+	rows, err := m.listContainers(ctx)
 	if err != nil {
 		return fmt.Errorf("listing containers: %w", err)
 	}
-	names := solaceRows(r, string(raw))
+	names := solaceRows(r, containercli.ByImage(rows, solaceImageMarker))
 	if !detail {
 		return nil
 	}
@@ -1336,51 +1265,36 @@ func (m *Manager) StatusAll(ctx context.Context, detail bool) error {
 	return nil
 }
 
-// engineNameRE is what a container name returned BY THE ENGINE must look like before
-// this tool will put it back into an argument vector. It is docker's and podman's own
-// grammar for a container name, deliberately no wider.
+// solaceRows prints the header plus every row it is given (the ones whose image names
+// a Solace broker), and returns the container names it kept so a caller can go deeper
+// on each.
 //
-// The names solaceRows returns did not come from the env file: they came out of
-// `<runtime> ps` on this host, which makes them untrusted input on the way back in.
-// Nothing about that is hypothetical to guard -- a name is created by whoever ran the
-// engine, not necessarily by this tool -- and while argv exec means a metacharacter is
-// inert, these names also reach report tables, logs and whatever a ticket quotes.
-// Validating at the boundary is cheaper than trusting every consumer downstream.
-var engineNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
-
-// solaceRows prints the header plus every row whose image names a Solace broker,
-// and returns the container names it kept so a caller can go deeper on each.
-//
-// A row whose name does not match the engine's own grammar is still SHOWN -- it is a
-// real container on this host and hiding it would be worse -- but its name is not
-// returned, so nothing further is run against it. Skipped out loud rather than
-// silently dropped: a missing row reads as "no such container".
-func solaceRows(s *output.Sink, raw string) []string {
-	lines := strings.Split(strings.TrimRight(raw, "\n"), "\n")
+// The names did not come from the env file: they came out of `<runtime> ps` on this
+// host, which makes them untrusted input on the way back in. A row whose name fails
+// containercli.ValidName is still SHOWN -- it is a real container on this host and
+// hiding it would be worse -- but its name is not returned, so nothing further is run
+// against it. Skipped out loud rather than silently dropped: a missing row reads as
+// "no such container". Validating at the boundary is cheaper than trusting every
+// consumer downstream.
+func solaceRows(s *output.Sink, listed []containercli.Row) []string {
 	var names []string
 	var rows [][]string
-	for _, ln := range lines {
-		cols := strings.Split(ln, "\t")
-		if len(cols) < 3 || !strings.Contains(cols[1], solaceImageMarker) {
-			continue
-		}
-		rows = append(rows, []string{cols[0], cols[1], cols[2]})
-		if !engineNameRE.MatchString(cols[0]) {
+	for _, row := range listed {
+		rows = append(rows, printableRow(row))
+		if !containercli.ValidName(row.Name) {
 			// s.Line, not s.Warn: this is a report body, and Warn is the stderr voice
 			// (internal/output). The note rides with the row it is about.
-			s.Line("  (not inspected: %q is not a name this tool will pass back to the engine)", cols[0])
+			s.Line("  (not inspected: %q is not a name this tool will pass back to the engine)", row.Name)
 			continue
 		}
-		names = append(names, cols[0])
+		names = append(names, row.Name)
 	}
 	// Table computes each column from what is actually in it, so a long image ref
-	// widens the column instead of running into the next one -- the fixed %-24s/%-48s
-	// this replaces did both, depending on the name.
+	// widens the column instead of running into the next one.
 	s.Table([]string{"NAME", "IMAGE", "STATUS"}, rows)
 	// len(rows), not len(names): names holds only the containers whose names passed the
-	// grammar check above, so a host running one Solace container under a name this tool
-	// will not hand back to the engine printed "none found" directly beneath a table
-	// listing it.
+	// check above, so a host running one Solace container under a name this tool will
+	// not hand back to the engine printed "none found" directly beneath a table listing it.
 	if len(rows) == 0 {
 		s.Line("  (no Solace broker containers on this host)")
 	}
@@ -1389,25 +1303,24 @@ func solaceRows(s *output.Sink, raw string) []string {
 
 // Status reports the container's state. Podman also shows its systemd unit.
 //
-// The `ps` listing is what the engine says about the container; the block after it
+// The listing is what the engine says about the container; the block after it
 // is what this tool reads out of `inspect` (inspect.go) -- health under whichever
 // spelling this engine uses, and a restart count that on podman comes from systemd
 // rather than from the engine's own counter, which a quadlet restart leaves at zero.
 // Those are the two facts an operator asking "is my broker healthy" needs and
 // neither engine's `ps` line carries.
 //
+// The listing is `ps --all --no-trunc` with an explicit template, so the columns are
+// the same on docker and podman and the PORTS column is never in it: a broker publishes
+// a dozen or more ports, and the engine's default table spends most of a terminal line
+// on them. Nothing is lost: the ports are in the env file that chose them, in the
+// artifact `broker generate` prints, and in the inspect block this command appends. The
+// rows are filtered to this container's exact name in Go and printed as this tool's own
+// table.
+//
 // A failed inspect is a WARNING, not a failure: the listing above it already
 // answered whether the container exists, so the command has reported something
 // useful and must not exit non-zero because the extra detail was unavailable.
-//
-// Docker used to run `compose ps` first as well. It listed the same single container the
-// filtered `ps` does, so the only thing it added was a second row -- carrying the widest
-// PORTS column in the output, because compose prints every published port with both host
-// bindings. It could not be narrowed in place either: compose's own --format takes only
-// `table` or `json`, never a column template, so there is no compose-side equivalent of
-// psTableFormat. Dropping it costs nothing a reader of this report wanted: the listing
-// below reports the container whether it is running or stopped, and the compose FILE's
-// own existence and path are already in `broker check`.
 func (m *Manager) Status(ctx context.Context) error {
 	if m.P == config.Podman {
 		// The unit is podman's half of "is it up": a quadlet container that systemd
@@ -1417,9 +1330,22 @@ func (m *Manager) Status(ctx context.Context) error {
 			m.progress().Warn("systemctl status %s reported non-zero (unit not active?): %v", svc, err)
 		}
 	}
-	if err := m.run(ctx, "ps", "--all", "--filter", "name="+exactName(m.name()),
-		"--format", psTableFormat); err != nil {
+	listed, err := m.listContainers(ctx)
+	if err != nil {
 		return err
+	}
+	var rows [][]string
+	for _, row := range listed {
+		if row.Name == m.name() {
+			rows = append(rows, printableRow(row))
+		}
+	}
+	r := m.report()
+	r.Table([]string{"NAME", "IMAGE", "STATUS"}, rows)
+	// Not under the Echo runner, which answers nothing: the note would say a deployed
+	// broker is missing when no listing was ever made.
+	if len(rows) == 0 && !m.isEcho() {
+		r.Line("  (no container named %s on this host)", m.name())
 	}
 	return m.statusDetail(ctx)
 }
@@ -1439,8 +1365,8 @@ func (m *Manager) statusDetail(ctx context.Context) error {
 }
 
 // Describe prints detailed inspection output for this host's broker, the container
-// analog of `kubectl describe pod`: `<runtime> inspect` carries the health state,
-// restart count, exit reason, mounts and resource limits that Status's one-line
+// analog of `kubectl describe pod`: `<runtime> container inspect` carries the health
+// state, restart count, exit reason, mounts and resource limits that Status's one-line
 // listing does not. Podman additionally shows the installed unit definition, which
 // answers "what did we actually deploy" -- the summary is already in Status.
 func (m *Manager) Describe(ctx context.Context) error {
@@ -1450,36 +1376,29 @@ func (m *Manager) Describe(ctx context.Context) error {
 			m.progress().Warn("systemctl cat %s failed (unit not installed?): %v", svc, err)
 		}
 	}
-	return m.run(ctx, "inspect", m.name())
+	return m.runCmd(ctx, func(base []string) runner.Cmd {
+		c, _ := inspect.Containers(base, m.name())
+		return c
+	})
 }
 
-// Logs reads the broker container's logs, appending the caller's log-selection
-// tokens (-f, --tail, --since, --timestamps -- the spellings kubectl and both engines
-// share). It prints what is buffered and exits unless the caller asked to follow.
+// Logs reads the broker container's logs, with the caller's log selection (follow,
+// tail, since, timestamps -- containercli.LogOptions, whose values the caller has already
+// validated). It prints what is buffered and exits unless the caller asked to follow.
 //
 // Following is the CALLER's choice, never hard-coded here: a hard-coded `-f` blocks
 // until interrupted, and no way to ask for one cannot follow at all.
 //
-// `-p`/`--previous` is refused here as well as at pre-run, and that is not
-// belt-and-braces. checkFlagPlatforms walks only the flags the operator actually SET,
-// so a defaulted value never reaches it -- and this method can be called by something
-// that is not this CLI. Neither engine keeps a previous container's log, so passing it
-// through would ask for something that cannot exist.
-func (m *Manager) Logs(ctx context.Context, extra ...string) error {
-	for _, a := range extra {
-		if a == "-p" || a == "--previous" {
-			return fmt.Errorf("--previous is not supported on %s: neither engine keeps a previous "+
-				"container's log, so there is nothing to read", m.P)
-		}
+// previous is refused here as well as at pre-run, and that is not belt-and-braces.
+// checkFlagPlatforms walks only the flags the operator actually SET, so a defaulted value
+// never reaches it -- and this method can be called by something that is not this CLI.
+// Neither engine keeps a previous container's log, so passing it through would ask for
+// something that cannot exist.
+func (m *Manager) Logs(ctx context.Context, o containercli.LogOptions, previous bool) error {
+	if previous {
+		return containercli.NoPrevious(containercli.Engine(m.P))
 	}
-	// Built into a fresh slice rather than appended onto extra: a `...`-expanded slice
-	// is forwarded by reference, so `append(extra, ...)` writes into the CALLER's
-	// backing array whenever it has spare capacity.
-	args := make([]string, 0, len(extra)+2)
-	args = append(args, "logs")
-	args = append(args, extra...)
-	args = append(args, m.name())
-	return m.run(ctx, args...)
+	return m.runCmd(ctx, func(base []string) runner.Cmd { return containercli.Logs(base, m.name(), o) })
 }
 
 // CopyFrom copies files out of the broker container into the working directory,
@@ -1540,21 +1459,22 @@ func (m *Manager) CopyInto(ctx context.Context, files []string, destDir string) 
 }
 
 // CLI opens an interactive Solace CLI session inside the container.
-func (m *Manager) CLI(ctx context.Context) error {
-	r, err := m.runtime()
-	if err != nil {
-		return err
-	}
-	return engine.Interactive(m.R, runner.Cmd{Argv: r.Argv("exec", "-it", m.name(), "cli", "-A")})
-}
+func (m *Manager) CLI(ctx context.Context) error { return m.session("cli", "-A") }
 
 // Shell opens an interactive shell inside the container.
-func (m *Manager) Shell(ctx context.Context) error {
-	r, err := m.runtime()
+func (m *Manager) Shell(ctx context.Context) error { return m.session("bash") }
+
+// session attaches this terminal to argv inside the container: `exec -i -t <name> argv`.
+func (m *Manager) session(argv ...string) error {
+	base, err := m.base()
 	if err != nil {
 		return err
 	}
-	return engine.Interactive(m.R, runner.Cmd{Argv: r.Argv("exec", "-it", m.name(), "bash")})
+	c, err := containercli.Exec(base, m.name(), containercli.ExecOptions{Stdin: true, TTY: true}, argv...)
+	if err != nil {
+		return err
+	}
+	return engine.Interactive(m.R, c)
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -1598,28 +1518,11 @@ func (m *Manager) checkPodmanEUID() error {
 	return GuardPodmanEUID(m.Cfg, m.P, m.R, m.Geteuid())
 }
 
-// composeFile is the docker compose path, defaulting an empty config value to
-// docker-compose.yml (config leaves it empty; the manager owns the default).
-func (m *Manager) composeFile() string {
-	if f := m.Cfg.Docker.ComposeFile; f != "" {
-		return f
-	}
-	return "docker-compose.yml"
-}
-
-// fileExists reports whether p exists (used to pick compose-down vs stop/rm).
+// fileExists reports whether p exists (used to name a legacy bundle in a preview).
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
 }
-
-// exactName turns a container name into a `ps --filter name=` value that matches it
-// and nothing else. The filter value is a regex, so a bare name is a substring match
-// (a `solace` deployment would list a sibling `solace-edge`) and an unescaped '.' --
-// which the schema allows in a container name -- would match any character. Used for
-// the display listings only; containerRunningKnown compares names in Go instead, because
-// a decision must not rest on an engine's regex handling.
-func exactName(name string) string { return "^" + regexp.QuoteMeta(name) + "$" }
 
 // platformTitle is the display name for the platform in Check output/errors.
 func platformTitle(p config.Platform) string {

@@ -659,6 +659,36 @@ func TestLoadRefusesTheRetiredPodmanRootlessKey(t *testing.T) {
 	}
 }
 
+// TestLoadRefusesTheRetiredDockerComposeFileKey: docker.composeFile is retired, because the
+// compose file goes to compose on stdin and is never written, so there is no path to choose.
+// The old key is refused by name, with the fix, and is neither rebased nor home-expanded on
+// its way to the refusal: an env file that still carries it is told, not silently ignored.
+func TestLoadRefusesTheRetiredDockerComposeFileKey(t *testing.T) {
+	for _, v := range []string{"docker-compose.yml", "~/compose.yaml", "/srv/solace/compose.yml"} {
+		path := filepath.Join(t.TempDir(), "env.yaml")
+		if err := os.WriteFile(path, []byte("docker:\n  composeFile: "+v+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(path, Docker)
+		if err == nil {
+			t.Fatalf("composeFile: %s must be refused", v)
+		}
+		for _, want := range []string{"docker.composeFile", "retired", "stdin", "drop the key", "can be deleted"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("composeFile: %s error %q should mention %q", v, err, want)
+			}
+		}
+	}
+	// A file without the key loads: the retirement is about the key, not the platform.
+	path := filepath.Join(t.TempDir(), "env.yaml")
+	if err := os.WriteFile(path, []byte("docker:\n  command: docker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path, Docker); err != nil && strings.Contains(err.Error(), "composeFile") {
+		t.Errorf("a file with no composeFile must not mention it: %v", err)
+	}
+}
+
 func validK8sConfig() *Config {
 	c := &Config{}
 	c.Image.Repo = "solace/broker"

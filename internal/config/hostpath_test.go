@@ -298,7 +298,6 @@ func TestValidateHostPathsChecksEveryPlatformsFields(t *testing.T) {
 			"broker.domainCerts.files[ca]": func(c *Config) { c.Broker.DomainCerts.Files = map[string]string{"ca": "certs$x.pem"} },
 		},
 		Docker: {
-			"docker.composeFile":       func(c *Config) { c.Docker.ComposeFile = "com$pose.yml" },
 			"docker.container.dataDir": func(c *Config) { c.Docker.Container.DataDir = "/opt/sol$ace" },
 		},
 		Podman: {
@@ -343,9 +342,6 @@ func TestValidateHostPathsMatchesTheRebaseList(t *testing.T) {
 			"broker.domainCerts.dirs[0]":   func(c *Config) { c.Broker.DomainCerts.Dirs = []CertDir{{Path: "a/$b"}} },
 			"broker.domainCerts.files[ca]": func(c *Config) { c.Broker.DomainCerts.Files = map[string]string{"ca": "a/$b"} },
 		}
-		if p == Docker {
-			rebased["docker.composeFile"] = func(c *Config) { c.Docker.ComposeFile = "a/$b" }
-		}
 		for name, set := range rebased {
 			fresh := guardConfig(p)
 			set(fresh)
@@ -372,7 +368,6 @@ func TestRebaseResolvesAgainstTheEnvFileDirectory(t *testing.T) {
 	c.Broker.CLIScriptsDir = "cli"
 	c.Broker.DomainCerts.Dirs = []CertDir{{Path: "prod-cas"}, {Path: filepath.FromSlash("/abs/partner-cas")}}
 	c.Broker.DomainCerts.Files = map[string]string{"my-ca": "certs/my-ca.pem"}
-	c.Docker.ComposeFile = "docker-compose.yml"
 
 	c.rebaseHostPaths()
 
@@ -383,7 +378,6 @@ func TestRebaseResolvesAgainstTheEnvFileDirectory(t *testing.T) {
 		"tls.cas[1]":                 filepath.FromSlash("/abs/ca2.pem"),
 		"broker.hostDiagnosticDir":   filepath.Join("/srv/solace/env", "diag-configs"),
 		"broker.cliScriptsDir":       filepath.Join("/srv/solace/env", "cli"),
-		"docker.composeFile":         filepath.Join("/srv/solace/env", "docker-compose.yml"),
 		"broker.domainCerts.dirs[0]": filepath.Join("/srv/solace/env", "prod-cas"),
 		"broker.domainCerts.dirs[1]": filepath.FromSlash("/abs/partner-cas"),
 		"broker.domainCerts.files":   filepath.Join("/srv/solace/env", "certs/my-ca.pem"),
@@ -395,7 +389,6 @@ func TestRebaseResolvesAgainstTheEnvFileDirectory(t *testing.T) {
 		"tls.cas[1]":                 c.TLS.CAs[1],
 		"broker.hostDiagnosticDir":   c.Broker.HostDiagnosticDir,
 		"broker.cliScriptsDir":       c.Broker.CLIScriptsDir,
-		"docker.composeFile":         c.Docker.ComposeFile,
 		"broker.domainCerts.dirs[0]": c.Broker.DomainCerts.Dirs[0].Path,
 		"broker.domainCerts.dirs[1]": c.Broker.DomainCerts.Dirs[1].Path,
 		"broker.domainCerts.files":   c.Broker.DomainCerts.Files["my-ca"],
@@ -963,7 +956,6 @@ func TestExpandHomePathsCoversEveryFieldItClaims(t *testing.T) {
 	c.TLS.CAs = []string{"~/tls/ca1.pem", "~/tls/ca2.pem"}
 	c.Broker.CLIScriptsDir = "~/scripts"
 	c.Broker.HostDiagnosticDir = "~/diag"
-	c.Docker.ComposeFile = "~/compose.yaml"
 	// The four container-host directories. They are listed unconditionally by
 	// expandHomePaths -- not per platform -- so they are set unconditionally here:
 	// a per-platform list there would be a second enumeration of the schema, and a
@@ -989,7 +981,6 @@ func TestExpandHomePathsCoversEveryFieldItClaims(t *testing.T) {
 		"tls.cas[1]":                  c.TLS.CAs[1],
 		"broker.cliScriptsDir":        c.Broker.CLIScriptsDir,
 		"broker.hostDiagnosticDir":    c.Broker.HostDiagnosticDir,
-		"docker.composeFile":          c.Docker.ComposeFile,
 		"docker.container.dataDir":    c.Docker.Container.DataDir,
 		"podman.quadletDir":           c.Podman.QuadletDir,
 		"podman.baseDir":              c.Podman.BaseDir,

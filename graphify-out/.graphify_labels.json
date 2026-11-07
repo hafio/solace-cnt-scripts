@@ -2,7 +2,6 @@
   "1": "newTestOps",
   "4": "cli_test.go",
   "6": "Command Reference Docs",
-  "7": "Manager",
   "12": "NewCluster",
   "15": "transform_test.go",
   "16": "manager_test.go",
@@ -17,9 +16,7 @@
   "42": "inject_test.go",
   "49": "config_test.go",
   "62": "rootless_test.go",
-  "88": "AdminSecret",
   "89": "render_test.go",
   "91": "RuleFor",
-  "112": "capRunner",
-  "118": "Container State Inspection"
+  "112": "capRunner"
 }

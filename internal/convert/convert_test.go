@@ -641,6 +641,27 @@ func TestConvertDockerRunModeWarns(t *testing.T) {
 	}
 }
 
+// TestConvertDockerComposeFileIsDropped pins the retired docker.composeFile: the compose
+// file now goes to compose on stdin and is never written, so DOCKER_COMPOSE_FILE has no
+// key to carry into. It is read (so it does not resurface as unmapped), dropped from the
+// YAML, and named in a warning -- and a file that never set it warns of nothing.
+func TestConvertDockerComposeFileIsDropped(t *testing.T) {
+	base := "SOLBK_IMAGE=\"r\"\nSOLBK_IMG_TAG=\"t\"\nSOLBK_ADM_PASS=\"p\"\nSOLBK_NODE_PRI_NAME=\"h\"\n"
+	res := convertOK(t, base+"DOCKER_COMPOSE_FILE=\"stack/compose.yml\"\n", config.Docker)
+	if strings.Contains(string(res.YAML), "composeFile") || strings.Contains(string(res.YAML), "stack/compose.yml") {
+		t.Errorf("the retired key must not be carried over:\n%s", res.YAML)
+	}
+	if !hasWarning(res.Warnings, "DOCKER_COMPOSE_FILE") || !hasWarning(res.Warnings, "no longer used") {
+		t.Errorf("warnings should name DOCKER_COMPOSE_FILE as no longer used, got %v", res.Warnings)
+	}
+	if hasWarning(res.Warnings, "no YAML equivalent") {
+		t.Errorf("the variable was read, so it must not be reported unmapped: %v", res.Warnings)
+	}
+	if res := convertOK(t, base+"DOCKER_COMPOSE_FILE=\"\"\n", config.Docker); hasWarning(res.Warnings, "DOCKER_COMPOSE_FILE") {
+		t.Errorf("an empty value is nothing to drop: %v", res.Warnings)
+	}
+}
+
 // TestConvertOffTierMaxConnWarns covers the legacy value that has no successor:
 // SOLBK_SCALING_MAXCONN was any integer, and it is now one of five tiers. The
 // value still converts -- rewriting the operator's declared load would be worse

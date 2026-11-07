@@ -66,7 +66,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-90 test files, 1649 test functions. One of those is not a test: `TestMain` in
+90 test files, 1662 test functions. One of those is not a test: `TestMain` in
 `internal/cli`, which points `os.Stdin` at an already-closed pipe for the whole package.
 That pipe is not a terminal under `confirm.StdinIsTerminal`, so a test that reaches a confirm
 helper without injecting `App.Interactive` gets the "pass --no-prompt instead" error at once
@@ -78,23 +78,44 @@ own tests carry the os/exec helper-process shim.
 | --- | --- | --- |
 | internal/k8s | 20 | 304 |
 | internal/broker | 24 | 507 |
-| internal/cli | 14 | 264 |
-| internal/config | 16 | 236 |
-| internal/container | 8 | 205 |
-| internal/convert | 1 | 41 |
-| internal/render | 2 | 50 |
+| internal/cli | 14 | 268 |
+| internal/config | 16 | 237 |
+| internal/container | 8 | 211 |
+| internal/convert | 1 | 42 |
+| internal/render | 2 | 51 |
 | internal/engine | 2 | 7 |
 | internal/output | 1 | 16 |
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/examples | 1 | 8 |
-| **Total** | **90** | **1649** |
+| **Total** | **90** | **1662** |
 
 
 ## Coverage
 
-Last recorded run, from `scripts/logs/cov.log` (2026-11-05), total **97.9%**. Re-run `cov`
+Last recorded run, from `scripts/logs/cov.log` (2026-11-07), total **97.9%**. Re-run `cov`
 after any change; these figures go stale the moment tests move, and the previous total is
 the floor the next run has to hold.
+
+**S7, measured at 97.9%, unchanged: containercli and inspect adopted.** The compose file goes to compose
+on stdin and is never written, the deploy digest label replaces the per-certificate one, every
+podman secret is compared by reading its stored value back (4.7+), and a deploy asks before it restarts or recreates a running
+broker (`--no-prompt` approves; no terminal fails with exit 1). Code that moved to the shared
+module took its tests with it, so the total can move either way: B's decoder
+(`decodeInspect`, `containerState`, `healthState`), `printable`, `engineNameRE`, `exactName`,
+`psHasName`, `stopAndRemove`, `containerExists`, `dockerCertChanged`, `certSecretHash`,
+`engineHint`, `shSingleQuote` and the compose-file writer are gone, and with them
+`TestInspectNameLosesDockersLeadingSlash`, `TestInspectRejectsAnEmptyReply` (shared:
+`inspect.TestDecode*`), `TestPrintableStripsControlCharacters` (shared: `inspect.TestPrintable`),
+the four `TestManagerStopAndRemove*`/`...StopTolerated` tests, `TestDockerCertChangedEdges` and
+`TestManagerDeployDockerComposeWriteError`. Every new branch arrived with a test: the redeploy
+gate on both platforms (no terminal, `--no-prompt`, a "no", `--restart`, a rotated password, an
+unlabelled or uninspectable container), the per-secret read-back skip and the below-4.7 path, `containercli` and `inspect`
+refusals on each path, `docker.composeFile` refused at load, `DOCKER_COMPOSE_FILE` warned in
+`convert`. Two small branches have no test because they cannot be reached: the error from
+`composeSecretEnv(true)` in `deleteDocker` (a preview resolve never fails) and the guarded
+`m.base()` errors in `changedSecrets`/`inspectContainer` after a preflight that already resolved
+the runtime -- the latter are reached directly through the unapproved-runtime table. The goldens and
+`docs/commands.md` moved too (`./scripts/dev.sh regen`).
 
 **S6, not yet re-measured: podman, systemd and rootless adopted from the shared module.** The
 covered duplicates went with the move, and the shared module carries their tests under their own
@@ -405,7 +426,7 @@ type behind the platform CLI overrides and the execution guard that decides what
 `Command` may be, the scaling block that sizes the broker on every platform, and the
 platform vocabulary the CLI resolves against, the host-path rules every file-valued
 key is held to, the grammar every value written as-is into an artifact is held to, and
-the two storage stories a Kubernetes deployment may tell. 236 tests across 16 files.
+the two storage stories a Kubernetes deployment may tell. 237 tests across 16 files.
 
 ### command_test.go
 
@@ -476,6 +497,7 @@ that used to be in this file moved with them (`TestCheckCommandAccepts`,
 | `TestResolveQuadletDirRefusals` | A rootless default that cannot be resolved is a load error, never a guess: a relative `XDG_CONFIG_HOME`, an unresolvable home and an empty home are each refused naming the cause and `podman.quadletDir`, leaving the field unset; an operator-set `quadletDir` skips the lookup |
 | `TestResolveQuadletDirOnlyForRootlessPodman` | A rootful config keeps the system directory `ApplyDefaults` gave it and a docker config is untouched, even with a relative `XDG_CONFIG_HOME` set -- only a rootless podman load depends on the account's home |
 | `TestLoadRefusesTheRetiredPodmanRootlessKey` | `podman.rootless` (either value) is refused at load naming `podman.rootful`, saying rootless is now the default and that `rootful: true` asks for the rootful engine -- rather than a bare unknown-field error or a silent read as the opposite |
+| `TestLoadRefusesTheRetiredDockerComposeFileKey` | `docker.composeFile` (any value, including a `~` and an absolute path) is refused at load naming the key, saying it is retired, that the file goes to compose on stdin, to drop the key and that a compose file an earlier build left can be deleted -- and a file without the key does not mention it |
 | `TestValidateK8sValid` | A fully populated k8s config validates clean |
 | `TestValidateK8sMissingMandatory` | Every missing mandatory k8s field is named in one message, exact wording pinned. `semp.adminPass` is not among them on Kubernetes |
 | `TestValidateK8sBadUpdateStrategy` | `kubernetes.updateStrategy` enum is rejected loud |
@@ -675,7 +697,7 @@ and the keys deliberately exempt from it.
 | `TestIsAbsHostPath` | The question asked for both operating systems at once, which is the point -- `filepath.IsAbs` alone answers only for the machine running the test, so one env file would be judged differently depending on where it was loaded |
 | `TestBaseNameSplitsOnBothSeparators` | The cross-platform agreement test. The value becomes an in-broker filename AND a Secret data key, so two answers for one env-file name two different objects rather than differing cosmetically |
 | `TestHasPathSeparator` | The name-or-path question a CLI/shell script argument rests on: a bare name resolves under `broker.cliScriptsDir`, and a separator of either kind marks a path, which `cli-script`/`shell-script` refuse |
-| `TestValidateHostPathsChecksEveryPlatformsFields` | The gate fires for every field it covers, on every platform. It uses a character the path charset refuses (`$`) so a failure can only have come from `CheckHostPath`, and sets one field at a time so a message naming the wrong field is caught rather than masked by a neighbour. Covers `broker.domainCerts.dirs[0]` and `.files[ca]` alongside the renamed `cliScriptsDir`/`hostDiagnosticDir` |
+| `TestValidateHostPathsChecksEveryPlatformsFields` | The gate fires for every field it covers, on every platform. It uses a character the path charset refuses (`$`) so a failure can only have come from `CheckHostPath`, and sets one field at a time so a message naming the wrong field is caught rather than masked by a neighbour. Covers `broker.domainCerts.dirs[0]` and `.files[ca]` alongside the renamed `cliScriptsDir`/`hostDiagnosticDir`; `docker.composeFile` is no longer a path and is not here |
 | `TestValidateHostPathsMatchesTheRebaseList` | The drift test between the two halves of the host-path story: a rebased field must also be gated. The reverse is allowed and deliberate -- `podman.quadletDir` is gated but never rebased, because the unit has to live where systemd scans |
 | `TestRebaseResolvesAgainstTheEnvFileDirectory` | The join itself: relative values move, absolute ones do not. Covers `broker.domainCerts.dirs[].path` and `.files{}` (a map, so its own write-back loop) alongside the renamed folder fields, including `broker.cliScriptsDir` -- the only folder the script commands read, so where a relative value lands is their whole rule |
 | `TestRebaseIsANoOpWithoutABaseDir` | The property `internal/convert` and every hand-built `Config` depend on -- `ApplyDefaults` and `Validate` are called directly, with no path to derive a base from, and those paths behave exactly as before |
@@ -822,7 +844,7 @@ without a live broker;
 fixtures stand in for a captured `show current-config` transcript; and
 `exportconfigReadCounter` wraps `App.PromptIn` to prove a confirmation prompt was never
 actually read, not merely that the command did not block.
-264 tests across 14 files.
+268 tests across 14 files.
 
 Because the platform is a flag rather than the first word of a command, the
 invocations here name it explicitly (`--platform docker`) rather than relying on
@@ -843,11 +865,11 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 | `TestTreeStructure` | A representative set of command paths exists in the one unified tree, covering a top-level leaf, a group's child, and each applicability class |
 | `TestEveryRunnableCommandIsWired` | The wiring that replaced the two `PersistentPreRunE` hooks: every command with a `RunE` (bar `convert`, `examples`, `version`, `completion`) carries the shared pre-run and the `--allow-command` flag. Missing either is invisible until that one command is run, so it is checked structurally |
 | `TestGroupCommandsPrintHelpAndDoNothing` | The no-implicit-actions rule: a verb that owns objects (`check`, `smoke`, `prepare`, `deploy`, `config`, `start`, `stop`, `restart`, `status`, `logs`, `copy`, `generate`, `remove`, and `config`'s own `apply`/`delete`/`disable`) carries no `RunE`, so running it bare prints its own help and touches nothing -- proven by succeeding with no `--env` at all, since a runnable leaf would instead fail resolving the missing default env file |
-| `TestFlagsRegistered` | Per-command flags are registered where expected: `--restart` and `--pod` on `broker deploy`; `--delete-data`/`--no-prompt` on `broker remove`; `--delete-crd`/`--no-prompt` on `operator remove`; `--days`/`--encrypt` on `broker perform gather-diagnostics`; `--pod`/`--no-prompt` on `broker perform assert-leader` (the silencer for the backup-host question); `--pod` on `broker cli`, `broker perform cli-script` and `broker perform shell-script`; `--pod` on `broker copy from`; `--pod`/`--dir` on `broker copy into`; `--all`/`--detail`/`--pod`/`--watch`/`--interval` on `broker status`; `--detail`/`--watch`/`--interval` on `operator status`; `--out`/`--no-prompt` on `examples`, `broker generate`, `operator generate` and `convert` -- every command whose output is an artifact you keep takes the same pair; `--apply`/`--remove`/`--no-prompt` on `broker configure server-certs` and `broker configure product-keys`, the two `configure` leaves with an outage on the other side of their removal (TLS down, and an unlicensed broker) and therefore the two that ask |
+| `TestFlagsRegistered` | Per-command flags are registered where expected: `--restart`, `--no-prompt` and `--pod` on `broker deploy` (`--no-prompt` answers the docker/podman redeploy question); `--delete-data`/`--no-prompt` on `broker remove`; `--delete-crd`/`--no-prompt` on `operator remove`; `--days`/`--encrypt` on `broker perform gather-diagnostics`; `--pod`/`--no-prompt` on `broker perform assert-leader` (the silencer for the backup-host question); `--pod` on `broker cli`, `broker perform cli-script` and `broker perform shell-script`; `--pod` on `broker copy from`; `--pod`/`--dir` on `broker copy into`; `--all`/`--detail`/`--pod`/`--watch`/`--interval` on `broker status`; `--detail`/`--watch`/`--interval` on `operator status`; `--out`/`--no-prompt` on `examples`, `broker generate`, `operator generate` and `convert` -- every command whose output is an artifact you keep takes the same pair; `--apply`/`--remove`/`--no-prompt` on `broker configure server-certs` and `broker configure product-keys`, the two `configure` leaves with an outage on the other side of their removal (TLS down, and an unlicensed broker) and therefore the two that ask |
 | `TestOpsGatherDiagnosticsRefusesDaysBelowOne` | `--days` 0 or -1 is a usage error naming the value on both platforms, before anything runs and before the diagnostics dir is created -- the broker's own refusal is invisible, since `cli -Apes` exits 0 over it |
 | `TestHelpNoConfig` | `--help` short-circuits before config load, so no env file is needed |
 | `TestGenerateWired` | `generate`'s leaves, none of which contact the cluster or the container engine: `broker generate` renders what `broker deploy` would apply on EITHER family (the CR's `apiVersion:` on kubernetes, `services:`/`[Unit]` on docker/podman), plus `broker generate` on both and `operator generate` on kubernetes. A plain `runRoot` with no echo seam is enough since nothing here executes |
-| `TestCtrWiredDryRun` | Every container command safe to run against the HA sample drives clean over the echo seam, echoing the expected runtime/systemctl/mkdir command; the sample's podman is rootless, the default, so deploy echoes `systemctl --user daemon-reload` |
+| `TestCtrWiredDryRun` | Every container command safe to run against the HA sample drives clean over the echo seam, echoing the expected runtime/systemctl/mkdir command; the sample's podman is rootless, the default, so deploy echoes `systemctl --user daemon-reload`, docker deploy echoes `compose`, and the sessions echo `exec -i -t` |
 | `TestCtrRoleGuards` | The HA guards under `broker perform`: redundancy-test rejects backup and monitor hosts, assert-leader refuses the monitor as an invalid operation (a backup host is asked instead -- see `TestAssertLeaderAsksBeforeActingFromABackup`), bad roles error, and standalone self-skips -- all before any poll or SEMP call |
 | `TestCtrConfigDryRun` | Container config steps run clean on a standalone env; cert/product-key-gated steps self-skip. The cli-script row's file is written into the env's own `cli` folder first (`writeCLIScript`), the only place the command reads |
 | `TestRemoveServerCertsOverTheCLI` | The direction that was a loud placeholder until `no ssl server-certificate` was confirmed. Three properties, each one a reason it was held back: `--no-prompt` runs the confirmed form; an interactive `n` changes nothing; and a run with no terminal and no `--no-prompt` keeps the certificate rather than failing. It asks at all because removing the certificate a broker is presenting takes TLS down immediately |
@@ -910,7 +932,11 @@ covered in `platform_test.go`, against fixtures written for that purpose.
 | `TestUnansweredPromptStillRefuses` | End of input AT a terminal: the question is asked, then the Gate error carries "reading input: EOF" and names `--no-prompt` -- not a quiet no and not exit 0. Also pins that a nil `*App` still yields a Prompter |
 | `TestPromptSeamsBeatStdin` | an App carrying `Interactive`/`PromptIn` never touches `os.Stdin` (the App's Prompter is a terminal under the seam although `TestMain`'s stdin is not), which is what keeps the ~200 wiring tests independent of what the suite was launched from |
 | `TestPromptKeepsBufferedAnswersForLaterQuestions` | A command asking TWO questions in one run (`broker remove --delete-data`) gets both answers: a pipe delivering `y\nyes\n` in one read must not lose the second to the first question's reader. Kept here although the `confirm` package has its own reader tests, because the one-Prompter-per-App memoisation is this package's |
-| `TestCtrManagerConfirmWiring` | ctrManager wires Manager.Confirm to confirmRestart, and a non-interactive session (via App.Interactive) declines without reading a prompt |
+| `TestCtrManagerConfirmWiring` | `ctrManager` wires `Manager.Confirm` to `confirmRedeploy`, which is the shared `Gate`: with no terminal and no `--no-prompt` it is `(false, an error naming --no-prompt)` that exits 1, `--no-prompt` approves without asking, and at a terminal `y` approves and `n` declines with no error |
+| `TestCtrRedeployGate` | The redeploy rule through the CLI's own wiring, on docker and podman over a fake runner that reports the container running and stale: no terminal and no flag fails exit 1 naming `--no-prompt` and changes nothing (no `up`/`create`/`daemon-reload`, no unit written); `--no-prompt` applies without asking; a terminal `n` changes nothing and is not an error; a terminal `y` applies; `--restart` applies without a terminal |
+| `TestCtrManagerReadsTheRestartFlag` | `ctrManager` hands `--restart` to the Manager as `RestartApproved`, which is what pre-approves a redeploy |
+| `TestCtrDeployEchoesTheProjectDirectory` | A docker deploy over Echo shows `compose -f - --project-directory <the env file's directory> up -d`, asks nothing and leaks no password |
+| `TestDeployNoPromptIsRegisteredOnContainersOnly` | `--no-prompt` is a `broker deploy` flag scoped to docker/podman in its usage, and refused by name on Kubernetes rather than accepted and ignored |
 | `TestK8sLoginOutcomes` | a transport failure propagates as an error and a canned 200 OK response returns nil, the two real SEMP outcomes runner.Echo's fixed (nil,nil) can never produce; without `semp.adminPass` the password is read back from the admin Secret the broker uses and reaches curl on stdin, never argv, and a failed read never reaches curl |
 | `TestCtrLoginOutcomes` | same as TestK8sLoginOutcomes for the container login path |
 | `TestOpK8sDeployAborts` | `opK8sDeploy`'s error-return arms (CreateNamespace, CreateSecrets, DeployBroker), each failed in its own sub-test with no later step's command issued afterward. Two arms the `deploy all` version had are gone: no Check step, since a deploy runs the per-operation preflight rather than the whole validate report, and no operator-apply step, since the operator has its own noun |
@@ -1265,7 +1291,7 @@ The Kubernetes handlers of `ops_k8s.go`, driven directly over `opRunner` rather 
 ## internal/convert
 
 The legacy bash env -> YAML converter: a shell-assignment parser, the variable
-mapping, and the YAML emitter. 41 tests.
+mapping, and the YAML emitter. 42 tests.
 
 ### convert_test.go
 
@@ -1296,6 +1322,7 @@ mapping, and the YAML emitter. 41 tests.
 | `TestConvertRedundancySpellings` | Both legacy spellings normalise onto the schema's own, any case -- `true`/`yes` become `"true"` and `false`/`no` become `"false"`, quoted because both are YAML-ambiguous -- while anything else copies through as a plain scalar with a warning |
 | `TestConvertRedundancyOmitted` | An unset SOLBK_REDUNDANCY emits no key either way, but a container source is warned that its bootstrap defaulted to HA while this CLI defaults to standalone; a k8s source stays silent because the defaults already agree |
 | `TestConvertDockerRunModeWarns` | DOCKER_MODE=run is dropped with the removal reason rather than carried over to fail validation later |
+| `TestConvertDockerComposeFileIsDropped` | `DOCKER_COMPOSE_FILE` is read (so it is not reported as unmapped) and dropped from the YAML, with a warning that it is no longer used because the compose file goes to compose on stdin; an empty value warns of nothing |
 | `TestConvertBadNumberWarns` | A non-numeric value for a numeric field warns and is not written |
 | `TestConvertSpoolVariablesUnify` | Two legacy names for one key: the k8s bootstrap's `SOLBK_SCALING_MAXPOOL` and the container one's `SOLBK_SPOOL_MAXUSAGE` both map to `scaling.maxSpoolUsageMB`, each platform's own name wins when both are set, and the warning says which was used rather than picking in silence |
 | `TestConvertOffTierMaxConnWarns` | `SOLBK_SCALING_MAXCONN` was any integer and is now one of five tiers. An off-tier value is still written -- rewriting the operator's declared load would be worse than reporting it -- and `Convert` re-validating its own output is what surfaces it, so this needs no mapping code of its own |
@@ -2539,20 +2566,23 @@ AGE column is reproducible.
 ## internal/container
 
 The host-local Docker/Podman manager, its node-local transport, and the engine
-preflight that precedes every mutating operation, plus the engine `inspect` decode
+preflight that precedes every mutating operation, plus the `container inspect` report
 behind `broker status` and the server-certificate delivery each engine needs, and the
-host rlimit ceilings every engine is bounded by.
-205 tests across 8 files.
+host rlimit ceilings every engine is bounded by. The engine commands are built by the
+shared module's `containercli` (and `containercli/inspect`, `podman`), whose tests carry
+the argv and decode pins; these pin what the manager makes of them -- above all the
+redeploy order, compare then ask then write.
+211 tests across 8 files.
 
 ### runtime_test.go
 
 | Test | What it covers |
 | --- | --- |
-| `TestManagerHonoursRuntime` | The manager's shell-outs (`run`, `output`, `CLI`, `Shell`) run argv[0] from `docker.command` with its leading arguments ahead of the subcommand -- the bash bootstrap expanded `${CONTAINER_RUNTIME}` unquoted, so a wrapper like `sudo -n docker` has to reach exec as argv |
+| `TestManagerHonoursRuntime` | The manager's shell-outs (`Logs`, `Reachable`, `CLI`, `Shell`) run argv[0] from `docker.command` with its leading arguments ahead of the subcommand -- the bash bootstrap expanded `${CONTAINER_RUNTIME}` unquoted, so a wrapper like `sudo -n docker` has to reach exec as argv. The sessions are `exec -i -t` (containercli's spelling, not `-it`) |
 | `TestManagerReachableProbesRuntimeThenCompose` | Docker `Reachable` probes both the engine and compose, and the derived compose default keeps the runtime wrapper (`sudo -n docker compose`, not a bare `docker compose`) |
 | `TestCtrTransportHonoursRuntime` | The node-local transport does the same for `exec`, the stdin `Upload`, and `cp` |
 | `TestCtrRuntimeDefaultArgvUnchanged` | A single-token runtime produces exactly the argv it did before, for both docker and podman |
-| `TestCtrExecutorRefusesUnapprovedRuntime` | The container half of enforce-twice: a `Manager` and a transport built from a `*config.Config` that never saw `config.Load` still refuse an unapproved `sudo -n docker` on every path that could reach exec, handing the runner nothing |
+| `TestCtrExecutorRefusesUnapprovedRuntime` | The container half of enforce-twice: a `Manager` and a transport built from a `*config.Config` that never saw `config.Load` still refuse an unapproved `sudo -n docker` on every path that could reach exec -- including the containercli builders' `base()` (lifecycle, listing, inspect, the secret probe and write, and the compose deploy and teardown) -- handing the runner nothing |
 
 ### preflight_test.go
 
@@ -2562,12 +2592,12 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | Test | What it covers |
 | --- | --- |
 | `TestPreflightRunsBeforeAnything` | The layer-7 ordering guarantee: `<runtime> info` is the FIRST call `Deploy`, `Delete`, `PrepHost`, `Start`, `Stop` and `Restart` make, on both platforms -- anything before it would be host state left behind by an operation that then failed on a stopped daemon |
-| `TestPreflightFailureStopsTheDeploy` | An unreachable engine stops `Deploy` nonzero, carries the engine's own error, adds the actionable hint, writes no compose file, and issues no call after the probe |
+| `TestPreflightFailureStopsTheDeploy` | An unreachable engine stops `Deploy` nonzero with `containercli.InfoError`'s message (the shared wording, which names the engine and carries the cause but not the engine's output, since stderr already streamed it) and the actionable hint, and issues no call after the probe |
 | `TestPreflightFailureStopsLifecycle` | The same ordering guarantee for `Start`, `Stop` and `Restart`: an unreachable engine fails each one with no call beyond the probe -- these act on an already-deployed broker, so there is no artifact write to check, only that nothing else ran |
-| `TestPreflightHintIsPlatformShaped` | Docker gets the daemon/group hint; rootful podman gets `sudo systemctl start podman.socket`; rootless podman gets the user-session hint and explicitly NOT a sudo suggestion, which would start the engine its deploy is not using. None of them offers to act on the operator's behalf |
+| `TestPreflightHintIsPlatformShaped` | Docker gets the daemon/context/group hint; rootful podman gets `sudo systemctl start podman.socket`; rootless podman gets the user-session hint and explicitly NOT a sudo suggestion, which would start the engine its deploy is not using. None of them offers to act on the operator's behalf. The hints are `containercli.EngineHint`'s, merged with solmq-conn-util's |
 | `TestPreflightIsPreviewableUnderDryRun` | `--dry-run` echoes the probe and skips its assertion, so previewing needs no engine -- which is why there is no skip flag |
 | `TestComposeSecretEnvNamesCannotBeSystemVars` | The config-side half of the child-environment rule: even with `container.name` set to `PATH`, `LD_PRELOAD`, `ld.preload` or `IFS`, every variable name keeps its fixed literal suffix, so no config value can produce a name the child's loader reads |
-| `TestComposeSecretEnvIsTheOnlyChildEnvironment` | `composeSecretEnv` passes through exactly the variables `render` names and invents none, which is the assumption the test above rests on: one `EnvVar` per secret, plus the certificate's `DigestEnvVar` when one is configured; values stay masked in any display path |
+| `TestComposeSecretEnvIsTheOnlyChildEnvironment` | `composeSecretEnv` passes through exactly the variables `render` names and invents none, which is the assumption the test above rests on: one `EnvVar` per secret. The deploy digest (`render.DeployDigestEnvVar`) is added by `deployDocker` alone, under a fixed name; values stay masked in any display path |
 
 ### manager_test.go
 
@@ -2581,24 +2611,28 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestManagerPrepHostLeavesBaseDirAlone` | Prep used to create `podman.baseDir` `0700` for the certificate bundle; with the certificate in podman's store, a configured baseDir must not make prep create, chmod or chown anything there |
 | `TestManagerPrepHostDirectoryErrors` | The data dir's rootless `chmod 775` failing stops prep with a message naming what it was trying to do, which an engine's bare "permission denied" does not |
 | `TestPrepHostRootlessDryRunSkipsTheReadinessBlock` | Two read-only blocks run before prep touches the host -- the podman readiness rows and the host limits -- and both skip as a WHOLE under the Echo runner rather than row by row: nothing they assert can be answered without a real host. Prep still previews the work that follows them |
-| `TestManagerDeployDockerComposeWritesFile` | Deploy writes the compose file and runs `compose up -d --force-recreate` |
-| `TestManagerDockerComposeCommandOverride` | A `docker.compose` override (the standalone `docker-compose` binary) is what every compose call goes through |
+| `TestManagerDeployDockerFeedsComposeOnStdin` | The compose file goes to compose on stdin (`compose -f - --project-directory . up -d`, the directory being the working directory for a `Config` built in code), with the rendered file as `Cmd.Stdin` and the values and `SOLACE_DEPLOY_SHA256` in `Cmd.Env`, and is written nowhere |
+| `TestManagerDockerComposeCommandOverride` | A `docker.compose` override (the standalone `docker-compose` binary) is what every compose call goes through, with the same `-f - --project-directory` argv |
 | `TestManagerDockerCheckProbesCompose` | Docker `check` probes the compose command, so a missing plugin fails at check time rather than at deploy time |
 | `TestManagerDockerCheckFailsWhenComposeMissing` | With only the compose probe failing, the error names the `docker.compose` override |
-| `TestManagerDeployDockerPassesSecretsAsEnv` | Deploy writes no secret file at all: `compose up -d` carries its environment in `Cmd.Env` (recorded as `RunEnv`), `SOLACE_ADMIN_PASSWORD`/`SOLACE_REDUNDANCY_PSK`, no value reaches an argv, and the compose file holds the source/target/variable references and the `*filepath` pointer instead of either value |
-| `TestManagerDeployPodmanCreatesSecrets` | Deploy loads both secrets into podman's store under container-scoped names (`sol-pod-*`), choosing the path from the client version asked once per deploy: `4.6.1` removes with `secret rm --ignore` then creates (rm first, no `--replace` anywhere); `5.2.0` makes one `secret create --replace` per secret, no rm. Values ride stdin, never an argv |
+| `TestManagerDeployDockerPassesSecretsAsEnv` | Deploy writes nothing to disk: `compose up -d` carries its environment in `Cmd.Env` (recorded as `RunEnv`), `SOLACE_ADMIN_PASSWORD`/`SOLACE_REDUNDANCY_PSK`, no value reaches an argv or the file on stdin, and that file holds the source/target/variable references, the `*filepath` pointer and the `solace-util.deploy-sha256: "${SOLACE_DEPLOY_SHA256:-}"` label |
+| `TestManagerDeployPodmanCreatesSecrets` | Deploy loads both secrets into podman's store under container-scoped names (`sol-pod-*`) with no label, choosing the path from the client version asked once per deploy: `4.6.1` removes with `secret rm --ignore` then creates (rm first, no `--replace` anywhere); `5.2.0` makes one `secret create --replace` and no rm. The values ride stdin and never reach an argv, and the unit is written `0600` |
+| `TestManagerDeployPodmanSkipsUnchangedSecrets` | Every podman secret is compared by reading its stored value back (`secret inspect --showsecret`, podman 4.7+): one equal to the configured value is left in the store and not rewritten, a different one is rewritten, and neither value reaches the output |
+| `TestManagerDeployPodmanSecretReadBackProbe` | The comparison's order and argv: the version is asked once, then one `secret inspect --showsecret --format {{.SecretData}} <name>` per secret before anything is written, and the stored value reaches no argv and no output |
+| `TestManagerDeployPodmanBelow47NeverReadsBack` | On a podman below 4.7, or one whose version is unparseable or empty, there is no `--showsecret`: every secret counts as changed and no SecretData call is made, even when the store holds the configured value |
+| `TestManagerDeployPodmanTreatsAFailedReadBackAsChanged` | A `secret inspect` that fails (no such secret on a first deploy) is a mismatch, so the secret is written |
 | `TestManagerDeployPodmanReplaceOnlyOnPodman47` | The old pin that no argv may carry `--replace`, inverted: it appears only when the version reads 4.7 or later (4.6.9 no, 4.7.0 yes, surrounding space ignored) and never for an unparseable, empty or failed version probe |
-| `TestManagerDeployPreviewNeverReplaces` | The Echo runner probes nothing: no `podman version` call and no `--replace`, only the remove-then-create pair that works on every supported podman |
+| `TestManagerDeployPreviewNeverReplaces` | The Echo runner probes nothing: no `podman version` call, no `--showsecret` and no `--replace`, only the remove-then-create pair that works on every supported podman, with no label |
 | `TestManagerDeployRestartsAReloadingUnit` | `systemctl is-active` printing `reloading` counts as running (`systemd.Active`), so a changed unit is restarted and not handed a start that does nothing |
 | `TestManagerDeployRejectsEmptySecret` | An empty required secret fails the deploy naming the field rather than starting a broker without one. It is a backstop rather than the everyday gate: on a loaded env file `config.Validate` has already refused an empty psk, so reaching this needs a `Config` built in code |
-| `TestManagerDeployDockerDryRunMasksSecretEnv` | Dry-run creates nothing, needs no secret value on disk, and echoes the compose environment as `NAME=***` without the password |
-| `TestManagerDeployPodmanDryRunHidesSecretBytes` | The dry-run echo shows the secret-create command and a stdin byte count, never the values |
-| `TestManagerRedeployUnchangedRestartsForRotation` | Docker: `--restart` against an unchanged compose file forces `up -d --force-recreate`, which is the only way a rotated secret reaches the running broker |
-| `TestManagerRedeployPodmanUnchangedRestartsForRotation` | Podman: the same state restarts the service (the store was refreshed, but the running container holds the old values) |
-| `TestContainerRunningMatchesNameExactly` | The branch selector matches the container name exactly, so a sibling deployment on the same host (`solace-edge` next to `solace`) is never mistaken for this one: exact, among-others, sibling-only, prefix-only, empty and whitespace-padded listings, plus a failed probe reading as not-running |
-| `TestManagerDeployDockerProbeUnansweredErrors` | M4: when the `ps --filter status=running` probe itself fails, `deployDocker` no longer reads that silence as "not running" and force-recreates without consent -- it errors out naming the container and that the probe could not answer, and neither create nor recreate reaches the runner |
-| `TestManagerRedeployStoppedContainerRecreates` | The arm with no consent prompt: an unchanged compose file with the container stopped recreates rather than starts, because a start would replay the credentials the container was created with |
-| `TestManagerRedeployUnchangedHintsRotation` | Without `--restart` nothing is recreated and the log names `--restart` as the way to apply a rotation |
+| `TestManagerDeployDockerDryRunMasksSecretEnv` | Dry-run needs no secret value on disk, asks nothing, and echoes the compose command (`compose -f - --project-directory . up -d`) with its file as a byte count -- never as text -- and the environment as `NAME=***`, the deploy digest included, without the password |
+| `TestManagerDeployPodmanDryRunHidesSecretBytes` | The dry-run echo shows the secret-create command and a stdin byte count, never the values, and asks nothing |
+| `TestManagerRedeployUnchangedRestartsForRotation` | Docker: `--restart` against an unchanged running container forces `up -d --force-recreate` and says why (it asks nothing). It is `--restart`'s remaining job: a rotated password is noticed by the deploy digest now (`TestManagerRedeployRotatedPasswordAsks`) |
+| `TestManagerRedeployPodmanUnchangedRestartsForRotation` | Podman: with the unit and every secret unchanged, `--restart` still restarts the running service and says why; nothing was written, so no `daemon-reload` |
+| `TestContainerRunningMatchesNameExactly` | The running probe matches the container name exactly (`containercli.HasName` over `containercli.List`'s three-field rows), so a sibling deployment on the same host (`solace-edge` next to `solace`) is never mistaken for this one: exact, among-others, sibling-only, prefix-only, empty, whitespace-padded and short-row listings, the argv being the running listing, plus a failed probe reading as not-running AND not-answered |
+| `TestManagerDeployDockerProbeUnansweredErrors` | M4: when the `ps --filter status=running` probe itself fails, `deployDocker` does not read that silence as "not running" and skip the question for a live broker -- it errors out naming the container and that the probe could not answer, and nothing reaches compose |
+| `TestManagerRedeployStoppedContainerIsLeftToCompose` | A stopped container with a stale label is brought up with a plain `up -d` -- no `--force-recreate` and no question, since a stopped broker carries no traffic. The label covers the file and the secrets, so compose itself recreates one whose configuration differs; it replaced "a stopped container is always recreated" |
+| `TestManagerDeployDockerRestartFlagOnAStoppedContainer` | `--restart` on a stopped container is still a plain `up -d`: `--force-recreate` is only for a running, unchanged one |
 | `TestManagerDeployPodmanWritesUnit` | The quadlet unit is written, then daemon-reload and service start |
 | `TestManagerDeployPodmanDryRunSkipsWrite` | Dry-run echoes the systemctl steps without writing the unit |
 | `TestManagerDeletePodmanRemovesUnit` | Delete stops the service, removes the unit, and daemon-reloads |
@@ -2607,30 +2641,34 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestManagerDeletePodmanStopFailsStateUnknownBlocksRemoval` | The case the guard exists for: the stop failed AND `systemctl is-active` answered nothing, which is what an unreachable rootless systemd user session looks like while `podman info` still succeeds on the engine socket. `is-active` exits non-zero for every state but `active`, so the exit code cannot tell "stopped" from "could not ask" -- only the state text can, and no text means refuse. Pins that silence is never read as "already stopped" |
 | `TestManagerDeletePodmanRemovesSecrets` | Delete removes every secret `createPodmanSecrets` loaded into podman's own store (the same `render.ContainerSecrets` list), so they no longer outlive a `broker remove --delete-data`; a failing credential removal warns rather than failing a teardown that otherwise succeeded (the certificate is the exception, `TestCertSecretRemovalFailureIsFatal`) |
 | `TestManagerDeletePodmanPurgeRootless` | Rootless purge EMPTIES the data dir through `podman unshare find -mindepth 1 -delete` -- the contents belong to a subuid, so clearing them needs the namespace the chown used -- and asserts no `rm -rf` of the directory itself |
-| `TestManagerDeleteDockerComposeDownWhenFileExists` | With a compose file present, delete runs `compose down` |
+| `TestManagerDeleteDockerComposeDown` | Delete runs `compose -f - --project-directory . down` with the file rendered now on stdin (no file on disk to find) and the secrets defined in the environment, as `RunEnv` |
 | `TestManagerDeleteDockerPurgeClearsDataDir` | Delete runs `compose down` and, with purge, EMPTIES the data dir with `find -mindepth 1 -delete` -- asserting both that the contents go and that no `rm` removes the directory, which would throw away the ownership and mode prep established |
-| `TestManagerDeleteDockerComposeNoFileFallsBackToStopRm` | A missing compose file falls back to stop+rm |
-| `TestManagerStopAndRemoveContainerAbsentNoOp` | `docker rm` on a name never deployed exits non-zero, which used to turn "reset after a failed deploy" into an error; `containerExists` (matched against a `ps --all` listing, not the unanchored `--filter name=` regex) makes the no-compose-file fallback no-op like every other removal path in the tool |
-| `TestManagerStopAndRemoveStopFailsContainerRunningBlocks` | The docker half of the same stop-failure check as podman's: `docker info`/Preflight proves the engine is reachable, not that the container stopped, so a failed stop with the container still running blocks `rm` instead of falling through to it |
-| `TestManagerStopAndRemoveStopFailsProbeUnansweredBlocks` | The docker twin of `...StateUnknownBlocksRemoval`: the stop failed and the `ps` running-probe could not answer either. A probe that answered with a bare bool would say "false" here -- the M4 hazard -- which is why `stopAndRemove` reads `containerRunningKnown`'s second return value and refuses on an unanswered probe rather than falling through to `rm` |
+| `TestManagerDeleteDockerNeedsNoComposeFile` | No compose file is looked for any more and there is no stop/rm fallback: a retired `docker.composeFile` that names a missing file never reaches a command, and Delete is `compose down` all the same |
 | `TestManagerLifecyclePodmanSystemctl` | `Start`/`Stop`/`Restart` on podman drive `systemctl {start\|stop\|restart} <name>.service` rather than the engine directly, since the quadlet unit owns the container's lifecycle -- covered rootful and rootless, since only rootless prepends `--user` |
 | `TestStatusAllFindsBrokersByImage` | The container answer to `--all`: discovery is by IMAGE, not by the configured container name, so a broker deployed by hand still appears and an unrelated container never does. A config-scoped listing cannot answer "what is actually running on this host", which is the whole reason the flag exists |
 | `TestStatusAllReportsNothingFound` | An empty result says so in words. This is the ordinary case on a host not yet deployed to, where a bare header would read as though the command failed to look |
 | `TestStatusAllWrapsListError` | An engine that cannot be asked (docker not running, podman socket down) fails loud naming the cause, rather than reporting an empty host -- which would be a lie in exactly the situation being diagnosed |
-| `TestStatusAllDetailInspectsEachAndKeepsSecretsOut` | `--detail` inspects every container it found, and the inspect format is deliberately mounts-only. Secrets are files under `/run/secrets`, so mounts name them without reading them -- while docker's compose secrets are environment-sourced, so reading the environment here would put passwords on the terminal and into scrollback (S3) |
-| `TestManagerLifecycleDockerComposeFile` | `Start`/`Stop`/`Restart` on docker drive `compose -f <file> {start\|stop\|restart}` when the compose file is on disk |
-| `TestManagerLifecycleDockerNoComposeFile` | With no compose file on disk, the same three verbs fall back to the plain `<runtime> {start\|stop\|restart} <name>`, mirroring Delete's stop/rm fallback |
-| `TestManagerLifecycleDockerDryRunUsesCompose` | Under `--dry-run` there is no file to probe (Echo never wrote one), so the preview always takes the compose branch |
-| `TestManagerRedeployUnchangedIsNoOp` | Re-deploying an unchanged artifact against a running broker touches nothing on either platform and says there was nothing to do |
-| `TestManagerRedeployChangedNeedsConsent` | A changed artifact against a running broker is written but not applied without consent (warning that the broker is still on the previous one); `--restart` and an accepted prompt both apply it. This is what stops a silent no-op on podman, where `systemctl start` on an already-active unit would otherwise leave the old image running while reporting success |
-| `TestManagerDescribe` | `<runtime> inspect` on both platforms, plus the installed unit on podman, with a missing unit tolerated |
+| `TestStatusAllDetailInspectsEachAndKeepsSecretsOut` | `--detail` inspects every container it found with `container inspect <name>`, and the decoder never reads the environment. Secrets are files under `/mnt/secrets`, so mounts name them without reading them -- while docker's compose secrets are environment-sourced, so reading the environment here would put passwords on the terminal and into scrollback |
+| `TestManagerLifecycleDocker` | `Start`/`Stop`/`Restart` on docker run the plain engine verb on the container (`docker {start|stop|restart} solace`), through no compose at all: it works on every compose implementation and needs no file, on disk or on stdin |
+| `TestManagerLifecycleDockerDryRun` | The preview shows the same plain verb (`+ docker start solace`) |
+| `TestManagerRedeployUnchangedIsNoOp` | Re-deploying an unchanged artifact against a running broker changes nothing and asks nothing. Podman: no `daemon-reload`, `start`, `restart` or `secret create`/`rm`, the unit file is not rewritten, and the log says it is unchanged and names `--restart`. Docker: the plain `up -d` still runs (compose decides, and with the label equal it recreates nothing), never with `--force-recreate` |
+| `TestManagerRedeployChangedNeedsConsent` | The redeploy rule, compare then ask then write: a changed unit or compose file against a RUNNING broker asks first. A "no" (or a Manager with no `Confirm` seam) writes no unit, stores no secret, runs no `daemon-reload`/`restart`/`compose` and says nothing was changed; a `Confirm` error (no terminal, no `--no-prompt`) fails the deploy with that error and the same nothing; `--restart` applies without asking; a yes writes, reloads, then restarts (docker: a plain `up -d`). A stopped broker is not asked about. Docker asks too when the container has no digest label, its inspect fails, or the answer holds no container |
+| `TestManagerRedeployRotatedPasswordAsks` | Why the comparison exists: a rotated password leaves the compose file and the quadlet unit byte-identical, yet the deploy notices it and asks, on both platforms. Docker: the label of the container equals the digest of the OLD password, so the new one differs. Podman: the store holds the old password and the current PSK, so only the changed secret is rewritten and the unchanged one skipped, then the service is reloaded and restarted |
+| `TestManagerRedeployPodmanDeclinedRotationWritesNothing` | A "no" to a rotated password stores nothing, so the next deploy asks again |
+| `TestManagerDescribe` | `<runtime> container inspect <name>` on both platforms, plus the installed unit on podman, with a missing unit tolerated |
 | `TestManagerCopy` | The copy verbs: cp out of and into the container, per-file reporting, an error with no files, and a non-zero exit when any file fails |
 | `TestManagerPrepHostRegistryLogin` | prep logs in to the registry with the password on stdin, never in an argv |
 | `TestManagerPrepHostNoLoginWithoutCreds` | No credentials means no login attempt |
 | `TestManagerPrepHostRejectsHalfCredentials` | A user with no password (or the reverse) fails loud rather than attempting a broken login |
-| `TestManagerStatusPodman` | Status shows the systemd unit and lists the container |
-| `TestManagerStatusDocker` | Docker status issues ONE listing, the narrowed `ps`, and mentions neither compose nor a ports column. The format string is not spelled out: it carries real tabs and `Echo` shell-quotes what it prints, so a literal would assert Echo's quoting rather than this command's argv |
-| `TestManagerLogsCLIShell` | `logs` follows, `cli` and `shell` exec interactively into the container |
+| `TestManagerStatusPodman` | Status shows the systemd unit and lists the containers (`containercli.List`) |
+| `TestManagerStatusDocker` | Docker status issues ONE listing, `ps --all --no-trunc` with the three-column template, filters it to this container's exact name in Go and prints it as a table: a sibling (`solace-edge`) and an unrelated container are never in it, and neither is compose or a ports column |
+| `TestManagerStatusDockerDryRun` | The preview shows the listing and the `container inspect` it would make, and does not claim the container is missing -- an Echo listing answers nothing |
+| `TestManagerStatusSaysWhenTheContainerIsNotThere` | An empty listing for this container is stated in words rather than printing a bare header |
+| `TestManagerStatusFailsWhenTheListingFails` | Unlike the inspect detail, the listing is what status is for, so its failure is the command's, with the engine's own error |
+| `TestStatusPrintsEngineTextThroughPrintable` | The name, image and status come from the engine about a container this tool did not necessarily create; each passes through `inspect.Printable` before the table, ESC, BEL and C1 controls included |
+| `TestManagerLogsCLIShell` | `logs` builds `containercli.Logs` (options before the name, in the shared order: `-f`, `--timestamps`, `--tail`, `--since`), and `cli` and `shell` exec interactively as `exec -i -t <name> ...` |
+| `TestManagerLogsRefusesPrevious` | `--previous` is refused on both engines with `containercli.NoPrevious`'s message naming the engine, and nothing reaches the runner |
+| `TestManagerSessionNeedsAContainerName` | `containercli.Exec` refuses an empty name, so a Manager over a config with no container name attaches nothing |
 | `TestManagerCheckReachableError` | A failing runtime version probe fails the check |
 | `TestManagerPrepHostMkdirError` | A mkdir failure propagates |
 | `TestManagerPrepHostChownError` | A chown failure propagates |
@@ -2640,17 +2678,13 @@ The read-only engine probe, and the child-environment hygiene it shares with
 | `TestManagerDeployPodmanDaemonReloadError` | A daemon-reload failure propagates |
 | `TestManagerDeployPodmanStartError` | A service-start failure propagates |
 | `TestManagerDeployPodmanEUIDGuardFails` | Rootless-as-root is rejected by the executor-side call of `GuardPodmanEUID`, which `Deploy` keeps because a wrong-account deploy writes into the secret store before anything can be undone |
-| `TestManagerDeployDockerComposeWriteError` | An unwritable compose path fails deploy |
 | `TestManagerDeployDockerComposeUpError` | A `compose up` failure propagates |
 | `TestManagerDeletePodmanDaemonReloadError` | A daemon-reload failure during delete propagates |
 | `TestManagerDeletePodmanRemoveUnitError` | An unremovable unit path fails delete |
 | `TestManagerDeleteDockerComposeDownError` | A `compose down` failure propagates |
-| `TestManagerDeleteDockerStopTolerated` | The tolerate branch B2 kept: a failed stop that the engine then CONFIRMS is not running still warns and goes on to `rm`. Uses `capRunner.outFor` so the two probes answer differently -- `ps --all` lists the container (so stop is attempted at all), `ps --filter status=running` does not (so it is confirmed down). Confirmation is what earns the tolerance; silence does not |
 | `TestManagerDeletePurgeError` | A failing data-dir clear under `--purge` propagates; the injection targets the purge `find` alone, not `compose down` |
-| `TestManagerStatusDockerNoComposeFile` | With no compose file on disk, status lists the container and never calls compose |
-| `TestManagerStatusPodmanUnitInactiveTolerated` | An inactive unit warns but status still lists the container |
-| `TestManagerStatusDockerRunsNoComposePs` | Status runs no compose at all, even WITH a compose file on disk. It replaced the tolerated-failure test: compose listed the same single container, and its PORTS column -- every published port with both host bindings -- was the widest thing in the report with no way to narrow it, since compose's `--format` takes only `table` or `json` |
-| `TestStatusListingCarriesNoPortsColumn` | The property the format exists for, asserted on the format rather than on engine output no test can produce: `psTableFormat` asks for NAMES/IMAGE/STATUS and never Ports |
+| `TestManagerStatusPodmanUnitInactiveTolerated` | An inactive unit warns but status still lists the containers |
+| `TestStatusListingCarriesNoPortsColumn` | The property the template exists for, asserted on the argv rather than on engine output no test can produce: the listing asks for `--all --no-trunc` and NAMES/IMAGE/STATUS and never Ports |
 | `TestGuardPodmanEUID` | The ONE definition of the invariant -- the same function `cli.prepare` runs before any podman command, now `rootless.Decide(euid, podman.rootful, "podman.rootful")` -- across root without `rootful` (refused), `rootful` as non-root (refused), rootless as non-root and `rootful` as root (pass), plus the cases that pass without asking: a non-POSIX euid keeps the setting (both ways), docker is never guarded, and the Echo runner reaches no host |
 | `TestGuardPodmanEUIDMessagesNameTheKeyAndTheFix` | Both refusals name the key (`podman.rootful`, passed to the shared rule), the account found, and the ways out: root without it is told to set `podman.rootful=true` or run as the rootless user without sudo, and `rootful` as non-root is told to re-run with sudo or remove the key to deploy rootless |
 | `TestManagerPrepHostRootlessAsRootFailsHard` | PrepHost shares the one guard definition and fails hard (one definition, one message) when deploying rootless (`podman.rootful` unset) but the process is root, instead of only warning and going on to mkdir/chown under the wrong namespace mapping -- neither call is reached once the guard rejects |
@@ -2776,11 +2810,12 @@ hard limits can bind.
 | Test | What it covers |
 | --- | --- |
 | `TestTransportExecArgs` | Exec argv is `<runtime> exec [-i] <name> ...` with no `--` (docker rejects it), and the role argument is ignored because the transport is node-local |
-| `TestTransportUpload` | The body rides stdin through `sh -c 'cat > <dest>'` and never appears in the argv |
+| `TestTransportUpload` | The body rides stdin through `sh -c "cat > '<dest>'"` (`containercli.Upload`) and never appears in the argv |
 | `TestTransportUploadQuotesDest` | Single-quote escaping stops a metacharacter in a path breaking out of the redirect |
 | `TestTransportCopy` | `<runtime> cp` argv in both directions, container-name prefixed |
 | `TestTransportEchoHidesUploadBody` | End to end over Echo: the body shows as a byte count, never in the traced line, and the exec carries no `--` and names this script's own broker-side files. Not reached by `regen` (which runs six packages, not this one), so its k8s twin failed alone when the argv shape changed |
 | `TestTransportEchoHidesSEMPConfig` | End to end over Echo via `BackupSEMPPreflight` (redundancy-test's mate channel): the mate SEMP curl is echoed with its stdin as a byte count, never the admin password |
+| `TestTransportRefusesWhatContainercliRefuses` | The exec and upload argv come from containercli, which refuses an exec with no command, one with no container name and an upload with no destination: each fails before anything reaches the runner |
 
 ### inspect_test.go
 
@@ -2791,18 +2826,18 @@ between an unknown answer and a confident wrong one.
 
 | Test | What it covers |
 | --- | --- |
-| `TestInspectNameLosesDockersLeadingSlash` | `/solbroker` is not a name either engine accepts back, and printing it beside podman's `solbroker` would make one engine's report disagree with the other about what the container is called |
-| `TestInspectHealthReadsBothSpellings` | The one that matters most: a report naming only one engine's spelling renders EMPTY on the other, which reads exactly like "no healthcheck configured" -- the most misleading thing this report could say about a broker |
+| `TestInspectHealthReadsBothSpellings` | The one that matters most: a report naming only one engine's spelling renders EMPTY on the other, which reads exactly like "no healthcheck configured" -- the most misleading thing this report could say about a broker. The decode is `inspect.Decode`'s; what is pinned is `health()` over its result |
 | `TestInspectDistinguishesNoHealthcheckFromUnknown` | An engine reports an unconfigured healthcheck as an empty status, so "not configured" and "configured but unknown" must not print the same -- one is a deployment choice, the other a missing answer |
-| `TestInspectRejectsAnEmptyReply` | Some engine versions answer a name they do not know with an empty ARRAY and exit 0, so the absence is turned into an error here rather than reported as a container with no name, no image and no state |
-| `TestInspectDecodesPartialOutput` | An engine version that stops emitting a field leaves that field unknown rather than failing the whole command -- the report is the point, and three quarters of it is worth more than none |
-| `TestInspectStateSurfacesTheEngineError` | An engine that cannot be asked (daemon down, socket gone) surfaces its own error rather than a parse failure about the empty output that follows, which would send whoever reads it looking for a malformed reply that was never sent |
+| `TestInspectContainerRejectsAnUnusableReply` | Some engine versions answer a name they do not know with an empty ARRAY and exit 0, so `inspectContainer` turns the absence into an error naming the container rather than reporting one with no name, no image and no state; an empty answer and one that is not JSON are `inspect.Decode`'s errors, passed through |
+| `TestInspectContainerArgv` | The engine call is `container inspect <name>` on both engines -- the subcommand that answers for containers alone, so an image or a volume with the same name never does |
+| `TestInspectDecodesPartialOutput` | An engine version that stops emitting a field leaves that field unknown (`(unknown)` in the report) rather than failing the whole command -- the report is the point, and three quarters of it is worth more than none |
+| `TestInspectContainerSurfacesTheEngineError` | An engine that cannot be asked (daemon down, socket gone) surfaces its own error rather than a parse failure about the empty output that follows, which would send whoever reads it looking for a malformed reply that was never sent |
 | `TestRestartCountComesFromSystemdOnPodman` | The fact this decode exists for: a quadlet unit is restarted by systemd, which stops and REPLACES the container, so the engine's own `RestartCount` stays 0 through any number of restarts. The count is asked of systemd as `show <unit> -p NRestarts --value` (`systemd.NRestarts`) and parsed by `systemd.ParseNRestarts` |
 | `TestRestartCountUsesTheEngineOnDocker` | Docker restarts the container in place, so its own counter is the answer and there is no unit to ask |
 | `TestRestartCountDoesNotAttributeOurUnitToAnotherContainer` | `broker status --all` discovers containers BY IMAGE, so it reaches brokers this env file knows nothing about -- and this env file's unit restart count is not their number |
 | `TestRestartCountUnknownRatherThanZero` | systemd not answering (unit not installed, rootless/rootful mismatch), answering with a non-number, or answering a negative reads as unknown. A zero there claims "this broker has never restarted", which this tool has no basis for |
 | `TestRestartCountUnknownWhenSystemctlFails` | The other way systemd declines to answer -- the command itself fails rather than answering unreadably. Both must read as unknown, never as zero |
-| `TestPrintableStripsControlCharacters` | Image names, statuses, error text and mount paths come out of `<runtime> inspect` -- data about a container this tool did not necessarily create -- and land in a report a terminal renders, so a terminal escape inside one would be executed by the terminal reading it |
+| `TestReportStatePrintsEngineTextThroughPrintable` | The name, image, state, error text, finish time and mount paths come out of `container inspect` and land in a report a terminal renders; each passes through `inspect.Printable`, which also drops the C1 controls a bare ESC filter misses. The filter itself is tested in the shared module (`inspect.TestPrintable`); the decoder tests that moved with it are `TestDecode*` there |
 | `TestReportStateNeverPrintsTheEnvironment` | On docker the compose secrets are environment-sourced, so a report that dumped the container's environment would put the admin password on a terminal, into scrollback, and into whatever ticket the output is pasted into. Secrets appear only as mount PATHS |
 | `TestReportStateOnAStoppedContainer` | The half of the report an operator only reads when something has gone wrong: no start time worth printing, but the three facts that say why it stopped -- finish time, exit code, and the engine's own reason. It also pins that a writable mount is labelled `rw` and a read-only one `ro`, so a secret mount that turned up writable is a real finding |
 | `TestReportStateOnAHealthyRunningContainer` | The ordinary case and the mirror of the above: health under docker's spelling with no failing-streak noise, a start time, and no exit code invented for a container that has not exited |
@@ -2811,8 +2846,8 @@ between an unknown answer and a confident wrong one.
 
 The server certificate is the one secret this package has to READ: its bytes are the key
 then the certificate, built from two host files. Docker hands it to the compose child's
-environment, podman loads it into its secret store with a digest label that drives the
-restart. These pin both routes, the label, the clean-up of the `0600` host file earlier
+environment, podman loads it into its secret store, compared next time by reading the stored value
+back, which drives the restart. These pin both routes, the comparison, the clean-up of the `0600` host file earlier
 builds wrote for podman, the "nothing happened" property on each failure path, and
 previewability.
 
@@ -2823,25 +2858,26 @@ previewability.
 | `TestResolveSecretValuesNamesTheUnreadableFile` | The error names the file, the secret AND the env-file key, because this failure reaches the operator from six different verbs |
 | `TestResolveSecretValuesRefusesAKeyBearingCert` | The existing refusal from its new call sites: a `tls.cert` that already contains its private key would produce a bundle carrying the key twice, and the refusal now fires from inside `compose()` on docker and from the bundle write on podman |
 | `TestPodmanResolvesTheBundle` | Podman resolves exactly one file-backed secret, `<container.name>-tls-servercertificate`, whose value is the key then the certificate -- the same bundle docker gets, since both engines now deliver it as a secret |
-| `TestDeployDockerPassesTheBundleAsEnvNotArgv` | The docker delivery end to end -- the bundle reaches the compose child through its environment and never through an argument vector, and so does its digest (`SOLACE_TLS_SERVERCERTIFICATE_SHA256`), which fills the container label |
-| `TestTeardownVerbsDoNotReadTheCertificate` | A moved certificate must not block recovery. Compose needs every declared secret DEFINED for down/stop/restart but never reads it -- only `up` does -- so those verbs keep working when the file is gone |
-| `TestDeployDockerFailsBeforeWritingTheComposeFile` | "Nothing happened" on the docker side: the certificate is read in `prepareSecrets`, before `deployDocker` rewrites the compose file, so a bad certificate leaves no artifact behind |
-| `TestDeployPodmanLoadsTheBundleIntoTheStore` | Podman's whole delivery: `secret create --label solace-util.sha256=<digest> <name> -` with the bundle on stdin, the label inspected before the `rm` that discards it, no key material on any argv, the unit mounting it with `Secret=...,target=/mnt/certs/server/tls.pem`, and nothing written under a configured `podman.baseDir` |
-| `TestDeployPodmanReplacesTheBundleOnPodman47` | With `--replace` available the labelled bundle is one `secret create --replace --label solace-util.sha256=<digest> <name> -` (the flag ahead of the label) with the bundle on stdin, and neither the certificate nor the admin password is removed first |
+| `TestDeployDockerPassesTheBundleAsEnvNotArgv` | The docker delivery end to end -- the bundle reaches the compose child through its environment and never through an argument vector or the compose file on stdin, and the deploy digest in the environment covers it: a renewed certificate changes the digest, which is all of docker's certificate change detection now |
+| `TestTeardownVerbsDoNotReadTheCertificate` | A moved certificate must not block recovery. `compose down` needs every declared secret DEFINED but never reads it, and stop and restart act on the container by name, so those verbs keep working when the file is gone |
+| `TestDeployDockerFailsBeforeAskingOrRunningAnything` | "Nothing happened" on the docker side: the certificate is read in `prepareSecrets`, before anything is asked or compose is run, so a bad certificate leaves the container untouched |
+| `TestDeployDockerReReadsTheCertificate` | The child environment is built from a second read of the bundle; a certificate gone between the two is an error naming the file, with nothing run (reached through `deployDocker` directly, since `prepareSecrets` cannot see it) |
+| `TestDeployPodmanLoadsTheBundleIntoTheStore` | Podman's whole delivery below 4.7: `secret create <name> -` with the bundle on stdin and no label, the rm before it, no read-back (`--showsecret` is 4.7+), no key material on any argv, the unit mounting it with `Secret=...,target=/mnt/certs/server/tls.pem`, and nothing written under a configured `podman.baseDir` |
+| `TestDeployPodmanReplacesTheBundleOnPodman47` | With `--replace` available the bundle is one `secret create --replace <name> -` with the bundle on stdin, and neither the certificate nor the admin password is removed first |
 | `TestDeployPodmanFailsBeforeWritingAnythingOnABadCert` | Podman's half of the same property -- the bundle is read before the store is touched, so a failure loads no secret, leaves no unit and issues no systemctl call |
 | `TestLegacyBundleRemovalFailureIsFatal` | The clean-up's error path on deploy and on remove: a non-empty directory standing where the legacy file belongs makes `os.Remove` fail without depending on permissions, and the error names the file, says it holds the PRIVATE KEY, and fails the command; remove still clears the store secrets |
-| `TestCertSecretLabelDrivesTheRestart` | Why the label exists: the unit names the secret, not its value, so a renewed certificate leaves it byte-identical. Against an active unit that is already current, an equal digest leaves the certificate secret in place (no `rm`, no `create`) and is "nothing to do", while a different or missing one -- or a label that cannot be read -- overwrites it, asks to restart and restarts on consent. The credentials are reloaded either way |
-| `TestDockerCertLabelDrivesTheRecreate` | The docker counterpart: compose keeps no secret object, so the digest is a container label read back with `inspect --type container`. Under a current compose file and a running container, an equal label is "nothing to do"; a different or missing one, or an inspect that fails, reports why, asks, and recreates with `--force-recreate` on consent |
-| `TestDockerCertChangedEdges` | The two answers `Deploy` cannot reach, since `prepareSecrets` reads the certificate first: a preview compares nothing and probes nothing, and an unreadable certificate is an error naming the file, with nothing inspected |
+| `TestCertSecretLabelDrivesTheRestart` | Why the store is read back: the unit names the secret, not its value, so a renewed certificate leaves it byte-identical. Against an active unit that is already current, a stored bundle equal to the configured one leaves the secret in place and asks nothing, while a different or absent one -- or one that cannot be read back -- overwrites it and asks to restart. The admin password is compared the same way and left alone throughout |
+| `TestDockerCertRenewalDrivesTheRecreate` | The docker counterpart: the deploy digest (file and every value, the bundle included) rides the container as a label read back with `container inspect`. An equal label asks nothing; a different one -- a REAL renewal here, the certificate file rewritten after the digest was taken -- a missing one, or an inspect that fails asks first. Either way compose is left to decide: a plain `up -d` |
 | `TestCertSecretRemovalFailureIsFatal` | The certificate secret holds the private key, so failing to remove it fails the teardown -- naming the secret and the command to remove it by hand -- instead of warning like any other leftover, and the other secrets are still attempted |
-| `TestUpdateServerCertSecretPersistsWithoutRestarting` | The store half of `configure server-certs`, which never restarts: podman overwrites only the certificate secret and only when its label differs or is missing; docker keeps no store, touches nothing and says so; no certificate configured does nothing; an unreachable engine or an unreadable certificate fails, naming the cause, before the store is touched |
+| `TestUpdateServerCertSecretPersistsWithoutRestarting` | The store half of `configure server-certs`, which never restarts: podman overwrites only the certificate secret and only when the stored value differs or is absent; docker keeps no store, touches nothing and says so; no certificate configured does nothing; an unreachable engine or an unreadable certificate fails, naming the cause, before the store is touched |
+| `TestUpdateServerCertSecretFailsWhenTheStoreWriteFails` | `configure server-certs` stops, naming the config key behind the secret (`tls.cert`), when podman cannot store it |
 | `TestSecretSummaryNamesTheCertificateSource` | The report reads no file, so the certificate's value is always empty there; on both engines it names its source keys instead of reporting a configured certificate as MISSING -- `tls.cas` too once a chain is configured -- while credentials keep `set`/`MISSING` |
 | `TestContainerBundleCarriesTheChain` | On docker and podman the bundle `broker deploy` resolves is the key, the certificate, then the `tls.cas` chain -- the same bytes `configure server-certs` loads -- so both present the same chain and a renewed CA changes the digest a redeploy compares |
 | `TestLegacyBundleIsRemovedOnDeployAndRemove` | A host an earlier build deployed holds the key as `<baseDir>/<name>-tls-servercertificate.pem`: deploy (after the new unit is written) and remove both delete it -- remove also with TLS no longer configured, since the file outlives the setting -- report it, and leave the directory |
 | `TestDeletePodmanToleratesAMissingBundle` | The normal case after the upgrade: no legacy file under a configured baseDir, or no baseDir at all, fails nothing and says nothing |
 | `TestDryRunNeedsNoCertificateOnDisk` | The previewability guarantee one level up from the pre-shared key's: a preview works before any certificate exists, echoes the store write labelled with the `(preview)` placeholder rather than a digest, never probes the store, and writes nothing |
 | `TestEchoPreviewsTheLegacyBundleRemoval` | The dry-run half of the clean-up on deploy and remove: it says it would remove the legacy file and removes nothing -- a dry run that deleted a private key is the mistake worth its own test |
-| `TestSolaceRowsRefusesAnEngineReturnedNameBackIntoArgv` | Closes a round trip that had no check: the names come out of `<runtime> ps` on this host, not from the env file, and `StatusAll` puts each straight back into an `inspect` argv. The row is still SHOWN -- it is a real container and hiding it would be worse -- but its name is not returned, so nothing further runs against it, and the skip is stated rather than silent |
+| `TestSolaceRowsRefusesAnEngineReturnedNameBackIntoArgv` | Closes a round trip that had no check: the names come out of `<runtime> ps` on this host, not from the env file, and `StatusAll` puts each straight back into an `inspect` argv. A row whose name fails `containercli.ValidName` is still SHOWN -- it is a real container and hiding it would be worse -- but its name is not returned, so nothing further runs against it, and the skip is stated |
 
 ---
 
@@ -2879,7 +2915,7 @@ decided by the CLI, in one place.
 ## internal/render
 
 Manifest and unit-file rendering, guarded by committed goldens, plus the server
-certificate's delivery on both engines. 50 tests across 2 files.
+certificate's delivery on both engines. 51 tests across 2 files.
 
 ### render_test.go
 
@@ -2942,7 +2978,8 @@ would bless away.
 | `TestServerCertIsASecretOnBothEngines` | On docker AND podman the certificate is exactly one file-backed secret, named `<container.name>-tls-servercertificate`, appended last, mounted at `certMount`, pointing `certFilePathKey` at it, with no value (render reads no file) and sources `{certKey, cert}` in that order, followed by each `tls.cas` file when a chain is configured -- and absent when no certificate is configured. Podman used to get a `0600` host file the default non-root broker could not read |
 | `TestServerCertificateReachesTheContainerOnBothEngines` | The named regression test for a property that previously had only goldens behind it -- a golden break is routinely answered with `-update`, which would silently bless the certificate disappearing from an artifact altogether. Compose defines and mounts the secret; the quadlet carries `Secret=<name>-tls-servercertificate,type=mount,target=/mnt/certs/server/tls.pem` and names no host file -- not the operator's certificate or key, not the legacy bundle path, and no `Volume=` at the mount; both point the broker there; neither mentions the mount with no certificate configured |
 | `TestServerCertBundlePathIsPosixAndUnderBaseDir` | The LEGACY path: where earlier builds wrote podman's bundle, and so the one file the clean-up deletes. Forward slashes, directly under `podman.baseDir`, carrying the container name, no doubled separator -- if it drifted, an upgraded host would keep a private key with nothing to say so |
-| `TestComposeLabelsTheCertificateDigest` | Docker's half of the change detection: the compose file labels the container `solace-util.sha256: "${<EnvVar>_SHA256}"`, unescaped so compose fills it from the child's environment, and never carries a digest, so it stays byte-identical across a renewal. No certificate, no label |
+| `TestComposeLabelsTheDeployDigest` | Docker's change detection: the compose file carries one container label, `solace-util.deploy-sha256: "${SOLACE_DEPLOY_SHA256:-}"`, with or without a certificate (a rotated password is as much a change), unescaped so compose fills it from the child's environment, with an empty default so a hand-run compose and `down` need not set it, and never carrying a digest, so the file stays byte-identical across a rotation. The per-certificate label is gone from compose |
+| `TestDeployDigestEnvVarIsFixedAndDistinct` | `render.DeployDigestEnvVar` is not a name the child's loader reads (`PATH`, `LD_PRELOAD`, ...), and no secret's `EnvVar` can fold to it whatever the container is called, since every secret keeps its own fixed suffix |
 | `TestFileBackedSecretIsExemptFromSecretPreflight` | A message that would otherwise be a lie: `SecretPreflight` blames an empty value with "set it in the env file", which for the certificate is wrong -- `tls.cert` IS set, the bytes just live on the host. Readability is enforced where the files are read instead |
 | `TestComposeEscapesTheDollarSign` | A value compose would otherwise consume before the container saw it. Compose interpolates `$VAR` and `${VAR}` across the whole document from its own environment and turns `$$` back into one `$`. The case that makes this necessary rather than defensive is the health-check command -- a shell command the ENGINE runs inside the broker, where `$(...)` and `$VAR` are legitimate and the config gate permits them on purpose. The render half builds its `Config` in code, so a timezone the load now refuses (`Etc/GMT$0`) still exercises the writer's escaping as a backstop; the escaping function itself is the shared module's (`compose.Escape`, its `TestEscape`) |
 | `TestComposeQuotesIdentifierScalars` | A YAML 1.1 misread the name grammar cannot prevent: `yes`, `no`, `on`, `off`, `true`, `false`, `0123` and `1.5` are all legal container names to both engines, but bare in a compose document they read as a boolean or a number -- so the service key, `container_name` and hostname stop being the string the operator wrote |
@@ -3089,14 +3126,18 @@ new fake.
 | internal/container | `capRunner` / `failOn` (transport_test.go) | Capturing runner whose `fail` (Run family) and `outFail` (Output family) hooks error on a targeted command, driving each error-wrap branch -- `failOn("info")` is how a failed engine preflight is injected. `outFail` exists because the blanket `outErr` cannot single out one of two probes in the same call. `capCall.env` records the `Cmd.Env` of a call, which is how the docker secret path is asserted. Each fake in this table implements `Run`/`Attach` and records the old method label (`Run`, `RunInput`, `RunEnv`, `Output`, `OutputInput`, `RunInteractive`) derived from the call by a `legacyMethod` helper in its package: an attached session is `RunInteractive`; a streamed stdout (`os.Stdout`) is `RunEnv` with `Env`, `RunInput` with `Stdin`, else `Run`; a captured stdout is `OutputInput` with `Stdin`, else `Output`. Captured answers are written to the stdout writer passed in |
 | internal/container | `containsStr`, `maskedKeys` (manager_test.go) | Exact-match lookup in a captured environment, and `runner.MaskEnv` for failure messages -- a test diagnostic must not print a secret either |
 | internal/container | `newEchoMgr`, `newCapMgr`, `ctrCfg` (manager_test.go) | Manager over dry-run Echo, or over the capturing runner for real file writes. `ctrCfg` leaves `podman.baseDir` unset, since deploy and remove delete a file under it; the clean-up tests point it at a `t.TempDir()`. `Manager.Confirm` is the injectable restart prompt (nil declines, which is what a non-interactive run must do) and `Manager.Restart` is the `--restart` pre-approval |
+| internal/container | `psRow`, `dockerHost`, `deployDigest`, `composeUp`, `composeUpArgs` (manager_test.go) | The docker redeploy fixtures: a `containercli.List`-shaped `ps` row, a runner that answers the running probe and the `container inspect` label, the digest a deploy of a config would set (so a test can make the running label equal it, or not), the captured compose `up` call, and its argv (`-f -`, no project directory of its own for a `Config` built in code) |
+| internal/container | `podmanHost`, `podmanHostVersion`, `secretCreateArgs`, `secretDataArgs`, `wroteSecret` (manager_test.go) | The podman redeploy fixtures: a runner that answers `systemctl is-active`, `podman version` (5.2.0 unless chosen) and each secret's stored value for `secret inspect --showsecret`, the unlabelled `secret create` and read-back argv, and whether a secret was written |
+| internal/container | `neverAsk`, `answer`, `errNoTerminal` (manager_test.go) | The `Manager.Confirm` seams: one that fails the test when asked, one that records the question and answers, and the gate's no-terminal refusal |
 | internal/container | `assertMode` (manager_test.go) | Permission-bit assertion for the artifacts the manager writes; skipped on Windows, which carries no POSIX mode |
-| internal/container | `certFixture`, `certCreate`, `bundleHash`, `writeLegacyBundle` (secrets_test.go) | A real key and certificate on disk plus the bundle they should produce; the captured `secret create` for a named secret; the `solace-util.sha256` label a bundle gets; and a legacy bundle file under a fresh `podman.baseDir` |
+| internal/container | `certFixture`, `certCreate`, `writeLegacyBundle` (secrets_test.go) | A real key and certificate on disk plus the bundle they should produce; the captured `secret create` for a named secret; and a legacy bundle file under a fresh `podman.baseDir` |
 | internal/cli | `runRoot`, `capture`/`captureStdout`/`captureStderr` (cli_test.go) | Builds a fresh command tree per call and captures a standard stream through a pipe |
 | internal/cli | `runRootWith` (cli_test.go) | `runRoot` with a hook to configure the `App` before `Execute` -- how the confirm-prompt branches are driven deterministically instead of depending on the test process's own stdin. `runRoot` delegates to it with a nil hook, so it is unchanged for every existing test |
 | internal/cli | `opRunner` / `opCall` / `opFailOn` / `opFailOnCount` (cli_test.go) | A fake `runner.Runner` whose failure is targeted by argv substring (or by the Nth matching occurrence, for the repeated identical `apply`/`delete` calls in `broker deploy` and `broker remove`). Ported from internal/container's `capRunner`/`failOn`; this is what makes the orchestration-abort tests possible -- assert step N fails and step N+1 never ran. `Output` answers the k8s `auth can-i` preflight "yes" unless a test supplies its own `output`/`fail` for that call, so the op-level tests stay about the work they were written for |
 | internal/cli | `loadDirect`, `healthyShowRD`, `standbyShowRD` (cli_test.go) | Loads a config from an inline YAML body for tests that build an `App` directly with a non-Echo runner; `healthyShowRD` is a canned `show redundancy` of a healthy primary that holds activity (it satisfies `broker.primaryRedundancyUp` and reports Local Active), `standbyShowRD` the same node with its mate holding activity |
 | internal/cli | `runLeader` / `leaderRun` (cli_test.go) | Drives `broker perform assert-leader` through cobra over env/sample.yaml with an `opRunner` (Echo's empty `show redundancy` is never Local Active, so it cannot reach the assert), the `App.Hostname`/`LocalAddrs`/`Geteuid`/`Interactive`/`PromptIn` seams, and `exportconfigReadCounter` so a case can prove the question was never asked |
 | internal/cli | `writeK8sTLSEnv`, `tlsSecretDigest`, `isGetPod`/`isDeletePod` (cli_test.go) | A k8s env with a certificate pair on disk (the derived `dev-broker-tls` Secret), the digest the rendered Secret carries (read off `k8s.TLSSecret`, not recomputed), and the two pod calls a certificate restart turns on |
+| internal/cli | `ctrRedeployApp` (cli_test.go) | A container `App` over an `opRunner` that reports the container running and stale (docker's `ps` and a stale `container inspect` label, podman's active unit), with `ctrManager` pointed at a temp quadlet directory and past the euid guard, so the redeploy gate is driven through the CLI's own wiring without touching a host |
 | internal/cli | `bashEnv`, `writeBashEnv` (cli_test.go) | Minimal legacy env file for the convert command tests |
 | internal/cli | `opsK8sRun`, `opsK8sPods`, `opsK8sAnswer`, `opsK8sUnattended`, `opsK8sSilenced` (ops_k8s_test.go) | Direct calls to the Kubernetes handlers: `opsK8sRun` captures stdout and stderr separately, since which stream a line reached is part of the contract; `opsK8sPods` names the broker pods the recorded calls addressed, by role letter; the three App seams answer a question with a typed reply, run with nobody at the terminal (a gate refuses naming `--no-prompt`), or run with `--no-prompt` |
 | internal/cli | `replEnv`, `replApp`, `siteNamed` (replication_test.go) | A DR pair whose two sites are reached DIFFERENTLY -- one over its own cluster CLI, one over SEMP -- so a dispatch that ignored `via` fails on one site rather than passing on both |

@@ -115,8 +115,10 @@ func newBrokerValidateCmd(app *App) *cobra.Command {
 }
 
 const brokerDeployLong = "Applies every prerequisite -- namespace, secrets, TLS -- then the broker, and is\n" +
-	"safe to re-run. A running broker is restarted for a change only on consent or\n" +
-	"--restart. Kubernetes readiness is not waited on; `broker status` watches it."
+	"safe to re-run. A running broker is restarted for a change only on consent, or\n" +
+	"with --restart (docker/podman also take --no-prompt, which approves; with no\n" +
+	"terminal and no --no-prompt the deploy fails before it changes anything).\n" +
+	"Kubernetes readiness is not waited on; `broker status` watches it."
 
 func newBrokerDeployCmd(app *App) *cobra.Command {
 	c := wireExec(app, &cobra.Command{
@@ -136,6 +138,11 @@ func newBrokerDeployCmd(app *App) *cobra.Command {
 	// Every platform: on Kubernetes a renewed certificate is the one change the operator
 	// does not roll out itself (opK8sDeploy).
 	addRestartFlag(c, app)
+	// Docker/podman only: the answer to the redeploy question. On Kubernetes the operator
+	// rolls a changed CR itself, and the one question a deploy asks there (a renewed
+	// certificate) is answered by --restart or a terminal.
+	addRemoveFlags(c, app, nil)
+	flagOnlyOn(c, "no-prompt", config.Docker, config.Podman)
 	return c
 }
 
@@ -833,17 +840,28 @@ func logArgs(a *App) ([]string, error) {
 	if a.tail != "" {
 		args = append(args, "--tail", a.tail)
 	}
-	if a.since != "" {
-		d, err := config.CanonicalDuration("--since", a.since)
-		if err != nil {
-			return nil, exitcode.AsUsage(err)
-		}
-		args = append(args, "--since", d)
+	since, err := logSince(a)
+	if err != nil {
+		return nil, err
+	}
+	if since != "" {
+		args = append(args, "--since", since)
 	}
 	if a.timestamps {
 		args = append(args, "--timestamps")
 	}
 	return args, nil
+}
+
+// logSince is --since canonicalised through Go's duration parser, "" when it is not set.
+// Both the kubectl passthrough (logArgs) and the container engines' options take it, so
+// a free-form operator string never needs charset checking on either.
+func logSince(a *App) (string, error) {
+	d, err := config.CanonicalDuration("--since", a.since)
+	if err != nil {
+		return "", exitcode.AsUsage(err)
+	}
+	return d, nil
 }
 
 // podFlagUsage is --pod's help text. One flag, two readings, and the flag has to say

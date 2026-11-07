@@ -28,7 +28,7 @@ env-file reference, [docs/operations.md](docs/operations.md) the day-2 lifecycle
 govulncheck's JSON through, so a fixable vulnerability fails the gate and one with no released
 fix warns.
 
-Shared code (`exitcode`, `notice`, `paritydoc`, `abbrev`, `execguard`, `envref`, `containerart`, `podman`, `systemd`, `rootless`) comes from `github.com/hafio/go-deploy-utility`.
+Shared code (`exitcode`, `notice`, `paritydoc`, `abbrev`, `execguard`, `envref`, `containerart`, `podman`, `systemd`, `rootless`, `containercli`, `inspect`) comes from `github.com/hafio/go-deploy-utility`.
 Tools build against that module's checkout through an untracked `go.work` (see the module's
 docs/consuming.md) until a tag is pinned.
 
