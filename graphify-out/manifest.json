@@ -24,9 +24,9 @@
     "semantic_hash": ""
   },
   "go.mod": {
-    "mtime": 1793837153.541359,
-    "seen": 1793838572.1689627,
-    "ast_hash": "bb350dfbd16d28e33e8e147345fe22cd",
+    "mtime": 1794127503.4742804,
+    "seen": 1794127535.029662,
+    "ast_hash": "6ca2d8b720cb884f36bbb8d150d7ddf8",
     "semantic_hash": ""
   },
   "internal/broker/broker.go": {
@@ -408,9 +408,9 @@
     "semantic_hash": ""
   },
   "docs/test.md": {
-    "mtime": 1794099140.39558,
-    "seen": 1794099964.0834591,
-    "ast_hash": "75e4eec2bd6aff029fe7acbc0588c6a4",
+    "mtime": 1794100559.6794777,
+    "seen": 1794127535.0300667,
+    "ast_hash": "90dcc931812a0f1fea287b2345775c02",
     "semantic_hash": ""
   },
   "internal/cli/commanddoc_test.go": {
