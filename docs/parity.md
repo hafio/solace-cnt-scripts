@@ -26,10 +26,14 @@ Both tools follow every rule in this section today.
    `kubectl delete -f - --ignore-not-found` removes. No manifest is written to disk.
    `solmq-conn-util`: `internal/runner/runner.go`. `solace-util`: `internal/k8s/cluster.go`.
 
-2. **Permissions are probed before the command that needs them.** The probe is
-   `kubectl auth can-i <verb> <resource>`, with `--namespace` or `-n` when the resource is
-   namespaced. A refusal stops the run and names the permission and the namespace.
-   `solmq-conn-util`: `internal/runner/runner.go` (`Preflight`). `solace-util`:
+2. **Every kind a command writes is probed before its first write.** The probe is
+   `kubectl auth can-i <verb> <resource>`, with `-n <namespace>` for a namespaced resource and
+   `--all-namespaces` for a cluster-scoped one. Reads are never probed: not status, logs or
+   exec, and not the read-back after a write. The answer's last line is the verdict; `no`,
+   `no - ...` and `no (...)` refuse, and anything but `yes` refuses. A refusal stops the run
+   and names the permission, where it applies and the binding to ask for; no answer at all
+   is reported apart from a refusal, with a hint to log in. Both tools use the shared
+   `kube/rbac`. `solmq-conn-util`: `internal/runner/runner.go` (`Preflight`). `solace-util`:
    `internal/k8s/preflight.go`.
 
 3. **The engine is checked first.** `<engine> info` runs before any other docker or podman
@@ -74,12 +78,18 @@ Both tools follow every rule in this section today.
    is reported, never passed back to the engine. `solmq-conn-util`:
    `internal/runner/runner.go`. `solace-util`: `internal/container/manager.go`.
 
-9. **An emptied namespace is offered for deletion, never assumed empty.** After the workload
-   is gone the tool lists `all,persistentvolumeclaims,secrets,configmaps` in the namespace.
-   `kube-root-ca.crt`, the `default` service account and its token secrets do not count.
-   `default`, `kube-system`, `kube-public` and `kube-node-lease` are never deleted. A listing
-   that fails keeps the namespace. `solmq-conn-util`: `cmd/solmq-conn-util/namespace.go`.
-   `solace-util`: `internal/k8s/namespace.go`.
+9. **An emptied namespace is offered for deletion, never assumed empty.** After a successful
+   remove the tool lists `all,persistentvolumeclaims,secrets,configmaps` in the namespace as
+   JSON. These do not count: an object being deleted; the deployment's own objects, by kind
+   and name, and everything they own through ownerReferences; events, limit ranges and
+   resource quotas; `kube-root-ca.crt`, the `default` service account and its token secret.
+   Anything else keeps the namespace and is named. `default`, `kube-system`, `kube-public` and
+   `kube-node-lease` are never deleted. `delete namespaces` is probed before the question,
+   `--no-prompt` approves, and without a terminal the namespace is kept. A listing that fails
+   or cannot be read, a refusal, a decline and a failed delete each keep the namespace with a
+   warning, and none of them fails the remove. The namespace is deleted by name. Both tools
+   use the shared `kube/nsgate`. `solmq-conn-util`: `cmd/solmq-conn-util/namespace.go`.
+   `solace-util`: `internal/k8s/namespace.go`, `internal/cli/ops_k8s.go`.
 
 10. **Compose secrets come from the environment.** Each `secrets:` entry has an
     `environment:` source and an absolute `target:`. Values live only in the compose child's
@@ -117,6 +127,25 @@ Both tools follow every rule in this section today.
     `internal/validate`, `internal/runner/runner.go`. `solace-util`:
     `internal/config/execguard.go`, `internal/engine/runner.go`.
 
+15. **A namespace is created only when absent.** Deploy reads the namespace by name, and an
+    existing one needs nothing more. An absent one is created on its own, after a
+    `create namespaces` probe; a refusal stops the deploy and names who can create it. When
+    the read itself is refused, the probe decides: allowed, the namespace is created; refused,
+    the tool warns and carries on, and the next write's own probe stops a deploy into a
+    missing namespace. `solace-util`'s `operator deploy` stops there instead, since its
+    cluster-scoped documents land first. `solmq-conn-util`: `cmd/solmq-conn-util/main.go`.
+    `solace-util`: `internal/k8s/prep.go`.
+
+16. **A rollout is waited on, and a refused wait is a warning.** The wait is
+    `kubectl rollout status <kind>/<name> -n <namespace> --timeout=300s`. `solmq-conn-util`
+    waits after deploy, start and restart; `solace-util` after start and restart, and after
+    scaling the operator up. A wait refused with Forbidden warns and the command succeeds,
+    since the change is already applied; a rollout that fails or times out is an error.
+    `solace-util`'s deploy hands the StatefulSets to the operator and reads the custom resource
+    back instead, and a refused read-back warns. `solmq-conn-util`:
+    `cmd/solmq-conn-util/main.go`, `cmd/solmq-conn-util/lifecycle.go`. `solace-util`:
+    `internal/k8s/ops.go`, `internal/k8s/operator.go`.
+
 ## Divergences
 
 | Topic | solmq-conn-util | solace-util | Status |
@@ -126,14 +155,14 @@ Both tools follow every rule in this section today.
 | Rootless podman | rootless unless `podman.rootful: true`, which needs root; root without it is refused; `XDG_RUNTIME_DIR` and the DBus address are repaired | the same | aligned |
 | Quadlet directory | `$XDG_CONFIG_HOME/containers/systemd`, else `$HOME/.config/containers/systemd`; a relative `XDG_CONFIG_HOME` is refused | the same, and `podman.quadletDir` overrides it | aligned |
 | Host checks for rootless podman | linger, which deploy enables for its own account; session repair | the same, plus the limits under Inherent differences | aligned |
-| Namespace on deploy | the Namespace document is applied on every deploy | read by name and created only when absent | adopt: solmq-conn-util |
-| Waiting after a change | none | `rollout status --timeout=300s`, then the resource is read back | adopt: solmq-conn-util |
-| Permission probes | one per verb, including status, logs and cli | every kind before the first write; none for status, logs and exec | adopt: solmq-conn-util probes every kind it writes; read probes in solace-util are open |
-| `can-i` answer parsing | `no` and `no - ...` | last line; `no`, `no - ...` and `no (...)`; anything but `yes` refuses; unanswered is distinct from refused | adopt: solmq-conn-util takes the wider parser |
+| Namespace on deploy | read by name and created only when absent | the same | aligned |
+| Waiting after a change | `rollout status --timeout=300s` after deploy, start and restart; a refused wait warns | the same after start and restart; deploy reads the custom resource back, since the operator owns the StatefulSets | aligned |
+| Permission probes | every kind before the first write; no read is probed | the same | aligned |
+| `can-i` answer parsing | last line; `no`, `no - ...` and `no (...)`; anything but `yes` refuses; unanswered is distinct from refused | the same | aligned |
 | Podman secret replace | `secret create --replace` on podman 4.7 and later, remove then create below; on 4.7 and later a secret whose stored value is unchanged is skipped | the same | aligned |
 | Redeploy over a running service | left to the platform; a change to a running service asks before anything is written, and `--no-prompt` approves | the same; `--restart` also approves, and recreates an unchanged service | aligned |
 | subuid range too small | asked of `podman info` and refused, with a `usermod` fix naming both ranges, in deploy and validate | the same | aligned |
-| Namespace gate details | discounts objects owned by the deployment; does not probe `delete namespaces` | counts every object; probes `delete namespaces` first | open |
+| Namespace gate details | discounts its own objects and what they own, terminating objects and the default token secret; probes `delete namespaces` before asking; never fails the remove | the same, with the custom resource as the root | aligned |
 | Output | buffered; one `ok:` or `error:` line at the end | streamed as it happens | open |
 
 ## Decisions
@@ -157,6 +186,16 @@ secret's stored value and the unit on disk are compared with the new ones; only 
 written, and only a change restarts an active unit. When a running service would be recreated
 or restarted, the tool asks before writing anything. A "no" changes nothing. `--no-prompt`
 approves, and without a terminal the deploy fails with exit 1 naming it.
+
+**Namespace gate.** The gate is the union of both tools' checks: what neither tool counts is
+not counted, and what either tool asked before deleting is asked. It is a convenience, so
+every way out short of a confirmed delete keeps the namespace with a warning, and none fails
+the remove that ran it.
+
+**Permission probes.** Probes cover writes only, and ask for the lowest permission that does
+the job. A read the step depends on fails at the read with kubectl's own refusal. A read taken
+only for convenience, such as a rollout wait or a read-back, warns when it is refused and
+never blocks the command.
 
 ## Inherent differences
 

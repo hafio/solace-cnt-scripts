@@ -8,6 +8,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/kube/rbac"
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
 	"solace/internal/render"
 )
@@ -28,58 +32,44 @@ func (c *Cluster) out() io.Writer {
 // Confirm func seam rather than a writer. Every other confirmation lives in
 // internal/cli, which owns the terminal.
 
-// namespaceManifest is a minimal core/v1 Namespace, the equivalent of the bash
-// `create ns --dry-run=client -o yaml | apply -f -` (011:15). It is applied only to a
-// namespace that is not there: applying it over one that exists is not the no-op it
-// looks like -- kubectl PATCHes a namespace that lacks its last-applied annotation, and
-// that needs `patch` on namespaces, which the built-in admin and edit roles do not grant.
-func namespaceManifest(ns string) []byte {
-	return []byte("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: " + ns + "\n")
-}
-
-// namespaceState is what a deploy knows about the namespace it is about to write into.
-type namespaceState int
-
-const (
-	namespaceUnknown namespaceState = iota // the read failed: no answer either way
-	namespaceExists
-	namespaceAbsent
-)
-
-// readNamespace asks whether ns exists, BY NAME. That is a question a namespace-scoped
-// identity can answer: a RoleBinding in ns whose role reads namespaces -- the built-in
-// view, edit and admin all do -- authorizes `get namespace <ns>`, because a request about
-// one namespace is evaluated in that namespace. `create namespaces` never is; only a
-// cluster-wide grant covers it, so asking for it when the namespace was already there
-// refused exactly the identity this tool most often runs as.
+// readNamespace asks whether ns exists, BY NAME (kube.GetNamespace). That is a question a
+// namespace-scoped identity can answer: a RoleBinding in ns whose role reads namespaces
+// -- the built-in view, edit and admin all do -- authorizes `get namespace <ns>`, because
+// a request about one namespace is evaluated in that namespace. `create namespaces` never
+// is; only a cluster-wide grant covers it, so asking for it when the namespace was already
+// there refused exactly the identity this tool most often runs as.
 //
 // Only the exact `namespace/<ns>` line counts as existing and only an empty answer as
-// absent; a failed read, or anything else on stdout, is unknown and leaves the decision
-// to the create probe. Under the Echo runner the read is echoed and answers nothing, so a
-// preview takes the first-deploy path.
-func (c *Cluster) readNamespace(ctx context.Context, ns string) namespaceState {
-	out, err := c.kubectlOutput(ctx, "get", "namespace", ns, "--ignore-not-found", "-o", "name")
+// absent (kube.ParseNamespace); a failed read, or anything else on stdout, is unknown and
+// leaves the decision to the create probe. Under the Echo runner the read is echoed and
+// answers nothing, so a preview takes the first-deploy path.
+//
+// The manifest a create applies (kube.NamespaceManifest) goes in only for a namespace that
+// is not there: applying it over one that exists is not the no-op it looks like -- kubectl
+// PATCHes a namespace that lacks its last-applied annotation, and that needs `patch` on
+// namespaces, which the built-in admin and edit roles do not grant.
+func (c *Cluster) readNamespace(ctx context.Context, ns string) kube.NamespaceState {
+	out, err := c.outKube(ctx, func(b []string) runner.Cmd { return kube.GetNamespace(b, ns) })
 	if err != nil {
-		return namespaceUnknown
+		return kube.NamespaceUnknown
 	}
-	switch strings.TrimSpace(string(out)) {
-	case "namespace/" + ns:
-		return namespaceExists
-	case "":
-		return namespaceAbsent
-	}
-	return namespaceUnknown
+	return kube.ParseNamespace(string(out), ns)
 }
 
 // missingNamespace words a failed create probe for a namespace known to be absent. The
 // namespace has to exist before anything can be deployed into it, so a refusal also says
-// who can create it, not only which grant was missing.
-func missingNamespace(ns string, err error) error {
-	if !errors.Is(err, errNotAllowed) {
+// who can create it, not only which grant was missing (kube.MissingNamespace). Anything
+// but a refusal -- no answer at all -- is returned as it is.
+func (c *Cluster) missingNamespace(ns string, err error) error {
+	var refused *rbac.RefusedError
+	if !errors.As(err, &refused) {
 		return err
 	}
-	return fmt.Errorf("namespace %q does not exist, and this identity may not create it (%w).\n"+
-		"  Or have a cluster admin create it: kubectl create namespace %s", ns, err, ns)
+	base, baseErr := c.base()
+	if baseErr != nil {
+		return baseErr
+	}
+	return kube.MissingNamespace(base, ns, err)
 }
 
 // CreateNamespace makes sure the broker namespace exists before the first namespaced
@@ -96,16 +86,17 @@ func missingNamespace(ns string, err error) error {
 func (c *Cluster) CreateNamespace(ctx context.Context) error {
 	ns := c.ns()
 	switch c.readNamespace(ctx, ns) {
-	case namespaceExists:
+	case kube.NamespaceExists:
 		c.logf("namespace %s exists", ns)
 		return nil
-	case namespaceAbsent:
+	case kube.NamespaceAbsent:
 		if err := c.Preflight(ctx, "create", "namespaces"); err != nil {
-			return missingNamespace(ns, err)
+			return c.missingNamespace(ns, err)
 		}
 	default:
 		if err := c.Preflight(ctx, "create", "namespaces"); err != nil {
-			if !errors.Is(err, errNotAllowed) {
+			var refused *rbac.RefusedError
+			if !errors.As(err, &refused) {
 				return err
 			}
 			c.progress().Warn("could not confirm namespace %s exists (that read needs get on namespaces in %s), "+
@@ -114,57 +105,28 @@ func (c *Cluster) CreateNamespace(ctx context.Context) error {
 			return nil
 		}
 	}
-	c.logf("creating namespace %s", ns)
-	return c.apply(ctx, namespaceManifest(ns))
-}
-
-// protectedNamespaces are the Kubernetes system namespaces DeleteNamespace
-// refuses outright, with no override: deleting any of them breaks the
-// cluster, and no Solace deployment ever needs it done. An env file naming one
-// of these in kubernetes.namespace (default included -- the easiest namespace
-// to point at by accident) is a configuration mistake DeleteNamespace must
-// catch before it does anything else, cluster round-trip included.
-var protectedNamespaces = map[string]bool{
-	"default":         true,
-	"kube-system":     true,
-	"kube-public":     true,
-	"kube-node-lease": true,
-}
-
-// DeleteNamespace removes the broker namespace (111). --ignore-not-found makes a
-// repeat teardown a no-op rather than an error.
-//
-// Emptiness is not this method's decision -- it is already made by the time this
-// runs. Cluster.NamespaceContents (namespace.go) enumerates the namespace
-// ownership-BLIND over occupancyKinds: ANY object other than alwaysPresent (the
-// Kubernetes-generated kube-root-ca.crt ConfigMap and default ServiceAccount)
-// blocks removal. removeNamespaceIfEmpty (internal/cli/ops_k8s.go) is the only
-// caller of DeleteNamespace, and it runs NamespaceContents first, reaching here
-// only when that reported the namespace empty. This method therefore does not
-// re-enumerate or re-classify what the namespace holds: a second guard here once
-// did, listing a different twelve-kind set and judging each object OURS/FOREIGN
-// (isOurs) rather than "anything remains" -- which is a weaker rule than
-// NamespaceContents' own (an object this guard judged "ours" would pass through
-// where the design says nothing does), and which cost two lists to keep aligned
-// for no benefit. There is one classifier now, and it runs once, upstream.
-//
-// protectedNamespaces is still checked first here and without even asking the
-// cluster: there is no interpretation of "delete kube-system" that this tool
-// should ever carry out, and it is not this deployment's to leave to
-// NamespaceContents' judgement. Neither guard can be silenced by --no-prompt:
-// that flag only decides whether the CLI's own confirmDelete asks a question
-// before calling here, so this method is exactly what a fully unattended
-// removal reaches, with nothing left upstream to skip its checks.
-func (c *Cluster) DeleteNamespace(ctx context.Context) error {
-	if protectedNamespaces[c.ns()] {
-		return fmt.Errorf("refusing to delete namespace %q: this tool will never delete it; "+
-			"use \"remove broker\" / \"remove secrets\" to remove just this deployment's own objects", c.ns())
-	}
-	if err := c.Preflight(ctx, "delete", "namespaces"); err != nil {
+	manifest, err := kube.NamespaceManifest(ns)
+	if err != nil {
 		return err
 	}
+	c.logf("creating namespace %s", ns)
+	return c.apply(ctx, manifest)
+}
+
+// DeleteNamespace removes the broker namespace and everything left in it (111), through
+// kube.DeleteNamespace: --ignore-not-found makes a repeat teardown a no-op rather than an
+// error.
+//
+// Whether it should be is not this method's decision -- it is already made by the time
+// this runs. removeNamespaceIfEmpty (internal/cli/ops_k8s.go) is the only caller, and it
+// runs the shared gate (kube/nsgate) in order: the protected namespaces, the listing and
+// what still occupies it (NamespaceOccupants), the `delete namespaces` probe, and the
+// question. It reaches here only when every step passed, and a failure here is a warning
+// there, never a failed removal. This method therefore neither re-checks the name nor
+// probes again: a second copy of either is a second list to keep aligned with the gate.
+func (c *Cluster) DeleteNamespace(ctx context.Context) error {
 	c.logf("deleting namespace %s", c.ns())
-	return c.kubectl(ctx, "delete", "namespace", c.ns(), "--ignore-not-found")
+	return c.runKube(ctx, func(b []string) runner.Cmd { return kube.DeleteNamespace(b, c.ns()) })
 }
 
 // secretPreflight fails loud before any manifest is built when the certificate inputs
@@ -336,10 +298,12 @@ func (c *Cluster) DeleteSecrets(ctx context.Context) error {
 // CLI load that follows it there (broker.Ops.ServerCert) is what swaps the
 // certificate into the running broker. No pod is restarted here.
 //
-// The probe asks for what `kubectl apply` actually sends over an existing Secret -- a GET,
-// then a PATCH -- rather than `update`, which apply never uses: asking for `update` refused
-// a Role granting exactly get and patch, and passed one granting update alone that then
-// failed inside the apply.
+// The probe asks for what `kubectl apply` actually WRITES over an existing Secret -- a PATCH
+// -- rather than `update`, which apply never uses: asking for `update` refused a Role
+// granting exactly get and patch, and passed one granting update alone that then failed
+// inside the apply. The GET that precedes it is a read, and reads are not probed as
+// requirements: an identity that may patch but not get fails in the apply, with kubectl's
+// own refusal.
 func (c *Cluster) UpdateServerCertSecret(ctx context.Context) error {
 	name := c.Cfg.TLSServerSecretName()
 	if name == "" {
@@ -352,7 +316,7 @@ func (c *Cluster) UpdateServerCertSecret(ctx context.Context) error {
 			"  Rotate it where it is managed (kubectl, cert-manager), or set tls.cert and tls.certKey to hand this tool the pair",
 			name)
 	}
-	if err := c.PreflightAll(ctx, probe{verb: "get", resource: "secrets"}, probe{verb: "patch", resource: "secrets"}); err != nil {
+	if err := c.Preflight(ctx, "patch", "secrets"); err != nil {
 		return err
 	}
 	manifest, err := TLSSecret(c.Cfg)
@@ -385,7 +349,9 @@ func (c *Cluster) ServerCertChanged(ctx context.Context) (bool, error) {
 	// jsonpath rather than -o json, so the Secret's data -- the private key -- is
 	// never read back into this process. The name line says whether it exists.
 	path := `{.metadata.name}{"\n"}{.metadata.annotations.` + strings.ReplaceAll(render.CertDigestLabel, ".", `\.`) + `}`
-	out, err := c.kubectlOutput(ctx, "get", "secret", name, "-n", c.ns(), "--ignore-not-found", "-o", "jsonpath="+path)
+	out, err := c.outKube(ctx, func(b []string) runner.Cmd {
+		return kube.Get(b, kube.GetOptions{Namespace: c.ns(), IgnoreNotFound: true, Output: "jsonpath=" + path}, "secret", name)
+	})
 	if err != nil {
 		c.progress().Warn("could not read TLS Secret %s to compare certificates (%v); treating the certificate as changed.",
 			name, err)
@@ -408,7 +374,9 @@ func (c *Cluster) ServerCertChanged(ctx context.Context) (bool, error) {
 // keeps serving the old one, so the warning says so and names the way to finish.
 func (c *Cluster) BrokerPodsExist(ctx context.Context) bool {
 	pod := podName(c.Cfg, config.Primary)
-	out, err := c.kubectlOutput(ctx, "get", "pod", pod, "-n", c.ns(), "--ignore-not-found", "-o", "name")
+	out, err := c.outKube(ctx, func(b []string) runner.Cmd {
+		return kube.Get(b, kube.GetOptions{Namespace: c.ns(), IgnoreNotFound: true, Output: "name"}, "pod", pod)
+	})
 	if err != nil {
 		c.progress().Warn("could not read pod %s (that needs get on pods in %s), so no restart is offered for "+
 			"the renewed server certificate; if the broker is running it serves the previous one until its pods "+
@@ -432,8 +400,12 @@ func GenBroker(cfg *config.Config) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	ns, err := kube.NamespaceManifest(cfg.K8s.Namespace)
+	if err != nil {
+		return nil, err
+	}
 	return joinManifests([][]byte{
-		namespaceManifest(cfg.K8s.Namespace),
+		ns,
 		secrets,
 		render.BrokerCR(cfg),
 	}), nil

@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/hafio/go-deploy-utility/kube/rbac"
 )
 
 // logBuf builds a step-logger func that appends every formatted line to a
@@ -25,11 +27,9 @@ func TestDeployBrokerApply(t *testing.T) {
 	if err := c.DeployBroker(context.Background(), false); err != nil {
 		t.Fatalf("DeployBroker: %v", err)
 	}
-	calls := rr.afterPreflights(t,
-		probe{verb: "create", resource: brokerResource},
-		probe{verb: "get", resource: brokerResource})
+	calls := rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: brokerResource})
 	if len(calls) != 1 {
-		t.Fatalf("DeployBroker(keepYAML=false) made %d calls after the probes, want 1 apply", len(calls))
+		t.Fatalf("DeployBroker(keepYAML=false) made %d calls after the probe, want 1 apply", len(calls))
 	}
 	got := calls[0]
 	if got.method != "RunInput" || got.name != "kubectl" || !eqArgs(got.args, []string{"apply", "-f", "-"}) {
@@ -75,11 +75,9 @@ func TestDeployBrokerKeepYAMLWriteError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), brokerYAMLFile) {
 		t.Fatalf("DeployBroker error = %v, want it to name %s", err, brokerYAMLFile)
 	}
-	// The probes ran (they precede the write); nothing after them may have.
-	if calls := rr.afterPreflights(t,
-		probe{verb: "create", resource: brokerResource},
-		probe{verb: "get", resource: brokerResource}); len(calls) != 0 {
-		t.Errorf("DeployBroker should abort before applying when the write fails; got %d calls after the probes", len(calls))
+	// The probe ran (it precedes the write); nothing after it may have.
+	if calls := rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: brokerResource}); len(calls) != 0 {
+		t.Errorf("DeployBroker should abort before applying when the write fails; got %d calls after the probe", len(calls))
 	}
 }
 
@@ -123,7 +121,7 @@ func TestPreflightUnreachableClusterHints(t *testing.T) {
 		t.Fatal("DeployBroker must fail when the cluster cannot be reached")
 	}
 	msg := err.Error()
-	for _, want := range []string{"cannot check permission", "log in first", "oc login"} {
+	for _, want := range []string{"cannot check permission", "log in or select a working context first", "oc login"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error = %v, want it to contain %q", msg, want)
 		}
@@ -161,8 +159,8 @@ func TestDeleteBrokerPurgeHA(t *testing.T) {
 		t.Fatalf("DeleteBroker: %v", err)
 	}
 	calls := rr.afterPreflights(t,
-		probe{verb: "delete", resource: brokerResource},
-		probe{verb: "delete", resource: "persistentvolumeclaims"})
+		rbac.Probe{Verb: "delete", Resource: brokerResource},
+		rbac.Probe{Verb: "delete", Resource: "persistentvolumeclaims"})
 	if len(calls) != 4 {
 		t.Fatalf("DeleteBroker(purge, HA) made %d calls after the probe, want 4 (CR + 3 PVCs)", len(calls))
 	}
@@ -189,8 +187,8 @@ func TestDeleteBrokerPurgeStandalone(t *testing.T) {
 		t.Fatalf("DeleteBroker: %v", err)
 	}
 	calls := rr.afterPreflights(t,
-		probe{verb: "delete", resource: brokerResource},
-		probe{verb: "delete", resource: "persistentvolumeclaims"})
+		rbac.Probe{Verb: "delete", Resource: brokerResource},
+		rbac.Probe{Verb: "delete", Resource: "persistentvolumeclaims"})
 	if len(calls) != 2 {
 		t.Fatalf("DeleteBroker(purge, standalone) made %d calls after the probe, want 2 (CR + 1 PVC)", len(calls))
 	}
@@ -229,8 +227,8 @@ func TestDeleteBrokerPurgeSwallowsPVCError(t *testing.T) {
 		t.Errorf("DeleteBroker error = %v, want it to wrap the underlying cause", err)
 	}
 	if calls := rr.afterPreflights(t,
-		probe{verb: "delete", resource: brokerResource},
-		probe{verb: "delete", resource: "persistentvolumeclaims"}); len(calls) != 4 {
+		rbac.Probe{Verb: "delete", Resource: brokerResource},
+		rbac.Probe{Verb: "delete", Resource: "persistentvolumeclaims"}); len(calls) != 4 {
 		t.Fatalf("all PVC deletes should still be attempted; got %d calls after the probe, want 4", len(calls))
 	}
 	if strings.Contains(buf.String(), "PVCs deleted") {
@@ -249,8 +247,8 @@ func TestDeleteBrokerPurgeAllSucceed(t *testing.T) {
 		t.Fatalf("DeleteBroker: %v", err)
 	}
 	calls := rr.afterPreflights(t,
-		probe{verb: "delete", resource: brokerResource},
-		probe{verb: "delete", resource: "persistentvolumeclaims"})
+		rbac.Probe{Verb: "delete", Resource: brokerResource},
+		rbac.Probe{Verb: "delete", Resource: "persistentvolumeclaims"})
 	if len(calls) != 4 {
 		t.Fatalf("DeleteBroker(purge, all succeed) made %d calls after the probe, want 4 (CR + 3 PVCs)", len(calls))
 	}
@@ -357,10 +355,10 @@ func TestDeleteBrokerProbesClaimsOnlyWhenPurging(t *testing.T) {
 }
 
 // TestPreflightDeployAsksForEveryWriteUpFront: `broker deploy` asks about every kind it will
-// write before it writes any -- the broker resource always (create, and the get its read-back
-// needs), Secrets only when this env file builds one -- so an identity bound to `edit` but
-// not to the broker resource is refused before its Secrets are applied, with nothing but
-// probes issued.
+// write before it writes any -- the broker resource always (create), Secrets only when this
+// env file builds one -- so an identity bound to `edit` but not to the broker resource is
+// refused before its Secrets are applied, with nothing but probes issued. Writes only: the
+// get its read-back needs is not asked about (ConfirmBrokerApplied warns when it is refused).
 func TestPreflightDeployAsksForEveryWriteUpFront(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -398,6 +396,9 @@ func TestPreflightDeployAsksForEveryWriteUpFront(t *testing.T) {
 			}
 			if _, ok := rr.probedNamespace("create", "secrets"); ok != tc.wantSecrets {
 				t.Errorf("probed secrets = %v, want %v", ok, tc.wantSecrets)
+			}
+			if _, ok := rr.probedNamespace("get", brokerResource); ok {
+				t.Error("reading the broker back is not a write, so it is not probed as a requirement")
 			}
 		})
 	}
@@ -529,8 +530,32 @@ func TestConfirmBrokerAppliedFailsOnADifferentObject(t *testing.T) {
 	}
 }
 
-// TestConfirmBrokerAppliedSurfacesReadFailures covers the two ways the read itself can
-// fail -- the cluster refusing it, and an answer that will not decode. Both name the
+// forbiddenGet is what kubectl prints to stderr when RBAC refuses a read, which is what
+// kube.Forbidden recognises.
+const forbiddenGet = `Error from server (Forbidden): pubsubpluseventbrokers.pubsubplus.solace.com "dev-broker" is forbidden: ` +
+	`User "u" cannot get resource "pubsubpluseventbrokers" in API group "pubsubplus.solace.com" in the namespace "solace"` + "\n"
+
+// TestConfirmBrokerAppliedWarnsWhenTheReadBackIsRefused: an identity that may create the
+// broker but not get it cannot confirm the apply, and that is no reason to fail a deploy
+// that wrote what it was asked to. kubectl's refusal (kube.Forbidden on its stderr) is a
+// warning naming the broker, the namespace and the grant, and the step succeeds.
+func TestConfirmBrokerAppliedWarnsWhenTheReadBackIsRefused(t *testing.T) {
+	cfg := loadK8s(t)
+	log, buf := logBuf()
+	rr := &recRunner{outErr: errors.New("exit status 1"), stderr: forbiddenGet}
+	c := NewCluster(rr, cfg, log, nil)
+	if err := c.ConfirmBrokerApplied(context.Background()); err != nil {
+		t.Fatalf("a refused read-back must warn, not fail the deploy: %v", err)
+	}
+	for _, want := range []string{`broker "dev-broker" was applied in namespace "solace"`, "may not read it back", "get on " + brokerResource} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("warning should contain %q:\n%s", want, buf.String())
+		}
+	}
+}
+
+// TestConfirmBrokerAppliedSurfacesReadFailures covers the ways the read itself can fail --
+// a failure that is not a refusal, and an answer that will not decode. Both name the
 // next step, because the deploy has already happened and the operator needs to know
 // what to check rather than what broke in here.
 func TestConfirmBrokerAppliedSurfacesReadFailures(t *testing.T) {
@@ -538,7 +563,7 @@ func TestConfirmBrokerAppliedSurfacesReadFailures(t *testing.T) {
 		name string
 		rr   *recRunner
 	}{
-		{"the read is refused", &recRunner{outErr: errors.New("forbidden")}},
+		{"the read fails", &recRunner{outErr: errors.New("connection refused")}},
 		{"the answer will not decode", &recRunner{out: []byte("not json at all")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

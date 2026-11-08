@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/kube/rbac"
+
 	"solace/internal/config"
 )
 
@@ -125,7 +128,7 @@ func (c *Cluster) installedWatch(ctx context.Context) (list []string, allNS, fou
 func (c *Cluster) findOperatorDeployment(ctx context.Context) (dep *deploymentItem, onlyNS string, err error) {
 	want := c.operatorNS(ctx)
 	var deps deploymentList
-	if listErr := c.getJSON(ctx, &deps, "deployment", "--all-namespaces"); listErr != nil {
+	if listErr := c.getJSON(ctx, &deps, getRead{kube.GetOptions{AllNamespaces: true}, []string{"deployment"}}); listErr != nil {
 		return c.findOperatorDeploymentIn(ctx, want, listErr)
 	}
 	var elsewhere []*deploymentItem
@@ -178,7 +181,7 @@ func (c *Cluster) findOperatorDeployment(ctx context.Context) (dep *deploymentIt
 // more than once, while this means nobody could look.
 func (c *Cluster) findOperatorDeploymentIn(ctx context.Context, ns string, listErr error) (*deploymentItem, string, error) {
 	var deps deploymentList
-	if err := c.getJSON(ctx, &deps, "deployment", operatorDeployment, "-n", ns, "--ignore-not-found"); err != nil {
+	if err := c.getJSON(ctx, &deps, getRead{kube.GetOptions{Namespace: ns, IgnoreNotFound: true}, []string{"deployment", operatorDeployment}}); err != nil {
 		return nil, "", fmt.Errorf("cannot tell whether an operator is installed: listing Deployments cluster-wide "+
 			"failed (%w), and so did reading %s in namespace %s (%w)\n"+
 			"  ask a cluster admin for `get` on deployments in %s (or `list` on deployments cluster-wide), then re-run",
@@ -445,7 +448,7 @@ func (c *Cluster) setWatch(ctx context.Context, opNS string, list []string) erro
 			"namespace, which would widen its scope instead of narrowing it.\n"+
 			"  Remove the operator itself if no namespace is left to watch", watchEnvVar)
 	}
-	if err := c.PreflightAll(ctx, probe{verb: "patch", resource: "deployments", ns: opNS}); err != nil {
+	if err := c.PreflightAll(ctx, rbac.Probe{Verb: "patch", Resource: "deployments", Namespace: opNS}); err != nil {
 		return err
 	}
 	value := strings.Join(list, ",")

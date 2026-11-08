@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
 
 	"solace/internal/broker"
 	"solace/internal/config"
@@ -496,16 +497,14 @@ func opK8sStatusOperator(a *App) error {
 }
 
 func opK8sLogs(a *App, role config.Role) error {
-	args, err := logArgs(a)
+	o, err := logOptions(a)
 	if err != nil {
 		return err
 	}
-	// --previous is kubernetes-only, so it is appended here rather than in logArgs,
-	// which builds only the tokens every platform shares.
-	if a.previous {
-		args = append(args, "-p")
-	}
-	return k8sCluster(a).Logs(bg(), role, args)
+	// --previous is kubernetes-only, so it is set here rather than in logOptions,
+	// which builds only the options every platform shares.
+	o.Previous = a.previous
+	return k8sCluster(a).Logs(bg(), role, o)
 }
 
 // opK8sCLI / opK8sShell hand the terminal to a session in the pod, so the session's
@@ -649,11 +648,11 @@ func opK8sOperatorStop(a *App) error {
 
 func opK8sOperatorRestart(a *App) error { return k8sCluster(a).OperatorRestart(bg()) }
 func opK8sOperatorLogs(a *App) error {
-	args, err := logArgs(a)
+	o, err := logOptions(a)
 	if err != nil {
 		return err
 	}
-	return k8sCluster(a).OperatorLogs(bg(), args...)
+	return k8sCluster(a).OperatorLogs(bg(), o)
 }
 
 // opK8sGenBroker / opK8sGenOperator print what deploy would apply and change nothing.
@@ -735,7 +734,8 @@ func opK8sRemoveBroker(a *App) error {
 	if err := c.DeleteSecrets(ctx); err != nil {
 		return err
 	}
-	return removeNamespaceIfEmpty(a, c)
+	removeNamespaceIfEmpty(a, c)
+	return nil
 }
 
 // warnWhereTheAdminPasswordIs says where the broker's admin password is when this env file
@@ -764,37 +764,63 @@ func warnWhereTheAdminPasswordIs(a *App) {
 		"-o jsonpath='{.data.username_admin_password}'", name, gen, cli, gen, ns)
 }
 
-// removeNamespaceIfEmpty offers the namespace for deletion ONLY when nothing else is in
-// it, and never deletes one Kubernetes owns.
+// removeNamespaceIfEmpty offers the namespace for deletion ONLY when nothing of anyone
+// else's is in it, and never deletes one Kubernetes owns. It never fails the removal that
+// ran it: by now everything this env file owns is gone, and every way out of the gate short
+// of a confirmed delete keeps the namespace with a warning.
 //
 // Deleting a namespace cascades to everything inside, including whatever another team put
 // there, and this tool very often did not create it -- so the namespace is not in the
-// removal's delete set at all. Anything still there is listed and the namespace kept, on
-// every path including --no-prompt: a warning an operator can act on beats a prompt whose
-// yes would destroy someone else's work.
+// removal's delete set at all. The gate is the shared one (kube/nsgate), in its order:
 //
-// A check that cannot run keeps the namespace too. That direction is the safety property:
-// a namespace wrongly reported empty gets cascade-deleted, while one wrongly reported
+//  1. the protected namespaces are never touched;
+//  2. the namespace is listed, and what is left is judged: the broker CR and what it owns
+//     (its StatefulSets, Pods and Services by ownerReference, and the Secrets this env
+//     file built), what is being deleted, and what Kubernetes puts in every namespace are
+//     discounted; anything else -- retained data PVCs, a second broker's objects -- is
+//     listed and the namespace kept, on every path including --no-prompt, since a warning
+//     an operator can act on beats a prompt whose yes would destroy someone else's work;
+//  3. `delete namespaces` is probed BEFORE the question, so nobody is asked and then refused;
+//  4. the question (--no-prompt approves it); a decline keeps the namespace, and so does a
+//     run with no terminal and no --no-prompt;
+//  5. the delete, whose failure is a warning too.
+//
+// A check that cannot run keeps the namespace. That direction is the safety property: a
+// namespace wrongly reported empty gets cascade-deleted, while one wrongly reported
 // occupied merely stays.
-func removeNamespaceIfEmpty(a *App, c *k8s.Cluster) error {
-	if c.NamespaceIsProtected() {
-		warn("namespace %q is a Kubernetes namespace and is never removed by this tool",
-			a.Cfg.K8s.Namespace)
-		return nil
+func removeNamespaceIfEmpty(a *App, c *k8s.Cluster) {
+	ns := a.Cfg.K8s.Namespace
+	if nsgate.Protected(ns) {
+		warn("namespace %q is a Kubernetes namespace and is never removed by this tool", ns)
+		return
 	}
-	contents, err := c.NamespaceContents(bg())
+	occupants, answered, err := c.NamespaceOccupants(bg())
 	if err != nil {
 		warn("%v", err)
-		return nil
+		return
 	}
-	if len(contents) > 0 {
-		c.ReportNamespaceOccupied(contents)
-		return nil
+	if !answered {
+		return
 	}
-	if ok, err := confirmDelete(a, "the now-empty namespace "+a.Cfg.K8s.Namespace+k8sContext(a)); err != nil || !ok {
-		return err
+	if len(occupants) > 0 {
+		c.ReportNamespaceOccupied(occupants)
+		return
 	}
-	return c.DeleteNamespace(bg())
+	if err := c.PreflightAll(bg(), nsgate.DeleteProbe()); err != nil {
+		warn("namespace %q kept: %v", ns, err)
+		return
+	}
+	ok, err := confirmDelete(a, "the now-empty namespace "+ns+k8sContext(a))
+	if err != nil {
+		warn("namespace %q kept: %v", ns, err)
+		return
+	}
+	if !ok {
+		return
+	}
+	if err := c.DeleteNamespace(bg()); err != nil {
+		warn("namespace %q kept: could not delete it: %v", ns, err)
+	}
 }
 
 // k8sWhat labels a destructive Kubernetes target the way containerWhat labels a

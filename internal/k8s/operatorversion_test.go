@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/kube/rbac"
 	"github.com/hafio/go-deploy-utility/runner"
 )
 
@@ -165,7 +166,7 @@ func TestConfirmNoDowngradeRefusesByDefault(t *testing.T) {
 	if err := c.OperatorApply(context.Background()); err == nil {
 		t.Fatal("a downgrade with no Confirm must be refused")
 	}
-	calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), defaultOperatorNS)
+	calls := withoutNamespaceStage(rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"}), defaultOperatorNS)
 	if len(calls) != 1 {
 		t.Fatalf("refused downgrade made %d calls after the probe, want 1 (the operator read only, no apply)", len(calls))
 	}
@@ -184,7 +185,7 @@ func TestConfirmNoDowngradeRefusedWhenConfirmDeclines(t *testing.T) {
 	if err := c.OperatorApply(context.Background()); err == nil {
 		t.Fatal("declining the confirm must refuse the downgrade")
 	}
-	calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), defaultOperatorNS)
+	calls := withoutNamespaceStage(rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"}), defaultOperatorNS)
 	if len(calls) != 1 {
 		t.Fatalf("declined downgrade made %d calls after the probe, want 1 (the operator read only, no apply)", len(calls))
 	}
@@ -205,7 +206,7 @@ func TestConfirmNoDowngradeReturnsAQuestionThatCouldNotBePut(t *testing.T) {
 	if err := c.OperatorApply(context.Background()); !errors.Is(err, cause) {
 		t.Fatalf("OperatorApply err = %v, want the Confirm error carried through", err)
 	}
-	calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), defaultOperatorNS)
+	calls := withoutNamespaceStage(rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"}), defaultOperatorNS)
 	if len(calls) != 1 {
 		t.Fatalf("an unaskable downgrade made %d calls after the probe, want 1 (the operator read only, no apply)", len(calls))
 	}
@@ -232,7 +233,7 @@ func TestConfirmNoDowngradeProceedsWhenConfirmAccepts(t *testing.T) {
 	if len(asked) != 1 || asked[0] != "Downgrade the operator?" {
 		t.Errorf("asked %q, want exactly the downgrade question", asked)
 	}
-	calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), "op-ns")
+	calls := withoutNamespaceStage(rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"}), "op-ns")
 	if len(calls) != 4 {
 		t.Fatalf("accepted downgrade made %d calls after the probe, want 4 "+
 			"(operator read + namespace + regcred + bundle)", len(calls))
@@ -266,7 +267,7 @@ func TestConfirmNoDowngradeAsksNothingWhenNotADowngrade(t *testing.T) {
 			if asked {
 				t.Error("an upgrade or same-version apply must not ask at all")
 			}
-			calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), "op-ns")
+			calls := withoutNamespaceStage(rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"}), "op-ns")
 			if len(calls) != 4 {
 				t.Fatalf("made %d calls after the probe, want 4 "+
 					"(operator read + namespace + regcred + bundle)", len(calls))
@@ -298,7 +299,7 @@ func TestConfirmNoDowngradeIsNotSkippedByAFailedRead(t *testing.T) {
 	if asked {
 		t.Error("a read nobody could make is not a downgrade to ask about")
 	}
-	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
+	calls := rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"})
 	if len(calls) != 2 {
 		t.Fatalf("made %d calls after the probe, want 2 (the list and its fallback, no apply): %+v", len(calls), calls)
 	}

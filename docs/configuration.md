@@ -319,11 +319,11 @@ pods would never become Ready, and nothing would hold the working password. So:
   the namespace, or when the running broker's CR names an admin Secret that the new one would
   drop. Set `semp.adminPass` to the broker's password, or `kubernetes.adminSecret` to a Secret
   holding it. The check reads this broker's CR and its own data claims by name, so it needs
-  only `get` on `pubsubpluseventbrokers` and `persistentvolumeclaims` in the namespace, each
-  probed first like every other permission. A refused `get` on the CR stops the deploy, which
-  needs that grant anyway; a refused `get` on the claims is a warning that the data was not
-  checked, and the deploy goes on -- set `semp.adminPass` first if an earlier broker's data
-  may still be there. Claims under a custom volume mount are not checked, since they exist
+  only `get` on `pubsubpluseventbrokers` and `persistentvolumeclaims` in the namespace, and
+  neither read is probed first: a read is not a requirement. A refused `get` on the CR is
+  not fatal -- the data check decides, and the deploy's own apply is what needs that grant;
+  a refused `get` on the claims is a warning that the data was not checked, and the deploy
+  goes on -- set `semp.adminPass` first if an earlier broker's data may still be there. Claims under a custom volume mount are not checked, since they exist
   before a first deploy.
 
 **Upgrading moves an unset name.** Earlier builds defaulted `kubernetes.adminSecret` to

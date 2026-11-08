@@ -213,6 +213,41 @@ func TestOutputCapturesStdoutAndStreamsStderr(t *testing.T) {
 	}
 }
 
+// TestTeeKeepsStderrLiveAndReturnsIt: RunTee and OutputTee hand back what the child wrote
+// to stderr, which is also forwarded to this process's own stderr as it arrives (the
+// writer is a tee over it, so it is no longer os.Stderr itself), and the captured stdout
+// of OutputTee stays out of this process's stdout.
+func TestTeeKeepsStderrLiveAndReturnsIt(t *testing.T) {
+	boom := errors.New("kubectl: exit status 1")
+	forbidden := `Error from server (Forbidden): deployments.apps "x" is forbidden`
+	fake := &runnertest.Fake{Script: runnertest.Seq(
+		runnertest.Reply{Stderr: forbidden, Err: boom},
+		runnertest.Reply{Stdout: "answer", Stderr: "warn"},
+	)}
+	c := runner.Cmd{Argv: []string{"kubectl", "rollout", "status", "deployment/x"}}
+
+	errText, err := RunTee(t.Context(), fake, c)
+	if !errors.Is(err, boom) || errText != forbidden {
+		t.Errorf("RunTee = (%q, %v), want the stderr text and the runner's error", errText, err)
+	}
+	out, errText, err := OutputTee(t.Context(), fake, c)
+	if err != nil || string(out) != "answer" || errText != "warn" {
+		t.Errorf("OutputTee = (%q, %q, %v), want (answer, warn, nil)", out, errText, err)
+	}
+	calls := fake.Calls()
+	if calls[0].Stdout != io.Writer(os.Stdout) {
+		t.Errorf("RunTee stdout = %v, want this process's own", calls[0].Stdout)
+	}
+	if calls[1].Stdout == io.Writer(os.Stdout) {
+		t.Error("OutputTee streamed stdout, want it captured")
+	}
+	for i, call := range calls {
+		if call.Stderr == io.Writer(os.Stderr) || call.Stderr == nil {
+			t.Errorf("call %d stderr = %v, want a tee that is not os.Stderr alone", i, call.Stderr)
+		}
+	}
+}
+
 // TestInteractiveReturnsTheSessionStatus: Interactive attaches this process's terminal; a
 // clean session is nil, a non-zero one is an exitcode.Exited error that carries the
 // status (so the CLI can pass it through with ChildExit, and not otherwise), and an

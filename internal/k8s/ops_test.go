@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/kube"
+
 	"solace/internal/config"
 )
 
@@ -101,14 +103,14 @@ func TestDescribeLB(t *testing.T) {
 	}
 }
 
-func TestLogsPassthrough(t *testing.T) {
+func TestLogs(t *testing.T) {
 	rr := &recRunner{}
 	c := newCluster(rr)
-	if err := c.Logs(context.Background(), config.Primary, []string{"-f", "--tail=100"}); err != nil {
+	if err := c.Logs(context.Background(), config.Primary, kube.LogOptions{Follow: true, Tail: "100"}); err != nil {
 		t.Fatalf("Logs: %v", err)
 	}
 	got := rr.last()
-	want := []string{"logs", "-n", "solace", "pod/dev-broker-pubsubplus-p-0", "-f", "--tail=100"}
+	want := []string{"logs", "pod/dev-broker-pubsubplus-p-0", "-n", "solace", "-f", "--tail", "100"}
 	if got.method != "Run" || !eqArgs(got.args, want) {
 		t.Errorf("Logs argv = %+v, want Run kubectl %v", got, want)
 	}
@@ -122,7 +124,7 @@ func TestCLIAndShellAreInteractive(t *testing.T) {
 			t.Fatalf("CLI: %v", err)
 		}
 		got := rr.last()
-		want := []string{"exec", "-it", "-n", "solace", "dev-broker-pubsubplus-m-0", "--", "cli", "-A"}
+		want := []string{"exec", "-i", "-t", "dev-broker-pubsubplus-m-0", "-n", "solace", "--", "cli", "-A"}
 		if got.method != "RunInteractive" || !eqArgs(got.args, want) {
 			t.Errorf("CLI argv = %+v, want RunInteractive kubectl %v", got, want)
 		}
@@ -134,7 +136,7 @@ func TestCLIAndShellAreInteractive(t *testing.T) {
 			t.Fatalf("Shell: %v", err)
 		}
 		got := rr.last()
-		want := []string{"exec", "-it", "-n", "solace", "dev-broker-pubsubplus-p-0", "--", "bash"}
+		want := []string{"exec", "-i", "-t", "dev-broker-pubsubplus-p-0", "-n", "solace", "--", "bash"}
 		if got.method != "RunInteractive" || !eqArgs(got.args, want) {
 			t.Errorf("Shell argv = %+v, want RunInteractive kubectl %v", got, want)
 		}
@@ -246,6 +248,38 @@ func TestRestartPod(t *testing.T) {
 	}
 }
 
+// forbiddenRollout is what kubectl prints to stderr when RBAC refuses a rollout wait, which
+// kube.Forbidden recognises.
+const forbiddenRollout = `Error from server (Forbidden): statefulsets.apps "dev-broker-pubsubplus-b" is forbidden: ` +
+	`User "u" cannot get resource "statefulsets" in API group "apps" in the namespace "solace"` + "\n"
+
+// TestRestartPodWarnsWhenTheRolloutWaitIsRefused: the wait is a convenience over a pod
+// that is already deleted, so a refusal of it (kube.Forbidden on kubectl's stderr) is a
+// warning naming the StatefulSet, and the step succeeds. A timeout is a real result and
+// still fails with the step's own message.
+func TestRestartPodWarnsWhenTheRolloutWaitIsRefused(t *testing.T) {
+	rr := &recRunner{runErrQueue: []error{nil, errFake}, stderrQueue: []string{forbiddenRollout}}
+	log, buf := logBuf()
+	c := NewCluster(rr, haCfg(), log, nil)
+	if err := c.RestartPod(context.Background(), config.Backup); err != nil {
+		t.Fatalf("a refused wait must warn, not fail the restart: %v", err)
+	}
+	for _, want := range []string{"rollout wait for statefulset/dev-broker-pubsubplus-b was refused", "the change was applied"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("warning should contain %q:\n%s", want, buf.String())
+		}
+	}
+	if len(rr.calls) != 2 {
+		t.Errorf("calls = %+v, want the delete and the one refused wait", rr.calls)
+	}
+
+	rr = &recRunner{runErrQueue: []error{nil, errFake}, stderrQueue: []string{"error: timed out waiting for the condition\n"}}
+	err := NewCluster(rr, haCfg(), nil, nil).RestartPod(context.Background(), config.Backup)
+	if err == nil || !strings.Contains(err.Error(), "did not become ready within 300s") {
+		t.Errorf("a timeout must still fail with the step's own message, got %v", err)
+	}
+}
+
 // TestRestartPodDeleteFails proves the pod-delete failing outright (RBAC denied,
 // etc.) surfaces its own distinct, actionable message and never reaches the
 // rollout-status wait -- only the rollout-wait failure was tested before, via
@@ -289,6 +323,24 @@ func TestRestartRolling(t *testing.T) {
 			t.Fatalf("RestartRolling(standalone) made %d calls, want 2", len(rr.calls))
 		}
 	})
+	t.Run("a refused wait warns and the roll continues to the next role", func(t *testing.T) {
+		// Every wait is refused; each pod was still deleted, so each role is restarted.
+		rr := &recRunner{
+			runErrQueue: []error{nil, errFake, nil, errFake, nil, errFake},
+			stderrQueue: []string{forbiddenRollout, forbiddenRollout, forbiddenRollout},
+		}
+		log, buf := logBuf()
+		c := NewCluster(rr, haCfg(), log, nil)
+		if err := c.RestartRolling(context.Background()); err != nil {
+			t.Fatalf("RestartRolling with every wait refused: %v", err)
+		}
+		if len(rr.calls) != 6 {
+			t.Errorf("RestartRolling made %d calls, want 6 -- a refused wait must not stop the roll", len(rr.calls))
+		}
+		if n := strings.Count(buf.String(), "was refused"); n != 3 {
+			t.Errorf("%d warnings, want one per role:\n%s", n, buf.String())
+		}
+	})
 	t.Run("a failed restart stops before the next role", func(t *testing.T) {
 		// Let the monitor's delete succeed, then fail the readiness wait: a pod that
 		// never comes back must not be followed by bouncing the next one.
@@ -314,7 +366,7 @@ func TestReplicasStart(t *testing.T) {
 		if len(rr.calls) != 6 {
 			t.Fatalf("ReplicasStart(HA) made %d calls, want 6 (scale+rollout x3)", len(rr.calls))
 		}
-		wantScale := []string{"scale", "statefulset", "dev-broker-pubsubplus-p", "-n", "solace", "--replicas=1"}
+		wantScale := []string{"scale", "statefulset/dev-broker-pubsubplus-p", "-n", "solace", "--replicas=1"}
 		wantRollout := []string{"rollout", "status", "statefulset/dev-broker-pubsubplus-p", "-n", "solace", "--timeout=300s"}
 		if !eqArgs(rr.calls[0].args, wantScale) {
 			t.Errorf("scale argv = %v, want %v", rr.calls[0].args, wantScale)
@@ -331,6 +383,21 @@ func TestReplicasStart(t *testing.T) {
 		}
 		if len(rr.calls) != 2 {
 			t.Fatalf("ReplicasStart(standalone) made %d calls, want 2", len(rr.calls))
+		}
+	})
+	t.Run("a refused wait warns and the step succeeds", func(t *testing.T) {
+		// The primary scales, its wait is refused (Forbidden), and the rest go on.
+		rr := &recRunner{runErrQueue: []error{nil, errFake}, stderrQueue: []string{forbiddenRollout}}
+		log, buf := logBuf()
+		c := NewCluster(rr, haCfg(), log, nil)
+		if err := c.ReplicasStart(context.Background()); err != nil {
+			t.Fatalf("a refused wait must warn, not fail the start: %v", err)
+		}
+		if len(rr.calls) != 6 {
+			t.Errorf("ReplicasStart made %d calls, want 6 -- every role is scaled", len(rr.calls))
+		}
+		if !strings.Contains(buf.String(), "rollout wait for statefulset/dev-broker-pubsubplus-p was refused") {
+			t.Errorf("want a warning naming the StatefulSet:\n%s", buf.String())
 		}
 	})
 	t.Run("fails loud when a rollout does not become ready", func(t *testing.T) {
@@ -372,7 +439,7 @@ func TestReplicasStop(t *testing.T) {
 		if len(rr.calls) != 3 {
 			t.Fatalf("ReplicasStop(HA) made %d calls, want 3", len(rr.calls))
 		}
-		want := []string{"scale", "statefulset", "dev-broker-pubsubplus-p", "-n", "solace", "--replicas=0"}
+		want := []string{"scale", "statefulset/dev-broker-pubsubplus-p", "-n", "solace", "--replicas=0"}
 		if !eqArgs(rr.calls[0].args, want) {
 			t.Errorf("scale-down argv = %v, want %v", rr.calls[0].args, want)
 		}

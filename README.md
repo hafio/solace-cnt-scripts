@@ -209,9 +209,11 @@ names an admin Secret that already exists, or you want the operator to generate 
    solace-util broker remove -e dev.yaml --delete-data     # asks before deleting them (irreversible)
    ```
 
-   The namespace is only offered for deletion once nothing else is left in it. If anything
-   you did not deploy is still there, it is listed and the namespace is kept -- on every
-   path, `--no-prompt` included.
+   The namespace is only offered for deletion once nothing of anyone else's is left in it
+   (this broker and what it owns are not counted). If anything you did not deploy is still
+   there, it is listed and the namespace is kept -- on every path, `--no-prompt` included. A
+   refused `delete namespaces`, a "no", no terminal or a failed delete keeps it too, with a
+   warning; the removal itself still succeeds.
 
 ### Docker / Podman
 

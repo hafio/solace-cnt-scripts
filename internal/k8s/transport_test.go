@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/kube/rbac"
 	"github.com/hafio/go-deploy-utility/runner"
 
 	"solace/internal/broker"
@@ -32,6 +33,13 @@ type recRunner struct {
 	runErr      error    // error returned by Run (nil = success); for best-effort paths
 	runErrQueue []error  // popped per Run call; falls back to runErr once drained
 	runInputErr error    // error returned by RunInput (nil = success)
+
+	// stderr is what a FAILING call writes to the stderr writer it was given, the way
+	// kubectl's refusal reaches the terminal and the tee the steps that tell a refusal
+	// (kube.Forbidden) from other failures read it through. Queue entries are consumed
+	// per Run call that returns an error, in order, then stderr applies.
+	stderr      string
+	stderrQueue []string
 
 	// Cluster.Preflight runs `auth can-i` before every mutating operation, so the
 	// double answers it out of band: the reply comes from these two fields rather
@@ -162,24 +170,38 @@ func legacyMethod(c runner.Cmd, stdout io.Writer) string {
 // RunEnv exists only so a call that carries Env is still recorded: nothing in the k8s
 // package passes secrets through a child environment (every secret rides stdin), so the
 // extra environment is deliberately not modelled.
-func (r *recRunner) Run(_ context.Context, c runner.Cmd, stdout, _ io.Writer) error {
+func (r *recRunner) Run(_ context.Context, c runner.Cmd, stdout, stderr io.Writer) error {
 	method, name, args := legacyMethod(c, stdout), c.Argv[0], c.Argv[1:]
 	switch method {
 	case "RunInput":
 		r.calls = append(r.calls, rrCall{method, name, args, string(c.Stdin)})
-		return r.runInputErr
+		return r.failWith(stderr, r.runInputErr)
 	case "Output":
 		r.calls = append(r.calls, rrCall{method, name, args, ""})
 		if isCanI(args) {
 			return writeOut(stdout)(r.canIAnswer(args))
 		}
-		return writeOut(stdout)(r.nextOut(), r.nextOutErr())
+		out := r.nextOut()
+		return r.failWith(stderr, writeOut(stdout)(out, r.nextOutErr()))
 	case "OutputInput":
 		r.calls = append(r.calls, rrCall{method, name, args, string(c.Stdin)})
 		return writeOut(stdout)(r.out, r.nextOutErr())
 	}
 	r.calls = append(r.calls, rrCall{method, name, args, ""})
-	return r.nextRunErr()
+	return r.failWith(stderr, r.nextRunErr())
+}
+
+// failWith writes the scripted stderr to w when the call is failing, then returns err.
+func (r *recRunner) failWith(w io.Writer, err error) error {
+	if err == nil || w == nil {
+		return err
+	}
+	text := r.stderr
+	if len(r.stderrQueue) > 0 {
+		text, r.stderrQueue = r.stderrQueue[0], r.stderrQueue[1:]
+	}
+	_, _ = io.WriteString(w, text)
+	return err
 }
 
 // writeOut returns a function that writes a scripted answer to the captured stdout and
@@ -215,7 +237,7 @@ func (r *recRunner) afterPreflight(t *testing.T, verb, resource string) []rrCall
 	// review, where RBAC would also evaluate namespaced Roles and could answer yes
 	// for a permission the cluster-scoped action does not actually have.
 	want := []string{"auth", "can-i", verb, resource}
-	if clusterScoped[resource] {
+	if rbac.ClusterScoped(resource) {
 		want = append(want, "--all-namespaces")
 	} else {
 		want = append(want, "-n", "solace")
@@ -261,17 +283,17 @@ func TestTransportExecArgs(t *testing.T) {
 		{
 			"Run primary",
 			func() { _ = tr.Run(ctx, config.Primary, "show", "version") },
-			rrCall{"Run", "kubectl", []string{"exec", "-n", "solace", "dev-broker-pubsubplus-p-0", "--", "show", "version"}, ""},
+			rrCall{"Run", "kubectl", []string{"exec", "dev-broker-pubsubplus-p-0", "-n", "solace", "--", "show", "version"}, ""},
 		},
 		{
 			"Output backup",
 			func() { _, _ = tr.Output(ctx, config.Backup, "hostname") },
-			rrCall{"Output", "kubectl", []string{"exec", "-n", "solace", "dev-broker-pubsubplus-b-0", "--", "hostname"}, ""},
+			rrCall{"Output", "kubectl", []string{"exec", "dev-broker-pubsubplus-b-0", "-n", "solace", "--", "hostname"}, ""},
 		},
 		{
 			"OutputInput monitor adds -i and rides stdin",
 			func() { _, _ = tr.OutputInput(ctx, config.Monitor, []byte("user = \"a:b\"\n"), "curl", "-K", "-") },
-			rrCall{"OutputInput", "kubectl", []string{"exec", "-i", "-n", "solace", "dev-broker-pubsubplus-m-0", "--", "curl", "-K", "-"}, "user = \"a:b\"\n"},
+			rrCall{"OutputInput", "kubectl", []string{"exec", "-i", "dev-broker-pubsubplus-m-0", "-n", "solace", "--", "curl", "-K", "-"}, "user = \"a:b\"\n"},
 		},
 	}
 	for _, tc := range cases {
@@ -305,7 +327,7 @@ func TestTransportUpload(t *testing.T) {
 	got := rr.last()
 	want := rrCall{
 		"RunInput", "kubectl",
-		[]string{"exec", "-i", "-n", "solace", "dev-broker-pubsubplus-p-0", "--", "sh", "-c", "cat > '" + dest + "'"},
+		[]string{"exec", "-i", "dev-broker-pubsubplus-p-0", "-n", "solace", "--", "sh", "-c", "cat > '" + dest + "'"},
 		secret,
 	}
 	if got.method != want.method || got.name != want.name || !eqArgs(got.args, want.args) || got.stdin != want.stdin {
@@ -381,7 +403,7 @@ func TestTransportEchoHidesUploadBody(t *testing.T) {
 	// anchors are the pod and the shell it is handed -- the skeleton's own body is
 	// multi-line and shell-quoted, and matching a fragment of it would break on any
 	// whitespace change without protecting anything.
-	if !strings.Contains(out, "dev-broker-pubsubplus-p-0 -- sh -c ") {
+	if !strings.Contains(out, "dev-broker-pubsubplus-p-0 -n solace -- sh -c ") {
 		t.Errorf("Echo missing the cli exec line:\n%s", out)
 	}
 	// The shell still runs the CLI, and runs THIS call's script: the broker-side
@@ -404,7 +426,7 @@ func TestTransportEchoHidesUploadBody(t *testing.T) {
 // The single-probe helper cannot serve here: it asserts calls[0] is the only probe and
 // returns calls[1:], so an operation that legitimately asks about seven kinds would
 // look like six stray calls before its real work.
-func (r *recRunner) afterPreflights(t *testing.T, want ...probe) []rrCall {
+func (r *recRunner) afterPreflights(t *testing.T, want ...rbac.Probe) []rrCall {
 	t.Helper()
 	got := map[string]bool{}
 	i := 0
@@ -420,9 +442,13 @@ func (r *recRunner) afterPreflights(t *testing.T, want ...probe) []rrCall {
 	}
 	for _, p := range want {
 		// target, not resource: a named probe's argv carries `resource/name`.
-		if !got[p.verb+" "+p.target()] {
+		target := p.Resource
+		if p.Name != "" {
+			target += "/" + p.Name
+		}
+		if !got[p.Verb+" "+target] {
 			t.Errorf("no probe for %q %q -- an operation must ask about every kind it touches, or it passes "+
-				"the check and fails halfway through the work", p.verb, p.target())
+				"the check and fails halfway through the work", p.Verb, target)
 		}
 	}
 	return r.calls[i:]

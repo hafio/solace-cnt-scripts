@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/kube"
 	"github.com/spf13/cobra"
 
 	"solace/internal/config"
@@ -523,58 +524,36 @@ func TestPlatformOpsCoversEveryPlatform(t *testing.T) {
 	}
 }
 
-// TestLogArgsBuildsOneSetForBothPlatforms pins the shared builder. The two argv
-// builders must not disagree about what a flag means, which is why the tokens are
-// produced once rather than assembled per platform.
-func TestLogArgsBuildsOneSetForBothPlatforms(t *testing.T) {
-	// Nothing set means nothing appended: `logs broker` prints a snapshot and exits,
+// TestLogOptionsBuildsOneSetForBothPlatforms pins the shared builder. The platforms must
+// not disagree about what a flag means, which is why the options are produced once rather
+// than assembled per platform.
+func TestLogOptionsBuildsOneSetForBothPlatforms(t *testing.T) {
+	// Nothing set means nothing asked for: `logs broker` prints a snapshot and exits,
 	// which is the behaviour change from the old hard-coded follow.
-	if got, err := logArgs(&App{}); err != nil || len(got) != 0 {
-		t.Errorf("logArgs with no flags = %v, %v; want no tokens at all", got, err)
+	if got, err := logOptions(&App{}); err != nil || got != (kube.LogOptions{}) {
+		t.Errorf("logOptions with no flags = %+v, %v; want the zero options", got, err)
 	}
 
 	a := &App{follow: true, tail: "100", since: "90m", timestamps: true}
-	got, err := logArgs(a)
+	got, err := logOptions(a)
 	if err != nil {
-		t.Fatalf("logArgs: %v", err)
+		t.Fatalf("logOptions: %v", err)
 	}
-	want := []string{"-f", "--tail", "100", "--since", "1h30m0s", "--timestamps"}
-	if len(got) != len(want) {
-		t.Fatalf("logArgs = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("logArgs[%d] = %q, want %q", i, got[i], want[i])
-		}
-	}
-
 	// --since is canonicalised, not passed through: `90m` became `1h30m0s`, so what
 	// reaches an argv is a string time.Duration produced.
-	if got[4] == "90m" {
-		t.Error("--since must be canonicalised through the duration parser, not forwarded verbatim")
+	want := kube.LogOptions{Follow: true, Tail: "100", Since: "1h30m0s", Timestamps: true}
+	if got != want {
+		t.Errorf("logOptions = %+v, want %+v", got, want)
 	}
 
 	// A bad duration fails here, before any argv is built.
-	if _, err := logArgs(&App{since: "yesterday"}); err == nil {
+	if _, err := logOptions(&App{since: "yesterday"}); err == nil {
 		t.Error("an unparseable --since must be refused rather than reaching the engine")
 	}
 
-	// --previous is deliberately NOT in the shared set: it is kubernetes-only and
-	// appended by the one handler that has it.
-	for _, tok := range logArgs2(t, &App{previous: true}) {
-		if tok == "-p" || tok == "--previous" {
-			t.Error("logArgs must not carry --previous: it is kubernetes-only, so the handler appends it")
-		}
+	// --previous is deliberately NOT in the shared set: it is kubernetes-only and set by
+	// the one handler that has it.
+	if o, err := logOptions(&App{previous: true}); err != nil || o.Previous {
+		t.Errorf("logOptions must not carry --previous: it is kubernetes-only, so the handler sets it (%+v, %v)", o, err)
 	}
-}
-
-// logArgs2 is logArgs with the error asserted away, for the cases that are about the
-// token list rather than the parsing.
-func logArgs2(t *testing.T, a *App) []string {
-	t.Helper()
-	got, err := logArgs(a)
-	if err != nil {
-		t.Fatalf("logArgs: %v", err)
-	}
-	return got
 }

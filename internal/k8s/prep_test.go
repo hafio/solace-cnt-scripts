@@ -11,8 +11,77 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/kube/rbac"
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
 )
+
+// TestKubeHelpersGuardTheCommand: every helper that builds a kubectl command takes its
+// argv from the execution guard, so a refused kubernetes.command is refused before
+// anything runs, whichever helper a step goes through -- including the refusal hint a
+// missing namespace gets, which names the command to run.
+func TestKubeHelpersGuardTheCommand(t *testing.T) {
+	ctx := context.Background()
+	get := func(base []string) runner.Cmd { return kube.GetNamespace(base, "solace") }
+	refusal := rbac.Check(rbac.Probe{Verb: "create", Resource: "namespaces"}, "no\n", "", nil)
+	for _, tc := range []struct {
+		name string
+		call func(c *Cluster) error
+	}{
+		{"runKube", func(c *Cluster) error { return c.runKube(ctx, get) }},
+		{"outKube", func(c *Cluster) error { _, err := c.outKube(ctx, get); return err }},
+		{"teeKube", func(c *Cluster) error { _, err := c.teeKube(ctx, get); return err }},
+		{"outTeeKube", func(c *Cluster) error { _, _, err := c.outTeeKube(ctx, get); return err }},
+		{"getJSONTee", func(c *Cluster) error {
+			var v any
+			_, err := c.getJSONTee(ctx, &v, getRead{what: []string{"pods"}})
+			return err
+		}},
+		{"preflight", func(c *Cluster) error { return c.PreflightAll(ctx, rbac.Probe{Verb: "create", Resource: "secrets"}) }},
+		{"missingNamespace", func(c *Cluster) error { return c.missingNamespace("solace", refusal) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := &recRunner{}
+			c := newCluster(rr)
+			c.Cfg.K8s.Command = config.Command{"curl"}
+			err := tc.call(c)
+			var refused *rbac.RefusedError
+			if err == nil || errors.As(err, &refused) {
+				t.Fatalf("err = %v, want the guard's refusal of the command", err)
+			}
+			if len(rr.calls) != 0 {
+				t.Errorf("the guard must stop before anything runs, but %d call(s) ran: %+v", len(rr.calls), rr.calls)
+			}
+		})
+	}
+}
+
+// TestCreateNamespaceRefusesANamespaceThatIsNotALabel: Load refuses such a namespace
+// first; a Config that skipped Load still gets no manifest, since kube.NamespaceManifest
+// refuses the name after the read and the probe and before any apply.
+func TestCreateNamespaceRefusesANamespaceThatIsNotALabel(t *testing.T) {
+	rr := &recRunner{}
+	c := newCluster(rr)
+	c.Cfg.K8s.Namespace = "Bad_NS"
+	if err := c.CreateNamespace(context.Background()); err == nil || !strings.Contains(err.Error(), `"Bad_NS"`) {
+		t.Fatalf("CreateNamespace = %v, want an error naming the namespace", err)
+	}
+	if len(rr.calls) != 2 || rr.calls[1].method == "RunInput" {
+		t.Errorf("calls = %+v, want the read and the probe, and no apply", rr.calls)
+	}
+}
+
+// TestGenBrokerRefusesANamespaceThatIsNotALabel: the generated stream leads with the
+// Namespace document, so a name kube.NamespaceManifest refuses yields no stream at all.
+func TestGenBrokerRefusesANamespaceThatIsNotALabel(t *testing.T) {
+	cfg := haCfg()
+	cfg.K8s.Namespace = "Bad_NS"
+	if got, err := GenBroker(cfg); err == nil || got != nil || !strings.Contains(err.Error(), `"Bad_NS"`) {
+		t.Fatalf("GenBroker = %q, %v, want no stream and an error naming the namespace", got, err)
+	}
+}
 
 // adminCfg is haCfg with the minimum admin fields AdminSecret requires, so
 // CreateSecrets/DeleteSecrets tests are hermetic (no dependency on env/sample.yaml).
@@ -50,68 +119,32 @@ func TestCreateNamespaceApplyFails(t *testing.T) {
 	}
 }
 
-// TestDeleteNamespace exercises the ordinary path: the permission probe passes
-// and the delete is issued directly, with no enumeration of the namespace's
-// contents here -- that is NamespaceContents' job, upstream of this call.
+// TestDeleteNamespace exercises the ordinary path: the delete is issued directly through
+// kube.DeleteNamespace, with no probe and no enumeration of the namespace's contents here --
+// the gate in internal/cli ran both (NamespaceOccupants, then the delete probe) before the
+// question that precedes this call.
 func TestDeleteNamespace(t *testing.T) {
 	rr := &recRunner{}
 	c := newCluster(rr)
 	if err := c.DeleteNamespace(context.Background()); err != nil {
 		t.Fatalf("DeleteNamespace: %v", err)
 	}
-	calls := rr.afterPreflight(t, "delete", "namespaces")
-	if len(calls) != 1 {
-		t.Fatalf("DeleteNamespace made %d calls after the probe, want 1 delete", len(calls))
+	if len(rr.calls) != 1 {
+		t.Fatalf("DeleteNamespace made %d calls, want 1 delete and nothing else: %+v", len(rr.calls), rr.calls)
 	}
-	got := calls[0]
+	got := rr.calls[0]
 	want := []string{"delete", "namespace", "solace", "--ignore-not-found"}
 	if got.method != "Run" || got.name != "kubectl" || !eqArgs(got.args, want) {
 		t.Errorf("DeleteNamespace argv = %+v, want Run kubectl %v", got, want)
 	}
 }
 
-// TestDeleteNamespaceProtected pins protectedNamespaces' floor: none of the four
-// Kubernetes system namespaces is ever deleted, and -- unlike every other guard
-// in DeleteNamespace -- the refusal happens before the cluster is asked
-// anything at all, RBAC probe included.
-func TestDeleteNamespaceProtected(t *testing.T) {
-	for _, ns := range []string{"default", "kube-system", "kube-public", "kube-node-lease"} {
-		t.Run(ns, func(t *testing.T) {
-			cfg := haCfg()
-			cfg.K8s.Namespace = ns
-			rr := &recRunner{}
-			c := NewCluster(rr, cfg, nil, nil)
-			err := c.DeleteNamespace(context.Background())
-			if err == nil {
-				t.Fatalf("DeleteNamespace(%s) should be refused", ns)
-			}
-			if !strings.Contains(err.Error(), ns) {
-				t.Errorf("error = %v, want it to name the namespace", err)
-			}
-			if len(rr.calls) != 0 {
-				t.Errorf("a protected namespace must not reach the cluster at all; got %d calls: %+v", len(rr.calls), rr.calls)
-			}
-		})
-	}
-}
-
-// TestDeleteNamespaceStopsOnPreflightFailure proves a refused permission stops
-// DeleteNamespace before any `kubectl delete` is issued -- the same shape as
-// TestCreateSecretsStopsOnPreflightFailure, but for the namespace teardown.
-func TestDeleteNamespaceStopsOnPreflightFailure(t *testing.T) {
-	rr := &recRunner{canI: "no"}
-	c := newCluster(rr)
-	err := c.DeleteNamespace(context.Background())
-	if err == nil {
-		t.Fatal("DeleteNamespace must fail when the permission probe answers no")
-	}
-	if !strings.Contains(err.Error(), "not allowed to delete namespaces") {
-		t.Errorf("error = %v, want it to name the refused permission", err)
-	}
-	for _, call := range rr.calls {
-		if len(call.args) > 0 && call.args[0] == "delete" {
-			t.Error("no delete namespace call must be issued after an RBAC denial")
-		}
+// TestDeleteNamespaceReturnsAFailedDelete: the delete's failure is returned as it is, for
+// the gate to word as a warning -- it is not swallowed here.
+func TestDeleteNamespaceReturnsAFailedDelete(t *testing.T) {
+	c := newCluster(&recRunner{runErr: errFake})
+	if err := c.DeleteNamespace(context.Background()); !errors.Is(err, errFake) {
+		t.Errorf("DeleteNamespace err = %v, want the runner's failure", err)
 	}
 }
 
@@ -581,8 +614,7 @@ func TestUpdateServerCertSecret(t *testing.T) {
 		if err := c.UpdateServerCertSecret(context.Background()); err == nil {
 			t.Error("UpdateServerCertSecret should fail when tls.certKey is not configured")
 		}
-		if calls := rr.afterPreflights(t, probe{verb: "get", resource: "secrets"},
-			probe{verb: "patch", resource: "secrets"}); len(calls) != 0 {
+		if calls := rr.afterPreflights(t, rbac.Probe{Verb: "patch", Resource: "secrets"}); len(calls) != 0 {
 			t.Errorf("no apply should run when TLSSecret fails to build; got %d calls after the probe", len(calls))
 		}
 	})
@@ -1171,14 +1203,14 @@ func TestGenBrokerStopsWhenASecretCannotBeBuilt(t *testing.T) {
 	}
 }
 
-// TestUpdateServerCertSecretStopsOnPreflightFailure: a refused `auth can-i get secrets` stops the
+// TestUpdateServerCertSecretStopsOnPreflightFailure: a refused `auth can-i patch secrets` stops the
 // rotation before it reads the certificate and private key off disk -- loading key material for a
 // cluster that will not accept it is work not worth doing -- and before any apply.
 func TestUpdateServerCertSecretStopsOnPreflightFailure(t *testing.T) {
 	rr := &recRunner{canI: "no"}
 	c := NewCluster(rr, tlsCfg(t), nil, nil)
 	err := c.UpdateServerCertSecret(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "not allowed to get secrets") {
+	if err == nil || !strings.Contains(err.Error(), "not allowed to patch secrets") {
 		t.Fatalf("UpdateServerCertSecret err = %v, want the refused permission named", err)
 	}
 	if len(rr.calls) != 1 {
@@ -1187,18 +1219,22 @@ func TestUpdateServerCertSecretStopsOnPreflightFailure(t *testing.T) {
 }
 
 // TestUpdateServerCertSecretProbesWhatApplyUses: rewriting an existing Secret with `kubectl
-// apply` is a GET then a PATCH -- never the PUT `update` names -- so those are the verbs
-// probed. Probing `update` refused a Role granting exactly get and patch, and passed one
-// granting update alone, which then failed inside the apply.
+// apply` is a GET then a PATCH -- never the PUT `update` names -- so the write, patch, is
+// the verb probed, and the read is not (reads are not requirements). Probing `update`
+// refused a Role granting exactly get and patch, and passed one granting update alone,
+// which then failed inside the apply.
 func TestUpdateServerCertSecretProbesWhatApplyUses(t *testing.T) {
 	rr := &recRunner{canIByVerb: map[string]string{"update": "no"}}
 	c := NewCluster(rr, tlsCfg(t), nil, nil)
 	if err := c.UpdateServerCertSecret(context.Background()); err != nil {
 		t.Fatalf("a get+patch identity must be able to rotate the Secret: %v", err)
 	}
-	rest := rr.afterPreflights(t, probe{verb: "get", resource: "secrets"}, probe{verb: "patch", resource: "secrets"})
+	rest := rr.afterPreflights(t, rbac.Probe{Verb: "patch", Resource: "secrets"})
 	if len(rest) != 1 || rest[0].method != "RunInput" {
-		t.Errorf("after the probes, want only the apply: %+v", rest)
+		t.Errorf("after the probe, want only the apply: %+v", rest)
+	}
+	if _, asked := rr.probedNamespace("get", "secrets"); asked {
+		t.Error("get on secrets is a read, so it is not probed as a requirement")
 	}
 }
 

@@ -68,7 +68,9 @@ refresh that fails mid-watch is shown and retried rather than ending it.
 ## The preflight
 
 Every command that writes a file or changes remote state runs one cheap **read-only** probe
-first, using the same command the real work will use:
+first, using the same command the real work will use. On Kubernetes the probes ask about
+**writes only**: a read is made, never probed as a requirement, and a refused read becomes a
+warning (see [Permissions](#permissions)).
 
 | Platform | Probe | Answers |
 | --- | --- | --- |
@@ -79,11 +81,14 @@ If it fails, the command stops nonzero **before the first byte is written**, pas
 CLI's own error through, and adds one line saying what to do -- log in, ask for a role
 binding (a cluster role binding for a cluster-wide question, which a role binding cannot
 grant), start the daemon. kubectl spells a refusal `no`, `no - <reason>` or
-`no (<evaluation error>)`, and all three are read as the refusal they are. `broker deploy`
+`no (<evaluation error>)`, and all three are read as the refusal they are; the message names
+the permission, where it applies (`namespace "solace"`, `the cluster`, or `the current
+namespace` when the context supplies it) and the binding to ask for. `broker deploy`
 asks whether it may create every kind it writes before its first write, and `broker remove`
 about every kind it will delete before its first delete, so a refused grant cannot stop
-either halfway. The namespace a removal empties is the exception: it is probed only when it
-is deleted, after the broker is gone. (A re-deploy's `kubectl apply` also patches what already exists; `patch` is
+either halfway. The namespace a removal empties is the exception: `delete namespaces` is
+probed only after the broker is gone, and before the question, so nobody is asked and then
+refused; a refusal keeps the namespace with a warning and the removal still succeeds. (A re-deploy's `kubectl apply` also patches what already exists; `patch` is
 not asked about in advance.) It never logs you in or starts anything on your behalf, and
 there is no flag to skip it: previewing a command's effect without touching a cluster is
 what `generate` is for, and a render-only command never runs the preflight because it never
@@ -105,16 +110,16 @@ bound only inside the broker namespace can deploy, report on and remove its brok
 
 | Command | Needs, in the broker namespace | Used when allowed; otherwise a warning |
 | --- | --- | --- |
-| `broker deploy` | `get`, `create`, `patch` on the broker resource and on Secrets -- `create` and the CR's `get` are asked before the first write, `patch` (a re-deploy) is not; `create namespaces` only when the namespace does not exist yet | `get` on the namespace itself; `get` on PVCs (the [admin-password data check](configuration.md#the-admin-secret)); `get` on pods (the restart offer after a renewed certificate) |
+| `broker deploy` | `create` on the broker resource and on Secrets -- asked before the first write; `patch` (a re-deploy) is not; `create namespaces` only when the namespace does not exist yet | `get` on the broker resource (the read-back after the apply; refused, it warns that the apply could not be confirmed); `get` on the namespace itself; `get` on PVCs (the [admin-password data check](configuration.md#the-admin-secret); refused, it warns); `get` on pods (the restart offer after a renewed certificate) |
 | `validate`, `broker validate` | `create` on the broker resource (a `[FAIL]` row) | Deployments listed cluster-wide (else the operator namespace is read by name); StorageClasses, which are cluster-scoped (else `[SKIP]`) |
 | `broker status` | `get` on the broker resource | `get` on pods, Services, StatefulSets and, with `--detail`, PVCs -- each section this identity may not read is a `[SKIP]` row |
 | `broker status --all` | `list` on the broker resource in every namespace | -- |
-| `broker remove` | `delete` on the broker resource, on the Secrets this env file owns and, with `--delete-data`, on PVCs -- all asked before the first delete; `delete namespaces` (cluster-wide) only when the removal leaves the namespace empty and its deletion is confirmed -- refused, the removal ends with that refusal, the broker already gone | listing what is left in the namespace (else the namespace is kept) |
+| `broker remove` | `delete` on the broker resource, on the Secrets this env file owns and, with `--delete-data`, on PVCs -- all asked before the first delete | listing what is left in the namespace; `delete namespaces` (cluster-wide), probed after the broker is gone and before the question -- a refusal, a decline, no terminal or a failed delete keeps the namespace with a warning, and the removal itself succeeds |
 | `broker cli`, `shell`, `copy`, `configure`, `perform` | `create` on `pods/exec`, `get` on pods; `get` on Secrets where the admin password is read back; `configure server-certs` also `get` and `patch` on the TLS Secret | -- |
 | `broker logs` | `get` on pods and `pods/log` | -- |
-| `broker start`, `stop`, `restart` | scaling the StatefulSets (`statefulsets/scale`, start and stop), `delete` on pods (restart), `get` and `watch` on StatefulSets to follow the rollout | -- |
+| `broker start`, `stop`, `restart` | scaling the StatefulSets (`statefulsets/scale`, start and stop), `delete` on pods (restart) | `get` and `watch` on StatefulSets to follow the rollout; a refused wait warns that the change was applied and the step succeeds (a timeout still fails) |
 | `operator status` | -- | `get` on Deployments in the operator namespace (else a `[SKIP]` row) |
-| `operator deploy`, `remove` | Cluster-wide: CRDs (`remove` only with `--delete-crd`, which also lists the broker resource in every namespace), ClusterRoles and ClusterRoleBindings; in the operator namespace: ServiceAccounts, Roles, RoleBindings, Deployments, and the image-pull Secret when credentials are set | Deployments listed cluster-wide (else the operator namespace is read by name) |
+| `operator deploy`, `remove` | Cluster-wide: CRDs (`remove` only with `--delete-crd`, which also reads the broker resource in every namespace before the first delete -- a read, not probed; a refusal stops the removal there with nothing deleted), ClusterRoles and ClusterRoleBindings; in the operator namespace: ServiceAccounts, Roles, RoleBindings, Deployments, and the image-pull Secret when credentials are set | Deployments listed cluster-wide (else the operator namespace is read by name) |
 
 The built-in `admin` and `edit` roles do **not** cover the broker resource: they grant only
 what ClusterRoles labelled `aggregate-to-admin`/`aggregate-to-edit` add, and the operator
@@ -275,7 +280,9 @@ solace-util broker perform assert-leader -e dev.yaml     # HA only, once the pri
 ```
 
 On Kubernetes, `broker deploy` reads the CR back after applying it, since `kubectl apply`
-exiting 0 does not prove the object actually exists. It creates the namespace only when it is
+exiting 0 does not prove the object actually exists; an identity that may create the broker
+but not get it is warned that the apply could not be confirmed, and the deploy succeeds. It
+creates the namespace only when it is
 missing: a namespace that exists -- the usual case for an identity confined to it -- is read
 by name and left alone, so `create namespaces`, which only a cluster-wide grant gives, is
 asked for only when there is a namespace to create. An identity that may neither read the
@@ -1200,7 +1207,8 @@ Deleting the CRDs is the sharper of the two layers, because they are cluster-wid
 cascade-deletes **every** PubSubPlusEventBroker in the cluster, including ones this env file
 has never heard of. So `--delete-crd` refuses outright while any PubSubPlusEventBroker still
 exists anywhere -- each is named `<namespace>/<name>` in the refusal, and a failure to even
-list them refuses too, as does an identity that may not list them in every namespace. The
+list them refuses too, as does an identity that may not list them in every namespace (that
+list is read for real before the first delete, not probed with the writes). The
 refusal comes **before anything is deleted**: the operator stays installed and the error says
 so, so a retry once the brokers are gone does the whole job. Without `--delete-crd` the CRDs
 are kept and nothing about them is asked or required.
@@ -1253,32 +1261,57 @@ Two more properties hold on every path:
 ### The namespace is only offered when it is empty
 
 The namespace is **never in the delete set**. After everything this env file owns is gone,
-what remains is enumerated, and only an otherwise-empty namespace is *offered* for removal --
-as its own question, which `--no-prompt` answers yes.
+what remains is listed, and only a namespace holding nothing of anyone else's is *offered*
+for removal -- as its own question, which `--no-prompt` answers yes.
 
 An occupied namespace is **listed and kept, on every path, `--no-prompt` included**. There is
 no flag that deletes it: deleting a namespace takes everything in it, including objects
 another team put there, and this tool may not have created it in the first place.
 
-- Four Kubernetes system namespaces -- `default`, `kube-system`, `kube-public`,
-  `kube-node-lease` -- are refused outright and unconditionally. There is no interpretation
-  of "delete kube-system" this tool should ever carry out.
-- Occupancy is checked ownership-BLIND, by one classifier (`Cluster.NamespaceContents`): it
-  lists a fixed set of kinds (`all`, PersistentVolumeClaims, Secrets, ConfigMaps) and
-  discounts only what Kubernetes itself puts in every namespace -- the `kube-root-ca.crt`
-  ConfigMap and the default ServiceAccount (without that, no namespace would ever read as
-  empty) -- plus a LimitRange, ResourceQuota or Event, which are cluster policy rather than
-  occupancy. Anything else still there blocks removal, with no further judgement of who put
-  it there: **a second Solace broker sharing the namespace** blocks it exactly like anything
-  else would.
-- **Retained data keeps the namespace too.** Without `--delete-data` the PVCs are still
-  there, so the namespace is not empty and is kept -- which is what makes "delete the
-  namespace and take the retained data with it" impossible to reach by accident rather than
-  merely discouraged.
-- A failure to even list the contents keeps the namespace: being unable to see what is in
-  there is not permission to proceed. That direction is the whole safety property -- a
-  namespace wrongly reported empty gets cascade-deleted, while one wrongly reported occupied
-  merely stays.
+The gate is the one `solmq-conn-util` runs, and it **never fails the removal**: by the time it
+runs the broker, its data (if asked) and its Secrets are already gone, so every way out short
+of a confirmed delete keeps the namespace with a warning and the command still succeeds. It
+runs in this order, stopping at the first step that does not pass:
+
+1. The four Kubernetes system namespaces -- `default`, `kube-system`, `kube-public`,
+   `kube-node-lease` -- are refused outright and unconditionally. There is no interpretation
+   of "delete kube-system" this tool should ever carry out.
+2. The namespace is listed (`get all,persistentvolumeclaims,secrets,configmaps -o json`) and
+   what is left is judged. A listing that fails or cannot be read keeps the namespace with a
+   warning: being unable to see what is in there is not permission to proceed. A runner that
+   answers nothing at all -- a dry run -- prints `check skipped (no answer from the runner)`
+   and keeps it quietly.
+3. If anything is left, it is listed and the namespace is kept. This is **not
+   ownership-blind**: these are discounted --
+   - the broker CR and everything the operator builds for it, which carry
+     `ownerReferences` back to it and are followed to the end: its StatefulSets, Pods,
+     Services and the Secrets the operator generates;
+   - the Secrets **this env file builds** (the admin, TLS, image-pull and additional-users
+     Secrets it owns). A Secret the env file only *names*
+     (`kubernetes.adminSecret`, `kubernetes.tlsServerSecret`, `kubernetes.imagePullSecret`
+     with nothing to build it from) is not owned, so it still counts;
+   - objects already being deleted (terminating);
+   - what Kubernetes itself puts in every namespace -- the `kube-root-ca.crt` ConfigMap, the
+     default ServiceAccount and the default ServiceAccount's token Secret (without that, no
+     namespace would ever read as empty) -- plus a LimitRange, ResourceQuota or Event, which
+     are cluster policy rather than occupancy.
+
+   Anything else blocks removal: **a second Solace broker sharing the namespace** blocks it,
+   because its objects hang off another CR.
+4. `delete namespaces` is probed **before** the question, cluster-wide (a namespace delete is
+   cluster-scoped, so a role binding in the namespace cannot grant it). Refused, or with no
+   usable answer, the namespace is kept with a warning and nobody is asked.
+5. The question (`--no-prompt` answers yes). A **no** keeps the namespace. So does a run with
+   **no terminal and no `--no-prompt`**: it keeps the namespace with a warning that names
+   `--no-prompt`, rather than failing the removal that already happened.
+6. The delete. If it fails, that is a warning and the namespace is kept.
+
+**Retained data keeps the namespace too.** Without `--delete-data` the PVCs are still there,
+and no `ownerReference` ties them to the broker, so the namespace is not empty and is kept --
+which is what makes "delete the namespace and take the retained data with it" impossible to
+reach by accident rather than merely discouraged. That direction is the whole safety property:
+a namespace wrongly reported empty gets cascade-deleted, while one wrongly reported occupied
+merely stays.
 
 **Docker and Podman have their own teardown wrinkles**, on top of the `--delete-data` layer.
 The sequence is: stop the container and remove it (Docker: `compose down`, fed the file
@@ -1338,7 +1371,11 @@ pushes to the primary -- though only once its read has shown it holds activity; 
 on Kubernetes or on the primary. A terminal is asked `[y/N]`; a
 session without one, and without `--no-prompt`, fails at once with exit 1 and an error that
 names `--no-prompt`, rather than destroying anything unattended. Declining at a terminal is an
-answer, not a failure: it prints nothing more and exits 0.
+answer, not a failure: it prints nothing more and exits 0. The one question that never fails
+the command is the namespace question that ends `broker remove`: by then the removal has
+happened, so with no terminal and no `--no-prompt` the namespace is kept with a warning that
+names `--no-prompt`, and the command exits 0 (see
+[the namespace gate](#the-namespace-is-only-offered-when-it-is-empty)).
 
 **A human is present when stdin is a terminal, and nothing else counts.** A terminal here is a
 character device. Without one, a destructive confirmation fails before asking: the question is

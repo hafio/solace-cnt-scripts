@@ -2,6 +2,7 @@ package cli
 
 import (
 	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/kube"
 	"github.com/spf13/cobra"
 
 	"solace/internal/config"
@@ -823,38 +824,23 @@ func addLogFlags(c *cobra.Command, app *App) {
 	registerFlagCompletion(c, "since", cobra.NoFileCompletions)
 }
 
-// logArgs turns the log flags into the passthrough tokens kubectl and the container
-// engines both accept. One builder for both platforms: the spellings are identical, and
-// a second copy is how one of them would quietly lose a flag.
+// logOptions turns the log flags into the kube.LogOptions kubectl takes. The container
+// engines read the same flags through their own options, so the flags are read in one
+// place and a second copy is not how one of them would quietly lose one.
 //
-// --tail and --since are emitted as two tokens rather than --flag=value because both
-// engines accept that form and it keeps the value a separate argv element. --since is
-// canonicalised through Go's duration parser first, so a free-form operator string never
-// needs charset checking -- round-tripping through a trusted parser beats enumerating
-// bad characters.
-func logArgs(a *App) ([]string, error) {
-	var args []string
-	if a.follow {
-		args = append(args, "-f")
-	}
-	if a.tail != "" {
-		args = append(args, "--tail", a.tail)
-	}
+// --tail is passed as given (kubectl validates it). --since is canonicalised through Go's
+// duration parser first, so a free-form operator string never needs charset checking --
+// round-tripping through a trusted parser beats enumerating bad characters.
+func logOptions(a *App) (kube.LogOptions, error) {
 	since, err := logSince(a)
 	if err != nil {
-		return nil, err
+		return kube.LogOptions{}, err
 	}
-	if since != "" {
-		args = append(args, "--since", since)
-	}
-	if a.timestamps {
-		args = append(args, "--timestamps")
-	}
-	return args, nil
+	return kube.LogOptions{Follow: a.follow, Tail: a.tail, Since: since, Timestamps: a.timestamps}, nil
 }
 
 // logSince is --since canonicalised through Go's duration parser, "" when it is not set.
-// Both the kubectl passthrough (logArgs) and the container engines' options take it, so
+// Both the kubectl options (logOptions) and the container engines' options take it, so
 // a free-form operator string never needs charset checking on either.
 func logSince(a *App) (string, error) {
 	d, err := config.CanonicalDuration("--since", a.since)

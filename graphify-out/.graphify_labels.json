@@ -8,8 +8,6 @@
   "17": "commands.go",
   "19": "Bash Dev Script",
   "21": "PowerShell Dev Script",
-  "24": "newLocalOps",
-  "26": "renderDriver",
   "30": "Solace Module Root",
   "34": "ResolveDomainCerts",
   "38": "annotate_test.go",

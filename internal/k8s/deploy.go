@@ -9,6 +9,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/kube/rbac"
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/render"
 )
 
@@ -25,13 +29,10 @@ const brokerYAMLFile = ".broker.yaml"
 func (c *Cluster) DeployBroker(ctx context.Context, keepYAML bool) error {
 	// Before the keepYAML write and before the apply: a deploy that cannot create
 	// the CR must not leave a manifest on disk suggesting it got further than it did.
-	// `get` is probed alongside `create` because ConfirmBrokerApplied reads the CR
-	// back immediately afterwards, and a deploy that could apply but not confirm would
-	// fail after the write rather than before it.
-	if err := c.PreflightAll(ctx,
-		probe{verb: "create", resource: brokerResource},
-		probe{verb: "get", resource: brokerResource},
-	); err != nil {
+	// Only the write is probed. ConfirmBrokerApplied reads the CR back afterwards, but a
+	// read-back is a confirmation, not a requirement: an identity that may create the CR
+	// and not get it still deploys, and is told the apply could not be confirmed.
+	if err := c.Preflight(ctx, "create", brokerResource); err != nil {
 		return err
 	}
 	manifest := render.BrokerCR(c.Cfg)
@@ -54,6 +55,10 @@ func (c *Cluster) DeployBroker(ctx context.Context, keepYAML bool) error {
 // of the confirmation -- readiness is NOT waited on, because the operator reconciles
 // asynchronously and `broker status` is the command for watching that.
 //
+// A read-back the cluster REFUSES (kube.Forbidden on kubectl's own words) is a warning, not
+// a failure: the apply was accepted, and an identity that may create the broker but not get
+// it cannot confirm it. Every other failure to read it back keeps its error.
+//
 // A runner that answers with NOTHING has not told us the broker is absent -- it has told
 // us nothing at all, which is a different fact and must not be reported as the alarming
 // one. That is the preview case (runner.Echo has no cluster behind it), and it is also
@@ -65,7 +70,14 @@ func (c *Cluster) DeployBroker(ctx context.Context, keepYAML bool) error {
 // nobody answered -- which is true of every silent runner, not just runner.Echo.
 func (c *Cluster) ConfirmBrokerApplied(ctx context.Context) error {
 	name := c.Cfg.K8s.Name
-	raw, err := c.kubectlOutput(ctx, "get", brokerResource, name, "-n", c.ns(), "-o", "json")
+	raw, stderr, err := c.outTeeKube(ctx, func(b []string) runner.Cmd {
+		return kube.Get(b, kube.GetOptions{Namespace: c.ns(), Output: "json"}, brokerResource, name)
+	})
+	if err != nil && kube.Forbidden(stderr) {
+		c.progress().Warn("broker %q was applied in namespace %q, but this identity may not read it back to "+
+			"confirm (get on %s)", name, c.ns(), brokerResource)
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("applied broker %q but could not read it back in namespace %q: %w\n"+
 			"  Check it with `solace-util broker validate`", name, c.ns(), err)
@@ -111,18 +123,19 @@ func (c *Cluster) deletesClaims(purge bool) bool {
 }
 
 // PreflightDeploy asks, before `broker deploy` writes anything, whether it may create what it
-// writes: create and get on the broker resource, and create on Secrets when this env file
+// writes: create on the broker resource, and create on Secrets when this env file
 // builds one -- the same questions each step asks just before its own write, asked up front
-// so a refusal lands before the FIRST write. (The patch a re-deploy's apply sends over an
-// existing object is not asked about, here or in the steps.) Without it, an identity bound to the
+// so a refusal lands before the FIRST write. Writes only: the read-back after the apply is
+// not asked about (ConfirmBrokerApplied warns when it is refused). (The patch a re-deploy's
+// apply sends over an existing object is not asked about, here or in the steps.) Without it, an identity bound to the
 // built-in edit role but not to the broker resource -- which edit does not cover -- had its
 // Secrets written and was then refused at the CR, leaving half a deployment behind. The
 // namespace is not asked about here: whether creating one is needed at all is known only
 // once it has been read (CreateNamespace).
 func (c *Cluster) PreflightDeploy(ctx context.Context) error {
-	probes := []probe{{verb: "create", resource: brokerResource}, {verb: "get", resource: brokerResource}}
+	probes := []rbac.Probe{{Verb: "create", Resource: brokerResource}}
 	if len(ownedSecretNames(c.Cfg)) > 0 {
-		probes = append(probes, probe{verb: "create", resource: "secrets"})
+		probes = append(probes, rbac.Probe{Verb: "create", Resource: "secrets"})
 	}
 	return c.PreflightAll(ctx, probes...)
 }
@@ -135,14 +148,14 @@ func (c *Cluster) PreflightDeploy(ctx context.Context) error {
 // gone used to end the removal there, leaving the TLS private key and the admin password
 // behind and a half-removed broker for the next run to make sense of. The namespace is not
 // asked about: it is deleted, if at all, only once the removal has left it empty and that
-// has been confirmed, and DeleteNamespace probes it then.
+// has been confirmed, and the namespace gate probes it then (removeNamespaceIfEmpty).
 func (c *Cluster) PreflightRemoval(ctx context.Context, purge bool) error {
-	probes := []probe{{verb: "delete", resource: brokerResource}}
+	probes := []rbac.Probe{{Verb: "delete", Resource: brokerResource}}
 	if c.deletesClaims(purge) {
-		probes = append(probes, probe{verb: "delete", resource: "persistentvolumeclaims"})
+		probes = append(probes, rbac.Probe{Verb: "delete", Resource: "persistentvolumeclaims"})
 	}
 	if len(ownedSecretNames(c.Cfg)) > 0 {
-		probes = append(probes, probe{verb: "delete", resource: "secrets"})
+		probes = append(probes, rbac.Probe{Verb: "delete", Resource: "secrets"})
 	}
 	return c.PreflightAll(ctx, probes...)
 }
@@ -163,9 +176,9 @@ func (c *Cluster) PreflightRemoval(ctx context.Context, purge bool) error {
 func (c *Cluster) DeleteBroker(ctx context.Context, purge bool) error {
 	// The claims are probed only when they will actually be deleted, so a removal
 	// that keeps the data does not demand a permission it never uses.
-	probes := []probe{{verb: "delete", resource: brokerResource}}
+	probes := []rbac.Probe{{Verb: "delete", Resource: brokerResource}}
 	if c.deletesClaims(purge) {
-		probes = append(probes, probe{verb: "delete", resource: "persistentvolumeclaims"})
+		probes = append(probes, rbac.Probe{Verb: "delete", Resource: "persistentvolumeclaims"})
 	}
 	if err := c.PreflightAll(ctx, probes...); err != nil {
 		return err

@@ -5,6 +5,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -95,6 +96,25 @@ func Run(ctx context.Context, r runner.Runner, c runner.Cmd) error {
 // transcript need the text more than they need the error alone.
 func Output(ctx context.Context, r runner.Runner, c runner.Cmd) ([]byte, error) {
 	return runner.Output(ctx, r, c, os.Stderr)
+}
+
+// RunTee is Run that also returns what the child wrote to stderr, which still reaches
+// this process's stderr as it arrives. It is for a step whose refusal must be told from
+// its other failures by the shared kube.Forbidden: the operator sees kubectl's own words
+// and the tool reads them too.
+func RunTee(ctx context.Context, r runner.Runner, c runner.Cmd) (string, error) {
+	var errBuf bytes.Buffer
+	err := r.Run(ctx, c, os.Stdout, io.MultiWriter(os.Stderr, &errBuf))
+	return errBuf.String(), err
+}
+
+// OutputTee is Output that also returns what the child wrote to stderr, streamed to this
+// process's stderr as well, for a read whose refusal must be told from its other
+// failures (kube.Forbidden).
+func OutputTee(ctx context.Context, r runner.Runner, c runner.Cmd) ([]byte, string, error) {
+	var out, errBuf bytes.Buffer
+	err := r.Run(ctx, c, &out, io.MultiWriter(os.Stderr, &errBuf))
+	return out.Bytes(), errBuf.String(), err
 }
 
 // Interactive wires this process's own terminal through to the child, for interactive

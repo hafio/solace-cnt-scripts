@@ -2,8 +2,8 @@ package k8s
 
 import (
 	"context"
-	"strings"
 
+	"github.com/hafio/go-deploy-utility/kube"
 	"github.com/hafio/go-deploy-utility/runner"
 
 	"solace/internal/broker"
@@ -11,11 +11,11 @@ import (
 	"solace/internal/engine"
 )
 
-// kubectlTransport implements broker.Transport by wrapping `kubectl exec/cp -n <ns>
-// <pod> --` against the broker pod for a role. Broker pods are single-container, so
-// no `-c` flag is used (050:30, 053:56, enter-solace-cli.sh:18). Every call routes
-// through the injected runner.Runner, so the Echo runner records the command without running
-// it and tests capture the exact argv.
+// kubectlTransport implements broker.Transport by wrapping `kubectl exec <pod> -n <ns>
+// --` and `kubectl cp -n <ns>` against the broker pod for a role. Broker pods are
+// single-container, so no `-c` flag is used (050:30, 053:56, enter-solace-cli.sh:18).
+// Every call routes through the injected runner.Runner, so the Echo runner records the
+// command without running it and tests capture the exact argv.
 type kubectlTransport struct {
 	r   runner.Runner
 	cfg *config.Config
@@ -36,53 +36,64 @@ func (k *kubectlTransport) ns() string { return k.cfg.K8s.Namespace }
 // straight from a *config.Config, so it must not assume Validate ever ran.
 func (k *kubectlTransport) cmd() (config.Command, error) { return k.cfg.ClusterCommand() }
 
-// execArgs builds `exec [-i] -n <ns> <pod> -- argv...` for a role's pod. stdin adds
-// the `-i` flag for commands that read stdin (Upload, OutputInput).
-func (k *kubectlTransport) execArgs(role config.Role, stdin bool, argv []string) []string {
-	args := []string{"exec"}
-	if stdin {
-		args = append(args, "-i")
+// base is the guarded cluster CLI as the argv the kube builders start from.
+func (k *kubectlTransport) base() ([]string, error) {
+	kc, err := k.cmd()
+	if err != nil {
+		return nil, err
 	}
-	args = append(args, "-n", k.ns(), podName(k.cfg, role), "--")
-	return append(args, argv...)
+	return kc.Argv(), nil
+}
+
+// execCmd builds `exec [-i] <pod> -n <ns> -- argv...` for a role's pod. stdin adds the
+// `-i` flag for commands that read stdin (OutputInput).
+func (k *kubectlTransport) execCmd(role config.Role, stdin bool, argv []string) (runner.Cmd, error) {
+	base, err := k.base()
+	if err != nil {
+		return runner.Cmd{}, err
+	}
+	return kube.Exec(base, podName(k.cfg, role), kube.ExecOptions{Namespace: k.ns(), Stdin: stdin}, argv...)
 }
 
 func (k *kubectlTransport) Run(ctx context.Context, role config.Role, argv ...string) error {
-	kc, err := k.cmd()
+	cmd, err := k.execCmd(role, false, argv)
 	if err != nil {
 		return err
 	}
-	return engine.Run(ctx, k.r, runner.Cmd{Argv: kc.Argv(k.execArgs(role, false, argv)...)})
+	return engine.Run(ctx, k.r, cmd)
 }
 
 func (k *kubectlTransport) Output(ctx context.Context, role config.Role, argv ...string) ([]byte, error) {
-	kc, err := k.cmd()
+	cmd, err := k.execCmd(role, false, argv)
 	if err != nil {
 		return nil, err
 	}
-	return engine.Output(ctx, k.r, runner.Cmd{Argv: kc.Argv(k.execArgs(role, false, argv)...)})
+	return engine.Output(ctx, k.r, cmd)
 }
 
 func (k *kubectlTransport) OutputInput(ctx context.Context, role config.Role, in []byte, argv ...string) ([]byte, error) {
-	kc, err := k.cmd()
+	cmd, err := k.execCmd(role, true, argv)
 	if err != nil {
 		return nil, err
 	}
-	return engine.Output(ctx, k.r, runner.Cmd{Argv: kc.Argv(k.execArgs(role, true, argv)...), Stdin: in})
+	cmd.Stdin = in
+	return engine.Output(ctx, k.r, cmd)
 }
 
 // Upload writes data to destPath inside the pod by piping it to `sh -c 'cat >
-// <dest>'` on stdin -- the secret-safe path: the body rides Cmd.Stdin (shown
-// as a byte count under the Echo runner), never an argv or a temp file. destPath is
-// tool-generated and validName-checked upstream, so shSingleQuote is defensive.
+// <dest>'` on stdin (kube.Upload) -- the secret-safe path: the body rides Cmd.Stdin
+// (shown as a byte count under the Echo runner), never an argv or a temp file. destPath
+// is tool-generated and validName-checked upstream, and kube.Upload quotes it anyway.
 func (k *kubectlTransport) Upload(ctx context.Context, role config.Role, data []byte, destPath string) error {
-	shcmd := "cat > " + shSingleQuote(destPath)
-	kc, err := k.cmd()
+	base, err := k.base()
 	if err != nil {
 		return err
 	}
-	argv := k.execArgs(role, true, []string{"sh", "-c", shcmd})
-	return engine.Run(ctx, k.r, runner.Cmd{Argv: kc.Argv(argv...), Stdin: data})
+	cmd, err := kube.Upload(base, podName(k.cfg, role), kube.ExecOptions{Namespace: k.ns()}, destPath, data, false)
+	if err != nil {
+		return err
+	}
+	return engine.Run(ctx, k.r, cmd)
 }
 
 // UploadFile copies a local file into the pod via
@@ -103,12 +114,4 @@ func (k *kubectlTransport) Download(ctx context.Context, role config.Role, remot
 		return err
 	}
 	return engine.Run(ctx, k.r, runner.Cmd{Argv: kc.Argv("cp", "-n", k.ns(), podName(k.cfg, role)+":"+remotePath, localPath)})
-}
-
-// shSingleQuote wraps s in single quotes for safe use inside `sh -c`, escaping any
-// embedded single quote (' -> '\''). Defensive: the only value passed to it is a
-// tool-generated, validName-checked destPath, but this guarantees no shell
-// metacharacter in a path can break out of the `cat >` redirect.
-func shSingleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

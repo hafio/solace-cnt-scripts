@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/kube"
 	"github.com/hafio/go-deploy-utility/runner"
 
 	"solace/internal/config"
@@ -463,10 +464,10 @@ func TestReportsDegradeRatherThanFalselyAlarm(t *testing.T) {
 	t.Run("malformed JSON names the command to run by hand", func(t *testing.T) {
 		c, _ := reportCluster(t, &fixtureRunner{})
 		var list brokerList
-		err := c.getJSON(context.Background(), &list, "garbage-kind")
+		err := c.getJSON(context.Background(), &list, getRead{what: []string{"garbage-kind"}})
 		_ = err // the fixture runner answers valid JSON; the shape below is the check
 		if e := (&Cluster{R: &badJSONRunner{}, Cfg: c.Cfg}).getJSON(
-			context.Background(), &list, "pods", "-n", "solace"); e == nil ||
+			context.Background(), &list, getRead{kube.GetOptions{Namespace: "solace"}, []string{"pods"}}); e == nil ||
 			!strings.Contains(e.Error(), "kubectl get") {
 			t.Errorf("err = %v, want it to name the command to run by hand", e)
 		}

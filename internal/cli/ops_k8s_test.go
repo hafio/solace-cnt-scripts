@@ -822,19 +822,18 @@ func TestOpsK8sStatusOperatorRefusesAClusterCommandTheGuardRejects(t *testing.T)
 	}
 }
 
-// TestOpsK8sLogsPreviousComesAfterTheSharedTokens: --previous is Kubernetes-only, so it is
-// appended by the Kubernetes handler rather than by logArgs, which builds only the tokens
-// every platform shares. It is added only when asked for, and it lands after the shared
-// tokens on the one pod --pod resolved -- the exact argv an operator reading a crashed
-// container's last words depends on.
-func TestOpsK8sLogsPreviousComesAfterTheSharedTokens(t *testing.T) {
+// TestOpsK8sLogsPreviousIsSetByTheKubernetesHandler: --previous is Kubernetes-only, so it is
+// set by the Kubernetes handler rather than by logOptions, which builds only the options
+// every platform shares. It is added only when asked for, on the one pod --pod resolved --
+// the exact argv an operator reading a crashed container's last words depends on.
+func TestOpsK8sLogsPreviousIsSetByTheKubernetesHandler(t *testing.T) {
 	cases := []struct {
 		name     string
 		previous bool
 		want     []string
 	}{
-		{"the current container", false, []string{"logs", "-n", "solace", "pod/dev-broker-pubsubplus-b-0", "--tail", "20"}},
-		{"--previous adds -p after the shared tokens", true, []string{"logs", "-n", "solace", "pod/dev-broker-pubsubplus-b-0", "--tail", "20", "-p"}},
+		{"the current container", false, []string{"logs", "pod/dev-broker-pubsubplus-b-0", "-n", "solace", "--tail", "20"}},
+		{"--previous adds -p", true, []string{"logs", "pod/dev-broker-pubsubplus-b-0", "-n", "solace", "-p", "--tail", "20"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -876,7 +875,7 @@ func TestOpsK8sOperatorLogsRefusesAnUnparseableSince(t *testing.T) {
 		if err != nil {
 			t.Fatalf("opK8sOperatorLogs err = %v, want nil", err)
 		}
-		want := []string{"logs", "-n", k8s.OperatorNamespace(cfg), "deployment/pubsubplus-eventbroker-operator", "--tail", "10", "--since", "5m0s"}
+		want := []string{"logs", "deployment/pubsubplus-eventbroker-operator", "-n", k8s.OperatorNamespace(cfg), "--tail", "10", "--since", "5m0s"}
 		if len(rr.calls) != 1 || !slices.Equal(rr.calls[0].args, want) {
 			t.Errorf("calls = \n%s\nwant one kubectl run with %q", rr.dump(), want)
 		}
@@ -911,7 +910,7 @@ func TestOpsK8sOperatorStartScalesUpAndWaitsWithoutAsking(t *testing.T) {
 	if want := "auth can-i patch deployments -n " + opNS; got[0] != want {
 		t.Errorf("first call = %q, want the permission probe %q", got[0], want)
 	}
-	if want := "scale deployment pubsubplus-eventbroker-operator -n " + opNS + " --replicas=1"; got[1] != want {
+	if want := "scale deployment/pubsubplus-eventbroker-operator -n " + opNS + " --replicas=1"; got[1] != want {
 		t.Errorf("second call = %q, want %q", got[1], want)
 	}
 	if want := "rollout status deployment/pubsubplus-eventbroker-operator -n " + opNS; !strings.HasPrefix(got[2], want) {
@@ -956,7 +955,7 @@ func TestOpsK8sOperatorStopConfirmsBecauseItFreezesEveryNamespace(t *testing.T) 
 					acted = append(acted, strings.Join(c.args, " "))
 				}
 			}
-			scale := "scale deployment pubsubplus-eventbroker-operator -n " + opNS + " --replicas=0"
+			scale := "scale deployment/pubsubplus-eventbroker-operator -n " + opNS + " --replicas=0"
 			switch {
 			case tc.scaled && !slices.Equal(acted, []string{scale}):
 				t.Errorf("acted = %q, want exactly %q and no rollout wait", acted, scale)
@@ -1125,7 +1124,7 @@ func TestOpsK8sRemoveBrokerStopsWhenASecretWillNotDelete(t *testing.T) {
 // configuration. Each broader read it cannot make becomes a warning or a [SKIP] row and none
 // fails the command, and it never applies a Namespace it could not patch. `broker status
 // --all`, which asks for the whole cluster, is refused; so is deleting the namespace a
-// removal empties, which is attempted as always and takes a cluster-wide grant.
+// removal empties, which takes a cluster-wide grant: it is probed, warned about and kept.
 func TestNamespaceScopedIdentityRunsTheBrokerLifecycle(t *testing.T) {
 	newApp := func(t *testing.T) (*App, *opRunner) {
 		t.Helper()
@@ -1147,6 +1146,9 @@ func TestNamespaceScopedIdentityRunsTheBrokerLifecycle(t *testing.T) {
 					return []byte("no\n")
 				case len(c.args) > 2 && c.args[0] == "get" && c.args[1] == "namespace":
 					return []byte("namespace/solace\n")
+				case c.method == "Output" && opArgvMatch(c, "persistentvolumeclaims,secrets,configmaps"):
+					// Its own namespace lists by name-scoped rights: only what Kubernetes puts there.
+					return []byte(`{"items":[{"kind":"ServiceAccount","metadata":{"name":"default"}}]}`)
 				}
 				return nil
 			},
@@ -1184,12 +1186,16 @@ func TestNamespaceScopedIdentityRunsTheBrokerLifecycle(t *testing.T) {
 	t.Run("broker remove --delete-data", func(t *testing.T) {
 		a, rr := newApp(t)
 		a.deleteLayer = true
-		_, _, err := opsK8sRun(t, func() error { return opK8sRemoveBroker(a) })
-		// The broker and its data go on namespace rights alone. The namespace that leaves empty
-		// is then deleted as it always was -- --no-prompt answers that question -- and that
-		// takes a cluster-wide grant, so the removal ends with the refusal, the namespace kept.
-		if err == nil || !strings.Contains(err.Error(), "not allowed to delete namespaces") {
-			t.Fatalf("err = %v, want the namespace delete refused once the broker is gone:\n%s", err, rr.dump())
+		_, errOut, err := opsK8sRun(t, func() error { return opK8sRemoveBroker(a) })
+		// The broker and its data go on namespace rights alone. The namespace that leaves
+		// empty is then offered as always, but deleting it takes a cluster-wide grant, which
+		// is probed before the question: the namespace is kept with a warning, and the
+		// removal -- everything this env file owns is gone -- still succeeds.
+		if err != nil {
+			t.Fatalf("err = %v, want the removal to succeed with the namespace kept:\n%s", err, rr.dump())
+		}
+		if !strings.Contains(errOut, "not allowed to delete namespaces") {
+			t.Errorf("stderr = %q, want a warning that namespaces may not be deleted", errOut)
 		}
 		var crDeleted, dataDeleted bool
 		for _, c := range rr.calls {
@@ -1261,63 +1267,120 @@ func TestOpsK8sRemoveBrokerRefusesBeforeTheFirstDelete(t *testing.T) {
 }
 
 // TestOpsK8sRemoveNamespaceIfEmptyKeepsTheNamespaceInDoubt pins when the namespace is
-// offered for deletion, which is only when nothing else is in it. A Kubernetes namespace is
-// never removed and a listing that cannot run keeps the namespace -- both on every path,
+// offered for deletion, which is only when nothing else is in it, and that the gate never
+// fails the removal that ran it. A Kubernetes namespace is never removed; a listing that
+// cannot run, cannot be read or comes back empty from a silent runner, an occupant, a refused
+// `delete namespaces`, a declined or unanswerable question and a failed delete each keep the
+// namespace with a warning (or, for a silent runner, a skipped-check row) -- on every path,
 // --no-prompt included, because a namespace wrongly reported empty is cascade-deleted while
-// one wrongly reported occupied merely stays. An empty one is still a question: a no or an
-// unanswerable prompt keeps it, and only a yes deletes it.
+// one wrongly reported occupied merely stays. The permission is asked BEFORE the question,
+// so nobody is asked and then refused. Only a yes deletes.
 func TestOpsK8sRemoveNamespaceIfEmptyKeepsTheNamespaceInDoubt(t *testing.T) {
+	const listing = "persistentvolumeclaims,secrets,configmaps"
+	const empty = `{"items":[{"kind":"ServiceAccount","metadata":{"name":"default"}}]}`
 	cases := []struct {
-		name      string
-		namespace string
-		listFails bool
-		set       func(*App)
-		deleted   bool
-		noCalls   bool
-		stderr    string
+		name         string
+		namespace    string
+		list         string // the listing the runner answers; "" answers nothing, as Echo does
+		listFails    bool
+		refuseDelete bool // `auth can-i delete namespaces` answers no
+		deleteFails  bool
+		set          func(*App)
+		deleted      bool
+		noCalls      bool
+		probed       bool // the delete permission was asked about
+		asked        bool // the question was put
+		stderr       string
+		stdout       string
 	}{
-		{"a Kubernetes namespace is never removed, even under --no-prompt", "kube-system", false, opsK8sSilenced, false, true,
-			`namespace "kube-system" is a Kubernetes namespace and is never removed by this tool`},
-		{"a listing that cannot run keeps the namespace, even under --no-prompt", "solace", true, opsK8sSilenced, false, false,
-			"could not list what is left in namespace"},
-		{"an empty namespace the operator declines stays", "solace", false, opsK8sAnswer("n\n"), false, false,
-			"Delete the now-empty namespace solace? [y/N] "},
-		{"an empty namespace with no terminal and no --no-prompt stays and fails naming the flag", "solace", false, opsK8sUnattended, false, false,
-			opsK8sGate("delete the now-empty namespace solace")},
-		{"an empty namespace the operator accepts is deleted", "solace", false, opsK8sAnswer("y\n"), true, false,
-			"Delete the now-empty namespace solace? [y/N] "},
+		{name: "a Kubernetes namespace is never removed, even under --no-prompt", namespace: "kube-system",
+			set: opsK8sSilenced, noCalls: true,
+			stderr: `namespace "kube-system" is a Kubernetes namespace and is never removed by this tool`},
+		{name: "a listing that cannot run keeps the namespace, even under --no-prompt", namespace: "solace",
+			listFails: true, set: opsK8sSilenced, stderr: "could not list what is left in namespace"},
+		{name: "a listing that is not JSON keeps the namespace", namespace: "solace", list: "NAME READY\n",
+			set: opsK8sSilenced, stderr: "the namespace listing is not JSON"},
+		{name: "a runner that answers nothing keeps it quietly, with a skipped-check row", namespace: "solace",
+			set: opsK8sSilenced, stdout: "check skipped (no answer from the runner)"},
+		{name: "an occupant keeps the namespace without asking or probing", namespace: "solace",
+			list: `{"items":[{"kind":"Deployment","metadata":{"name":"someone-elses-app"}}]}`,
+			set:  opsK8sSilenced, stderr: `namespace "solace" kept: 1 object(s) still in it`},
+		{name: "a refused delete permission keeps the namespace before any question", namespace: "solace",
+			list: empty, refuseDelete: true, set: opsK8sAnswer("y\n"), probed: true,
+			stderr: "not allowed to delete namespaces"},
+		{name: "an empty namespace the operator declines stays", namespace: "solace", list: empty,
+			set: opsK8sAnswer("n\n"), probed: true, asked: true, stderr: "Delete the now-empty namespace solace? [y/N] "},
+		{name: "an empty namespace with no terminal and no --no-prompt stays, warning that names the flag",
+			namespace: "solace", list: empty, set: opsK8sUnattended, probed: true,
+			stderr: opsK8sGate("delete the now-empty namespace solace")},
+		{name: "an empty namespace the operator accepts is deleted", namespace: "solace", list: empty,
+			set: opsK8sAnswer("y\n"), deleted: true, probed: true, asked: true,
+			stderr: "Delete the now-empty namespace solace? [y/N] "},
+		{name: "--no-prompt deletes an empty namespace without asking", namespace: "solace", list: empty,
+			set: opsK8sSilenced, deleted: true, probed: true},
+		{name: "a failed delete is a warning, not a failed removal", namespace: "solace", list: empty,
+			deleteFails: true, set: opsK8sSilenced, deleted: true, probed: true,
+			stderr: `namespace "solace" kept: could not delete it`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := writeK8sDeployAllEnv(t, "false")
 			cfg.K8s.Namespace = tc.namespace
-			rr := &opRunner{}
-			if tc.listFails {
-				rr.fail = func(c opCall) error {
-					if c.method == "Output" && opArgvMatch(c, "persistentvolumeclaims,secrets,configmaps") {
+			rr := &opRunner{
+				fail: func(c opCall) error {
+					switch {
+					case tc.listFails && c.method == "Output" && opArgvMatch(c, listing):
 						return errors.New("injected listing failure")
+					case tc.deleteFails && len(c.args) > 1 && c.args[0] == "delete" && c.args[1] == "namespace":
+						return errors.New("injected delete failure")
 					}
 					return nil
-				}
+				},
+				output: func(c opCall) []byte {
+					switch {
+					case opCanI(c) && tc.refuseDelete:
+						return []byte("no\n")
+					case c.method == "Output" && opArgvMatch(c, listing):
+						return []byte(tc.list)
+					}
+					return nil
+				},
 			}
 			a := &App{Cfg: cfg, Platform: config.K8s, Runner: rr}
 			tc.set(a)
-			_, errOut, err := opsK8sRun(t, func() error { return removeNamespaceIfEmpty(a, k8sCluster(a)) })
-			opsK8sCheckGate(t, err, tc.stderr) // keeping the namespace is not a failure; being unable to ask is
-			deleted := false
+			out, errOut, err := opsK8sRun(t, func() error { removeNamespaceIfEmpty(a, k8sCluster(a)); return nil })
+			if err != nil {
+				t.Fatalf("err = %v: the gate never fails the removal", err)
+			}
+			deleted, probed := false, false
 			for _, c := range rr.calls {
 				if len(c.args) > 1 && c.args[0] == "delete" && c.args[1] == "namespace" {
 					deleted = true
+				}
+				if opCanI(c) && opArgvMatch(c, "namespaces") {
+					probed = true
 				}
 			}
 			if deleted != tc.deleted {
 				t.Errorf("namespace deleted = %v, want %v:\n%s", deleted, tc.deleted, rr.dump())
 			}
+			if probed != tc.probed {
+				t.Errorf("`delete namespaces` probed = %v, want %v:\n%s", probed, tc.probed, rr.dump())
+			}
 			if tc.noCalls && len(rr.calls) != 0 {
 				t.Errorf("a protected namespace must not even be listed:\n%s", rr.dump())
 			}
-			if !opsK8sIsGate(tc.stderr) && !strings.Contains(errOut, tc.stderr) {
+			if asked := strings.Contains(errOut, "[y/N]"); asked != tc.asked {
+				t.Errorf("a question was asked = %v, want %v:\n%s", asked, tc.asked, errOut)
+			}
+			if !strings.Contains(errOut, tc.stderr) {
 				t.Errorf("stderr = %q, want it to carry %q", errOut, tc.stderr)
+			}
+			if !strings.Contains(out, tc.stdout) {
+				t.Errorf("stdout = %q, want it to carry %q", out, tc.stdout)
+			}
+			if tc.stdout == "" && strings.Contains(out, "check skipped") {
+				t.Errorf("a runner that answered must not report a skipped check:\n%s", out)
 			}
 		})
 	}

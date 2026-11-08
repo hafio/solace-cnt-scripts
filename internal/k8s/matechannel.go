@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/kube"
 	"github.com/hafio/go-deploy-utility/runner"
 
 	"solace/internal/broker"
@@ -59,14 +60,17 @@ func NewMateChannel(r runner.Runner, cfg *config.Config, site config.ReplSite,
 	pod := podNameFor(k.Name, config.Primary)
 
 	what := fmt.Sprintf("site %s (%s/%s)", site.VirtualRouterName, k.Namespace, pod)
+	base := cmd.Argv()
+	opts := kube.ExecOptions{Namespace: k.Namespace}
 	run := func(ctx context.Context, name, script string) ([]byte, error) {
 		// Upload on stdin, never as an argument: a replication script carries no
 		// secret today, but the body-on-stdin rule is the transport's and is not
 		// worth a local exception.
-		shcmd := "cat > " + shSingleQuote(broker.CLIScriptPath(name))
-		if _, err := engine.Output(ctx, r, runner.Cmd{
-			Argv:  cmd.Argv(execArgs(k.Namespace, pod, true, []string{"sh", "-c", shcmd})...),
-			Stdin: []byte(script)}); err != nil {
+		up, err := kube.Upload(base, pod, opts, broker.CLIScriptPath(name), []byte(script), false)
+		if err != nil {
+			return nil, fmt.Errorf("upload cli script %q to %s: %w", name, what, err)
+		}
+		if _, err := engine.Output(ctx, r, up); err != nil {
 			return nil, fmt.Errorf("upload cli script %q to %s: %w", name, what, err)
 		}
 		// Deleted on every path out, including a failed run. The LOCAL leg has always
@@ -81,15 +85,21 @@ func NewMateChannel(r runner.Runner, cfg *config.Config, site config.ReplSite,
 		// not turn a successful role change into a reported failure, and the operator
 		// can see it in the warning.
 		defer func() {
-			if _, err := engine.Output(ctx, r, runner.Cmd{Argv: cmd.Argv(execArgs(k.Namespace, pod, false,
-				[]string{"rm", "-f", broker.CLIScriptPath(name)})...)}); err != nil && log != nil {
+			rm, err := kube.Exec(base, pod, opts, "rm", "-f", broker.CLIScriptPath(name))
+			if err == nil {
+				_, err = engine.Output(ctx, r, rm)
+			}
+			if err != nil && log != nil {
 				output.NewFunc(log).Warn("cleanup of cli script %q on %s failed: %v", name, what, err)
 			}
 		}()
 		// The CLI is handed the RELATIVE name: its working directory is the scripts
 		// folder, which is what Ops.RunCLI has always relied on.
-		out, err := engine.Output(ctx, r, runner.Cmd{Argv: cmd.Argv(execArgs(k.Namespace, pod, false,
-			[]string{broker.CLIBinary, "-Apes", broker.CLIArg(name)})...)})
+		runCLI, err := kube.Exec(base, pod, opts, broker.CLIBinary, "-Apes", broker.CLIArg(name))
+		if err != nil {
+			return nil, fmt.Errorf("run cli script %q on %s: %w", name, what, err)
+		}
+		out, err := engine.Output(ctx, r, runCLI)
 		if err != nil {
 			return out, fmt.Errorf("run cli script %q on %s: %w", name, what, err)
 		}
@@ -138,8 +148,8 @@ func readSecretKey(r runner.Runner, cmd config.Command, namespace, name, key, wh
 	// The key is a JSON object member, so a name carrying a dot has to be escaped or
 	// jsonpath reads it as a path step and silently returns nothing.
 	jsonpath := fmt.Sprintf(`{.data.%s}`, strings.ReplaceAll(key, ".", `\.`))
-	out, err := engine.Output(context.Background(), engine.NoEnv(r), runner.Cmd{
-		Argv: cmd.Argv("get", "secret", name, "-n", namespace, "-o", "jsonpath="+jsonpath)})
+	out, err := engine.Output(context.Background(), engine.NoEnv(r),
+		kube.Get(cmd.Argv(), kube.GetOptions{Namespace: namespace, Output: "jsonpath=" + jsonpath}, "secret", name))
 	if err != nil {
 		return "", fmt.Errorf("read secret %s/%s for %s: %w", namespace, name, whose, err)
 	}
@@ -176,17 +186,4 @@ func secretCommand(cfg *config.Config, site config.ReplSite) (config.Command, er
 		return cfg.SiteCommand(site.VirtualRouterName)
 	}
 	return cfg.ClusterCommand()
-}
-
-// execArgs builds `exec [-i] -n <ns> <pod> -- argv...`, the same shape
-// kubectlTransport.execArgs builds for this deployment's own pods. It is duplicated
-// rather than shared because that one derives the namespace and pod from the config,
-// which is precisely what a mate in another cluster cannot do.
-func execArgs(namespace, pod string, stdin bool, argv []string) []string {
-	args := []string{"exec"}
-	if stdin {
-		args = append(args, "-i")
-	}
-	args = append(args, "-n", namespace, pod, "--")
-	return append(args, argv...)
 }

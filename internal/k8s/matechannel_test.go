@@ -77,11 +77,11 @@ func TestNewMateChannelArgv(t *testing.T) {
 
 	upload, exec := r.calls[0], r.calls[1]
 
-	wantUpload := []string{"--context", "dr", "exec", "-i", "-n", "solace-dr", "dr-broker-pubsubplus-p-0", "--", "sh", "-c"}
+	wantUpload := []string{"--context", "dr", "exec", "-i", "dr-broker-pubsubplus-p-0", "-n", "solace-dr", "--", "sh", "-c"}
 	if upload.name != "kubectl" || !hasPrefixArgv(upload.args, wantUpload) {
 		t.Errorf("upload = %s %v,\nwant kubectl %v ...", upload.name, upload.args, wantUpload)
 	}
-	wantExec := []string{"--context", "dr", "exec", "-n", "solace-dr", "dr-broker-pubsubplus-p-0", "--",
+	wantExec := []string{"--context", "dr", "exec", "dr-broker-pubsubplus-p-0", "-n", "solace-dr", "--",
 		"/usr/sw/loads/currentload/bin/cli", "-Apes", ".repl-show-replication.cli"}
 	if exec.name != "kubectl" || strings.Join(exec.args, " ") != strings.Join(wantExec, " ") {
 		t.Errorf("exec = %s %v,\nwant kubectl %v", exec.name, exec.args, wantExec)
@@ -126,7 +126,7 @@ func TestNewMateChannelUsesTheSiteNotTheLocalDeployment(t *testing.T) {
 			r.calls[1].args, ns, cfg.K8s.Namespace)
 	}
 	// Same for the pod, built from the SITE's broker name rather than cfg.K8s.Name.
-	pod := r.calls[1].args[indexOf(r.calls[1].args, "-n")+2]
+	pod := r.calls[1].args[indexOf(r.calls[1].args, "-n")-1]
 	if pod != "dr-broker-pubsubplus-p-0" {
 		t.Errorf("pod = %q, want one named from the site's broker name %q, not the local %q",
 			pod, "dr-broker", cfg.K8s.Name)

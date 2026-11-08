@@ -5,6 +5,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/kube"
 	"github.com/hafio/go-deploy-utility/runner"
 
 	"solace/internal/config"
@@ -130,24 +131,69 @@ func (c *Cluster) kubectl(ctx context.Context, args ...string) error {
 	return engine.Run(ctx, c.R, runner.Cmd{Argv: k.Argv(args...)})
 }
 
-// apply pipes a rendered manifest to `kubectl apply -f -` on stdin (never a temp
-// file, so secret-bearing manifests stay off disk).
-func (c *Cluster) apply(ctx context.Context, manifest []byte) error {
+// build makes one command from the guarded cluster CLI argv: a closure over a builder
+// in the shared kube package, which takes that argv as its first argument.
+type build func(base []string) runner.Cmd
+
+// base is the guarded cluster CLI as the argv every kube builder starts from (kubectl, or
+// oc, plus any --context or --kubeconfig kubernetes.command carries). It re-runs the
+// execution guard through cmd, for the reason cmd gives.
+func (c *Cluster) base() ([]string, error) {
 	k, err := c.cmd()
+	if err != nil {
+		return nil, err
+	}
+	return k.Argv(), nil
+}
+
+// runKube runs what b builds, streaming stdout/stderr.
+func (c *Cluster) runKube(ctx context.Context, b build) error {
+	base, err := c.base()
 	if err != nil {
 		return err
 	}
-	return engine.Run(ctx, c.R, runner.Cmd{Argv: k.Argv("apply", "-f", "-"), Stdin: manifest})
+	return engine.Run(ctx, c.R, b(base))
+}
+
+// outKube runs what b builds and returns captured stdout, stderr streaming.
+func (c *Cluster) outKube(ctx context.Context, b build) ([]byte, error) {
+	base, err := c.base()
+	if err != nil {
+		return nil, err
+	}
+	return engine.Output(ctx, c.R, b(base))
+}
+
+// teeKube runs what b builds, streaming both streams as runKube does, and also returns
+// what it wrote to stderr, for a step that must tell a refusal (kube.Forbidden) from any
+// other failure. Echo writes nothing there.
+func (c *Cluster) teeKube(ctx context.Context, b build) (string, error) {
+	base, err := c.base()
+	if err != nil {
+		return "", err
+	}
+	return engine.RunTee(ctx, c.R, b(base))
+}
+
+// outTeeKube is outKube that also returns stderr, which still reaches the terminal.
+func (c *Cluster) outTeeKube(ctx context.Context, b build) ([]byte, string, error) {
+	base, err := c.base()
+	if err != nil {
+		return nil, "", err
+	}
+	return engine.OutputTee(ctx, c.R, b(base))
+}
+
+// apply pipes a rendered manifest to `kubectl apply -f -` on stdin (never a temp
+// file, so secret-bearing manifests stay off disk).
+func (c *Cluster) apply(ctx context.Context, manifest []byte) error {
+	return c.runKube(ctx, func(base []string) runner.Cmd { return kube.Apply(base, manifest) })
 }
 
 // deleteStdin pipes a rendered manifest to `kubectl delete -f - --ignore-not-found`,
 // so teardown mirrors apply through one code path and is idempotent.
 func (c *Cluster) deleteStdin(ctx context.Context, manifest []byte) error {
-	k, err := c.cmd()
-	if err != nil {
-		return err
-	}
-	return engine.Run(ctx, c.R, runner.Cmd{Argv: k.Argv("delete", "-f", "-", "--ignore-not-found"), Stdin: manifest})
+	return c.runKube(ctx, func(base []string) runner.Cmd { return kube.Delete(base, manifest) })
 }
 
 // output runs `kubectl args...` and returns captured stdout.

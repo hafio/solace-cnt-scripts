@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/kube/rbac"
 	"github.com/hafio/go-deploy-utility/runner"
 
 	"solace/internal/config"
@@ -356,7 +357,7 @@ func TestAmbiguousOperatorAbortsTheDeploy(t *testing.T) {
 	if asked {
 		t.Error("an ambiguous install must stop the deploy, not reach a question")
 	}
-	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
+	calls := rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"})
 	if len(calls) != 1 || !eqArgs(calls[0].args, []string{"get", "deployment", "--all-namespaces", "-o", "json"}) {
 		t.Errorf("calls after the probe = %+v, want only the one cluster-wide read", calls)
 	}
@@ -870,7 +871,7 @@ func TestOperatorReleaseNarrowingNeedsPermissionToPatch(t *testing.T) {
 	c, rr, _ := watchCluster("team-a,solace", "") // team-a still depends on it, so the list is narrowed
 	rr.canI = "no"
 	err := c.OperatorRelease(context.Background(), false)
-	want := "not allowed to patch deployments in " + defaultOperatorNS
+	want := `not allowed to patch deployments in namespace "` + defaultOperatorNS + `"`
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("OperatorRelease err = %v, want it to say %q", err, want)
 	}

@@ -1461,11 +1461,11 @@ func TestScriptCommandsUploadFromTheScriptsDir(t *testing.T) {
 		cp               func(string) string
 		exec, notWant    string
 	}{
-		{"kubernetes cli-script", "cli-script", "setup.cli", writeStandaloneEnv, nil, k8sCP(p0), p0 + " -- sh -c", ""},
+		{"kubernetes cli-script", "cli-script", "setup.cli", writeStandaloneEnv, nil, k8sCP(p0), p0 + " -n solace -- sh -c", ""},
 		{"kubernetes cli-script --pod backup", "cli-script", "setup.cli", writeStandaloneEnv,
-			[]string{"--pod", "backup"}, k8sCP(b0), b0 + " -- sh -c", p0},
+			[]string{"--pod", "backup"}, k8sCP(b0), b0 + " -n solace -- sh -c", p0},
 		{"kubernetes shell-script", "shell-script", "run.sh", writeStandaloneEnv, nil, k8sCP(p0),
-			p0 + " -- bash /usr/sw/jail/.run.sh", ""},
+			p0 + " -n solace -- bash /usr/sw/jail/.run.sh", ""},
 		{"docker cli-script", "cli-script", "setup.cli", writeCtrStandaloneEnv,
 			[]string{"--platform", "docker"}, dockerCP, "docker exec solace sh -c", ""},
 		{"docker shell-script", "shell-script", "run.sh", writeCtrStandaloneEnv,
@@ -2432,8 +2432,8 @@ func TestOpK8sRemoveAborts(t *testing.T) {
 // remove` without --delete-data keeps the PVCs, and a namespace still holding them is
 // never deleted -- not even under --no-prompt, which answers the namespace question yes.
 // Deleting it would cascade the kept PVCs away. The gate lists PVCs explicitly
-// (internal/k8s.occupancyKinds) and TestRetainedPVCsKeepTheNamespace pins that listing;
-// this pins that opK8sRemoveBroker acts on it. The empty arm runs too, so the assertion is
+// (nsgate.List) and counts them, which carry no ownerReference to the broker, and
+// TestRetainedPVCsKeepTheNamespace pins that; this pins that opK8sRemoveBroker acts on it. The empty arm runs too, so the assertion is
 // known to be able to see a namespace delete at all.
 func TestRemoveBrokerKeepsTheNamespaceWhileItsPVCsRemain(t *testing.T) {
 	hasPair := func(args []string, a, b string) bool {
@@ -2473,7 +2473,7 @@ func TestRemoveBrokerKeepsTheNamespaceWhileItsPVCsRemain(t *testing.T) {
 	}
 
 	t.Run("a kept PVC keeps the namespace", func(t *testing.T) {
-		rr, out := run(t, "persistentvolumeclaim/data-dev-broker-pubsubplus-p-0\n")
+		rr, out := run(t, `{"items":[{"kind":"PersistentVolumeClaim","metadata":{"name":"data-dev-broker-pubsubplus-p-0"}}]}`)
 		if deletesNamespace(rr) {
 			t.Fatalf("the namespace was deleted while a kept PVC was still in it:\n%s", rr.dump())
 		}
@@ -2487,7 +2487,7 @@ func TestRemoveBrokerKeepsTheNamespaceWhileItsPVCsRemain(t *testing.T) {
 		}
 	})
 	t.Run("an empty namespace is removed", func(t *testing.T) {
-		rr, _ := run(t, "")
+		rr, _ := run(t, `{"items":[]}`)
 		if !deletesNamespace(rr) {
 			t.Errorf("an empty namespace under --no-prompt should be deleted; the assertion above "+
 				"would otherwise be unable to fail:\n%s", rr.dump())
