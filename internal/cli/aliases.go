@@ -3,9 +3,8 @@ package cli
 import (
 	"fmt"
 
+	"github.com/hafio/go-deploy-utility/abbrev"
 	"github.com/spf13/cobra"
-
-	"solace/internal/abbrev"
 )
 
 // commandAbbrev is the approved short form of every command NAME.

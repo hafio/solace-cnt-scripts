@@ -10,7 +10,9 @@ package container
 
 import (
 	"context"
-	"strings"
+
+	"github.com/hafio/go-deploy-utility/containercli"
+	"github.com/hafio/go-deploy-utility/runner"
 
 	"solace/internal/broker"
 	"solace/internal/config"
@@ -21,10 +23,10 @@ import (
 // against the single broker container on this host. Node-local: there is one
 // container per host, so the role argument is ignored (the k8s transport maps it
 // to a pod; here every call targets the same container). Every call routes through
-// the injected engine.Runner, so the Echo runner records the command without running it
+// the injected runner.Runner, so the Echo runner records the command without running it
 // and tests capture the exact argv.
 type containerTransport struct {
-	r    engine.Runner
+	r    runner.Runner
 	cfg  *config.Config
 	p    config.Platform
 	name string // container name
@@ -35,9 +37,9 @@ type containerTransport struct {
 // once; the role argument on every method is ignored (node-local, one
 // container/host). The runtime command is deliberately NOT captured -- it is
 // resolved through the execution guard on every call (runtime below).
-func NewTransport(r engine.Runner, cfg *config.Config, p config.Platform) broker.Transport {
+func NewTransport(r runner.Runner, cfg *config.Config, p config.Platform) broker.Transport {
 	return &containerTransport{
-		r:    r,
+		r:    engine.NoEnv(r),
 		cfg:  cfg,
 		p:    p,
 		name: cfg.ContainerBlock(p).Name,
@@ -45,7 +47,7 @@ func NewTransport(r engine.Runner, cfg *config.Config, p config.Platform) broker
 }
 
 // runtime is the guarded container runtime command (docker.command /
-// podman.command). It re-runs config.CheckCommand on every call rather than
+// podman.command). It re-runs execguard.Check on every call rather than
 // caching the value at construction: the transport can be built from a Config that
 // never went through config.Load, so this is the executor half of the guard's two
 // enforcement points and must not trust what it was handed.
@@ -53,54 +55,64 @@ func (c *containerTransport) runtime() (config.Command, error) {
 	return c.cfg.RuntimeCommand(c.p)
 }
 
-// execArgs builds `exec [-i] <name> argv...`. stdin adds `-i` for commands that
-// read stdin (Upload, OutputInput). No `--` separator: docker `exec` rejects it,
-// and it is unnecessary for both engines since the container name is positional.
-func (c *containerTransport) execArgs(stdin bool, argv []string) []string {
-	args := []string{"exec"}
-	if stdin {
-		args = append(args, "-i")
+// exec builds `exec [-i] <name> argv...` through containercli.Exec, with in as the
+// child's stdin when stdin is set (Upload and OutputInput). There is no `--` separator:
+// docker `exec` rejects it, and it is unnecessary for both engines since the container
+// name is positional.
+func (c *containerTransport) exec(stdin bool, in []byte, argv []string) (runner.Cmd, error) {
+	rt, err := c.runtime()
+	if err != nil {
+		return runner.Cmd{}, err
 	}
-	args = append(args, c.name)
-	return append(args, argv...)
+	cmd, err := containercli.Exec(rt.Argv(), c.name, containercli.ExecOptions{Stdin: stdin}, argv...)
+	if err != nil {
+		return runner.Cmd{}, err
+	}
+	if stdin {
+		cmd.Stdin = in
+	}
+	return cmd, nil
 }
 
 func (c *containerTransport) Run(ctx context.Context, _ config.Role, argv ...string) error {
-	rt, err := c.runtime()
+	cmd, err := c.exec(false, nil, argv)
 	if err != nil {
 		return err
 	}
-	return c.r.Run(ctx, rt.Name(), rt.Args(c.execArgs(false, argv)...)...)
+	return engine.Run(ctx, c.r, cmd)
 }
 
 func (c *containerTransport) Output(ctx context.Context, _ config.Role, argv ...string) ([]byte, error) {
-	rt, err := c.runtime()
+	cmd, err := c.exec(false, nil, argv)
 	if err != nil {
 		return nil, err
 	}
-	return c.r.Output(ctx, rt.Name(), rt.Args(c.execArgs(false, argv)...)...)
+	return engine.Output(ctx, c.r, cmd)
 }
 
 func (c *containerTransport) OutputInput(ctx context.Context, _ config.Role, in []byte, argv ...string) ([]byte, error) {
-	rt, err := c.runtime()
+	cmd, err := c.exec(true, in, argv)
 	if err != nil {
 		return nil, err
 	}
-	return c.r.OutputInput(ctx, in, rt.Name(), rt.Args(c.execArgs(true, argv)...)...)
+	return engine.Output(ctx, c.r, cmd)
 }
 
-// Upload writes data to destPath inside the container by piping it to `sh -c 'cat
-// > <dest>'` on stdin -- the secret-safe path: the body rides RunInput's stdin
-// (shown as a byte count under the Echo runner), never an argv or a temp file. destPath
-// is tool-generated and validName-checked upstream, so shSingleQuote is defensive.
+// Upload writes data to destPath inside the container with containercli.Upload, which
+// pipes it to `sh -c "cat > '<dest>'"` on stdin -- the secret-safe path: the body rides
+// Cmd.Stdin (shown as a byte count under the Echo runner), never an argv or a temp file.
+// Upload single-quotes destPath, so it is one word whatever it holds; it is also
+// tool-generated and validName-checked upstream.
 func (c *containerTransport) Upload(ctx context.Context, _ config.Role, data []byte, destPath string) error {
 	rt, err := c.runtime()
 	if err != nil {
 		return err
 	}
-	shcmd := "cat > " + shSingleQuote(destPath)
-	argv := c.execArgs(true, []string{"sh", "-c", shcmd})
-	return c.r.RunInput(ctx, data, rt.Name(), rt.Args(argv...)...)
+	cmd, err := containercli.Upload(rt.Argv(), c.name, destPath, data, false)
+	if err != nil {
+		return err
+	}
+	return engine.Run(ctx, c.r, cmd)
 }
 
 // UploadFile copies a local file into the container via
@@ -110,7 +122,7 @@ func (c *containerTransport) UploadFile(ctx context.Context, _ config.Role, loca
 	if err != nil {
 		return err
 	}
-	return c.r.Run(ctx, rt.Name(), rt.Args("cp", localPath, c.name+":"+destPath)...)
+	return engine.Run(ctx, c.r, runner.Cmd{Argv: rt.Argv("cp", localPath, c.name+":"+destPath)})
 }
 
 // Download copies remotePath from the container to localPath via
@@ -120,15 +132,5 @@ func (c *containerTransport) Download(ctx context.Context, _ config.Role, remote
 	if err != nil {
 		return err
 	}
-	return c.r.Run(ctx, rt.Name(), rt.Args("cp", c.name+":"+remotePath, localPath)...)
-}
-
-// shSingleQuote wraps s in single quotes for safe use inside `sh -c`, escaping any
-// embedded single quote (' -> '\''). Defensive: the only value passed to it is a
-// tool-generated, validName-checked destPath, but this guarantees no shell
-// metacharacter in a path can break out of the `cat >` redirect. A
-// package-local copy of the k8s helper -- deliberately not over-DRY'd across
-// packages, matching the house style of one small copy per transport.
-func shSingleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+	return engine.Run(ctx, c.r, runner.Cmd{Argv: rt.Argv("cp", c.name+":"+remotePath, localPath)})
 }

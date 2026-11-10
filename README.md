@@ -62,7 +62,8 @@ needs and is safe to re-run.
 - **Docker / Podman:** the `docker` or `podman` binary on your `PATH`, on the host that runs
   the broker. Podman deploys a systemd **quadlet** unit and needs systemd; Docker deploys
   through **compose**, so that host needs the compose plugin (`docker compose`) or the
-  standalone `docker-compose` binary -- set `docker.compose` when it is the latter.
+  standalone `docker-compose` binary -- set `docker.compose` when it is the latter. The
+  compose file is handed to compose on stdin and is not written to disk.
 
 Version-specific caveats (podman secret flags, the compose version the generated file
 needs, wrapper runtimes such as `microk8s kubectl`) are in
@@ -208,9 +209,11 @@ names an admin Secret that already exists, or you want the operator to generate 
    solace-util broker remove -e dev.yaml --delete-data     # asks before deleting them (irreversible)
    ```
 
-   The namespace is only offered for deletion once nothing else is left in it. If anything
-   you did not deploy is still there, it is listed and the namespace is kept -- on every
-   path, `--no-prompt` included.
+   The namespace is only offered for deletion once nothing of anyone else's is left in it
+   (this broker and what it owns are not counted). If anything you did not deploy is still
+   there, it is listed and the namespace is kept -- on every path, `--no-prompt` included. A
+   refused `delete namespaces`, a "no", no terminal or a failed delete keeps it too, with a
+   warning; the removal itself still succeeds.
 
 ### Docker / Podman
 
@@ -262,11 +265,15 @@ an HA member lists its redundancy and SEMP ports too, or opts into `network.mode
    solace-util broker remove -e prod.yaml           # keeps the data directory by default
    ```
 
-Re-running `broker deploy` is safe: it compares the rendered artifact with the one on disk
-and only bounces a running broker with `--restart` or your consent -- on every platform,
-including for a renewed TLS certificate. That is also how an image-tag bump and a rotated
-password are applied, while `broker configure server-certs` swaps in a renewed certificate
-with no restart at all -- see
+Re-running `broker deploy` is safe. On Docker and Podman it compares what it would apply
+with what is deployed -- the rendered artifact and the value of every secret -- before it
+writes or restarts anything, and an unchanged deploy changes nothing. A running broker whose
+artifact or secrets changed is restarted only with `--restart` or your consent: it asks
+first, `--no-prompt` approves, and with no terminal and no `--no-prompt` it fails before
+changing anything. A "no" leaves the host exactly as it was. That is how an image-tag bump, a
+rotated password and a renewed certificate are all applied (Kubernetes asks only about the
+certificate, answered by `--restart` or a terminal), while `broker configure server-certs`
+swaps in a renewed certificate with no restart at all -- see
 [Docker and Podman mechanics](docs/operations.md#docker-and-podman-mechanics).
 
 ## Common commands
@@ -279,7 +286,7 @@ The full surface -- every command, argument, and flag with its default -- is
 | `validate` | all | Check the whole env file and the platform. `broker validate` / `operator validate` are the scoped halves |
 | `operator deploy` | kubernetes | Install the cluster-scoped operator. Re-run from another env file and its watch list grows |
 | `operator remove` | kubernetes | Remove it, or narrow its watch list if other namespaces still need it |
-| `broker deploy` | all | Prerequisites and the broker, idempotent (`--restart` on docker/podman, `--pod` names this host) |
+| `broker deploy` | all | Prerequisites and the broker, idempotent (`--restart`, and `--no-prompt` on docker/podman; `--pod` names this host) |
 | `broker remove` | all | Remove the broker. Data kept unless `--delete-data`; the namespace only if nothing else is in it |
 | `broker generate` | all | Print what `broker deploy` would apply, without applying it |
 | `broker status` | all | Pods/services/statefulset, or the local container. `--all`, `--detail`, `--pod`, `--watch`/`--interval` |

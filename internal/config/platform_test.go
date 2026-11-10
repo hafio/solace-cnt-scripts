@@ -122,7 +122,7 @@ func TestDetectPlatforms(t *testing.T) {
 		{name: "none", body: "image:\n  repo: solace/solace-pubsub-standard\n", want: nil},
 		{name: "kubernetes only", body: "kubernetes:\n  name: solace\n", want: []Platform{K8s}},
 		{name: "docker only", body: "docker:\n  container:\n    dataDir: /opt/solace/data\n", want: []Platform{Docker}},
-		{name: "podman only", body: "podman:\n  rootless: true\n", want: []Platform{Podman}},
+		{name: "podman only", body: "podman:\n  rootful: true\n", want: []Platform{Podman}},
 		{name: "empty marker counts", body: "docker: {}\n", want: []Platform{Docker}},
 		{name: "null section counts", body: "podman:\n", want: []Platform{Podman}},
 		{name: "two sections", body: "kubernetes:\n  name: solace\ndocker: {}\n", want: []Platform{K8s, Docker}},

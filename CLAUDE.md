@@ -23,17 +23,21 @@ env-file reference, [docs/operations.md](docs/operations.md) the day-2 lifecycle
 
 ## Packages, and which way they may import
 
-`internal/{abbrev,config,engine,render,broker,k8s,container,convert,cli,output,examples}` plus
+`internal/{config,engine,render,broker,k8s,container,convert,cli,output,examples}` plus
 `main.go`, and `internal/tools/vulnjudge` -- a dev-only command the `scan` task pipes
 govulncheck's JSON through, so a fixable vulnerability fails the gate and one with no released
 fix warns.
 
+Shared code (`exitcode`, `notice`, `paritydoc`, `abbrev`, `execguard`, `envref`, `containerart`, `podman`, `systemd`, `rootless`, `containercli`, `inspect`) comes from `github.com/hafio/go-deploy-utility`.
+Tools build against that module's checkout through an untracked `go.work` (see the module's
+docs/consuming.md) until a tag is pinned.
+
 The layering is enforced by convention, not by a compiler, so it is stated here:
 
-- **`abbrev`, `output` and `examples` import nothing but the stdlib.** That is what lets any
+- **`output` and `examples` import nothing but the stdlib.** That is what lets any
   package use them, and it is why `output` can define the `==> ` prefix once for both `engine`
   and `cli`.
-- **`config` imports only `abbrev`.** It must never import `convert` (which is why
+- **`config` imports only the shared module's `abbrev`, `execguard`, `envref` and `podman`.** It must never import `convert` (which is why
   `config.Load`'s invalid-YAML hint carries its own bash-file sniff) and never `render` (which
   is why `validate.go` keeps a small copy of the environment-variable folding `render` owns).
 - **`k8s` and `container` import `broker`; the reverse would be a cycle.** `broker.CLIRunner`
@@ -79,11 +83,11 @@ the env file's section key and the `--platform` value. The yaml tag is a separat
 
 **There is no `--dry-run` and no `--gen-*` flags.** `generate <target>` is the only
 look-before-you-leap surface, so an artifact you meant to read and a cluster you meant to change
-are not one typo apart. `engine.Echo` is a TEST-ONLY runner installed through the
+are not one typo apart. `runner.Echo` (from the shared module) is a TEST-ONLY runner installed through the
 `App.NewRunner` seam; nothing user-facing installs it.
 
 **Secret values are shown in exactly one place** -- `generate` on Kubernetes, where the Secret
-manifest *is* the artifact. Everywhere else reports say `set`/`MISSING` and `engine.Echo` masks
+manifest *is* the artifact. Everywhere else reports say `set`/`MISSING` and `runner.Echo` masks
 child environment as `NAME=***`.
 
 **The env-loading hook lives on each runnable command's `PreRunE`, never on root's
@@ -104,7 +108,7 @@ lists have to name it.
 
 **Abbreviations: nothing rewrites argv.** Each site expands its own input at the moment it reads
 it -- cobra's `Find` for a command, `config.ParseRole`, `config.ParsePlatform`, pflag for a
-shorthand. `internal/abbrev` owns the RULES and each package declares its own words. One rule
+shorthand. The shared module's `abbrev` package owns the RULES and each package declares its own words. One rule
 CLI-wide: abbreviations work everywhere, completion teaches the canonical spelling.
 
 **Cobra's Windows Explorer check stays off** (`cobra.MousetrapHelpText = ""` in `newRootCmd`).
@@ -114,15 +118,16 @@ notice it coming back -- every test would still pass, just slower.
 
 ## Security invariants
 
-**Config text must not be able to choose what executes.** `config.CheckCommand` is the whole
+**Config text must not be able to choose what executes.** The shared `execguard.Check` is the whole
 rule for `kubernetes.command`, `docker.command`, `podman.command`, `docker.compose` and each
 `replication.sites[].via.kubernetes.command`, and it is enforced **twice from that one
 definition**: in `Validate`, and again in every executor immediately before argv is built.
 Executors are handed a `*config.Config` directly and **must not assume `config.Load` ran** --
 if you add one, re-run the check there too.
 
-**`--allow-command` is the only way to widen the allowlist**, and it has a floor: `neverAllowed`
-(the escalators -- sudo, doas, pkexec, run0, nsenter and the rest) can be approved by nobody.
+**`--allow-command` is the only way to widen the allowlist**, and it has a floor: the
+shared `execguard` package's escalator list (sudo, doas, pkexec, run0, nsenter, runuser, chroot and
+the rest) can be approved by nobody. `config.AllowCommands` only wraps `execguard.Approve`.
 There is deliberately no schema key, no env var and no binding layer: an env file that could
 approve its own binary would make the allowlist decorative.
 
@@ -165,13 +170,17 @@ deliberately not `step`.
 
 **No driver package prompts.** Every confirmation lives in `internal/cli` and goes to stderr, so
 redirecting stdout captures results rather than questions. `k8s` and `container` take a
-`Confirm` func seam that declines when nil.
+`Confirm` func seam that declines when nil (`k8s` also takes `ConfirmScope`).
 
-**Whether a human is present is decided by READING stdin, never by what kind of stream it is.**
-The question goes to stderr, the answer is read from stdin, and an unanswered question is NOT a
-"no": a reply of `n` is a decision, EOF means nobody could make one, and only the second earns
-the refusal line naming `--no-prompt`. See [docs/operations.md](docs/operations.md) for the
-operator-facing contract and `internal/cli/confirm.go` for why every other approach failed.
+**A human is present when stdin is a terminal** (a character device, `confirm.StdinIsTerminal`).
+Without one, and without `--no-prompt`, a destructive gate fails at once with exit 1 and an error
+naming `--no-prompt`; a pipe is never read, and end of input at a terminal is an error too. A reply
+of `n` is a decision and exits 0. The prompts are the shared `confirm` package's, held on the App
+as one `*confirm.Prompter` (`App.Interactive` and `App.PromptIn` are the test seams). On
+`operator deploy`, `--no-prompt` approves a downgrade only; widening the watch to every namespace
+has its own `Cluster.ConfirmScope` seam and needs a terminal. See
+[docs/operations.md](docs/operations.md) for the operator-facing contract and
+`internal/cli/confirm.go` for the gates.
 
 **Removals keep the expensive layer.** `broker remove` keeps persistent data, `operator remove`
 keeps the CRDs. The `--delete-*` flag RAISES the question rather than silencing it, `--no-prompt`

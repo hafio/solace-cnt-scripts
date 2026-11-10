@@ -145,8 +145,8 @@ func TestClusterHonoursRuntime(t *testing.T) {
 			name:       "interactiveExec",
 			call:       func(c *Cluster) error { return c.CLI(context.Background(), config.Primary) },
 			wantMethod: "RunInteractive",
-			wantArgs: withLeading("exec", "-it", "-n", "solace",
-				"dev-broker-pubsubplus-p-0", "--", "cli", "-A"),
+			wantArgs: withLeading("exec", "-i", "-t", "dev-broker-pubsubplus-p-0", "-n", "solace",
+				"--", "cli", "-A"),
 		},
 	}
 	for _, tc := range cases {
@@ -186,7 +186,7 @@ func TestTransportHonoursRuntime(t *testing.T) {
 				return tr.Run(context.Background(), config.Primary, "ls")
 			},
 			wantMethod: "Run",
-			wantArgs:   withLeading("exec", "-n", "solace", pod, "--", "ls"),
+			wantArgs:   withLeading("exec", pod, "-n", "solace", "--", "ls"),
 		},
 		{
 			name: "exec with stdin",
@@ -195,7 +195,7 @@ func TestTransportHonoursRuntime(t *testing.T) {
 				return err
 			},
 			wantMethod: "OutputInput",
-			wantArgs:   withLeading("exec", "-i", "-n", "solace", pod, "--", "cat"),
+			wantArgs:   withLeading("exec", "-i", pod, "-n", "solace", "--", "cat"),
 		},
 		{
 			name: "upload rides stdin",
@@ -203,7 +203,7 @@ func TestTransportHonoursRuntime(t *testing.T) {
 				return tr.Upload(context.Background(), config.Primary, []byte("body"), "/tmp/f")
 			},
 			wantMethod: "RunInput",
-			wantArgs:   withLeading("exec", "-i", "-n", "solace", pod, "--", "sh", "-c", "cat > '/tmp/f'"),
+			wantArgs:   withLeading("exec", "-i", pod, "-n", "solace", "--", "sh", "-c", "cat > '/tmp/f'"),
 		},
 		{
 			name: "cp in",

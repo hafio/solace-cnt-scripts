@@ -6,6 +6,10 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/kube/rbac"
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/output"
 )
 
@@ -57,7 +61,7 @@ func (c *Cluster) BrokerReport(ctx context.Context, detail bool) error {
 	// status.podsList -- and fetching it twice would double a cluster round-trip
 	// for data that cannot change meaningfully between two calls in one report.
 	var brokers brokerList
-	if err := c.getJSON(ctx, &brokers, c.brokerRead()...); err != nil {
+	if err := c.getJSON(ctx, &brokers, c.brokerRead()); err != nil {
 		return fmt.Errorf("reading the broker resource in namespace %q: %w\n  Reading broker %s needs get on %s there",
 			c.ns(), err, c.Cfg.K8s.Name, brokerResource)
 	}
@@ -82,16 +86,16 @@ func (c *Cluster) BrokerReport(ctx context.Context, detail bool) error {
 	return c.storageSection(ctx, r)
 }
 
-// brokerRead is the `get` arguments of this env file's broker CR, read by name.
-func (c *Cluster) brokerRead() []string {
-	return []string{"pubsubpluseventbrokers", c.Cfg.K8s.Name, "-n", c.ns(), "--ignore-not-found"}
+// brokerRead is the `get` of this env file's broker CR, read by name.
+func (c *Cluster) brokerRead() getRead {
+	return getRead{kube.GetOptions{Namespace: c.ns(), IgnoreNotFound: true}, []string{"pubsubpluseventbrokers", c.Cfg.K8s.Name}}
 }
 
-// namedRead is the `get` arguments for the named objects of one kind in the broker
-// namespace. --ignore-not-found makes an object that is not there an absence the section
-// reports, rather than a failed read.
-func (c *Cluster) namedRead(kind string, names []string) []string {
-	return append(append([]string{kind}, names...), "-n", c.ns(), "--ignore-not-found")
+// namedRead is the `get` for the named objects of one kind in the broker namespace.
+// --ignore-not-found makes an object that is not there an absence the section reports,
+// rather than a failed read.
+func (c *Cluster) namedRead(kind string, names []string) getRead {
+	return getRead{kube.GetOptions{Namespace: c.ns(), IgnoreNotFound: true}, append([]string{kind}, names...)}
 }
 
 // statusPodNames are the pods the report reads: the one pod per role a broker of this env
@@ -131,7 +135,7 @@ func (c *Cluster) statusClaimNames() []string {
 // found. Anything else -- a fault, or a permission question nobody answered -- ends the report
 // with the error as it always did, so a script gating on the exit status still sees it.
 func (c *Cluster) unreadSection(ctx context.Context, r *output.Sink, title, key, what, resource string, err error) error {
-	if allowed, answered := c.canI(ctx, probe{verb: "get", resource: resource}); answered && !allowed {
+	if allowed, answered := c.canI(ctx, rbac.Probe{Verb: "get", Resource: resource}); answered && !allowed {
 		r.Section(title)
 		r.KVRowAt(output.LevelSkip, statusKeyWidth, key,
 			fmt.Sprintf("not read -- this identity may not get %s in %s", resource, c.ns()))
@@ -177,7 +181,7 @@ func (c *Cluster) brokerSummary(r *output.Sink, list brokerList) {
 // workload whose name happens to carry the infix cannot be mistaken for a broker.
 func (c *Cluster) podSection(ctx context.Context, r *output.Sink, detail bool, own map[string]bool) error {
 	var list podList
-	if err := c.getJSON(ctx, &list, c.namedRead("pods", c.statusPodNames())...); err != nil {
+	if err := c.getJSON(ctx, &list, c.namedRead("pods", c.statusPodNames())); err != nil {
 		return c.unreadSection(ctx, r, "Pods", "pods", "pods", "pods", err)
 	}
 	type entry struct {
@@ -264,7 +268,7 @@ func ownsPod(own map[string]bool, name string) bool {
 // useful warning here -- it is the difference between "deployed" and "reachable".
 func (c *Cluster) serviceSection(ctx context.Context, r *output.Sink) error {
 	var list serviceList
-	if err := c.getJSON(ctx, &list, c.namedRead("svc", []string{lbServiceName(c.Cfg), discoveryServiceName(c.Cfg)})...); err != nil {
+	if err := c.getJSON(ctx, &list, c.namedRead("svc", []string{lbServiceName(c.Cfg), discoveryServiceName(c.Cfg)})); err != nil {
 		return c.unreadSection(ctx, r, "Services", "services", "services", "services", err)
 	}
 	r.Section("Services")
@@ -289,7 +293,7 @@ func (c *Cluster) serviceSection(ctx context.Context, r *output.Sink) error {
 // statefulSetSection lists the per-role StatefulSets, in redundancy order.
 func (c *Cluster) statefulSetSection(ctx context.Context, r *output.Sink) error {
 	var list statefulSetList
-	if err := c.getJSON(ctx, &list, c.namedRead("statefulsets", c.statusStatefulSetNames())...); err != nil {
+	if err := c.getJSON(ctx, &list, c.namedRead("statefulsets", c.statusStatefulSetNames())); err != nil {
 		return c.unreadSection(ctx, r, "StatefulSets", "statefulsets", "statefulsets", "statefulsets", err)
 	}
 	type entry struct {
@@ -326,7 +330,7 @@ func (c *Cluster) statefulSetSection(ctx context.Context, r *output.Sink) error 
 // left behind by a removed broker is exactly the thing you only find by looking.
 func (c *Cluster) storageSection(ctx context.Context, r *output.Sink) error {
 	var list pvcList
-	if err := c.getJSON(ctx, &list, c.namedRead("pvc", c.statusClaimNames())...); err != nil {
+	if err := c.getJSON(ctx, &list, c.namedRead("pvc", c.statusClaimNames())); err != nil {
 		return c.unreadSection(ctx, r, "Storage", "claims", "persistent volume claims", "persistentvolumeclaims", err)
 	}
 	type entry struct {
@@ -370,7 +374,9 @@ func (c *Cluster) storageSection(ctx context.Context, r *output.Sink) error {
 func (c *Cluster) OperatorReport(ctx context.Context) error {
 	r := c.report()
 	if c.isEcho() {
-		return c.kubectl(ctx, "get", "deployment", operatorDeployment, "-n", c.operatorNS(ctx))
+		return c.runKube(ctx, func(b []string) runner.Cmd {
+			return kube.Get(b, kube.GetOptions{Namespace: c.operatorNS(ctx)}, "deployment", operatorDeployment)
+		})
 	}
 	opNS := c.operatorNS(ctx)
 	// --ignore-not-found makes an operator that is not there an empty answer, reported below
@@ -378,7 +384,7 @@ func (c *Cluster) OperatorReport(ctx context.Context) error {
 	// not read the operator's namespace at all -- and is reported as not read, rather than
 	// sending a namespace-scoped user off to install an operator that is already running.
 	var list deploymentList
-	if err := c.getJSON(ctx, &list, "deployment", operatorDeployment, "-n", opNS, "--ignore-not-found"); err != nil {
+	if err := c.getJSON(ctx, &list, getRead{kube.GetOptions{Namespace: opNS, IgnoreNotFound: true}, []string{"deployment", operatorDeployment}}); err != nil {
 		r.Section("Operator")
 		r.KVRowAt(output.LevelSkip, statusKeyWidth, "installed",
 			fmt.Sprintf("not read (%v) -- reading deployment %s needs get on deployments in %s", err, operatorDeployment, opNS))
@@ -412,7 +418,7 @@ func operatorRunningImage(containers []containerSpec) string {
 // echoStatusReads lists the reads the report would make, for the preview path
 // where there is no cluster to decode.
 func (c *Cluster) echoStatusReads(ctx context.Context, detail bool) error {
-	reads := [][]string{
+	reads := []getRead{
 		c.brokerRead(),
 		c.namedRead("pods", c.statusPodNames()),
 		c.namedRead("svc", []string{lbServiceName(c.Cfg), discoveryServiceName(c.Cfg)}),
@@ -422,7 +428,8 @@ func (c *Cluster) echoStatusReads(ctx context.Context, detail bool) error {
 		reads = append(reads, c.namedRead("pvc", c.statusClaimNames()))
 	}
 	for _, read := range reads {
-		if err := c.kubectl(ctx, append(append([]string{"get"}, read...), "-o", "json")...); err != nil {
+		read.opts.Output = "json"
+		if err := c.runKube(ctx, func(b []string) runner.Cmd { return kube.Get(b, read.opts, read.what...) }); err != nil {
 			return err
 		}
 	}
@@ -441,14 +448,16 @@ func (c *Cluster) echoStatusReads(ctx context.Context, detail bool) error {
 func (c *Cluster) ClusterReport(ctx context.Context, detail bool) error {
 	r := c.report()
 	if c.isEcho() {
-		return c.kubectl(ctx, "get", "pubsubpluseventbrokers", "--all-namespaces", "-o", "json")
+		return c.runKube(ctx, func(b []string) runner.Cmd {
+			return kube.Get(b, kube.GetOptions{AllNamespaces: true, Output: "json"}, "pubsubpluseventbrokers")
+		})
 	}
 
 	// Cluster-wide by request, so a refusal is the answer and the command fails -- there is
 	// no narrower view to fall back to that would still be what --all asked for. The error
 	// says what the listing needs, and where the env file's own broker can still be seen.
 	var list brokerList
-	if err := c.getJSON(ctx, &list, "pubsubpluseventbrokers", "--all-namespaces"); err != nil {
+	if err := c.getJSON(ctx, &list, getRead{kube.GetOptions{AllNamespaces: true}, []string{"pubsubpluseventbrokers"}}); err != nil {
 		return fmt.Errorf("listing brokers across the cluster: %w\n"+
 			"  --all needs list on %s in every namespace (a cluster role binding); "+
 			"`broker status` without --all reports this env file's broker with namespace rights alone", err, brokerResource)

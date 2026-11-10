@@ -239,19 +239,36 @@ func TestAdminPasswordPreflight(t *testing.T) {
 			t.Errorf("no broker can be running without its data, so a first deploy must pass: %v", err)
 		}
 	})
-	t.Run("a refused CR permission stops before any read", func(t *testing.T) {
-		r := &recRunner{canI: "no"}
-		err := run(t, operatorManagedCfg(), r)
-		if err == nil || !strings.Contains(err.Error(), "not allowed to get "+brokerResource) {
-			t.Fatalf("err = %v, want the preflight's own permission refusal", err)
+	t.Run("a refused CR read falls through to the data check", func(t *testing.T) {
+		// The CR read is refused (kubectl's Forbidden on stderr): that is no reason to stop,
+		// since the deploy's own apply is what needs the grant. The claims decide, so with
+		// nothing of this broker's data there is nothing to lose and it passes ...
+		r := &recRunner{
+			outErrQueue: []error{errors.New("exit status 1")},
+			outQueue:    [][]byte{nil, []byte(`{"items":[]}`)},
+			stderrQueue: []string{forbiddenGet},
+		}
+		if err := run(t, operatorManagedCfg(), r); err != nil {
+			t.Fatalf("a refused CR read must fall through to the data check: %v", err)
 		}
 		for _, c := range r.calls {
-			if !isCanI(c.args) {
-				t.Errorf("no read may run once a probe is refused: %+v", c)
+			if isCanI(c.args) {
+				t.Errorf("reads are not probed as requirements, but %v was asked", c.args)
 			}
 		}
+		// ... and with kept data it still refuses, naming why the CR was not read.
+		r = &recRunner{
+			outErrQueue: []error{errors.New("exit status 1")},
+			outQueue:    [][]byte{nil, []byte(`{"items":[{"metadata":{"name":"data-dev-broker-pubsubplus-p-0"}}]}`)},
+			stderrQueue: []string{forbiddenGet},
+		}
+		err := run(t, operatorManagedCfg(), r)
+		if err == nil || !strings.Contains(err.Error(), "data-dev-broker-pubsubplus-p-0") ||
+			!strings.Contains(err.Error(), "could not be read") {
+			t.Errorf("err = %v, want the refusal naming the kept claim and the unread CR", err)
+		}
 	})
-	t.Run("both reads are by name, so get is all they need", func(t *testing.T) {
+	t.Run("both reads are by name, so get is all they need, and neither is probed", func(t *testing.T) {
 		r := &recRunner{}
 		if err := run(t, operatorManagedCfg(), r); err != nil {
 			t.Fatalf("AdminPasswordPreflight: %v", err)
@@ -259,9 +276,7 @@ func TestAdminPasswordPreflight(t *testing.T) {
 		var reads [][]string
 		for _, c := range r.calls {
 			if isCanI(c.args) {
-				if canIVerb(c.args) != "get" {
-					t.Errorf("probe %v asks for more than get", c.args)
-				}
+				t.Errorf("a read is not a requirement, so it is not probed: %v", c.args)
 				continue
 			}
 			reads = append(reads, c.args)
@@ -275,35 +290,33 @@ func TestAdminPasswordPreflight(t *testing.T) {
 			t.Errorf("reads = %v, want %v", reads, want)
 		}
 	})
-	t.Run("a refused claims permission warns and lets the deploy proceed", func(t *testing.T) {
-		r := &recRunner{canIByResource: map[string]string{"persistentvolumeclaims": "no"},
-			outQueue: [][]byte{[]byte(`{"items":[]}`)}}
+	t.Run("a refused claims read warns and lets the deploy proceed", func(t *testing.T) {
+		r := &recRunner{
+			outErrQueue: []error{nil, errors.New("exit status 1")},
+			outQueue:    [][]byte{[]byte(`{"items":[]}`), nil},
+			stderrQueue: []string{strings.Replace(forbiddenGet, "pubsubpluseventbrokers", "persistentvolumeclaims", -1)},
+		}
 		log, narration := logBuf()
 		c := NewCluster(r, operatorManagedCfg(), log, nil)
 		if err := c.AdminPasswordPreflight(context.Background()); err != nil {
-			t.Fatalf("reading claims is no part of a deploy; a refused grant must not stop it: %v", err)
+			t.Fatalf("reading claims is no part of a deploy; a refused read must not stop it: %v", err)
 		}
 		for _, want := range []string{"not checked", "get persistentvolumeclaims", "semp.adminPass"} {
 			if !strings.Contains(narration.String(), want) {
 				t.Errorf("warning %q should mention %q", narration.String(), want)
 			}
 		}
-		if r.last().args[0] == "get" && r.last().args[1] == "pvc" {
-			t.Errorf("no claims read may follow a refused probe: %+v", r.calls)
+		if len(r.calls) != 2 {
+			t.Errorf("calls = %+v, want the CR read and the one refused claims read", r.calls)
 		}
 	})
-	t.Run("a refused claims permission never hides a running broker's Secret", func(t *testing.T) {
-		r := &recRunner{canIByResource: map[string]string{"persistentvolumeclaims": "no"},
-			outQueue: [][]byte{[]byte(strings.Replace(brokerListJSON, "%q", `"solace-admin-secret"`, 1))}}
+	t.Run("a running broker's Secret is decided before the claims are read", func(t *testing.T) {
+		r := &recRunner{outQueue: [][]byte{[]byte(strings.Replace(brokerListJSON, "%q", `"solace-admin-secret"`, 1))}}
 		if err := run(t, operatorManagedCfg(), r); err == nil || !strings.Contains(err.Error(), "solace-admin-secret") {
 			t.Errorf("err = %v, want the refusal for the dropped reference: the CR decides before the claims", err)
 		}
-	})
-	t.Run("an unanswered claims probe still stops the deploy", func(t *testing.T) {
-		r := &recRunner{canIByResource: map[string]string{"persistentvolumeclaims": "maybe"},
-			outQueue: [][]byte{[]byte(`{"items":[]}`)}}
-		if err := run(t, operatorManagedCfg(), r); err == nil || !strings.Contains(err.Error(), "could not read the answer") {
-			t.Errorf("err = %v, want the preflight's own unreadable-answer error: only a refusal degrades", err)
+		if len(r.calls) != 1 {
+			t.Errorf("calls = %+v, want only the CR read", r.calls)
 		}
 	})
 	t.Run("a failed check refuses and says how to skip it", func(t *testing.T) {

@@ -3,15 +3,19 @@ package k8s
 import (
 	"bytes"
 	"context"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/kube/rbac"
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/broker"
 	"solace/internal/config"
-	"solace/internal/engine"
 )
 
-// --- capturing fake engine.Runner ------------------------------------------
+// --- capturing fake runner.Runner ------------------------------------------
 
 type rrCall struct {
 	method string // Run | RunInput | RunInteractive | Output | OutputInput
@@ -29,6 +33,13 @@ type recRunner struct {
 	runErr      error    // error returned by Run (nil = success); for best-effort paths
 	runErrQueue []error  // popped per Run call; falls back to runErr once drained
 	runInputErr error    // error returned by RunInput (nil = success)
+
+	// stderr is what a FAILING call writes to the stderr writer it was given, the way
+	// kubectl's refusal reaches the terminal and the tee the steps that tell a refusal
+	// (kube.Forbidden) from other failures read it through. Queue entries are consumed
+	// per Run call that returns an error, in order, then stderr applies.
+	stderr      string
+	stderrQueue []string
 
 	// Cluster.Preflight runs `auth can-i` before every mutating operation, so the
 	// double answers it out of band: the reply comes from these two fields rather
@@ -137,36 +148,74 @@ func (r *recRunner) nextOutErr() error {
 	return r.outErr
 }
 
-func (r *recRunner) Run(_ context.Context, name string, args ...string) error {
-	r.calls = append(r.calls, rrCall{"Run", name, args, ""})
-	return r.nextRunErr()
-}
-func (r *recRunner) RunInput(_ context.Context, in []byte, name string, args ...string) error {
-	r.calls = append(r.calls, rrCall{"RunInput", name, args, string(in)})
-	return r.runInputErr
+// legacyMethod names a call the way the retired five-method Runner interface did, so the
+// recorded sequences and their assertions keep reading as they always have: a captured
+// stdout is Output (OutputInput with stdin), a streamed one is Run (RunEnv with env,
+// RunInput with stdin), and an attached session is RunInteractive.
+func legacyMethod(c runner.Cmd, stdout io.Writer) string {
+	switch {
+	case stdout != io.Writer(os.Stdout) && c.Stdin != nil:
+		return "OutputInput"
+	case stdout != io.Writer(os.Stdout):
+		return "Output"
+	case c.Env != nil:
+		return "RunEnv"
+	case c.Stdin != nil:
+		return "RunInput"
+	}
+	return "Run"
 }
 
-// RunEnv exists to satisfy engine.Runner: nothing in the k8s package passes
-// secrets through a child environment (every secret rides stdin), so it records
-// the call like Run and the extra environment is deliberately not modelled.
-func (r *recRunner) RunEnv(_ context.Context, _ []string, name string, args ...string) error {
-	r.calls = append(r.calls, rrCall{"RunEnv", name, args, ""})
-	return r.nextRunErr()
-}
-func (r *recRunner) RunInteractive(_ context.Context, name string, args ...string) error {
-	r.calls = append(r.calls, rrCall{"RunInteractive", name, args, ""})
-	return nil
-}
-func (r *recRunner) Output(_ context.Context, name string, args ...string) ([]byte, error) {
-	r.calls = append(r.calls, rrCall{"Output", name, args, ""})
-	if isCanI(args) {
-		return r.canIAnswer(args)
+// Run records the call under its legacy method name and answers it as that method did.
+// RunEnv exists only so a call that carries Env is still recorded: nothing in the k8s
+// package passes secrets through a child environment (every secret rides stdin), so the
+// extra environment is deliberately not modelled.
+func (r *recRunner) Run(_ context.Context, c runner.Cmd, stdout, stderr io.Writer) error {
+	method, name, args := legacyMethod(c, stdout), c.Argv[0], c.Argv[1:]
+	switch method {
+	case "RunInput":
+		r.calls = append(r.calls, rrCall{method, name, args, string(c.Stdin)})
+		return r.failWith(stderr, r.runInputErr)
+	case "Output":
+		r.calls = append(r.calls, rrCall{method, name, args, ""})
+		if isCanI(args) {
+			return writeOut(stdout)(r.canIAnswer(args))
+		}
+		out := r.nextOut()
+		return r.failWith(stderr, writeOut(stdout)(out, r.nextOutErr()))
+	case "OutputInput":
+		r.calls = append(r.calls, rrCall{method, name, args, string(c.Stdin)})
+		return writeOut(stdout)(r.out, r.nextOutErr())
 	}
-	return r.nextOut(), r.nextOutErr()
+	r.calls = append(r.calls, rrCall{method, name, args, ""})
+	return r.failWith(stderr, r.nextRunErr())
 }
-func (r *recRunner) OutputInput(_ context.Context, in []byte, name string, args ...string) ([]byte, error) {
-	r.calls = append(r.calls, rrCall{"OutputInput", name, args, string(in)})
-	return r.out, r.nextOutErr()
+
+// failWith writes the scripted stderr to w when the call is failing, then returns err.
+func (r *recRunner) failWith(w io.Writer, err error) error {
+	if err == nil || w == nil {
+		return err
+	}
+	text := r.stderr
+	if len(r.stderrQueue) > 0 {
+		text, r.stderrQueue = r.stderrQueue[0], r.stderrQueue[1:]
+	}
+	_, _ = io.WriteString(w, text)
+	return err
+}
+
+// writeOut returns a function that writes a scripted answer to the captured stdout and
+// passes the scripted error through, so an answer and an error can come back together.
+func writeOut(stdout io.Writer) func([]byte, error) error {
+	return func(out []byte, err error) error {
+		_, _ = stdout.Write(out)
+		return err
+	}
+}
+
+func (r *recRunner) Attach(c runner.Cmd, _, _, _ *os.File) (int, error) {
+	r.calls = append(r.calls, rrCall{"RunInteractive", c.Argv[0], c.Argv[1:], ""})
+	return 0, nil
 }
 
 // afterPreflight asserts the FIRST recorded call is the read-only permission probe
@@ -188,7 +237,7 @@ func (r *recRunner) afterPreflight(t *testing.T, verb, resource string) []rrCall
 	// review, where RBAC would also evaluate namespaced Roles and could answer yes
 	// for a permission the cluster-scoped action does not actually have.
 	want := []string{"auth", "can-i", verb, resource}
-	if clusterScoped[resource] {
+	if rbac.ClusterScoped(resource) {
 		want = append(want, "--all-namespaces")
 	} else {
 		want = append(want, "-n", "solace")
@@ -234,17 +283,17 @@ func TestTransportExecArgs(t *testing.T) {
 		{
 			"Run primary",
 			func() { _ = tr.Run(ctx, config.Primary, "show", "version") },
-			rrCall{"Run", "kubectl", []string{"exec", "-n", "solace", "dev-broker-pubsubplus-p-0", "--", "show", "version"}, ""},
+			rrCall{"Run", "kubectl", []string{"exec", "dev-broker-pubsubplus-p-0", "-n", "solace", "--", "show", "version"}, ""},
 		},
 		{
 			"Output backup",
 			func() { _, _ = tr.Output(ctx, config.Backup, "hostname") },
-			rrCall{"Output", "kubectl", []string{"exec", "-n", "solace", "dev-broker-pubsubplus-b-0", "--", "hostname"}, ""},
+			rrCall{"Output", "kubectl", []string{"exec", "dev-broker-pubsubplus-b-0", "-n", "solace", "--", "hostname"}, ""},
 		},
 		{
 			"OutputInput monitor adds -i and rides stdin",
 			func() { _, _ = tr.OutputInput(ctx, config.Monitor, []byte("user = \"a:b\"\n"), "curl", "-K", "-") },
-			rrCall{"OutputInput", "kubectl", []string{"exec", "-i", "-n", "solace", "dev-broker-pubsubplus-m-0", "--", "curl", "-K", "-"}, "user = \"a:b\"\n"},
+			rrCall{"OutputInput", "kubectl", []string{"exec", "-i", "dev-broker-pubsubplus-m-0", "-n", "solace", "--", "curl", "-K", "-"}, "user = \"a:b\"\n"},
 		},
 	}
 	for _, tc := range cases {
@@ -278,7 +327,7 @@ func TestTransportUpload(t *testing.T) {
 	got := rr.last()
 	want := rrCall{
 		"RunInput", "kubectl",
-		[]string{"exec", "-i", "-n", "solace", "dev-broker-pubsubplus-p-0", "--", "sh", "-c", "cat > '" + dest + "'"},
+		[]string{"exec", "-i", "dev-broker-pubsubplus-p-0", "-n", "solace", "--", "sh", "-c", "cat > '" + dest + "'"},
 		secret,
 	}
 	if got.method != want.method || got.name != want.name || !eqArgs(got.args, want.args) || got.stdin != want.stdin {
@@ -330,12 +379,12 @@ func TestTransportCopy(t *testing.T) {
 	}
 }
 
-// --- end-to-end: a real broker.Ops over engine.Echo never echoes the body ---
+// --- end-to-end: a real broker.Ops over runner.Echo never echoes the body ---
 
 func TestTransportEchoHidesUploadBody(t *testing.T) {
 	buf := &bytes.Buffer{}
 	cfg := haCfg()
-	tr := NewTransport(engine.Echo{W: buf}, cfg)
+	tr := NewTransport(runner.Echo{W: buf}, cfg)
 	o := broker.New(tr, cfg, nil)
 
 	body := "SECRET-CLI-BODY\n"
@@ -354,7 +403,7 @@ func TestTransportEchoHidesUploadBody(t *testing.T) {
 	// anchors are the pod and the shell it is handed -- the skeleton's own body is
 	// multi-line and shell-quoted, and matching a fragment of it would break on any
 	// whitespace change without protecting anything.
-	if !strings.Contains(out, "dev-broker-pubsubplus-p-0 -- sh -c ") {
+	if !strings.Contains(out, "dev-broker-pubsubplus-p-0 -n solace -- sh -c ") {
 		t.Errorf("Echo missing the cli exec line:\n%s", out)
 	}
 	// The shell still runs the CLI, and runs THIS call's script: the broker-side
@@ -377,7 +426,7 @@ func TestTransportEchoHidesUploadBody(t *testing.T) {
 // The single-probe helper cannot serve here: it asserts calls[0] is the only probe and
 // returns calls[1:], so an operation that legitimately asks about seven kinds would
 // look like six stray calls before its real work.
-func (r *recRunner) afterPreflights(t *testing.T, want ...probe) []rrCall {
+func (r *recRunner) afterPreflights(t *testing.T, want ...rbac.Probe) []rrCall {
 	t.Helper()
 	got := map[string]bool{}
 	i := 0
@@ -393,9 +442,13 @@ func (r *recRunner) afterPreflights(t *testing.T, want ...probe) []rrCall {
 	}
 	for _, p := range want {
 		// target, not resource: a named probe's argv carries `resource/name`.
-		if !got[p.verb+" "+p.target()] {
+		target := p.Resource
+		if p.Name != "" {
+			target += "/" + p.Name
+		}
+		if !got[p.Verb+" "+target] {
 			t.Errorf("no probe for %q %q -- an operation must ask about every kind it touches, or it passes "+
-				"the check and fails halfway through the work", p.verb, p.target())
+				"the check and fails halfway through the work", p.Verb, target)
 		}
 	}
 	return r.calls[i:]

@@ -8,10 +8,20 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/systemd"
+
 	"solace/internal/config"
 )
 
 // --- fixtures ---------------------------------------------------------------
+
+// The variables rootless.UserSession derives and the Manager exports. The tests read
+// them back through fakeEnv by name.
+const (
+	xdgRuntimeDir  = "XDG_RUNTIME_DIR"
+	dbusSessionBus = "DBUS_SESSION_BUS_ADDRESS"
+)
 
 // healthyRootlessOut answers every probe in the podman host-readiness block the
 // way a correctly prepared host would. It is keyed by the shape of each call
@@ -40,8 +50,8 @@ func healthyRootlessOut(nrOpen string) func(name string, args []string) []byte {
 			return []byte(nrOpen)
 		case name == "sh" && slices.Contains(args, "ulimit -Hn"):
 			return []byte(healthySessionNoFile)
-		case name == "sh" && slices.Contains(args, sessionCoreScript):
-			return []byte(healthySessionCore)
+		case name == "cat" && slices.Contains(args, "/proc/self/limits"):
+			return []byte(procLimits(healthySessionCore))
 		case slices.Contains(args, "--format") && strings.Contains(strings.Join(args, " "), "IDMappings"):
 			// 0:1 is this user mapped to container root; 1:65536 is the subuid
 			// range, which is what covers ctrCfg's runUser of 1000:0.
@@ -81,7 +91,7 @@ func fakeEnv(m *Manager, initial map[string]string) map[string]string {
 // and then breaks in exactly one place.
 func rootlessMgr() (*Manager, *capRunner, *bytes.Buffer) {
 	cfg := ctrCfg(config.Podman, "false")
-	cfg.Podman.Rootless = true
+	cfg.Podman.Rootful = false
 	// Both knobs ApplyDefaults derives from Rootless, set by hand for the same
 	// reason ctrCfg sets Scaling.CPU: the executors must work without config.Load,
 	// so the fixture skips ApplyDefaults. Leaving SystemctlUser empty would send
@@ -180,7 +190,7 @@ func TestCheckPodmanHostSkipsDockerAndPreview(t *testing.T) {
 	}
 
 	cfg := ctrCfg(config.Podman, "false")
-	cfg.Podman.Rootless = true
+	cfg.Podman.Rootful = false
 	em, buf := newEchoMgr(cfg, config.Podman)
 	if err := em.checkPodmanHost(context.Background(), false); err != nil {
 		t.Fatalf("preview must not assert: %v", err)
@@ -196,7 +206,7 @@ func TestCheckPodmanHostSkipsDockerAndPreview(t *testing.T) {
 // applies to every engine (limits.go).
 func TestCheckPodmanHostRootfulStopsAtEUID(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "false")
-	cfg.Podman.Rootless = false
+	cfg.Podman.Rootful = true
 	m, rr, buf := newCapMgr(cfg, config.Podman)
 	m.Geteuid = func() int { return 0 }
 	if err := m.checkPodmanHost(context.Background(), false); err != nil {
@@ -301,9 +311,13 @@ func TestEnsureUserSessionDerivesEachHalfIndependently(t *testing.T) {
 func TestEnsureUserSessionExportsNothingWhenTheDirIsMissing(t *testing.T) {
 	m, rr, buf := rootlessMgr()
 	env := fakeEnv(m, nil)
-	failOnCall(rr, func(name string, args []string) bool {
-		return name == "sh" && slices.Contains(args, `test -d "$0"`)
-	})
+	// Exit status 1 is `test -d` saying the directory is not there.
+	rr.outFail = func(name string, args []string) error {
+		if name == "sh" && slices.Contains(args, `test -d "$0"`) {
+			return exitcode.Exited("sh", 1)
+		}
+		return nil
+	}
 	err := m.checkPodmanHost(context.Background(), false)
 	if err == nil {
 		t.Fatal("a missing user runtime directory must fail the block")
@@ -328,6 +342,33 @@ func TestEnsureUserSessionExportsNothingWhenTheDirIsMissing(t *testing.T) {
 	}
 }
 
+// TestEnsureUserSessionReportsAProbeThatCannotRun: only exit status 1 from the
+// `test -d` probe means the directory is absent. Any other failure is a probe that
+// could not run, and saying "does not exist" about it would send the operator to fix
+// a session that may be fine.
+func TestEnsureUserSessionReportsAProbeThatCannotRun(t *testing.T) {
+	m, rr, _ := rootlessMgr()
+	env := fakeEnv(m, nil)
+	failOnCall(rr, func(name string, args []string) bool {
+		return name == "sh" && slices.Contains(args, `test -d "$0"`)
+	})
+	err := m.checkPodmanHost(context.Background(), false)
+	if err == nil {
+		t.Fatal("a probe that cannot run must fail the block")
+	}
+	for _, want := range []string{"cannot tell whether the user runtime directory /run/user/1000 exists", "boom"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error must mention %q, got: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("a failed probe is not a missing directory: %v", err)
+	}
+	if len(env) != 0 {
+		t.Errorf("nothing may be exported when the directory could not be checked, got %v", env)
+	}
+}
+
 // TestEnsureUserSessionProbesOncePerRun: every systemctl call funnels through it,
 // so it must cost one probe per run rather than one per command.
 func TestEnsureUserSessionProbesOncePerRun(t *testing.T) {
@@ -335,7 +376,7 @@ func TestEnsureUserSessionProbesOncePerRun(t *testing.T) {
 	fakeEnv(m, nil)
 	ctx := context.Background()
 	for range 3 {
-		if _, err := m.systemctlOutput(ctx, "is-active", "sol-pod.service"); err != nil {
+		if _, err := m.systemctlOutput(ctx, systemd.IsActive(true, "sol-pod.service")); err != nil {
 			t.Fatalf("systemctlOutput: %v", err)
 		}
 	}
@@ -356,7 +397,7 @@ func TestEnsureUserSessionProbesOncePerRun(t *testing.T) {
 func TestSystemctlCarriesTheSessionWithoutPrepHost(t *testing.T) {
 	m, rr, _ := rootlessMgr()
 	env := fakeEnv(m, nil)
-	if err := m.systemctl(context.Background(), "start", "sol-pod.service"); err != nil {
+	if err := m.systemctl(context.Background(), systemd.Start(true, "sol-pod.service")); err != nil {
 		t.Fatalf("systemctl: %v", err)
 	}
 	if env[xdgRuntimeDir] == "" {
@@ -389,6 +430,26 @@ func TestCheckIDMappingRefusesAnUnmappedRunUser(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "id mapping:") {
 		t.Errorf("the failing row must be reported:\n%s", buf)
+	}
+}
+
+// TestCheckIDMappingPassesGidZeroWithAnEmptyGIDMap: container gid 0 is the invoking
+// user's own primary group, so it needs no subgid allocation, and a user with none
+// (the usual `useradd` account has a subuid range only) must not be refused for it.
+func TestCheckIDMappingPassesGidZeroWithAnEmptyGIDMap(t *testing.T) {
+	m, rr, buf := rootlessMgr()
+	fakeEnv(m, nil)
+	rr.outFor = func(name string, args []string) []byte {
+		if slices.Contains(args, "--format") && strings.Contains(strings.Join(args, " "), "IDMappings.GIDMap") {
+			return nil // no subgid allocation at all
+		}
+		return healthyRootlessOut(healthyNrOpen)(name, args)
+	}
+	if err := m.checkPodmanHost(context.Background(), false); err != nil {
+		t.Fatalf("runUser 1000:0 needs no subgid allocation: %v", err)
+	}
+	if !strings.Contains(buf.String(), "id mapping: runUser 1000:0 is inside") {
+		t.Errorf("the row must pass:\n%s", buf)
 	}
 }
 
@@ -573,14 +634,18 @@ func TestCheckLingerRefusesWhenDisabled(t *testing.T) {
 	rr.outFor = lingerOff(healthyNrOpen)
 	err := m.checkPodmanHost(context.Background(), false)
 	if err == nil {
-		t.Fatal("linger off must refuse: systemd stops the broker at logout")
+		t.Fatal("linger off must refuse: systemd stops the user's units at logout")
 	}
-	// The consequence in one clause, and the command. Why systemd behaves this way
-	// is documented, not restated here.
-	for _, want := range []string{"linger is not enabled", "logout", "loginctl enable-linger"} {
+	// The consequence in one clause, and the command (the shared rootless.CheckLinger,
+	// whose text names no broker). Why systemd behaves this way is documented, not
+	// restated here.
+	for _, want := range []string{"linger is not enabled", "logout", "start at boot", "loginctl enable-linger"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the error must mention %q, got: %v", want, err)
 		}
+	}
+	if strings.Contains(err.Error(), "broker") {
+		t.Errorf("the shared refusal names no broker, got: %v", err)
 	}
 	if !strings.Contains(buf.String(), "linger: not enabled") {
 		t.Errorf("the failing row must be reported:\n%s", buf)
@@ -890,7 +955,7 @@ func TestPrepHostMkdirFailureExplainsRootless(t *testing.T) {
 func TestPrepHostMkdirHintIsRootlessOnly(t *testing.T) {
 	for _, p := range []config.Platform{config.Podman, config.Docker} {
 		cfg := ctrCfg(p, "false")
-		cfg.Podman.Rootless = false
+		cfg.Podman.Rootful = true
 		m, rr, _ := newCapMgr(cfg, p)
 		if p == config.Podman {
 			m.Geteuid = func() int { return 0 }
@@ -917,7 +982,7 @@ func TestPrepHostMkdirHintIsRootlessOnly(t *testing.T) {
 // level: a DNS failure must not hide a host-readiness failure or the reverse.
 func TestCheckReportsDNSAndPodmanHostTogether(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "true") // HA -> DNS failures are loud
-	cfg.Podman.Rootless = true
+	cfg.Podman.Rootful = false
 	cfg.Podman.SystemctlUser = "--user" // derived by ApplyDefaults, which ctrCfg skips
 	cfg.Podman.WantedBy = "default.target"
 	m, rr, buf := newCapMgr(cfg, config.Podman)

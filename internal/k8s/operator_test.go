@@ -5,14 +5,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/kube/rbac"
+	"github.com/hafio/go-deploy-utility/runner"
 	"gopkg.in/yaml.v3"
 
 	"solace/internal/config"
-	"solace/internal/engine"
 	"solace/internal/examples"
 )
 
@@ -256,7 +259,7 @@ func TestOperatorApply(t *testing.T) {
 	if err := c.OperatorApply(context.Background()); err != nil {
 		t.Fatalf("OperatorApply: %v", err)
 	}
-	calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), "op-ns")
+	calls := withoutNamespaceStage(rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"}), "op-ns")
 	if len(calls) != 4 {
 		t.Fatalf("OperatorApply made %d calls after the probe, want 4 "+
 			"(operator read + namespace + regcred + bundle)", len(calls))
@@ -319,7 +322,7 @@ func TestOperatorApplyNoCredentialsSkipsRegcred(t *testing.T) {
 	if err := c.OperatorApply(context.Background()); err != nil {
 		t.Fatalf("OperatorApply: %v", err)
 	}
-	calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), "op-ns")
+	calls := withoutNamespaceStage(rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"}), "op-ns")
 	if len(calls) != 3 {
 		t.Fatalf("OperatorApply without credentials made %d calls after the probe, want 3 "+
 			"(operator read + namespace + bundle)", len(calls))
@@ -363,7 +366,7 @@ func TestOperatorApplyNamedPullSecretWithoutCredentials(t *testing.T) {
 	if err := c.OperatorApply(context.Background()); err != nil {
 		t.Fatalf("OperatorApply: %v", err)
 	}
-	calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), "op-ns")
+	calls := withoutNamespaceStage(rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"}), "op-ns")
 	if len(calls) != 3 {
 		t.Fatalf("OperatorApply with a named-but-unbuilt pull secret made %d calls after the probe, want 3 "+
 			"(operator read + namespace + bundle)", len(calls))
@@ -406,7 +409,7 @@ func TestOperatorApplyProceedsWhenTheClusterWideListIsDenied(t *testing.T) {
 			if err := c.OperatorApply(context.Background()); err != nil {
 				t.Fatalf("OperatorApply: %v\n%s", err, buf.String())
 			}
-			calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), "op-ns")
+			calls := withoutNamespaceStage(rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"}), "op-ns")
 			want := [][]string{
 				{"get", "deployment", "--all-namespaces", "-o", "json"},
 				{"get", "deployment", operatorDeployment, "-n", "op-ns", "--ignore-not-found", "-o", "json"},
@@ -462,7 +465,8 @@ func TestOperatorApplyRefusesAFallbackFirstInstallWithoutEscalateOrBind(t *testi
 			rr.canIByVerb = map[string]string{tc.verb: "no"}
 			c := NewCluster(rr, cfg, nil, nil)
 			asked := false
-			c.Confirm = func(string) bool { asked = true; return true }
+			c.Confirm = func(string) (bool, error) { asked = true; return true, nil }
+			c.ConfirmScope = c.Confirm
 			err := c.OperatorApply(context.Background())
 			if err == nil {
 				t.Fatal("a fallback first install without " + tc.verb + " must be refused before anything is applied")
@@ -492,7 +496,7 @@ func TestOperatorApplyRefusesAFallbackFirstInstallWithoutEscalateOrBind(t *testi
 // both belong to a refused list, which a preview cannot have.
 func TestOperatorApplyPreviewReadsTheOperatorOnce(t *testing.T) {
 	var out strings.Builder
-	c := NewCluster(engine.Echo{W: &out}, loadK8s(t), nil, &out)
+	c := NewCluster(runner.Echo{W: &out}, loadK8s(t), nil, &out)
 	if err := c.OperatorApply(context.Background()); err != nil {
 		t.Fatalf("OperatorApply under Echo: %v", err)
 	}
@@ -553,7 +557,7 @@ func TestOperatorDeleteOmitsRegcredWithoutCredentials(t *testing.T) {
 			if err := c.OperatorDelete(context.Background(), false); err != nil {
 				t.Fatalf("OperatorDelete: %v", err)
 			}
-			calls := rr.afterPreflights(t, probe{verb: "delete", resource: "clusterroles"})
+			calls := rr.afterPreflights(t, rbac.Probe{Verb: "delete", Resource: "clusterroles"})
 			if len(calls) != 1 {
 				t.Fatalf("OperatorDelete(deleteCRDs=false) made %d call(s) after the probe, want 1 "+
 					"(the non-CRD documents)", len(calls))
@@ -583,7 +587,7 @@ func TestOperatorDelete(t *testing.T) {
 	if err := c.OperatorDelete(context.Background(), false); err != nil {
 		t.Fatalf("OperatorDelete: %v", err)
 	}
-	calls := rr.afterPreflights(t, probe{verb: "delete", resource: "clusterroles"})
+	calls := rr.afterPreflights(t, rbac.Probe{Verb: "delete", Resource: "clusterroles"})
 	if len(calls) != 1 {
 		t.Fatalf("OperatorDelete(deleteCRDs=false) made %d call(s) after the probe, want 1 (the non-CRD documents)", len(calls))
 	}
@@ -600,10 +604,10 @@ func TestOperatorDelete(t *testing.T) {
 	}
 }
 
-// TestOperatorDeleteWithCRDs is the deleteCRDs=true half: OperatorDelete probes the
-// cluster-wide broker list with every delete, checks the cluster for existing broker
-// custom resources BEFORE its first delete (none here -- the default recRunner Output
-// returns empty), checks again right before the CRDs go, and deletes the CRD document in
+// TestOperatorDeleteWithCRDs is the deleteCRDs=true half: OperatorDelete checks the
+// cluster for existing broker custom resources BEFORE its first delete (none here -- the
+// default recRunner Output returns empty) with a real read, not a probe of it, checks again
+// right before the CRDs go, and deletes the CRD document in
 // a SECOND, separate `kubectl delete -f -` call, never folded into the first -- so a
 // caller inspecting just the first delete (as most teardowns do) cannot mistake a
 // CRD-carrying delete for the safe default.
@@ -615,8 +619,7 @@ func TestOperatorDeleteWithCRDs(t *testing.T) {
 	if err := c.OperatorDelete(context.Background(), true); err != nil {
 		t.Fatalf("OperatorDelete: %v", err)
 	}
-	calls := rr.afterPreflights(t, probe{verb: "delete", resource: "customresourcedefinitions"},
-		probe{verb: "list", resource: brokerResource})
+	calls := rr.afterPreflights(t, rbac.Probe{Verb: "delete", Resource: "customresourcedefinitions"})
 	if len(calls) != 4 {
 		t.Fatalf("OperatorDelete(deleteCRDs=true) made %d call(s) after the probe, want 4 (the broker CR listing, "+
 			"non-CRD documents, the listing again, then CRDs)", len(calls))
@@ -674,7 +677,7 @@ func TestOperatorDeleteRefusesCRDWhenBrokersExist(t *testing.T) {
 	if !strings.Contains(err.Error(), "Nothing was deleted: the operator is still installed") {
 		t.Errorf("error = %v, want it to say nothing was deleted", err)
 	}
-	calls := rr.afterPreflights(t, probe{verb: "delete", resource: "customresourcedefinitions"})
+	calls := rr.afterPreflights(t, rbac.Probe{Verb: "delete", Resource: "customresourcedefinitions"})
 	if len(calls) != 1 || calls[0].method != "Output" {
 		t.Fatalf("OperatorDelete made %+v after the probes, want only the broker CR listing -- nothing may be "+
 			"deleted once the CRD layer is refused", calls)
@@ -700,7 +703,7 @@ func TestOperatorDeleteSkipsBrokerCheckWithoutDeleteCRDs(t *testing.T) {
 	if err := c.OperatorDelete(context.Background(), false); err != nil {
 		t.Fatalf("OperatorDelete: %v", err)
 	}
-	calls := rr.afterPreflights(t, probe{verb: "delete", resource: "clusterroles"})
+	calls := rr.afterPreflights(t, rbac.Probe{Verb: "delete", Resource: "clusterroles"})
 	if len(calls) != 1 {
 		t.Fatalf("OperatorDelete(deleteCRDs=false) made %d call(s) after the probe, want 1 (the operator bundle "+
 			"delete only -- no broker CR listing belongs on this path)", len(calls))
@@ -727,7 +730,7 @@ func TestOperatorDeleteRefusesCRDWhenListingFails(t *testing.T) {
 	if !errors.Is(err, errFake) {
 		t.Errorf("refusal error must preserve the listing failure via %%w: %v", err)
 	}
-	calls := rr.afterPreflights(t, probe{verb: "delete", resource: "customresourcedefinitions"})
+	calls := rr.afterPreflights(t, rbac.Probe{Verb: "delete", Resource: "customresourcedefinitions"})
 	for _, call := range calls {
 		if call.method == "RunInput" {
 			t.Errorf("nothing may be deleted when the listing failed: %+v", call)
@@ -735,10 +738,11 @@ func TestOperatorDeleteRefusesCRDWhenListingFails(t *testing.T) {
 	}
 }
 
-// TestOperatorDeleteProbesCRDsOnlyWhenDeletingThem: a removal that keeps the CRDs demands
-// neither the grant to delete them nor the cluster-wide broker list that guards their
-// deletion, so an identity holding the operator's own RBAC and Deployment rights but not
-// those can still remove the operator. With --delete-crd both are asked, up front.
+// TestOperatorDeleteProbesCRDsOnlyWhenDeletingThem: a removal that keeps the CRDs does not
+// demand the grant to delete them, so an identity holding the operator's own RBAC and
+// Deployment rights but not that can still remove the operator. With --delete-crd the
+// delete is asked up front. The cluster-wide broker list that guards their deletion is a
+// read, so it is never probed, either way: the gate runs it for real.
 func TestOperatorDeleteProbesCRDsOnlyWhenDeletingThem(t *testing.T) {
 	for _, deleteCRDs := range []bool{false, true} {
 		cfg := loadK8s(t)
@@ -749,31 +753,60 @@ func TestOperatorDeleteProbesCRDsOnlyWhenDeletingThem(t *testing.T) {
 		}
 		_, crdProbe := rr.probedNamespace("delete", "customresourcedefinitions")
 		_, listProbe := rr.probedNamespace("list", brokerResource)
-		if crdProbe != deleteCRDs || listProbe != deleteCRDs {
-			t.Errorf("deleteCRDs=%v: probed the CRD delete = %v and the cluster-wide broker list = %v, want both %v",
+		if crdProbe != deleteCRDs || listProbe {
+			t.Errorf("deleteCRDs=%v: probed the CRD delete = %v and the cluster-wide broker list = %v, want %v and false",
 				deleteCRDs, crdProbe, listProbe, deleteCRDs)
 		}
 	}
 }
 
 // TestOperatorDeleteRefusesAnUnreadableBrokerListBeforeAnyDelete: --delete-crd needs the
-// cluster-wide broker list to prove no broker would be cascade-deleted, so an identity that
-// may not read it is refused by the preflight -- naming the cluster role binding to ask for
-// -- with nothing read and nothing deleted, the operator still installed.
+// cluster-wide broker list to prove no broker would be cascade-deleted. That list is no
+// longer probed with the writes -- a read is not a requirement -- but the cascade gate runs
+// it for real before the first delete, so an identity that may not read it is refused there
+// (kubectl's Forbidden, preserved in the error) with nothing deleted and the operator still
+// installed.
 func TestOperatorDeleteRefusesAnUnreadableBrokerListBeforeAnyDelete(t *testing.T) {
 	cfg := loadK8s(t)
 	cfg.K8s.Operator.Namespace = "op-ns"
-	rr := &recRunner{canIByVerb: map[string]string{"list": "no"}}
+	rr := &recRunner{outErr: errors.New("exit status 1"), stderr: forbiddenGet}
 	err := NewCluster(rr, cfg, nil, nil).OperatorDelete(context.Background(), true)
-	for _, want := range []string{"not allowed to list " + brokerResource + " in the cluster", "cluster role binding"} {
+	for _, want := range []string{"refusing to delete the operator CRDs", "Nothing was deleted: the operator is still installed"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("OperatorDelete err = %v, want it to contain %q", err, want)
 		}
 	}
-	for _, call := range rr.calls {
-		if !isCanI(call.args) {
-			t.Errorf("nothing but probes may run before the refusal: %+v", call)
-		}
+	if _, asked := rr.probedNamespace("list", brokerResource); asked {
+		t.Error("the cluster-wide broker list is a read: it must not be probed")
+	}
+	calls := rr.afterPreflights(t, rbac.Probe{Verb: "delete", Resource: "customresourcedefinitions"})
+	if len(calls) != 1 || calls[0].method != "Output" {
+		t.Errorf("calls after the probes = %+v, want only the refused broker list: nothing may be deleted", calls)
+	}
+}
+
+// TestOperatorScaleWarnsWhenTheRolloutWaitIsRefused: `operator start` waits for the rollout
+// only as a convenience over a scale that is already applied, so a refused wait (kube.Forbidden
+// on kubectl's stderr) is a warning and the start succeeds; a timeout still fails.
+func TestOperatorScaleWarnsWhenTheRolloutWaitIsRefused(t *testing.T) {
+	cfg := haCfg()
+	cfg.K8s.Operator.Namespace = "op-ns"
+	rr := &recRunner{runErrQueue: []error{nil, errFake}, stderrQueue: []string{forbiddenRollout}}
+	log, buf := logBuf()
+	if err := NewCluster(rr, cfg, log, nil).OperatorScale(context.Background(), 1); err != nil {
+		t.Fatalf("a refused wait must warn, not fail the start: %v", err)
+	}
+	if !strings.Contains(buf.String(), "rollout wait for deployment/"+operatorDeployment+" was refused") ||
+		!strings.Contains(buf.String(), "the change was applied") {
+		t.Errorf("want a warning naming the Deployment and that the scale was applied:\n%s", buf.String())
+	}
+	if calls := rr.afterPreflights(t, rbac.Probe{Verb: "patch", Resource: "deployments"}); len(calls) != 2 {
+		t.Errorf("calls after the probe = %+v, want the scale and the one refused wait", calls)
+	}
+
+	rr = &recRunner{runErrQueue: []error{nil, errFake}, stderrQueue: []string{"error: timed out waiting for the condition\n"}}
+	if err := NewCluster(rr, cfg, nil, nil).OperatorScale(context.Background(), 1); !errors.Is(err, errFake) {
+		t.Errorf("a timeout must still fail, got %v", err)
 	}
 }
 
@@ -849,17 +882,17 @@ func TestOperatorApplyPlansItsNamespace(t *testing.T) {
 	}
 }
 
-// TestOperatorLogsArgs checks the log passthrough argv against the operator deployment.
+// TestOperatorLogsArgs checks the log argv against the operator deployment.
 func TestOperatorLogsArgs(t *testing.T) {
 	cfg := loadK8s(t)
 	cfg.K8s.Operator.Namespace = "op-ns"
 	rr := &recRunner{}
 	c := NewCluster(rr, cfg, nil, nil)
-	if err := c.OperatorLogs(context.Background(), "-f", "--tail=10"); err != nil {
+	if err := c.OperatorLogs(context.Background(), kube.LogOptions{Follow: true, Tail: "10"}); err != nil {
 		t.Fatalf("OperatorLogs: %v", err)
 	}
 	got := rr.last()
-	want := []string{"logs", "-n", "op-ns", "deployment/pubsubplus-eventbroker-operator", "-f", "--tail=10"}
+	want := []string{"logs", "deployment/pubsubplus-eventbroker-operator", "-n", "op-ns", "-f", "--tail", "10"}
 	if got.method != "Run" || got.name != "kubectl" || !eqArgs(got.args, want) {
 		t.Errorf("OperatorLogs\n got: %+v\nwant Run kubectl %v", got, want)
 	}
@@ -995,12 +1028,12 @@ func TestOperatorRestart(t *testing.T) {
 	if err := c.OperatorRestart(context.Background()); err != nil {
 		t.Fatalf("OperatorRestart: %v", err)
 	}
-	calls := rr.afterPreflights(t, probe{verb: "patch", resource: "deployments"})
+	calls := rr.afterPreflights(t, rbac.Probe{Verb: "patch", Resource: "deployments"})
 	if len(calls) != 1 {
 		t.Fatalf("OperatorRestart made %d call(s) after the probe, want 1", len(calls))
 	}
 	got := calls[0]
-	want := []string{"rollout", "restart", "deployment", operatorDeployment, "-n", "op-ns"}
+	want := []string{"rollout", "restart", "deployment/" + operatorDeployment, "-n", "op-ns"}
 	if got.method != "Run" || got.name != "kubectl" || !eqArgs(got.args, want) {
 		t.Errorf("OperatorRestart\n got: %+v\nwant Run kubectl %v", got, want)
 	}
@@ -1095,15 +1128,15 @@ func TestOperatorProbesEveryKindItTouches(t *testing.T) {
 			if err := tc.run(c); err != nil {
 				t.Fatalf("%s: %v", tc.name, err)
 			}
-			want := []probe{
-				{verb: tc.verb, resource: "customresourcedefinitions"},
-				{verb: tc.verb, resource: "clusterroles"},
-				{verb: tc.verb, resource: "clusterrolebindings"},
-				{verb: tc.verb, resource: "serviceaccounts"},
-				{verb: tc.verb, resource: "roles"},
-				{verb: tc.verb, resource: "rolebindings"},
-				{verb: tc.verb, resource: "deployments"},
-				{verb: tc.verb, resource: "secrets"},
+			want := []rbac.Probe{
+				{Verb: tc.verb, Resource: "customresourcedefinitions"},
+				{Verb: tc.verb, Resource: "clusterroles"},
+				{Verb: tc.verb, Resource: "clusterrolebindings"},
+				{Verb: tc.verb, Resource: "serviceaccounts"},
+				{Verb: tc.verb, Resource: "roles"},
+				{Verb: tc.verb, Resource: "rolebindings"},
+				{Verb: tc.verb, Resource: "deployments"},
+				{Verb: tc.verb, Resource: "secrets"},
 			}
 			rr.afterPreflights(t, want...)
 
@@ -1301,12 +1334,13 @@ type covApplyRunner struct {
 	err error
 }
 
-// RunInput records the call like recRunner does, then fails it when failOn selects the manifest.
-func (r *covApplyRunner) RunInput(ctx context.Context, in []byte, name string, args ...string) error {
-	if err := r.recRunner.RunInput(ctx, in, name, args...); err != nil {
+// Run records the call like recRunner does, then fails a call carrying stdin when failOn
+// selects the manifest.
+func (r *covApplyRunner) Run(ctx context.Context, c runner.Cmd, stdout, stderr io.Writer) error {
+	if err := r.recRunner.Run(ctx, c, stdout, stderr); err != nil {
 		return err
 	}
-	if r.failOn(string(in)) {
+	if legacyMethod(c, stdout) == "RunInput" && r.failOn(string(c.Stdin)) {
 		return r.err
 	}
 	return nil
@@ -1379,7 +1413,8 @@ func TestOperatorApplyStopsAtARefusedPermission(t *testing.T) {
 	rr := &recRunner{canI: "no"}
 	c := NewCluster(rr, loadK8s(t), nil, nil)
 	asked := false
-	c.Confirm = func(string) bool { asked = true; return true }
+	c.Confirm = func(string) (bool, error) { asked = true; return true, nil }
+	c.ConfirmScope = c.Confirm
 	err := c.OperatorApply(context.Background())
 	if err == nil {
 		t.Fatal("OperatorApply must fail when the permission probe answers no")
@@ -1397,6 +1432,31 @@ func TestOperatorApplyStopsAtARefusedPermission(t *testing.T) {
 	}
 }
 
+// TestOperatorApplyReturnsAWideningQuestionThatCouldNotBePut: a ConfirmScope that cannot ask
+// (no terminal) fails the deploy with its own error, carried as it came and not read as a
+// "no", and nothing is applied. The downgrade seam is not consulted for it.
+func TestOperatorApplyReturnsAWideningQuestionThatCouldNotBePut(t *testing.T) {
+	cfg := loadK8s(t)
+	cfg.K8s.Operator.Namespace = "op-ns"
+	cfg.K8s.Operator.WatchNamespaces = ""
+	cfg.K8s.Operator.WatchBrokerNS = boolPtr(false) // nothing listed at all: every namespace
+	installed := operatorItem("op-ns", operatorImage(cfg), "team-a")
+	rr := &recRunner{out: []byte(`{"items":[` + installed + `]}`)}
+	c := NewCluster(rr, cfg, nil, nil)
+	cause := errors.New("needs a terminal")
+	c.ConfirmScope = func(string) (bool, error) { return false, cause }
+	c.Confirm = func(string) (bool, error) { t.Error("the downgrade question was asked"); return true, nil }
+	err := c.OperatorApply(context.Background())
+	if !errors.Is(err, cause) {
+		t.Fatalf("OperatorApply err = %v, want the ConfirmScope error carried through", err)
+	}
+	for _, call := range rr.calls {
+		if call.method == "RunInput" {
+			t.Errorf("an unaskable widening still applied a document: %+v", call)
+		}
+	}
+}
+
 // TestOperatorApplyAsksBeforeWideningTheWatchList: an env file that asks for EVERY namespace,
 // against a shared operator that watches a named list, hands brokers this env file has never
 // heard of a wider reconciler -- a privilege increase, so a question and not a side effect. An
@@ -1405,12 +1465,12 @@ func TestOperatorApplyStopsAtARefusedPermission(t *testing.T) {
 func TestOperatorApplyAsksBeforeWideningTheWatchList(t *testing.T) {
 	const question = "Let the operator watch EVERY namespace in this cluster?"
 	var asked []string
-	answer := func(yes bool) func(string) bool {
-		return func(q string) bool { asked = append(asked, q); return yes }
+	answer := func(yes bool) func(string) (bool, error) {
+		return func(q string) (bool, error) { asked = append(asked, q); return yes, nil }
 	}
 	for _, tc := range []struct {
 		name      string
-		confirm   func(string) bool
+		confirm   func(string) (bool, error)
 		wantErr   bool
 		wantAsked bool
 	}{
@@ -1429,7 +1489,8 @@ func TestOperatorApplyAsksBeforeWideningTheWatchList(t *testing.T) {
 			installed := operatorItem("op-ns", operatorImage(cfg), "team-a")
 			rr := &recRunner{out: []byte(`{"items":[` + installed + `]}`)}
 			c := NewCluster(rr, cfg, nil, nil)
-			c.Confirm = tc.confirm
+			c.ConfirmScope = tc.confirm
+			c.Confirm = func(string) (bool, error) { t.Error("the downgrade question was asked, but nothing here downgrades"); return true, nil }
 			err := c.OperatorApply(context.Background())
 
 			var applied []rrCall
@@ -1572,7 +1633,7 @@ func TestOperatorDeleteDeletesNothingFromABundleItCannotRender(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "render operator bundle") {
 		t.Fatalf("OperatorDelete err = %v, want the render failure", err)
 	}
-	if calls := rr.afterPreflights(t, probe{verb: "delete", resource: "customresourcedefinitions"}); len(calls) != 0 {
+	if calls := rr.afterPreflights(t, rbac.Probe{Verb: "delete", Resource: "customresourcedefinitions"}); len(calls) != 0 {
 		t.Errorf("a bundle that could not be rendered still issued %+v", calls)
 	}
 }
@@ -1644,7 +1705,7 @@ func TestOperatorDeleteSaysSoWhenTheBundleCarriesNoCRDs(t *testing.T) {
 	if err := c.OperatorDelete(context.Background(), true); err != nil {
 		t.Fatalf("OperatorDelete: %v", err)
 	}
-	calls := rr.afterPreflights(t, probe{verb: "delete", resource: "customresourcedefinitions"})
+	calls := rr.afterPreflights(t, rbac.Probe{Verb: "delete", Resource: "customresourcedefinitions"})
 	if len(calls) != 1 || calls[0].method != "RunInput" {
 		t.Fatalf("calls after the probes = %+v, want only the delete of the non-CRD documents: "+
 			"no broker listing and no CRD delete", calls)
@@ -1662,7 +1723,7 @@ func TestOperatorRestartStopsAtARefusedPermission(t *testing.T) {
 	cfg.K8s.Operator.Namespace = "op-ns"
 	rr := &recRunner{canI: "no"}
 	err := NewCluster(rr, cfg, nil, nil).OperatorRestart(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "not allowed to patch deployments in op-ns") {
+	if err == nil || !strings.Contains(err.Error(), `not allowed to patch deployments in namespace "op-ns"`) {
 		t.Fatalf("OperatorRestart err = %v, want the refused `patch deployments` permission in op-ns", err)
 	}
 	for _, call := range rr.calls {
@@ -1680,9 +1741,9 @@ func TestOperatorRestartStopsAtARefusedPermission(t *testing.T) {
 // own namespace behind the same `patch deployments` probe a restart uses.
 func TestOperatorScale(t *testing.T) {
 	scale := func(replicas string) []string {
-		return []string{"scale", "deployment", operatorDeployment, "-n", "op-ns", "--replicas=" + replicas}
+		return []string{"scale", "deployment/" + operatorDeployment, "-n", "op-ns", "--replicas=" + replicas}
 	}
-	rollout := []string{"rollout", "status", operatorDeployRef, "-n", "op-ns", "--timeout=" + rolloutTimeout}
+	rollout := []string{"rollout", "status", operatorDeployRef, "-n", "op-ns", "--timeout=" + kube.RolloutTimeout}
 	for _, tc := range []struct {
 		name     string
 		replicas int
@@ -1701,7 +1762,7 @@ func TestOperatorScale(t *testing.T) {
 			if err := c.OperatorScale(context.Background(), tc.replicas); err != nil {
 				t.Fatalf("OperatorScale(%d): %v", tc.replicas, err)
 			}
-			calls := rr.afterPreflights(t, probe{verb: "patch", resource: "deployments"})
+			calls := rr.afterPreflights(t, rbac.Probe{Verb: "patch", Resource: "deployments"})
 			if len(calls) != len(tc.want) {
 				t.Fatalf("OperatorScale(%d) made %d call(s) after the probe, want %d: %+v",
 					tc.replicas, len(calls), len(tc.want), calls)
@@ -1731,7 +1792,7 @@ func TestOperatorScaleStopsAtARefusedPermission(t *testing.T) {
 			cfg.K8s.Operator.Namespace = "op-ns"
 			rr := &recRunner{canI: "no"}
 			err := NewCluster(rr, cfg, nil, nil).OperatorScale(context.Background(), replicas)
-			if err == nil || !strings.Contains(err.Error(), "not allowed to patch deployments in op-ns") {
+			if err == nil || !strings.Contains(err.Error(), `not allowed to patch deployments in namespace "op-ns"`) {
 				t.Fatalf("OperatorScale(%d) err = %v, want the refused `patch deployments` permission", replicas, err)
 			}
 			if len(rr.calls) != 1 {
@@ -1766,7 +1827,7 @@ func TestOperatorScaleSurfacesAFailure(t *testing.T) {
 			if !errors.Is(err, errFake) {
 				t.Fatalf("OperatorScale(%d) err = %v, want the failed kubectl call's error", tc.replicas, err)
 			}
-			if calls := rr.afterPreflights(t, probe{verb: "patch", resource: "deployments"}); len(calls) != tc.wantCalls {
+			if calls := rr.afterPreflights(t, rbac.Probe{Verb: "patch", Resource: "deployments"}); len(calls) != tc.wantCalls {
 				t.Errorf("made %d call(s) after the probe, want %d: %+v", len(calls), tc.wantCalls, calls)
 			}
 			if strings.Contains(buf.String(), "the operator is stopped") {

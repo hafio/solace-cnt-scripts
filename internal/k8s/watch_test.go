@@ -10,8 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/kube/rbac"
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
-	"solace/internal/engine"
 )
 
 // The operator's watch scope is the one field of the install that does not belong to any
@@ -340,7 +342,8 @@ func TestAmbiguousOperatorAbortsTheDeploy(t *testing.T) {
 	rr := &recRunner{out: []byte(`{"items":[` + items + `]}`)}
 	c := NewCluster(rr, cfg, nil, nil)
 	asked := false
-	c.Confirm = func(string) bool { asked = true; return true }
+	c.Confirm = func(string) (bool, error) { asked = true; return true, nil }
+	c.ConfirmScope = c.Confirm
 
 	err := c.OperatorApply(context.Background())
 	if !errors.Is(err, errAmbiguousOperator) {
@@ -354,7 +357,7 @@ func TestAmbiguousOperatorAbortsTheDeploy(t *testing.T) {
 	if asked {
 		t.Error("an ambiguous install must stop the deploy, not reach a question")
 	}
-	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
+	calls := rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"})
 	if len(calls) != 1 || !eqArgs(calls[0].args, []string{"get", "deployment", "--all-namespaces", "-o", "json"}) {
 		t.Errorf("calls after the probe = %+v, want only the one cluster-wide read", calls)
 	}
@@ -685,7 +688,8 @@ func TestOperatorApplyDoesNotAskForAFirstInstallThatWatchesEveryNamespace(t *tes
 	buf := &bytes.Buffer{}
 	c := NewCluster(rr, cfg, func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) }, buf)
 	asked := false
-	c.Confirm = func(string) bool { asked = true; return false }
+	c.Confirm = func(string) (bool, error) { asked = true; return false, nil }
+	c.ConfirmScope = c.Confirm
 	if err := c.OperatorApply(context.Background()); err != nil {
 		t.Fatalf("OperatorApply: %v\n%s", err, buf.String())
 	}
@@ -844,7 +848,7 @@ func TestOperatorReleaseDeletesTheOperatorWhenTheEnvFileCoversEveryNamespace(t *
 func TestOperatorReleasePreviewShowsTheFullDelete(t *testing.T) {
 	var out bytes.Buffer
 	log := func(f string, a ...any) { fmt.Fprintf(&out, f+"\n", a...) }
-	c := NewCluster(engine.Echo{W: &out}, loadK8s(t), log, &out)
+	c := NewCluster(runner.Echo{W: &out}, loadK8s(t), log, &out)
 	if err := c.OperatorRelease(context.Background(), false); err != nil {
 		t.Fatalf("OperatorRelease under Echo: %v\n%s", err, out.String())
 	}
@@ -867,7 +871,7 @@ func TestOperatorReleaseNarrowingNeedsPermissionToPatch(t *testing.T) {
 	c, rr, _ := watchCluster("team-a,solace", "") // team-a still depends on it, so the list is narrowed
 	rr.canI = "no"
 	err := c.OperatorRelease(context.Background(), false)
-	want := "not allowed to patch deployments in " + defaultOperatorNS
+	want := `not allowed to patch deployments in namespace "` + defaultOperatorNS + `"`
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("OperatorRelease err = %v, want it to say %q", err, want)
 	}

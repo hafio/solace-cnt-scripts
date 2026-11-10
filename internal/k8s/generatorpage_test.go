@@ -115,10 +115,12 @@ func generatorDefaults(t *testing.T) genDefaults {
 	k.ApplyDefaults(config.K8s)
 	d := &config.Config{}
 	d.ApplyDefaults(config.Docker)
+	// The page's podman defaults are the rootful engine's, and its rootless ones are
+	// the schema default.
 	p := &config.Config{}
+	p.Podman.Rootful = true
 	p.ApplyDefaults(config.Podman)
 	r := &config.Config{}
-	r.Podman.Rootless = true
 	r.ApplyDefaults(config.Podman)
 
 	tiers := map[string]genTier{}

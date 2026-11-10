@@ -3,10 +3,16 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/runner"
+	"github.com/hafio/go-deploy-utility/runner/runnertest"
+	"github.com/hafio/go-deploy-utility/watch"
 
 	"solace/internal/engine"
 )
@@ -40,7 +46,7 @@ func TestWatchRedrawsInPlaceOnATerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want nil: the watch ends cleanly", err)
 	}
-	if got := strings.Count(out, clearScreen); got != 2 {
+	if got := strings.Count(out, watch.ClearScreen); got != 2 {
 		t.Errorf("cleared the screen %d times, want once per refresh (2):\n%q", got, out)
 	}
 	if got := strings.Count(out, "Every 1s: solace-util broker status --all"); got != 2 {
@@ -74,7 +80,7 @@ func TestWatchAppendsWhenNotATerminal(t *testing.T) {
 	if got := len(watchSection.FindAllString(out, -1)); got != 2 {
 		t.Errorf("found %d timestamped section lines, want one per refresh (2):\n%s", got, out)
 	}
-	if len(slept) != 2 || slept[0] != defaultWatchInterval {
+	if len(slept) != 2 || slept[0] != watch.DefaultInterval {
 		t.Errorf("slept %v, want the 5s default each time", slept)
 	}
 }
@@ -98,7 +104,7 @@ func TestWatchKeepsGoingAfterAFailedRefresh(t *testing.T) {
 	errOut := captureStderr(t, func() {
 		_, err = runRootWith(t, []string{"broker", "status", "--all", "--watch", "--interval", "2s",
 			"--platform", "docker", "--env", writeCtrStandaloneEnv(t)}, func(a *App) {
-			a.NewRunner = func(*App) engine.EnvRunner { return rr }
+			a.NewRunner = func(*App) runner.Runner { return rr }
 			a.Terminal = func() bool { return false }
 			a.Sleep = stopAfter(2, &slept)
 		})
@@ -136,26 +142,69 @@ func TestWatchEndsQuietlyWhenInterrupted(t *testing.T) {
 	}
 }
 
-// TestWatchSleepHonoursCtrlC covers the real timer: it waits out an interval, and returns
-// at once when the context is already cancelled rather than finishing the wait.
-func TestWatchSleepHonoursCtrlC(t *testing.T) {
-	a := &App{}
-	if err := a.sleep(context.Background(), time.Millisecond); err != nil {
-		t.Errorf("a completed wait returned %v, want nil", err)
+// TestWatchDrawsTheRefreshAsOneFrame: a refresh's report, its warning and the stdout and
+// stderr of the command it runs are collected into one frame and drawn under the header,
+// in the order they were written, with nothing reaching stdout or stderr on the side; the
+// App's sinks and runner are its own again once the refresh is drawn.
+func TestWatchDrawsTheRefreshAsOneFrame(t *testing.T) {
+	fake := &runnertest.Fake{Script: runnertest.Seq(
+		runnertest.Reply{Stdout: "child stdout\n", Stderr: "child stderr\n"},
+	)}
+	var slept []time.Duration
+	a := &App{Runner: fake, Terminal: func() bool { return true }, Sleep: stopAfter(1, &slept)}
+	var err error
+	var out string
+	errOut := captureStderr(t, func() {
+		out = captureStdout(t, func() {
+			err = watchLoop(context.Background(), a, "operator status", time.Second, func() error {
+				fmt.Fprintln(a.stdout(), "report line")
+				a.lineSink()("[WARN] a refused read")
+				return engine.Run(context.Background(), a.Runner, runner.Cmd{Argv: []string{"kubectl", "describe", "deployment"}})
+			})
+		})
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	start := time.Now()
-	if err := a.sleep(ctx, time.Hour); !errors.Is(err, context.Canceled) {
-		t.Errorf("a cancelled wait returned %v, want context.Canceled", err)
+	head := watch.ClearScreen + "Every 1s: solace-util operator status   "
+	body := "Ctrl-C to stop\n\nreport line\n[WARN] a refused read\nchild stdout\nchild stderr\n"
+	if !strings.HasPrefix(out, head) || !strings.HasSuffix(out, body) || strings.Count(out, watch.ClearScreen) != 1 {
+		t.Errorf("stdout =\n%q\nwant one frame: the clear and header, then everything the refresh wrote, in order", out)
 	}
-	if time.Since(start) > time.Minute {
-		t.Error("a cancelled wait did not return at once")
+	for _, leak := range []string{"report line", "a refused read", "child stdout", "child stderr"} {
+		if strings.Contains(errOut, leak) {
+			t.Errorf("stderr got %q, want it drawn in the frame: %q", leak, errOut)
+		}
+	}
+	if a.frameOut != nil || a.frameLog != nil || a.Runner != runner.Runner(fake) {
+		t.Errorf("after the refresh frameOut=%v, frameLog set=%v, runner=%v; want the App's own back",
+			a.frameOut, a.frameLog != nil, a.Runner)
 	}
 }
 
-// TestWatchNeverRedrawsIntoAPipe: with no seam, a redraw needs stdout to be a terminal, so
-// output going into a pipe -- as a test's captured stdout does -- is never sent escape bytes.
+// TestWatchDrawsNothingForARefreshCutShort: Ctrl-C while a refresh is being collected
+// draws nothing of it, not even the header, so the last complete report stays on screen,
+// and the watch ends cleanly.
+func TestWatchDrawsNothingForARefreshCutShort(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := &App{Terminal: func() bool { return true }}
+	var err error
+	out := captureStdout(t, func() {
+		err = watchLoop(ctx, a, "broker status", time.Second, func() error {
+			fmt.Fprintln(a.stdout(), "half a report")
+			cancel()
+			return nil
+		})
+	})
+	if err != nil || out != "" {
+		t.Errorf("err = %v, stdout = %q; want nil and nothing drawn", err, out)
+	}
+}
+
+// TestWatchNeverRedrawsIntoAPipe: with no seam, canRedraw falls back to watch.CanRedraw,
+// which needs stdout to be a terminal, so output going into a pipe -- as a test's captured
+// stdout does -- is never sent escape bytes.
 func TestWatchNeverRedrawsIntoAPipe(t *testing.T) {
 	var redraw bool
 	captureStdout(t, func() { redraw = (&App{}).canRedraw() })
@@ -166,7 +215,8 @@ func TestWatchNeverRedrawsIntoAPipe(t *testing.T) {
 
 // TestWatchIntervalIsValidated: each bad --interval is a usage error (exit 2) refused before
 // anything runs -- the echo runner prints nothing -- including an --interval given without
-// --watch, which a script would expect to start a watch it never gets.
+// --watch, which a script would expect to start a watch it never gets. An --interval above
+// 1h is refused too, while 1s and 1h exactly are accepted.
 func TestWatchIntervalIsValidated(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -175,6 +225,7 @@ func TestWatchIntervalIsValidated(t *testing.T) {
 	}{
 		{"below 1s", []string{"--watch", "--interval", "500ms"}, "below 1s"},
 		{"not a duration", []string{"--watch", "--interval", "soon"}, "not a duration"},
+		{"above 1h", []string{"--watch", "--interval", "61m"}, "above 1h"},
 		{"without --watch", []string{"--interval", "10s"}, "means nothing without --watch"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,13 +237,22 @@ func TestWatchIntervalIsValidated(t *testing.T) {
 					return nil
 				}
 			})
-			if err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("err = %v (exit %d), want a usage error containing %q", err, ExitCode(err), tc.want)
+			if err == nil || exitcode.Code(err) != exitcode.Usage || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v (exit %d), want a usage error containing %q", err, exitcode.Code(err), tc.want)
 			}
 			if out != "" {
 				t.Errorf("a refused --interval still ran the report: %q", out)
 			}
 		})
+	}
+	for _, edge := range []string{"1s", "1h"} {
+		d, err := watchInterval(&App{watch: true, interval: edge})
+		if err != nil {
+			t.Errorf("--interval %s refused: %v, want it accepted as a bound", edge, err)
+		}
+		if want, _ := time.ParseDuration(edge); d != want {
+			t.Errorf("--interval %s = %s, want %s", edge, d, want)
+		}
 	}
 }
 

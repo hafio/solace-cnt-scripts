@@ -199,7 +199,7 @@ func TestEveryNameResolves(t *testing.T) {
 }
 
 // TestListNamesEveryExample pins the error/help phrasing on the table rather than
-// on a list typed beside it, the same rule internal/abbrev's Set.List follows.
+// on a list typed beside it, the same rule the shared abbrev package's Set.List follows.
 func TestListNamesEveryExample(t *testing.T) {
 	got := List()
 	for _, name := range Names() {

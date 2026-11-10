@@ -7,6 +7,9 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
+
+	"github.com/hafio/go-deploy-utility/execguard"
 )
 
 // Validate checks mandatory and enum fields for the given platform, mirroring
@@ -55,7 +58,7 @@ func (c *Config) Validate(p Platform) error {
 	// The platform CLI is user-supplied and reaches os/exec, so it goes through the
 	// full execution guard (execguard.go) on every platform before anything can
 	// run. This is the first of the two enforcement points; every executor re-runs
-	// the same CheckCommand immediately before it builds argv, so a hostile env
+	// the same execguard.Check immediately before it builds argv, so a hostile env
 	// file is inert even on a path that never reached Validate.
 	if err := c.validateExecCommands(p); err != nil {
 		return err
@@ -102,6 +105,13 @@ func (c *Config) Validate(p Platform) error {
 	// unit, the compose file and the broker CR -- so it is held to the reference
 	// grammar once here (artifactvalues.go).
 	if err := c.validateImage(); err != nil {
+		return err
+	}
+
+	// The timezone is the one free-text value every platform writes into its
+	// artifact (TZ in compose and quadlet, timezone in the CR), so it is held to an
+	// IANA-name charset here, before anything renders (artifactvalues.go).
+	if err := checkTimezone("timezone", c.Timezone); err != nil {
 		return err
 	}
 
@@ -161,10 +171,11 @@ func (c *Config) validateDomainCerts() error {
 	return nil
 }
 
-// validateRenamedKeys refuses the six keys renamed away from this schema,
-// naming the replacement -- the same pattern scaling.go's retired maxPool
-// uses, rather than a silent alias: an env file setting both the old and the
-// new spelling would otherwise have no defined winner.
+// validateRenamedKeys refuses the keys renamed away from this schema
+// (podman.rootless among them, whose meaning also flipped), naming the
+// replacement -- the same pattern scaling.go's retired maxPool uses, rather than
+// a silent alias: an env file setting both the old and the new spelling would
+// otherwise have no defined winner.
 //
 // Every field checked here is retained in config.go specifically so it decodes
 // (rather than failing strict-decoding with a bare unknown-field error) and is
@@ -179,6 +190,17 @@ func (c *Config) validateRenamedKeys() error {
 	}
 	if len(c.Podman.Runtime) > 0 {
 		return fmt.Errorf("podman.runtime was renamed to podman.command (got: %q)", c.Podman.Runtime.String())
+	}
+	if c.Podman.Rootless != nil {
+		return fmt.Errorf("podman.rootless was replaced by podman.rootful (got: rootless: %t): rootless is now "+
+			"the default, so drop the key to deploy rootless as this user; set `rootful: true` only to deploy "+
+			"the rootful engine, which needs root", *c.Podman.Rootless)
+	}
+	if c.Docker.ComposeFile != "" {
+		return fmt.Errorf("docker.composeFile was retired (got: %q): the compose file is no longer written to "+
+			"disk, it is fed to compose on stdin with --project-directory set to the env file's directory, so "+
+			"there is no path to choose; drop the key. A compose file an earlier build left behind is no longer "+
+			"read, and can be deleted", c.Docker.ComposeFile)
 	}
 	if c.Broker.CLIScriptsFolder != "" {
 		return fmt.Errorf("broker.cliScriptsFolder was renamed to broker.cliScriptsDir (got: %q)",
@@ -287,14 +309,14 @@ func (c *Config) validateHostPaths(p Platform) error {
 	case Docker:
 		fields = append(fields,
 			struct{ field, value string }{"docker.container.dataDir", c.Docker.Container.DataDir},
-			struct{ field, value string }{"docker.composeFile", c.Docker.ComposeFile},
 		)
 	case Podman:
 		fields = append(fields,
 			// The quadlet dir is never rebased: the unit has to live where systemd
 			// scans, so a relative value is an operator error rather than
 			// something to resolve helpfully. A '~' one is not relative by the time
-			// it arrives here -- expandHomePaths ran first.
+			// it arrives here -- expandHomePaths ran first, and a rootless default is
+			// filled in before that (resolveQuadletDir).
 			struct{ field, value string }{"podman.quadletDir", c.Podman.QuadletDir},
 			// Likewise never rebased, and held absolute above when set: deploy
 			// and remove delete a legacy key file under it, and resolving a
@@ -320,7 +342,8 @@ func (c *Config) validateHostPaths(p Platform) error {
 // `sh -c 'curl ... || exit 1'`, and the engine, not this process, decides what it
 // means. What still applies is the exec-boundary check the field always had: an
 // empty argument, or a control character carried in from a converted bash file,
-// can only ever fail obscurely.
+// can only ever fail obscurely. Invalid UTF-8 and an invisible formatting character
+// are refused for the same reason: neither survives the artifact as written.
 //
 // An empty Command is not an error: ApplyDefaults runs before Validate on every
 // path and fills the platform default, so "empty" means "unset" exactly as it
@@ -330,17 +353,24 @@ func validateProbeCommand(field string, cmd Command) error {
 		if tok == "" {
 			return fmt.Errorf("%s[%d] is an empty argument; remove it or quote the intended value", field, i)
 		}
-		if j := strings.IndexFunc(tok, isCtrl); j >= 0 {
+		// First: a raw byte that is not UTF-8 reaches the compose scalar as a
+		// different code point, and the rune checks below would see U+FFFD instead.
+		if !utf8.ValidString(tok) {
+			return fmt.Errorf("%s[%d] is not valid UTF-8: %q; re-save the env file as UTF-8", field, i, tok)
+		}
+		if j := strings.IndexFunc(tok, execguard.IsControl); j >= 0 {
 			return fmt.Errorf("%s[%d] contains a control character (0x%02x) at offset %d: %q",
 				field, i, tok[j], j, tok)
+		}
+		// Whitespace and shell syntax stay allowed (a probe may be sh -c '...'), but
+		// an invisible formatting character cannot be seen in a review or a log line.
+		if j := strings.IndexFunc(tok, execguard.IsInvisible); j >= 0 {
+			return fmt.Errorf("%s[%d] contains an invisible formatting character at offset %d: %q; it cannot "+
+				"be seen in a review or a log line, so it is not allowed in a probe", field, i, j, tok)
 		}
 	}
 	return nil
 }
-
-// isCtrl reports the ASCII control characters (including NUL and DEL), which can
-// never legitimately appear in a command name or argument here.
-func isCtrl(r rune) bool { return r < 0x20 || r == 0x7f }
 
 // identRE constrains the identifiers that reach a rendered artifact in a
 // structural position: a compose service key, a `container_name`, a systemd
@@ -498,7 +528,7 @@ func validSecretKey(field, value string) error {
 // exists, and is worse than a failed read: a dash-led name or namespace is parsed by
 // kubectl as a flag (`-A`, `--kubeconfig=/x`), and the key is spliced into a jsonpath
 // expression. It is "config text must not choose what executes" applied to the
-// arguments rather than to argv[0], and like CheckCommand it is enforced twice from this
+// arguments rather than to argv[0], and like execguard.Check it is enforced twice from this
 // one definition: in Validate for replication.sites[].via.semp.passSecret, and again by
 // internal/k8s's secret reader immediately before argv is built.
 //
@@ -944,8 +974,8 @@ func foldToEnvVar(name string) string {
 }
 
 // checkCredentialChars rejects a control character (unicode.IsControl: this
-// covers Unicode's control category, not just the ASCII set isCtrl above
-// checks, since a secret can carry any encoding) in one secret value. An empty
+// covers Unicode's control category, not just the ASCII set
+// execguard.IsControl checks, since a secret can carry any encoding) in one secret value. An empty
 // value is left alone -- emptiness is requireAll's or the caller's own job, not
 // this check's. The message names the field and the byte offset of the
 // offending character but never the value itself, or even the character: these

@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/containercli"
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/broker"
 	"solace/internal/config"
 )
@@ -19,7 +22,7 @@ import (
 // AllowCommands models here. These tests are therefore also the container-side
 // proof that an approved chained runner reaches argv intact. Deliberately NOT a
 // privilege-escalation wrapper -- --allow-command can never approve one of those
-// (config.neverAllowed), which TestAllowCommandsRejectsEscalation covers.
+// (the shared execguard package), which its own tests cover.
 func wrappedCtrCfg() *config.Config {
 	cfg := ctrCfg(config.Docker, "true")
 	cfg.Docker.Command = config.Command{"lima", "nerdctl"}
@@ -54,13 +57,38 @@ func TestCtrExecutorRefusesUnapprovedRuntime(t *testing.T) {
 		call func(*config.Config, *capRunner) error
 	}{
 		{"run", func(cfg *config.Config, rr *capRunner) error {
-			return mgrOver(rr, cfg).Logs(context.Background())
+			return mgrOver(rr, cfg).Logs(context.Background(), containercli.LogOptions{}, false)
 		}},
 		{"output", func(cfg *config.Config, rr *capRunner) error {
 			return mgrOver(rr, cfg).Reachable(context.Background())
 		}},
 		{"compose", func(cfg *config.Config, rr *capRunner) error {
-			return mgrOver(rr, cfg).compose(context.Background(), "ps")
+			return mgrOver(rr, cfg).deleteDocker(context.Background())
+		}},
+		{"lifecycle", func(cfg *config.Config, rr *capRunner) error {
+			return mgrOver(rr, cfg).runCmd(context.Background(), func(base []string) runner.Cmd {
+				return containercli.Start(base, "solace")
+			})
+		}},
+		{"podman deploy", func(cfg *config.Config, rr *capRunner) error {
+			return mgrOver(rr, cfg).deployPodman(context.Background(), cfg.ResolveNode(config.Primary), nil)
+		}},
+		{"listing", func(cfg *config.Config, rr *capRunner) error {
+			_, err := mgrOver(rr, cfg).listContainers(context.Background())
+			return err
+		}},
+		{"inspect", func(cfg *config.Config, rr *capRunner) error {
+			_, err := mgrOver(rr, cfg).inspectContainer(context.Background(), "solace")
+			return err
+		}},
+		{"deploy compose", func(cfg *config.Config, rr *capRunner) error {
+			return mgrOver(rr, cfg).deployDocker(context.Background(), cfg.ResolveNode(config.Primary))
+		}},
+		{"deploy", func(cfg *config.Config, rr *capRunner) error {
+			// The compose command is set (and approved), so only the runtime is refused:
+			// the digest probe and `ps` need it, and must not be reached without it.
+			cfg.Docker.Compose = config.Command{"docker-compose"}
+			return mgrOver(rr, cfg).deployDocker(context.Background(), cfg.ResolveNode(config.Primary))
 		}},
 		{"interactive", func(cfg *config.Config, rr *capRunner) error {
 			return mgrOver(rr, cfg).CLI(context.Background())
@@ -147,7 +175,7 @@ func TestManagerHonoursRuntime(t *testing.T) {
 	}{
 		{
 			name:       "run",
-			call:       func(m *Manager) error { return m.Logs(context.Background()) },
+			call:       func(m *Manager) error { return m.Logs(context.Background(), containercli.LogOptions{}, false) },
 			wantMethod: "Run",
 			wantArgs:   withWrapper("logs", "solace"),
 		},
@@ -164,13 +192,13 @@ func TestManagerHonoursRuntime(t *testing.T) {
 			name:       "cli",
 			call:       func(m *Manager) error { return m.CLI(context.Background()) },
 			wantMethod: "RunInteractive",
-			wantArgs:   withWrapper("exec", "-it", "solace", "cli", "-A"),
+			wantArgs:   withWrapper("exec", "-i", "-t", "solace", "cli", "-A"),
 		},
 		{
 			name:       "shell",
 			call:       func(m *Manager) error { return m.Shell(context.Background()) },
 			wantMethod: "RunInteractive",
-			wantArgs:   withWrapper("exec", "-it", "solace", "bash"),
+			wantArgs:   withWrapper("exec", "-i", "-t", "solace", "bash"),
 		},
 	}
 	for _, tc := range cases {
@@ -254,7 +282,7 @@ func TestCtrTransportHonoursRuntime(t *testing.T) {
 func TestCtrRuntimeDefaultArgvUnchanged(t *testing.T) {
 	for _, p := range []config.Platform{config.Docker, config.Podman} {
 		m, rr, _ := newCapMgr(ctrCfg(p, "true"), p)
-		if err := m.Logs(context.Background()); err != nil {
+		if err := m.Logs(context.Background(), containercli.LogOptions{}, false); err != nil {
 			t.Fatalf("%s Logs: %v", p, err)
 		}
 		got := rr.last()

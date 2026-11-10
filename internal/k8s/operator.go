@@ -7,9 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 	"text/template"
+
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/kube/rbac"
+	"github.com/hafio/go-deploy-utility/runner"
 
 	"solace/internal/config"
 )
@@ -242,8 +245,14 @@ func (c *Cluster) OperatorApply(ctx context.Context) error {
 	// rendered from this env file alone -- see watch.go. Also before the first write,
 	// because the widening case is a question.
 	plan := c.reconcileWatch(dep)
-	if plan.widening && !c.confirm("Let the operator watch EVERY namespace in this cluster?") {
-		return fmt.Errorf("declined: the operator's watch list was left as it is, and nothing was applied")
+	if plan.widening {
+		ok, err := c.confirmScope("Let the operator watch EVERY namespace in this cluster?")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("declined: the operator's watch list was left as it is, and nothing was applied")
+		}
 	}
 	c.logf("deploying operator to namespace %s", opNS)
 	manifest, err := RenderOperator(c.Cfg, opNS, plan.value)
@@ -300,21 +309,21 @@ var yamlDocSepRE = regexp.MustCompile(`(?m)^---[ \t]*$`)
 // not demand the grant to delete them. The Namespace kind is not here at all: whether it
 // is needed depends on whether the namespace already exists, which planOperatorNamespace
 // reads first, and the delete never removes it.
-func operatorProbes(verb, opNS string, withRegcred, withCRDs bool) []probe {
-	var ps []probe
+func operatorProbes(verb, opNS string, withRegcred, withCRDs bool) []rbac.Probe {
+	var ps []rbac.Probe
 	if withCRDs {
-		ps = append(ps, probe{verb: verb, resource: "customresourcedefinitions"}) // cluster-scoped
+		ps = append(ps, rbac.Probe{Verb: verb, Resource: "customresourcedefinitions"}) // cluster-scoped
 	}
 	ps = append(ps,
-		probe{verb: verb, resource: "clusterroles"},        // cluster-scoped
-		probe{verb: verb, resource: "clusterrolebindings"}, // cluster-scoped
-		probe{verb: verb, resource: "serviceaccounts", ns: opNS},
-		probe{verb: verb, resource: "roles", ns: opNS},
-		probe{verb: verb, resource: "rolebindings", ns: opNS},
-		probe{verb: verb, resource: "deployments", ns: opNS},
+		rbac.Probe{Verb: verb, Resource: "clusterroles"},        // cluster-scoped
+		rbac.Probe{Verb: verb, Resource: "clusterrolebindings"}, // cluster-scoped
+		rbac.Probe{Verb: verb, Resource: "serviceaccounts", Namespace: opNS},
+		rbac.Probe{Verb: verb, Resource: "roles", Namespace: opNS},
+		rbac.Probe{Verb: verb, Resource: "rolebindings", Namespace: opNS},
+		rbac.Probe{Verb: verb, Resource: "deployments", Namespace: opNS},
 	)
 	if withRegcred {
-		ps = append(ps, probe{verb: verb, resource: "secrets", ns: opNS})
+		ps = append(ps, rbac.Probe{Verb: verb, Resource: "secrets", Namespace: opNS})
 	}
 	return ps
 }
@@ -330,16 +339,17 @@ func operatorProbes(verb, opNS string, withRegcred, withCRDs bool) []probe {
 // that may not exist risks CRDs and RBAC installed for a controller that never starts.
 func (c *Cluster) planOperatorNamespace(ctx context.Context, opNS string) (apply bool, err error) {
 	switch c.readNamespace(ctx, opNS) {
-	case namespaceExists:
+	case kube.NamespaceExists:
 		return false, nil
-	case namespaceAbsent:
+	case kube.NamespaceAbsent:
 		if err := c.Preflight(ctx, "create", "namespaces"); err != nil {
-			return false, missingNamespace(opNS, err)
+			return false, c.missingNamespace(opNS, err)
 		}
 		return true, nil
 	}
 	if err := c.Preflight(ctx, "create", "namespaces"); err != nil {
-		if errors.Is(err, errNotAllowed) {
+		var refused *rbac.RefusedError
+		if errors.As(err, &refused) {
 			return false, fmt.Errorf("could not confirm the operator namespace %q exists (that read needs get on "+
 				"namespaces in %s), and this identity may not create it (%w). Nothing was applied", opNS, opNS, err)
 		}
@@ -357,10 +367,10 @@ func (c *Cluster) planOperatorNamespace(ctx context.Context, opNS string) (apply
 // is known, so a resourceNames grant cannot cover it and the probe asks about the kind --
 // asking by name would say yes to a grant the create then refuses. OperatorApply asks them
 // only on the path that implies such an identity -- see its comment.
-func operatorEscalationProbes() []probe {
-	return []probe{
-		{verb: "escalate", resource: "clusterroles"},
-		{verb: "bind", resource: "clusterroles", name: operatorClusterRole},
+func operatorEscalationProbes() []rbac.Probe {
+	return []rbac.Probe{
+		{Verb: "escalate", Resource: "clusterroles"},
+		{Verb: "bind", Resource: "clusterroles", Name: operatorClusterRole},
 	}
 }
 
@@ -426,7 +436,7 @@ func joinYAMLDocs(docs []string) []byte {
 // refuseCRDDeleteIfBrokersExist stays the thing that actually stops the cascade.
 func (c *Cluster) BrokerCRs(ctx context.Context) ([]string, error) {
 	var list brokerList
-	if err := c.getJSON(ctx, &list, "pubsubpluseventbrokers", "--all-namespaces"); err != nil {
+	if err := c.getJSON(ctx, &list, getRead{kube.GetOptions{AllNamespaces: true}, []string{"pubsubpluseventbrokers"}}); err != nil {
 		return nil, fmt.Errorf("listing broker custom resources across the cluster: %w", err)
 	}
 	refs := make([]string, 0, len(list.Items))
@@ -486,10 +496,9 @@ func (c *Cluster) refuseCRDDeleteIfBrokersExist(ctx context.Context) error {
 // teardown.
 //
 // With --delete-crd the CRD layer is settled BEFORE anything is deleted: the cascade gate
-// (refuseCRDDeleteIfBrokersExist) runs ahead of the first delete, and its cluster-wide
-// list is probed with everything else, so a broker anywhere in the cluster -- or a list
-// this identity may not read -- stops the whole removal with the operator still
-// installed, instead of after the Deployment and RBAC were already gone. The gate runs
+// (refuseCRDDeleteIfBrokersExist) runs ahead of the first delete, so a broker anywhere in
+// the cluster -- or a list this identity may not read -- stops the whole removal with the
+// operator still installed, instead of after the Deployment and RBAC were already gone. The gate runs
 // once more right before the CRDs are deleted, so a broker deployed in between is not
 // cascaded away either. Without --delete-crd the CRDs are kept and nothing about them is
 // asked.
@@ -503,11 +512,9 @@ func (c *Cluster) OperatorDelete(ctx context.Context, deleteCRDs bool) error {
 	opNS := c.operatorNS(ctx)
 	// The same set the apply probes, with `delete` -- the CRDs only when they go. The
 	// Namespace is absent because this command no longer deletes it. The cascade gate's
-	// cluster-wide list rides along when it will run, so its refusal lands here too.
+	// cluster-wide list is not probed: a list is a read, and the gate runs it for real
+	// below, before the first delete, where a refusal stops the removal all the same.
 	probes := operatorProbes("delete", opNS, c.Cfg.ManagesImagePullSecret(), deleteCRDs)
-	if deleteCRDs {
-		probes = append(probes, probe{verb: "list", resource: brokerResource, allNamespaces: true})
-	}
 	if err := c.PreflightAll(ctx, probes...); err != nil {
 		return fmt.Errorf("%w\n  Nothing was deleted: the operator is still installed", err)
 	}
@@ -575,11 +582,13 @@ func (c *Cluster) OperatorRestart(ctx context.Context) error {
 	// opNS explicitly: the restart happens in the OPERATOR's namespace, and this
 	// probe used to ask about the broker's -- so an identity permitted in one and not
 	// the other passed the check and then failed the work it was meant to guard.
-	if err := c.PreflightAll(ctx, probe{verb: "patch", resource: "deployments", ns: opNS}); err != nil {
+	if err := c.PreflightAll(ctx, rbac.Probe{Verb: "patch", Resource: "deployments", Namespace: opNS}); err != nil {
 		return err
 	}
 	c.logf("restarting operator deployment %s in %s", operatorDeployment, opNS)
-	return c.kubectl(ctx, "rollout", "restart", "deployment", operatorDeployment, "-n", opNS)
+	return c.runKube(ctx, func(b []string) runner.Cmd {
+		return kube.RolloutRestart(b, "deployment", operatorDeployment, opNS)
+	})
 }
 
 // OperatorScale scales the controller Deployment to replicas, which is what
@@ -599,12 +608,13 @@ func (c *Cluster) OperatorScale(ctx context.Context, replicas int) error {
 	opNS := c.operatorNS(ctx)
 	// `scale` is a patch on the Deployment's scale subresource; `patch deployments` is
 	// the probe OperatorRestart already uses, so this adds no new RBAC vocabulary.
-	if err := c.PreflightAll(ctx, probe{verb: "patch", resource: "deployments", ns: opNS}); err != nil {
+	if err := c.PreflightAll(ctx, rbac.Probe{Verb: "patch", Resource: "deployments", Namespace: opNS}); err != nil {
 		return err
 	}
 	c.logf("scaling operator deployment %s in %s to %d", operatorDeployment, opNS, replicas)
-	if err := c.kubectl(ctx, "scale", "deployment", operatorDeployment, "-n", opNS,
-		"--replicas="+strconv.Itoa(replicas)); err != nil {
+	if err := c.runKube(ctx, func(b []string) runner.Cmd {
+		return kube.Scale(b, "deployment", operatorDeployment, opNS, replicas)
+	}); err != nil {
 		return err
 	}
 	if replicas == 0 {
@@ -612,26 +622,28 @@ func (c *Cluster) OperatorScale(ctx context.Context, replicas int) error {
 			"reconciled until `operator start`.")
 		return nil
 	}
-	return c.kubectl(ctx, "rollout", "status", operatorDeployRef, "-n", opNS,
-		"--timeout="+rolloutTimeout)
+	return c.waitRollout(ctx, "deployment", operatorDeployment, opNS)
 }
 
 // OperatorStatus prints the operator Deployment and its controller pods in the
 // operator namespace.
 func (c *Cluster) OperatorStatus(ctx context.Context) error {
 	opNS := c.operatorNS(ctx)
-	if err := c.kubectl(ctx, "get", "deployment", operatorDeployment, "-n", opNS, "-o", "wide"); err != nil {
+	if err := c.runKube(ctx, func(b []string) runner.Cmd {
+		return kube.Get(b, kube.GetOptions{Namespace: opNS, Output: "wide"}, "deployment", operatorDeployment)
+	}); err != nil {
 		return err
 	}
-	return c.kubectl(ctx, "get", "pods", "-n", opNS, "-l", "control-plane=controller-manager", "-o", "wide")
+	return c.runKube(ctx, func(b []string) runner.Cmd {
+		return kube.Get(b, kube.GetOptions{Namespace: opNS, Selector: "control-plane=controller-manager", Output: "wide"}, "pods")
+	})
 }
 
-// OperatorLogs streams the operator manager logs; passthrough args (e.g. -f, --tail)
-// are forwarded verbatim.
-func (c *Cluster) OperatorLogs(ctx context.Context, passthrough ...string) error {
-	opNS := c.operatorNS(ctx)
-	args := append([]string{"logs", "-n", opNS, operatorDeployRef}, passthrough...)
-	return c.kubectl(ctx, args...)
+// OperatorLogs streams the operator manager logs; o carries the log flags (follow, tail,
+// since, ...), and the namespace is the operator's.
+func (c *Cluster) OperatorLogs(ctx context.Context, o kube.LogOptions) error {
+	o.Namespace = c.operatorNS(ctx)
+	return c.runKube(ctx, func(b []string) runner.Cmd { return kube.Logs(b, operatorDeployRef, o) })
 }
 
 // OperatorDescribe describes the operator Deployment in the operator namespace.

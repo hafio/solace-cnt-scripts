@@ -8,13 +8,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
-	"solace/internal/engine"
 	"solace/internal/k8s"
 )
 
 // ops_k8s_test.go drives the Kubernetes handlers of ops_k8s.go directly, over opRunner
-// (cli_test.go) rather than engine.Echo, for the branches the echo seam cannot reach: every
+// (cli_test.go) rather than runner.Echo, for the branches the echo seam cannot reach: every
 // confirmation gate in each of its outcomes, every refusal that has to land BEFORE anything
 // is issued, and the failures a real cluster hands back mid-operation. Echo answers every
 // read with nothing and never fails, so it can show which argv a command would issue but not
@@ -59,8 +61,33 @@ func opsK8sAnswer(reply string) func(*App) {
 }
 
 // opsK8sUnattended is an App seam for a run with nobody at the terminal: no question is
-// asked, and a gate that needs an answer refuses and names --no-prompt.
+// asked, and a gate that needs an answer fails with an error naming --no-prompt.
 func opsK8sUnattended(a *App) { a.Interactive = func() bool { return false } }
+
+// opsK8sGate is the error a gate returns when nobody can be asked and --no-prompt was not
+// passed: confirm.Prompter.Gate's wording around doing, the noun phrase the gate names.
+func opsK8sGate(doing string) string {
+	return "confirming " + doing + " interactively: stdin is not a terminal, so this prompt " +
+		"cannot be answered interactively; pass --no-prompt instead"
+}
+
+// opsK8sIsGate reports whether want is such an error, which a run returns rather than prints.
+func opsK8sIsGate(want string) bool { return strings.HasSuffix(want, "pass --no-prompt instead") }
+
+// opsK8sCheckGate fails the test unless err matches want: the Gate error when want is one,
+// nil otherwise.
+func opsK8sCheckGate(t *testing.T, err error, want string) {
+	t.Helper()
+	if opsK8sIsGate(want) {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want the Gate error %q", err, want)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+}
 
 // opsK8sSilenced is --no-prompt: every question is answered yes without being asked.
 func opsK8sSilenced(a *App) {
@@ -207,8 +234,8 @@ func TestOpsK8sConfigureLeavesRefuseOppositeDirections(t *testing.T) {
 				PromptIn: exportconfigReadCounter{Reader: strings.NewReader("yes\n"), n: &reads}}
 			tc.set(a)
 			_, _, err := opsK8sRun(t, func() error { return tc.op(a) })
-			if err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("err = %v (exit %d), want a usage refusal naming %q", err, ExitCode(err), tc.want)
+			if err == nil || exitcode.Code(err) != exitcode.Usage || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v (exit %d), want a usage refusal naming %q", err, exitcode.Code(err), tc.want)
 			}
 			if len(rr.calls) != 0 || reads != 0 {
 				t.Errorf("a contradictory request must act and ask nothing: %d call(s), %d prompt read(s):\n%s", len(rr.calls), reads, rr.dump())
@@ -263,8 +290,8 @@ func TestOpsK8sABadPodIsRefusedBeforeAnythingRuns(t *testing.T) {
 				PromptIn: exportconfigReadCounter{Reader: strings.NewReader("yes\n"), n: &reads}}
 			tc.set(a)
 			_, _, err := opsK8sRun(t, func() error { return tc.op(a) })
-			if err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), `invalid node role "bogus"`) {
-				t.Fatalf("err = %v (exit %d), want a usage error naming the bad role", err, ExitCode(err))
+			if err == nil || exitcode.Code(err) != exitcode.Usage || !strings.Contains(err.Error(), `invalid node role "bogus"`) {
+				t.Fatalf("err = %v (exit %d), want a usage error naming the bad role", err, exitcode.Code(err))
 			}
 			if len(rr.calls) != 0 || reads != 0 {
 				t.Errorf("a refused --pod must act and ask nothing: %d call(s), %d prompt read(s):\n%s", len(rr.calls), reads, rr.dump())
@@ -325,8 +352,8 @@ func TestOpsK8sPodRolesAnnouncesWhatItNarrows(t *testing.T) {
 		var got []config.Role
 		var err error
 		errOut := captureStderr(t, func() { got, err = podRoles(&App{pod: "bogus"}, all) })
-		if got != nil || err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), `invalid node role "bogus"`) {
-			t.Fatalf("podRoles(bogus) = %v, %v (exit %d), want no roles and a usage error naming the word", got, err, ExitCode(err))
+		if got != nil || err == nil || exitcode.Code(err) != exitcode.Usage || !strings.Contains(err.Error(), `invalid node role "bogus"`) {
+			t.Fatalf("podRoles(bogus) = %v, %v (exit %d), want no roles and a usage error naming the word", got, err, exitcode.Code(err))
 		}
 		if errOut != "" {
 			t.Errorf("a refused --pod must not announce a narrowing it never made: %q", errOut)
@@ -343,7 +370,7 @@ func TestOpsK8sPodRolesAnnouncesWhatItNarrows(t *testing.T) {
 // when --pod says so, and rewrites no Secret. Declined or unanswerable, nothing reaches a pod.
 func TestOpsK8sRemoveServerCertsConfirmsThenSpansTheGroup(t *testing.T) {
 	const question = `Remove the TLS server certificate from broker dev-broker in namespace solace (context "prod-cluster")? [y/N] `
-	const refusal = `refusing to remove the TLS server certificate from broker dev-broker in namespace solace (context "prod-cluster") without confirmation; pass --no-prompt to proceed`
+	refusal := opsK8sGate(`remove the TLS server certificate from broker dev-broker in namespace solace (context "prod-cluster")`)
 	narrowed := func(a *App) {
 		opsK8sSilenced(a)
 		a.pod = "backup"
@@ -358,7 +385,7 @@ func TestOpsK8sRemoveServerCertsConfirmsThenSpansTheGroup(t *testing.T) {
 		{"--no-prompt removes it from every node without asking", opsK8sSilenced, "pbm", false, ""},
 		{"a yes at the prompt removes it from every node", opsK8sAnswer("y\n"), "pbm", true, question},
 		{"a no at the prompt leaves every node alone", opsK8sAnswer("n\n"), "", true, question},
-		{"no terminal and no --no-prompt leaves every node alone and names the flag", opsK8sUnattended, "", false, refusal},
+		{"no terminal and no --no-prompt leaves every node alone and fails naming the flag", opsK8sUnattended, "", false, refusal},
 		{"--pod narrows the removal to that node and says so", narrowed, "b", false, "--pod b narrows this to 1 of 3 node(s)"},
 	}
 	for _, tc := range cases {
@@ -367,9 +394,7 @@ func TestOpsK8sRemoveServerCertsConfirmsThenSpansTheGroup(t *testing.T) {
 			a := &App{Cfg: writeK8sDeployAllEnv(t, "true"), Platform: config.K8s, Runner: rr, flagRemove: true, kubeContext: "prod-cluster"}
 			tc.set(a)
 			_, errOut, err := opsK8sRun(t, func() error { return opK8sConfigServerCerts(a) })
-			if err != nil {
-				t.Fatalf("configure server-certs --remove err = %v, want nil", err)
-			}
+			opsK8sCheckGate(t, err, tc.stderr)
 			if got := opsK8sPods(rr); got != tc.wantPods {
 				t.Errorf("the removal reached pods %q, want %q:\n%s", got, tc.wantPods, rr.dump())
 			}
@@ -385,7 +410,7 @@ func TestOpsK8sRemoveServerCertsConfirmsThenSpansTheGroup(t *testing.T) {
 			if removals != len(tc.wantPods) {
 				t.Errorf("%d removal script(s) ran, want one per node (%d)", removals, len(tc.wantPods))
 			}
-			if tc.stderr != "" && !strings.Contains(errOut, tc.stderr) {
+			if tc.stderr != "" && !opsK8sIsGate(tc.stderr) && !strings.Contains(errOut, tc.stderr) {
 				t.Errorf("stderr = %q, want it to carry %q", errOut, tc.stderr)
 			}
 			if asked := strings.Contains(errOut, "[y/N]"); asked != tc.asked {
@@ -432,7 +457,7 @@ func TestOpsK8sDomainCertsResolveBeforeAnythingIsAskedOrIssued(t *testing.T) {
 // the one --pod names otherwise -- never the whole group.
 func TestOpsK8sRemoveDomainCertsConfirmsAndTargetsOneNode(t *testing.T) {
 	const question = "Remove the configured domain CA certificates from broker dev-broker in namespace solace? [y/N] "
-	const refusal = "refusing to remove the configured domain CA certificates from broker dev-broker in namespace solace without confirmation; pass --no-prompt to proceed"
+	refusal := opsK8sGate("remove the configured domain CA certificates from broker dev-broker in namespace solace")
 	backup := func(a *App) {
 		opsK8sSilenced(a)
 		a.pod = "backup"
@@ -447,7 +472,7 @@ func TestOpsK8sRemoveDomainCertsConfirmsAndTargetsOneNode(t *testing.T) {
 		{"--no-prompt removes the configured CA from the primary", opsK8sSilenced, "p", false, ""},
 		{"a yes at the prompt removes it from the primary", opsK8sAnswer("y\n"), "p", true, question},
 		{"a no at the prompt removes nothing", opsK8sAnswer("n\n"), "", true, question},
-		{"no terminal and no --no-prompt removes nothing and names the flag", opsK8sUnattended, "", false, refusal},
+		{"no terminal and no --no-prompt removes nothing and fails naming the flag", opsK8sUnattended, "", false, refusal},
 		{"--pod backup removes it from the backup node only", backup, "b", false, ""},
 	}
 	for _, tc := range cases {
@@ -458,9 +483,7 @@ func TestOpsK8sRemoveDomainCertsConfirmsAndTargetsOneNode(t *testing.T) {
 			a := &App{Cfg: cfg, Platform: config.K8s, Runner: rr, flagRemove: true}
 			tc.set(a)
 			_, errOut, err := opsK8sRun(t, func() error { return opK8sConfigDomainCerts(a) })
-			if err != nil {
-				t.Fatalf("configure domain-certs --remove err = %v, want nil", err)
-			}
+			opsK8sCheckGate(t, err, tc.stderr)
 			if got := opsK8sPods(rr); got != tc.wantPods {
 				t.Errorf("the removal reached pods %q, want %q:\n%s", got, tc.wantPods, rr.dump())
 			}
@@ -473,7 +496,7 @@ func TestOpsK8sRemoveDomainCertsConfirmsAndTargetsOneNode(t *testing.T) {
 			if removals != len(tc.wantPods) {
 				t.Errorf("%d removal script(s) for CA myca ran, want %d:\n%s", removals, len(tc.wantPods), rr.dump())
 			}
-			if tc.stderr != "" && !strings.Contains(errOut, tc.stderr) {
+			if tc.stderr != "" && !opsK8sIsGate(tc.stderr) && !strings.Contains(errOut, tc.stderr) {
 				t.Errorf("stderr = %q, want it to carry %q", errOut, tc.stderr)
 			}
 			if asked := strings.Contains(errOut, "[y/N]"); asked != tc.asked {
@@ -491,7 +514,7 @@ func TestOpsK8sRemoveDomainCertsConfirmsAndTargetsOneNode(t *testing.T) {
 // the script on stdin and never appears in an argv, where it would be logged and echoed.
 func TestOpsK8sProductKeysGoToTheLicensedNodesOnly(t *testing.T) {
 	const question = "Revoke every configured product key from broker dev-broker in namespace solace? [y/N] "
-	const refusal = "refusing to revoke the product keys from broker dev-broker in namespace solace without confirmation; pass --no-prompt to proceed"
+	refusal := opsK8sGate("revoke the product keys from broker dev-broker in namespace solace")
 	const applied = "product-key KEY-ONE\nproduct-key KEY-TWO\n"
 	const revoked = "no product-key KEY-ONE\nno product-key KEY-TWO\n"
 	narrowed := func(a *App) {
@@ -510,7 +533,7 @@ func TestOpsK8sProductKeysGoToTheLicensedNodesOnly(t *testing.T) {
 		{"--remove --no-prompt revokes on the same two nodes", true, opsK8sSilenced, "pb", revoked, ""},
 		{"--remove answered yes revokes on the same two nodes", true, opsK8sAnswer("y\n"), "pb", revoked, question},
 		{"--remove answered no revokes nothing", true, opsK8sAnswer("n\n"), "", "", question},
-		{"--remove with no terminal revokes nothing and names the flag", true, opsK8sUnattended, "", "", refusal},
+		{"--remove with no terminal revokes nothing and fails naming the flag", true, opsK8sUnattended, "", "", refusal},
 		{"--remove --pod backup revokes on that node only and says so", true, narrowed, "b", revoked, "--pod b narrows this to 1 of 2 node(s)"},
 	}
 	for _, tc := range cases {
@@ -520,9 +543,7 @@ func TestOpsK8sProductKeysGoToTheLicensedNodesOnly(t *testing.T) {
 			a.Cfg.Broker.ProductKeys = []string{"KEY-ONE", "KEY-TWO"}
 			tc.set(a)
 			_, errOut, err := opsK8sRun(t, func() error { return opK8sConfigProductKeys(a) })
-			if err != nil {
-				t.Fatalf("configure product-keys err = %v, want nil", err)
-			}
+			opsK8sCheckGate(t, err, tc.stderr)
 			if got := opsK8sPods(rr); got != tc.wantPods {
 				t.Errorf("the keys reached pods %q, want %q:\n%s", got, tc.wantPods, rr.dump())
 			}
@@ -538,7 +559,7 @@ func TestOpsK8sProductKeysGoToTheLicensedNodesOnly(t *testing.T) {
 			if scripts != len(tc.wantPods) {
 				t.Errorf("%d script(s) carried the expected lines, want one per licensed node (%d):\n%s", scripts, len(tc.wantPods), rr.dump())
 			}
-			if tc.stderr != "" && !strings.Contains(errOut, tc.stderr) {
+			if tc.stderr != "" && !opsK8sIsGate(tc.stderr) && !strings.Contains(errOut, tc.stderr) {
 				t.Errorf("stderr = %q, want it to carry %q", errOut, tc.stderr)
 			}
 		})
@@ -611,7 +632,7 @@ func TestOpsK8sHardeningLeavesAskOnlyBeforeDisturbingClients(t *testing.T) {
 		{"--no-prompt shuts it down without asking", false, opsK8sSilenced, true, ""},
 		{"a yes at the prompt shuts it down", false, opsK8sAnswer("y\n"), true, "question"},
 		{"a no at the prompt leaves it up", false, opsK8sAnswer("n\n"), false, "question"},
-		{"no terminal and no --no-prompt leaves it up and names the flag", false, opsK8sUnattended, false, "refusal"},
+		{"no terminal and no --no-prompt leaves it up and fails naming the flag", false, opsK8sUnattended, false, "refusal"},
 		{"--enable starts it back up without a question", true, opsK8sAnswer("n\n"), true, ""},
 		{"--enable with no terminal still starts it back up", true, opsK8sUnattended, true, ""},
 	}
@@ -627,8 +648,11 @@ func TestOpsK8sHardeningLeavesAskOnlyBeforeDisturbingClients(t *testing.T) {
 				a := &App{Cfg: writeK8sDeployAllEnv(t, "true"), Platform: config.K8s, Runner: rr, flagEnable: sc.enable}
 				sc.set(a)
 				_, errOut, err := opsK8sRun(t, func() error { return lf.op(a) })
-				if err != nil {
-					t.Fatalf("%s err = %v, want nil", lf.name, err)
+				refusal := opsK8sGate("shut down " + lf.what)
+				if sc.wantText == "refusal" {
+					opsK8sCheckGate(t, err, refusal)
+				} else {
+					opsK8sCheckGate(t, err, "")
 				}
 				ran, other := lf.downName, lf.upName
 				if sc.enable {
@@ -660,22 +684,14 @@ func TestOpsK8sHardeningLeavesAskOnlyBeforeDisturbingClients(t *testing.T) {
 					}
 				}
 				question := "Shut down " + lf.what + "? [y/N] "
-				refusal := "refusing to shut down " + lf.what + " without confirmation; pass --no-prompt to proceed"
-				switch sc.wantText {
-				case "question":
-					if !strings.Contains(errOut, question) {
-						t.Errorf("stderr = %q, want the question %q", errOut, question)
-					}
-				case "refusal":
-					if !strings.Contains(errOut, refusal) {
-						t.Errorf("stderr = %q, want the refusal %q", errOut, refusal)
-					}
+				if sc.wantText == "question" && !strings.Contains(errOut, question) {
+					t.Errorf("stderr = %q, want the question %q", errOut, question)
 				}
 				if asked := strings.Contains(errOut, "[y/N]"); asked != (sc.wantText == "question") {
 					t.Errorf("a question was asked = %v, want %v:\n%s", asked, sc.wantText == "question", errOut)
 				}
-				if refused := strings.Contains(errOut, "refusing"); refused != (sc.wantText == "refusal") {
-					t.Errorf("a refusal line was printed = %v, want %v:\n%s", refused, sc.wantText == "refusal", errOut)
+				if strings.Contains(errOut, "refusing") {
+					t.Errorf("a refusal line was printed; the gate's error is the refusal now:\n%s", errOut)
 				}
 			})
 		}
@@ -796,29 +812,28 @@ func TestOpsK8sStatusOperatorRefusesAClusterCommandTheGuardRejects(t *testing.T)
 	cfg := writeK8sDeployAllEnv(t, "false")
 	cfg.K8s.Command = config.Command{"sudo", "kubectl"}
 	var echoed strings.Builder
-	a := &App{Cfg: cfg, Platform: config.K8s, Runner: engine.Echo{W: &echoed}}
+	a := &App{Cfg: cfg, Platform: config.K8s, Runner: runner.Echo{W: &echoed}}
 	_, _, err := opsK8sRun(t, func() error { return opK8sStatusOperator(a) })
-	if err == nil || !strings.Contains(err.Error(), "kubernetes.command") || !strings.Contains(err.Error(), "sudo") {
-		t.Fatalf("opK8sStatusOperator err = %v, want the guard's refusal naming kubernetes.command and sudo", err)
+	if err == nil || !strings.Contains(err.Error(), "kubernetes.command") || !strings.Contains(err.Error(), "privilege-escalation wrapper (sudo)") {
+		t.Fatalf("opK8sStatusOperator err = %v, want the guard's refusal naming kubernetes.command and the sudo wrapper", err)
 	}
 	if echoed.Len() != 0 {
 		t.Errorf("a command the guard refused was issued anyway: %q", echoed.String())
 	}
 }
 
-// TestOpsK8sLogsPreviousComesAfterTheSharedTokens: --previous is Kubernetes-only, so it is
-// appended by the Kubernetes handler rather than by logArgs, which builds only the tokens
-// every platform shares. It is added only when asked for, and it lands after the shared
-// tokens on the one pod --pod resolved -- the exact argv an operator reading a crashed
-// container's last words depends on.
-func TestOpsK8sLogsPreviousComesAfterTheSharedTokens(t *testing.T) {
+// TestOpsK8sLogsPreviousIsSetByTheKubernetesHandler: --previous is Kubernetes-only, so it is
+// set by the Kubernetes handler rather than by logOptions, which builds only the options
+// every platform shares. It is added only when asked for, on the one pod --pod resolved --
+// the exact argv an operator reading a crashed container's last words depends on.
+func TestOpsK8sLogsPreviousIsSetByTheKubernetesHandler(t *testing.T) {
 	cases := []struct {
 		name     string
 		previous bool
 		want     []string
 	}{
-		{"the current container", false, []string{"logs", "-n", "solace", "pod/dev-broker-pubsubplus-b-0", "--tail", "20"}},
-		{"--previous adds -p after the shared tokens", true, []string{"logs", "-n", "solace", "pod/dev-broker-pubsubplus-b-0", "--tail", "20", "-p"}},
+		{"the current container", false, []string{"logs", "pod/dev-broker-pubsubplus-b-0", "-n", "solace", "--tail", "20"}},
+		{"--previous adds -p", true, []string{"logs", "pod/dev-broker-pubsubplus-b-0", "-n", "solace", "-p", "--tail", "20"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -845,8 +860,8 @@ func TestOpsK8sOperatorLogsRefusesAnUnparseableSince(t *testing.T) {
 		rr := &opRunner{}
 		a := &App{Cfg: writeK8sDeployAllEnv(t, "false"), Platform: config.K8s, Runner: rr, since: "yesterday"}
 		_, _, err := opsK8sRun(t, func() error { return opK8sOperatorLogs(a) })
-		if err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), "--since") {
-			t.Fatalf("opK8sOperatorLogs err = %v (exit %d), want a usage error naming --since", err, ExitCode(err))
+		if err == nil || exitcode.Code(err) != exitcode.Usage || !strings.Contains(err.Error(), "--since") {
+			t.Fatalf("opK8sOperatorLogs err = %v (exit %d), want a usage error naming --since", err, exitcode.Code(err))
 		}
 		if len(rr.calls) != 0 {
 			t.Errorf("a refused flag must not reach the cluster:\n%s", rr.dump())
@@ -860,7 +875,7 @@ func TestOpsK8sOperatorLogsRefusesAnUnparseableSince(t *testing.T) {
 		if err != nil {
 			t.Fatalf("opK8sOperatorLogs err = %v, want nil", err)
 		}
-		want := []string{"logs", "-n", k8s.OperatorNamespace(cfg), "deployment/pubsubplus-eventbroker-operator", "--tail", "10", "--since", "5m0s"}
+		want := []string{"logs", "deployment/pubsubplus-eventbroker-operator", "-n", k8s.OperatorNamespace(cfg), "--tail", "10", "--since", "5m0s"}
 		if len(rr.calls) != 1 || !slices.Equal(rr.calls[0].args, want) {
 			t.Errorf("calls = \n%s\nwant one kubectl run with %q", rr.dump(), want)
 		}
@@ -895,7 +910,7 @@ func TestOpsK8sOperatorStartScalesUpAndWaitsWithoutAsking(t *testing.T) {
 	if want := "auth can-i patch deployments -n " + opNS; got[0] != want {
 		t.Errorf("first call = %q, want the permission probe %q", got[0], want)
 	}
-	if want := "scale deployment pubsubplus-eventbroker-operator -n " + opNS + " --replicas=1"; got[1] != want {
+	if want := "scale deployment/pubsubplus-eventbroker-operator -n " + opNS + " --replicas=1"; got[1] != want {
 		t.Errorf("second call = %q, want %q", got[1], want)
 	}
 	if want := "rollout status deployment/pubsubplus-eventbroker-operator -n " + opNS; !strings.HasPrefix(got[2], want) {
@@ -912,7 +927,7 @@ func TestOpsK8sOperatorStartScalesUpAndWaitsWithoutAsking(t *testing.T) {
 func TestOpsK8sOperatorStopConfirmsBecauseItFreezesEveryNamespace(t *testing.T) {
 	const what = "the operator, freezing reconciliation for every broker it watches"
 	const question = "Stop " + what + ` (context "prod-cluster")? [y/N] `
-	const refusal = "refusing to stop " + what + ` (context "prod-cluster") without confirmation; pass --no-prompt to proceed`
+	refusal := opsK8sGate("stop " + what + ` (context "prod-cluster")`)
 	cases := []struct {
 		name   string
 		set    func(*App)
@@ -923,7 +938,7 @@ func TestOpsK8sOperatorStopConfirmsBecauseItFreezesEveryNamespace(t *testing.T) 
 		{"--no-prompt scales it to zero without asking", opsK8sSilenced, true, false, "the operator is stopped"},
 		{"a yes at the prompt scales it to zero", opsK8sAnswer("y\n"), true, true, question},
 		{"a no at the prompt leaves it running", opsK8sAnswer("n\n"), false, true, question},
-		{"no terminal and no --no-prompt leaves it running and names the flag", opsK8sUnattended, false, false, refusal},
+		{"no terminal and no --no-prompt leaves it running and fails naming the flag", opsK8sUnattended, false, false, refusal},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -933,23 +948,21 @@ func TestOpsK8sOperatorStopConfirmsBecauseItFreezesEveryNamespace(t *testing.T) 
 			a := &App{Cfg: cfg, Platform: config.K8s, Runner: rr, kubeContext: "prod-cluster"}
 			tc.set(a)
 			_, errOut, err := opsK8sRun(t, func() error { return opK8sOperatorStop(a) })
-			if err != nil {
-				t.Fatalf("opK8sOperatorStop err = %v, want nil", err)
-			}
+			opsK8sCheckGate(t, err, tc.stderr)
 			var acted []string
 			for _, c := range rr.calls {
 				if !opCanI(c) {
 					acted = append(acted, strings.Join(c.args, " "))
 				}
 			}
-			scale := "scale deployment pubsubplus-eventbroker-operator -n " + opNS + " --replicas=0"
+			scale := "scale deployment/pubsubplus-eventbroker-operator -n " + opNS + " --replicas=0"
 			switch {
 			case tc.scaled && !slices.Equal(acted, []string{scale}):
 				t.Errorf("acted = %q, want exactly %q and no rollout wait", acted, scale)
 			case !tc.scaled && len(rr.calls) != 0:
 				t.Errorf("a stop that was not confirmed must not reach the cluster:\n%s", rr.dump())
 			}
-			if !strings.Contains(errOut, tc.stderr) {
+			if !opsK8sIsGate(tc.stderr) && !strings.Contains(errOut, tc.stderr) {
 				t.Errorf("stderr = %q, want it to carry %q", errOut, tc.stderr)
 			}
 			if asked := strings.Contains(errOut, "[y/N]"); asked != tc.asked {
@@ -1111,7 +1124,7 @@ func TestOpsK8sRemoveBrokerStopsWhenASecretWillNotDelete(t *testing.T) {
 // configuration. Each broader read it cannot make becomes a warning or a [SKIP] row and none
 // fails the command, and it never applies a Namespace it could not patch. `broker status
 // --all`, which asks for the whole cluster, is refused; so is deleting the namespace a
-// removal empties, which is attempted as always and takes a cluster-wide grant.
+// removal empties, which takes a cluster-wide grant: it is probed, warned about and kept.
 func TestNamespaceScopedIdentityRunsTheBrokerLifecycle(t *testing.T) {
 	newApp := func(t *testing.T) (*App, *opRunner) {
 		t.Helper()
@@ -1133,6 +1146,9 @@ func TestNamespaceScopedIdentityRunsTheBrokerLifecycle(t *testing.T) {
 					return []byte("no\n")
 				case len(c.args) > 2 && c.args[0] == "get" && c.args[1] == "namespace":
 					return []byte("namespace/solace\n")
+				case c.method == "Output" && opArgvMatch(c, "persistentvolumeclaims,secrets,configmaps"):
+					// Its own namespace lists by name-scoped rights: only what Kubernetes puts there.
+					return []byte(`{"items":[{"kind":"ServiceAccount","metadata":{"name":"default"}}]}`)
 				}
 				return nil
 			},
@@ -1170,12 +1186,16 @@ func TestNamespaceScopedIdentityRunsTheBrokerLifecycle(t *testing.T) {
 	t.Run("broker remove --delete-data", func(t *testing.T) {
 		a, rr := newApp(t)
 		a.deleteLayer = true
-		_, _, err := opsK8sRun(t, func() error { return opK8sRemoveBroker(a) })
-		// The broker and its data go on namespace rights alone. The namespace that leaves empty
-		// is then deleted as it always was -- --no-prompt answers that question -- and that
-		// takes a cluster-wide grant, so the removal ends with the refusal, the namespace kept.
-		if err == nil || !strings.Contains(err.Error(), "not allowed to delete namespaces") {
-			t.Fatalf("err = %v, want the namespace delete refused once the broker is gone:\n%s", err, rr.dump())
+		_, errOut, err := opsK8sRun(t, func() error { return opK8sRemoveBroker(a) })
+		// The broker and its data go on namespace rights alone. The namespace that leaves
+		// empty is then offered as always, but deleting it takes a cluster-wide grant, which
+		// is probed before the question: the namespace is kept with a warning, and the
+		// removal -- everything this env file owns is gone -- still succeeds.
+		if err != nil {
+			t.Fatalf("err = %v, want the removal to succeed with the namespace kept:\n%s", err, rr.dump())
+		}
+		if !strings.Contains(errOut, "not allowed to delete namespaces") {
+			t.Errorf("stderr = %q, want a warning that namespaces may not be deleted", errOut)
 		}
 		var crDeleted, dataDeleted bool
 		for _, c := range rr.calls {
@@ -1247,97 +1267,151 @@ func TestOpsK8sRemoveBrokerRefusesBeforeTheFirstDelete(t *testing.T) {
 }
 
 // TestOpsK8sRemoveNamespaceIfEmptyKeepsTheNamespaceInDoubt pins when the namespace is
-// offered for deletion, which is only when nothing else is in it. A Kubernetes namespace is
-// never removed and a listing that cannot run keeps the namespace -- both on every path,
+// offered for deletion, which is only when nothing else is in it, and that the gate never
+// fails the removal that ran it. A Kubernetes namespace is never removed; a listing that
+// cannot run, cannot be read or comes back empty from a silent runner, an occupant, a refused
+// `delete namespaces`, a declined or unanswerable question and a failed delete each keep the
+// namespace with a warning (or, for a silent runner, a skipped-check row) -- on every path,
 // --no-prompt included, because a namespace wrongly reported empty is cascade-deleted while
-// one wrongly reported occupied merely stays. An empty one is still a question: a no or an
-// unanswerable prompt keeps it, and only a yes deletes it.
+// one wrongly reported occupied merely stays. The permission is asked BEFORE the question,
+// so nobody is asked and then refused. Only a yes deletes.
 func TestOpsK8sRemoveNamespaceIfEmptyKeepsTheNamespaceInDoubt(t *testing.T) {
+	const listing = "persistentvolumeclaims,secrets,configmaps"
+	const empty = `{"items":[{"kind":"ServiceAccount","metadata":{"name":"default"}}]}`
 	cases := []struct {
-		name      string
-		namespace string
-		listFails bool
-		set       func(*App)
-		deleted   bool
-		noCalls   bool
-		stderr    string
+		name         string
+		namespace    string
+		list         string // the listing the runner answers; "" answers nothing, as Echo does
+		listFails    bool
+		refuseDelete bool // `auth can-i delete namespaces` answers no
+		deleteFails  bool
+		set          func(*App)
+		deleted      bool
+		noCalls      bool
+		probed       bool // the delete permission was asked about
+		asked        bool // the question was put
+		stderr       string
+		stdout       string
 	}{
-		{"a Kubernetes namespace is never removed, even under --no-prompt", "kube-system", false, opsK8sSilenced, false, true,
-			`namespace "kube-system" is a Kubernetes namespace and is never removed by this tool`},
-		{"a listing that cannot run keeps the namespace, even under --no-prompt", "solace", true, opsK8sSilenced, false, false,
-			"could not list what is left in namespace"},
-		{"an empty namespace the operator declines stays", "solace", false, opsK8sAnswer("n\n"), false, false,
-			"Delete the now-empty namespace solace? [y/N] "},
-		{"an empty namespace with no terminal and no --no-prompt stays and names the flag", "solace", false, opsK8sUnattended, false, false,
-			"refusing to delete the now-empty namespace solace without confirmation; pass --no-prompt to proceed"},
-		{"an empty namespace the operator accepts is deleted", "solace", false, opsK8sAnswer("y\n"), true, false,
-			"Delete the now-empty namespace solace? [y/N] "},
+		{name: "a Kubernetes namespace is never removed, even under --no-prompt", namespace: "kube-system",
+			set: opsK8sSilenced, noCalls: true,
+			stderr: `namespace "kube-system" is a Kubernetes namespace and is never removed by this tool`},
+		{name: "a listing that cannot run keeps the namespace, even under --no-prompt", namespace: "solace",
+			listFails: true, set: opsK8sSilenced, stderr: "could not list what is left in namespace"},
+		{name: "a listing that is not JSON keeps the namespace", namespace: "solace", list: "NAME READY\n",
+			set: opsK8sSilenced, stderr: "the namespace listing is not JSON"},
+		{name: "a runner that answers nothing keeps it quietly, with a skipped-check row", namespace: "solace",
+			set: opsK8sSilenced, stdout: "check skipped (no answer from the runner)"},
+		{name: "an occupant keeps the namespace without asking or probing", namespace: "solace",
+			list: `{"items":[{"kind":"Deployment","metadata":{"name":"someone-elses-app"}}]}`,
+			set:  opsK8sSilenced, stderr: `namespace "solace" kept: 1 object(s) still in it`},
+		{name: "a refused delete permission keeps the namespace before any question", namespace: "solace",
+			list: empty, refuseDelete: true, set: opsK8sAnswer("y\n"), probed: true,
+			stderr: "not allowed to delete namespaces"},
+		{name: "an empty namespace the operator declines stays", namespace: "solace", list: empty,
+			set: opsK8sAnswer("n\n"), probed: true, asked: true, stderr: "Delete the now-empty namespace solace? [y/N] "},
+		{name: "an empty namespace with no terminal and no --no-prompt stays, warning that names the flag",
+			namespace: "solace", list: empty, set: opsK8sUnattended, probed: true,
+			stderr: opsK8sGate("delete the now-empty namespace solace")},
+		{name: "an empty namespace the operator accepts is deleted", namespace: "solace", list: empty,
+			set: opsK8sAnswer("y\n"), deleted: true, probed: true, asked: true,
+			stderr: "Delete the now-empty namespace solace? [y/N] "},
+		{name: "--no-prompt deletes an empty namespace without asking", namespace: "solace", list: empty,
+			set: opsK8sSilenced, deleted: true, probed: true},
+		{name: "a failed delete is a warning, not a failed removal", namespace: "solace", list: empty,
+			deleteFails: true, set: opsK8sSilenced, deleted: true, probed: true,
+			stderr: `namespace "solace" kept: could not delete it`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := writeK8sDeployAllEnv(t, "false")
 			cfg.K8s.Namespace = tc.namespace
-			rr := &opRunner{}
-			if tc.listFails {
-				rr.fail = func(c opCall) error {
-					if c.method == "Output" && opArgvMatch(c, "persistentvolumeclaims,secrets,configmaps") {
+			rr := &opRunner{
+				fail: func(c opCall) error {
+					switch {
+					case tc.listFails && c.method == "Output" && opArgvMatch(c, listing):
 						return errors.New("injected listing failure")
+					case tc.deleteFails && len(c.args) > 1 && c.args[0] == "delete" && c.args[1] == "namespace":
+						return errors.New("injected delete failure")
 					}
 					return nil
-				}
+				},
+				output: func(c opCall) []byte {
+					switch {
+					case opCanI(c) && tc.refuseDelete:
+						return []byte("no\n")
+					case c.method == "Output" && opArgvMatch(c, listing):
+						return []byte(tc.list)
+					}
+					return nil
+				},
 			}
 			a := &App{Cfg: cfg, Platform: config.K8s, Runner: rr}
 			tc.set(a)
-			_, errOut, err := opsK8sRun(t, func() error { return removeNamespaceIfEmpty(a, k8sCluster(a)) })
+			out, errOut, err := opsK8sRun(t, func() error { removeNamespaceIfEmpty(a, k8sCluster(a)); return nil })
 			if err != nil {
-				t.Fatalf("removeNamespaceIfEmpty err = %v, want nil: keeping the namespace is not a failure", err)
+				t.Fatalf("err = %v: the gate never fails the removal", err)
 			}
-			deleted := false
+			deleted, probed := false, false
 			for _, c := range rr.calls {
 				if len(c.args) > 1 && c.args[0] == "delete" && c.args[1] == "namespace" {
 					deleted = true
+				}
+				if opCanI(c) && opArgvMatch(c, "namespaces") {
+					probed = true
 				}
 			}
 			if deleted != tc.deleted {
 				t.Errorf("namespace deleted = %v, want %v:\n%s", deleted, tc.deleted, rr.dump())
 			}
+			if probed != tc.probed {
+				t.Errorf("`delete namespaces` probed = %v, want %v:\n%s", probed, tc.probed, rr.dump())
+			}
 			if tc.noCalls && len(rr.calls) != 0 {
 				t.Errorf("a protected namespace must not even be listed:\n%s", rr.dump())
 			}
+			if asked := strings.Contains(errOut, "[y/N]"); asked != tc.asked {
+				t.Errorf("a question was asked = %v, want %v:\n%s", asked, tc.asked, errOut)
+			}
 			if !strings.Contains(errOut, tc.stderr) {
 				t.Errorf("stderr = %q, want it to carry %q", errOut, tc.stderr)
+			}
+			if !strings.Contains(out, tc.stdout) {
+				t.Errorf("stdout = %q, want it to carry %q", out, tc.stdout)
+			}
+			if tc.stdout == "" && strings.Contains(out, "check skipped") {
+				t.Errorf("a runner that answered must not report a skipped check:\n%s", out)
 			}
 		})
 	}
 }
 
-// TestOpsK8sClusterConfirmIsTheDowngradeGateWithNoWayAround covers the one question the
-// Kubernetes package asks, as k8sCluster wires it: whether to install an operator OLDER than
-// the cluster-scoped one already running, which rolls back every broker it watches. The
-// wiring must reach confirmDowngrade and not the removal gate, so --no-prompt is no side
-// door -- it neither answers the question nor lets an unattended run through -- and only a
-// yes typed by a human proceeds. Nobody answering at all refuses and says to re-run
-// interactively, not to pass a flag this command does not have.
-func TestOpsK8sClusterConfirmIsTheDowngradeGateWithNoWayAround(t *testing.T) {
+// TestOpsK8sClusterConfirmIsTheDowngradeGate covers the downgrade question the Kubernetes
+// package asks, as k8sCluster wires it: whether to install an operator OLDER than the
+// cluster-scoped one already running, which rolls back every broker it watches. The wiring
+// must reach confirmDowngrade and not the removal gate. --no-prompt on `operator deploy`
+// approves it without asking; at a terminal a yes proceeds and a no declines; and a run
+// with no terminal and no --no-prompt fails naming the flag.
+func TestOpsK8sClusterConfirmIsTheDowngradeGate(t *testing.T) {
 	const question = "Install an operator older than the one running?"
-	const refusal = "refusing to downgrade the operator without confirmation; re-run interactively to confirm the downgrade"
+	gate := opsK8sGate("the operator downgrade")
 	cases := []struct {
 		name    string
 		app     *App
 		want    bool
 		stderr  string
-		refused bool
+		wantErr string
 	}{
 		{"a yes at the prompt lets the downgrade through",
-			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("y\n")}, true, question + " [y/N] ", false},
-		{"a no at the prompt declines without a refusal line",
-			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("n\n")}, false, question + " [y/N] ", false},
-		{"--no-prompt does not answer a question that is asked",
-			&App{noPrompt: true, Interactive: func() bool { return true }, PromptIn: strings.NewReader("n\n")}, false, question + " [y/N] ", false},
-		{"--no-prompt does not let an unattended run through",
-			&App{noPrompt: true, Interactive: func() bool { return false }}, false, refusal, true},
-		{"nobody answering refuses and says to re-run interactively",
-			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("")}, false, refusal, true},
+			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("y\n")}, true, question + " [y/N] ", ""},
+		{"a no at the prompt declines without an error",
+			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("n\n")}, false, question + " [y/N] ", ""},
+		{"--no-prompt approves the downgrade without asking",
+			&App{noPrompt: true, Interactive: func() bool { return false }}, true, "", ""},
+		{"no terminal and no --no-prompt fails naming the flag",
+			&App{Interactive: func() bool { return false }}, false, "", gate},
+		{"nobody answering at a terminal is an error",
+			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("")}, false, question + " [y/N] ", "reading input: EOF"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1346,15 +1420,77 @@ func TestOpsK8sClusterConfirmIsTheDowngradeGateWithNoWayAround(t *testing.T) {
 				t.Fatal("k8sCluster did not wire Cluster.Confirm: the operator downgrade would be declined for everyone")
 			}
 			var got bool
-			errOut := captureStderr(t, func() { got = c.Confirm(question) })
+			var err error
+			errOut := captureStderr(t, func() { got, err = c.Confirm(question) })
 			if got != tc.want {
 				t.Errorf("Confirm = %v, want %v", got, tc.want)
+			}
+			if tc.wantErr == "" && err != nil {
+				t.Errorf("Confirm err = %v, want nil", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Errorf("Confirm err = %v, want it to carry %q", err, tc.wantErr)
 			}
 			if !strings.Contains(errOut, tc.stderr) {
 				t.Errorf("stderr = %q, want it to carry %q", errOut, tc.stderr)
 			}
-			if refused := strings.Contains(errOut, "refusing"); refused != tc.refused {
-				t.Errorf("a refusal line was printed = %v, want %v:\n%s", refused, tc.refused, errOut)
+		})
+	}
+}
+
+// TestOpsK8sClusterConfirmScopeNeedsATerminal covers the other question, widening the
+// operator's watch to every namespace, as k8sCluster wires it on its own seam. --no-prompt
+// is NOT an answer to it: a run with no terminal is refused whether or not the flag was
+// passed, with an error that says it needs a terminal and names the env-file setting that
+// selects the watched namespaces. At a terminal the human answers, and --no-prompt does not
+// change the question or the answer.
+func TestOpsK8sClusterConfirmScopeNeedsATerminal(t *testing.T) {
+	const question = "Let the operator watch EVERY namespace in this cluster?"
+	const key = "kubernetes.operator.watchNamespaces"
+	cases := []struct {
+		name    string
+		app     *App
+		want    bool
+		asked   bool
+		wantErr []string
+	}{
+		{"a yes at the prompt widens the watch",
+			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("y\n")}, true, true, nil},
+		{"a no at the prompt declines without an error",
+			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("n\n")}, false, true, nil},
+		{"--no-prompt does not answer the question that is asked",
+			&App{noPrompt: true, Interactive: func() bool { return true }, PromptIn: strings.NewReader("n\n")}, false, true, nil},
+		{"--no-prompt does not widen the watch with no terminal",
+			&App{noPrompt: true, Interactive: func() bool { return false }}, false, false,
+			[]string{"needs a terminal", "--no-prompt does not answer it", "stdin is not a terminal", key}},
+		{"no terminal and no flag is refused naming the setting",
+			&App{Interactive: func() bool { return false }}, false, false, []string{"needs a terminal", key}},
+		{"nobody answering at a terminal is refused naming the setting",
+			&App{Interactive: func() bool { return true }, PromptIn: strings.NewReader("")}, false, true,
+			[]string{"needs a terminal", "reading input: EOF", key}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := k8sCluster(tc.app)
+			if c.ConfirmScope == nil {
+				t.Fatal("k8sCluster did not wire Cluster.ConfirmScope: the watch widening would be declined for everyone")
+			}
+			var got bool
+			var err error
+			errOut := captureStderr(t, func() { got, err = c.ConfirmScope(question) })
+			if got != tc.want {
+				t.Errorf("ConfirmScope = %v, want %v", got, tc.want)
+			}
+			if len(tc.wantErr) == 0 && err != nil {
+				t.Errorf("ConfirmScope err = %v, want nil", err)
+			}
+			for _, w := range tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), w) {
+					t.Errorf("ConfirmScope err = %v, want it to carry %q", err, w)
+				}
+			}
+			if asked := strings.Contains(errOut, question+" [y/N] "); asked != tc.asked {
+				t.Errorf("the question was asked = %v, want %v:\n%s", asked, tc.asked, errOut)
 			}
 		})
 	}

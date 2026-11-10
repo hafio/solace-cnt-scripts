@@ -10,7 +10,7 @@ import (
 
 // previewValue stands in for a file-backed secret under the Echo runner. It is
 // non-empty on purpose: the entry must survive so the child-environment list still
-// has exactly one variable per secret, and engine.MaskEnv prints it as *** anyway.
+// has exactly one variable per secret, and runner.Echo prints it as *** anyway.
 const previewValue = "(preview)"
 
 // ResolveSecretValues fills in the secrets whose bytes are not in the env file.
@@ -21,9 +21,11 @@ const previewValue = "(preview)"
 // package that already does host file I/O.
 //
 // preview substitutes a placeholder instead of reading, and it is not a convenience.
-// `compose()` runs on six docker verbs, so without it every argv test of any of them
-// would fail before the certificate files exist -- losing exactly the coverage
-// prepareSecrets goes out of its way to keep for the pre-shared key. The placeholder keeps the ENTRY and blanks only the value:
+// The compose deploy and teardown both build the child environment, so without it every
+// argv test of either would fail before the certificate files exist -- losing exactly the
+// coverage prepareSecrets goes out of its way to keep for the pre-shared key. A teardown asks
+// for it too, since `compose down` needs every secret defined but never reads one. The
+// placeholder keeps the ENTRY and blanks only the value:
 // dropping the entry would break the deliberate "one child variable per secret"
 // invariant.
 //

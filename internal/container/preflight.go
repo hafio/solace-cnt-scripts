@@ -2,9 +2,10 @@ package container
 
 import (
 	"context"
-	"fmt"
 
-	"solace/internal/config"
+	"github.com/hafio/go-deploy-utility/containercli"
+
+	"solace/internal/engine"
 )
 
 // Preflight is the read-only probe every mutating operation runs first. `<runtime>
@@ -29,47 +30,21 @@ func (m *Manager) Preflight(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	probe := containercli.Info(rt.Argv())
 	if m.isEcho() {
 		// Echo the probe so the preview shows it, then skip the assertion: the
 		// Echo runner answers nothing, and there is no engine to answer.
-		if _, err := m.R.Output(ctx, rt.Name(), rt.Args("info")...); err != nil {
+		if _, err := engine.Output(ctx, m.R, probe); err != nil {
 			return err
 		}
 		m.report().KVRow(reportKeyWidth, "engine", "skipped (preview)")
 		return nil
 	}
-	if _, err := m.R.Output(ctx, rt.Name(), rt.Args("info")...); err != nil {
-		// The engine's own message already went to stderr; add the one line that
-		// says what to do about it, which differs by platform and rootless mode.
-		return fmt.Errorf("cannot talk to the %s engine (%q info failed): %w\n  %s",
-			platformTitle(m.P), rt, err, m.engineHint())
+	if _, err := engine.Output(ctx, m.R, probe); err != nil {
+		// The engine's own message already went to stderr (out is empty for that
+		// reason); add the one line that says what to do about it, which differs by
+		// engine and rootless mode and is shared with solmq-conn-util.
+		return containercli.InfoError(containercli.Engine(m.P), rt, !m.Cfg.Podman.Rootful, "", err)
 	}
 	return nil
-}
-
-// engineHint is the actionable half of a failed Preflight: the one thing to try
-// next. Rootless podman is called out separately because its usual failure is a
-// missing user session rather than a stopped service, and `sudo systemctl start`
-// is the wrong answer there -- it would start the rootful engine the deploy is not
-// using.
-func (m *Manager) engineHint() string {
-	if m.P == config.Podman {
-		if m.Cfg.Podman.Rootless {
-			// The three things a rootless `info` fails on, in the order they are worth
-			// trying. The subuid line is here because podman refuses outright on an
-			// account with no allocation, which is how a `useradd --system` or a
-			// directory account arrives -- and that failure lands HERE rather than on
-			// the id-mapping row, which never gets to run.
-			return "start the rootless user service: `systemctl --user start podman.socket` " +
-				"(and `loginctl enable-linger` so it survives logout); if podman named /etc/subuid, " +
-				"this account has no subuid range and an administrator has to allocate one " +
-				"(`sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $(id -un)`, " +
-				"then `podman system migrate`) -- do NOT use sudo for podman itself, " +
-				"podman.rootless=true deploys as this user"
-		}
-		return "start the engine: `sudo systemctl start podman.socket`, and re-run with the privileges " +
-			"rootful podman needs"
-	}
-	return "start the daemon: `sudo systemctl start docker`, and check this user is in the `docker` group " +
-		"(`newgrp docker` applies a fresh membership without logging out)"
 }

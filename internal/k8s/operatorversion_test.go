@@ -8,7 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"solace/internal/engine"
+	"github.com/hafio/go-deploy-utility/kube/rbac"
+	"github.com/hafio/go-deploy-utility/runner"
 )
 
 func TestImageTag(t *testing.T) {
@@ -120,7 +121,7 @@ func TestConfirmNoDowngradeIsSilentInAPreview(t *testing.T) {
 	buf := &bytes.Buffer{}
 	cfg := haCfg()
 	cfg.K8s.Operator.Image = "solace/pubsubplus-eventbroker-operator:1.4.0"
-	c := NewCluster(engine.Echo{W: buf}, cfg, func(f string, a ...any) {
+	c := NewCluster(runner.Echo{W: buf}, cfg, func(f string, a ...any) {
 		fmt.Fprintf(buf, f+"\n", a...)
 	}, buf)
 	newer := &deploymentItem{}
@@ -165,7 +166,7 @@ func TestConfirmNoDowngradeRefusesByDefault(t *testing.T) {
 	if err := c.OperatorApply(context.Background()); err == nil {
 		t.Fatal("a downgrade with no Confirm must be refused")
 	}
-	calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), defaultOperatorNS)
+	calls := withoutNamespaceStage(rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"}), defaultOperatorNS)
 	if len(calls) != 1 {
 		t.Fatalf("refused downgrade made %d calls after the probe, want 1 (the operator read only, no apply)", len(calls))
 	}
@@ -180,13 +181,34 @@ func TestConfirmNoDowngradeRefusedWhenConfirmDeclines(t *testing.T) {
 		operatorDeployJSON("registry.example.com/solace/pubsubplus-eventbroker-operator:1.4.2"),
 	}}
 	c := NewCluster(rr, cfg, nil, nil)
-	c.Confirm = func(string) bool { return false }
+	c.Confirm = func(string) (bool, error) { return false, nil }
 	if err := c.OperatorApply(context.Background()); err == nil {
 		t.Fatal("declining the confirm must refuse the downgrade")
 	}
-	calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), defaultOperatorNS)
+	calls := withoutNamespaceStage(rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"}), defaultOperatorNS)
 	if len(calls) != 1 {
 		t.Fatalf("declined downgrade made %d calls after the probe, want 1 (the operator read only, no apply)", len(calls))
+	}
+}
+
+// TestConfirmNoDowngradeReturnsAQuestionThatCouldNotBePut covers a Confirm that cannot ask
+// (no terminal, no --no-prompt): its error is the command's failure, carried as it came and
+// not read as a "no", and nothing is applied.
+func TestConfirmNoDowngradeReturnsAQuestionThatCouldNotBePut(t *testing.T) {
+	cfg := haCfg()
+	cfg.K8s.Operator.Image = "solace/pubsubplus-eventbroker-operator:1.4.0"
+	rr := &recRunner{outQueue: [][]byte{
+		operatorDeployJSON("registry.example.com/solace/pubsubplus-eventbroker-operator:1.4.2"),
+	}}
+	c := NewCluster(rr, cfg, nil, nil)
+	cause := errors.New("stdin is not a terminal")
+	c.Confirm = func(string) (bool, error) { return false, cause }
+	if err := c.OperatorApply(context.Background()); !errors.Is(err, cause) {
+		t.Fatalf("OperatorApply err = %v, want the Confirm error carried through", err)
+	}
+	calls := withoutNamespaceStage(rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"}), defaultOperatorNS)
+	if len(calls) != 1 {
+		t.Fatalf("an unaskable downgrade made %d calls after the probe, want 1 (the operator read only, no apply)", len(calls))
 	}
 }
 
@@ -204,14 +226,14 @@ func TestConfirmNoDowngradeProceedsWhenConfirmAccepts(t *testing.T) {
 	}}
 	c := NewCluster(rr, cfg, nil, nil)
 	var asked []string
-	c.Confirm = func(q string) bool { asked = append(asked, q); return true }
+	c.Confirm = func(q string) (bool, error) { asked = append(asked, q); return true, nil }
 	if err := c.OperatorApply(context.Background()); err != nil {
 		t.Fatalf("OperatorApply: %v", err)
 	}
 	if len(asked) != 1 || asked[0] != "Downgrade the operator?" {
 		t.Errorf("asked %q, want exactly the downgrade question", asked)
 	}
-	calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), "op-ns")
+	calls := withoutNamespaceStage(rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"}), "op-ns")
 	if len(calls) != 4 {
 		t.Fatalf("accepted downgrade made %d calls after the probe, want 4 "+
 			"(operator read + namespace + regcred + bundle)", len(calls))
@@ -237,14 +259,15 @@ func TestConfirmNoDowngradeAsksNothingWhenNotADowngrade(t *testing.T) {
 			rr := &recRunner{outQueue: [][]byte{operatorDeployJSON(tc.existing)}}
 			c := NewCluster(rr, cfg, nil, nil)
 			asked := false
-			c.Confirm = func(string) bool { asked = true; return false }
+			c.Confirm = func(string) (bool, error) { asked = true; return false, nil }
+			c.ConfirmScope = c.Confirm
 			if err := c.OperatorApply(context.Background()); err != nil {
 				t.Fatalf("OperatorApply: %v", err)
 			}
 			if asked {
 				t.Error("an upgrade or same-version apply must not ask at all")
 			}
-			calls := withoutNamespaceStage(rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"}), "op-ns")
+			calls := withoutNamespaceStage(rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"}), "op-ns")
 			if len(calls) != 4 {
 				t.Fatalf("made %d calls after the probe, want 4 "+
 					"(operator read + namespace + regcred + bundle)", len(calls))
@@ -264,7 +287,8 @@ func TestConfirmNoDowngradeIsNotSkippedByAFailedRead(t *testing.T) {
 	rr := &recRunner{outErr: errFake} // every read fails: the list AND the fallback
 	c := NewCluster(rr, cfg, nil, nil)
 	asked := false
-	c.Confirm = func(string) bool { asked = true; return true }
+	c.Confirm = func(string) (bool, error) { asked = true; return true, nil }
+	c.ConfirmScope = c.Confirm
 	err := c.OperatorApply(context.Background())
 	if !errors.Is(err, errFake) {
 		t.Fatalf("OperatorApply err = %v, want it to carry the failed read", err)
@@ -275,7 +299,7 @@ func TestConfirmNoDowngradeIsNotSkippedByAFailedRead(t *testing.T) {
 	if asked {
 		t.Error("a read nobody could make is not a downgrade to ask about")
 	}
-	calls := rr.afterPreflights(t, probe{verb: "create", resource: "customresourcedefinitions"})
+	calls := rr.afterPreflights(t, rbac.Probe{Verb: "create", Resource: "customresourcedefinitions"})
 	if len(calls) != 2 {
 		t.Fatalf("made %d calls after the probe, want 2 (the list and its fallback, no apply): %+v", len(calls), calls)
 	}
@@ -302,7 +326,7 @@ func TestConfirmNoDowngradeStillAsksWhenTheFallbackFindsANewerOperator(t *testin
 			buf := &bytes.Buffer{}
 			c := NewCluster(rr, cfg, func(f string, a ...any) { fmt.Fprintf(buf, f+"\n", a...) }, buf)
 			var asked []string
-			c.Confirm = func(q string) bool { asked = append(asked, q); return tc.accept }
+			c.Confirm = func(q string) (bool, error) { asked = append(asked, q); return tc.accept, nil }
 			err := c.OperatorApply(context.Background())
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("OperatorApply err = %v, wantErr %v", err, tc.wantErr)

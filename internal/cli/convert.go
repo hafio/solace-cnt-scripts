@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/spf13/cobra"
 
 	"solace/internal/config"
@@ -49,14 +50,14 @@ func newConvertCmd(app *App) *cobra.Command {
 func runConvert(a *App, src, platform string) error {
 	p, err := config.ParsePlatform(platform)
 	if err != nil {
-		return asUsage(err)
+		return exitcode.AsUsage(err)
 	}
 	raw, err := os.ReadFile(src)
 	if err != nil {
 		// The operator chose this path, so a bad one is exit 2 -- the same reading
 		// import-config's own source-file failure takes. No retry and no different
 		// broker state would help.
-		return usagef("read bash env file %q: %w", src, err)
+		return exitcode.Usagef("read bash env file %q: %w", src, err)
 	}
 	res, err := convert.Convert(raw, src, p)
 	if err != nil {

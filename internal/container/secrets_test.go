@@ -3,13 +3,13 @@ package container
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/hafio/go-deploy-utility/containercli"
 
 	"solace/internal/config"
 	"solace/internal/output"
@@ -183,12 +183,10 @@ func TestPodmanResolvesTheBundle(t *testing.T) {
 
 // TestDeployDockerPassesTheBundleAsEnvNotArgv covers the docker delivery end to end:
 // the bundle reaches the compose child through its environment, and never through an
-// argument vector.
+// argument vector or the compose file on stdin.
 func TestDeployDockerPassesTheBundleAsEnvNotArgv(t *testing.T) {
-	dir := t.TempDir()
 	cfg := ctrCfg(config.Docker, "false")
 	want := certFixture(t, cfg)
-	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 
 	m, rr, _ := newCapMgr(cfg, config.Docker)
 	if err := m.Deploy(context.Background(), config.Primary); err != nil {
@@ -210,38 +208,34 @@ func TestDeployDockerPassesTheBundleAsEnvNotArgv(t *testing.T) {
 	if !sawBundle {
 		t.Error("the compose child's environment must carry the bundle")
 	}
-	// And its digest, which fills the container label the compose file interpolates.
-	digest := "SOLACE_TLS_SERVERCERTIFICATE_SHA256=" + bundleHash(want)
-	var sawDigest bool
-	for _, c := range rr.calls {
-		sawDigest = sawDigest || slices.Contains(c.env, digest)
-	}
-	if !sawDigest {
-		t.Errorf("the compose child's environment must carry %s:\n%+v", digest, rr.calls)
-	}
-	// Nothing of it is written beside the compose file, which is the property the
+	up := composeUp(t, rr)
+	// Nothing of it is on stdin beside the compose file, which is the property the
 	// secret channel buys on docker.
-	body, err := os.ReadFile(cfg.Docker.ComposeFile)
-	if err != nil {
+	if strings.Contains(up.stdin, "PRIVATE KEY") {
+		t.Error("the compose file must reference the secret, not carry the key")
+	}
+	// The digest covers the bundle, so a renewed certificate changes it: that is the
+	// whole of docker's certificate change detection now.
+	if !slices.Contains(up.env, render.DeployDigestEnvVar+"="+deployDigest(t, cfg)) {
+		t.Errorf("the deploy digest must cover the certificate and be in the child's environment:\n%v", maskedKeys(up.env))
+	}
+	renewed := ctrCfg(config.Docker, "false")
+	certFixture(t, renewed)
+	if err := os.WriteFile(renewed.TLS.Cert, []byte("-----BEGIN CERTIFICATE-----\nRENEWED\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(body), "PRIVATE KEY") {
-		t.Error("the compose file must reference the secret, not carry the key")
+	if deployDigest(t, renewed) == deployDigest(t, cfg) {
+		t.Error("a renewed certificate must change the deploy digest")
 	}
 }
 
 // TestTeardownVerbsDoNotReadTheCertificate covers the operator's decision that a
 // moved certificate must not block recovery. compose needs every declared secret to
-// be DEFINED for down/stop/restart, but never reads it -- only `up` does -- so those
-// verbs must keep working when the file is gone.
+// be DEFINED for down, but never reads it -- only `up` does -- and stop and restart
+// act on the container by name, so those verbs must keep working when the file is gone.
 func TestTeardownVerbsDoNotReadTheCertificate(t *testing.T) {
-	dir := t.TempDir()
 	cfg := ctrCfg(config.Docker, "false")
 	certFixture(t, cfg)
-	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
-	if err := os.WriteFile(cfg.Docker.ComposeFile, []byte("services: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	// The certificate moves away after deploy, which is the real-world case.
 	cfg.TLS.Cert = filepath.Join(t.TempDir(), "moved.crt")
 
@@ -270,29 +264,42 @@ func TestTeardownVerbsDoNotReadTheCertificate(t *testing.T) {
 	}
 }
 
-// TestDeployDockerFailsBeforeWritingTheComposeFile pins "nothing happened" on the
-// docker side. The certificate is read in prepareSecrets, before deployDocker rewrites
-// the compose file, so a bad certificate leaves no artifact behind.
-func TestDeployDockerFailsBeforeWritingTheComposeFile(t *testing.T) {
-	dir := t.TempDir()
+// TestDeployDockerFailsBeforeAskingOrRunningAnything pins "nothing happened" on the
+// docker side. The certificate is read in prepareSecrets, before anything is asked or
+// compose is run, so a bad certificate leaves no container touched.
+func TestDeployDockerFailsBeforeAskingOrRunningAnything(t *testing.T) {
 	cfg := ctrCfg(config.Docker, "false")
 	certFixture(t, cfg)
 	cfg.TLS.Cert = filepath.Join(t.TempDir(), "absent.crt")
-	cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
 
-	m, _, _ := newCapMgr(cfg, config.Docker)
+	m, rr, _ := newCapMgr(cfg, config.Docker)
+	m.Confirm = neverAsk(t)
 	if err := m.Deploy(context.Background(), config.Primary); err == nil {
 		t.Fatal("Deploy must fail on an unreadable certificate")
 	}
-	if _, err := os.Stat(cfg.Docker.ComposeFile); !os.IsNotExist(err) {
-		t.Error("no compose file may be written when the certificate cannot be read")
+	for _, c := range rr.calls {
+		if slices.Contains(c.args, "compose") || slices.Contains(c.args, "ps") {
+			t.Errorf("nothing may be probed or run once the certificate cannot be read: %s %v", c.name, c.args)
+		}
 	}
 }
 
-// bundleHash is the render.CertDigestLabel value a deploy of bundle writes.
-func bundleHash(bundle string) string {
-	sum := sha256.Sum256([]byte(bundle))
-	return hex.EncodeToString(sum[:])
+// TestDeployDockerReReadsTheCertificate: the child environment is built from a second
+// read of the bundle, and a certificate that goes missing between the two is an error
+// naming the file, not an empty value. prepareSecrets cannot see it, so this reaches
+// deployDocker directly.
+func TestDeployDockerReReadsTheCertificate(t *testing.T) {
+	cfg := ctrCfg(config.Docker, "false")
+	certFixture(t, cfg)
+	cfg.TLS.Cert = filepath.Join(t.TempDir(), "gone.crt")
+	m, rr, _ := newCapMgr(cfg, config.Docker)
+	err := m.deployDocker(context.Background(), cfg.ResolveNode(config.Primary))
+	if err == nil || !strings.Contains(err.Error(), "gone.crt") {
+		t.Fatalf("err = %v, want a failure naming the unreadable file", err)
+	}
+	if len(rr.calls) != 0 {
+		t.Errorf("nothing may run once the certificate cannot be read: %+v", rr.calls)
+	}
 }
 
 // certCreate returns the captured `secret create` call for the certificate secret.
@@ -306,7 +313,7 @@ func certCreate(rr *capRunner, name string) (capCall, bool) {
 }
 
 // TestDeployPodmanLoadsTheBundleIntoTheStore covers podman's whole delivery: the
-// bundle goes into podman's secret store on stdin, labelled with its digest, the
+// bundle goes into podman's secret store on stdin with no label, the
 // unit mounts it from there, and nothing lands on the host -- not even with a
 // baseDir configured, which is where earlier builds wrote it.
 func TestDeployPodmanLoadsTheBundleIntoTheStore(t *testing.T) {
@@ -329,17 +336,19 @@ func TestDeployPodmanLoadsTheBundleIntoTheStore(t *testing.T) {
 	if c.stdin != want {
 		t.Errorf("the secret's stdin = %q, want the key then the certificate", c.stdin)
 	}
-	wantArgs := []string{"secret", "create", "--label", "solace-util.sha256=" + bundleHash(want), name, "-"}
+	wantArgs := secretCreateArgs(name, false)
 	if !eqArgs(c.args, wantArgs) {
 		t.Errorf("create argv = %v, want %v", c.args, wantArgs)
 	}
-	// The rm that makes the pair idempotent comes before it, and the label is read
-	// before the rm discards it.
-	inspect := callIndex(rr, "podman", []string{"secret", "inspect", "--format",
-		`{{index .Spec.Labels "solace-util.sha256"}}`, name})
+	// Below 4.7 (no version answer here) nothing is read back, so nothing is compared:
+	// the rm that makes the pair idempotent comes before the create.
 	rm := callIndex(rr, "podman", []string{"secret", "rm", "--ignore", name})
-	if inspect < 0 || rm < 0 || inspect > rm {
-		t.Errorf("want the label inspected (%d) before the rm (%d):\n%+v", inspect, rm, rr.calls)
+	create := callIndex(rr, "podman", wantArgs)
+	if rm < 0 || create < rm {
+		t.Errorf("want the rm (%d) before the create (%d):\n%+v", rm, create, rr.calls)
+	}
+	if hasCall(rr, "podman", secretDataArgs(name)) {
+		t.Errorf("a podman below 4.7 has no --showsecret, so it must not be asked:\n%+v", rr.calls)
 	}
 	for _, call := range rr.calls {
 		for _, a := range call.args {
@@ -361,6 +370,40 @@ func TestDeployPodmanLoadsTheBundleIntoTheStore(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(cfg.Podman.BaseDir); err != nil || len(entries) != 0 {
 		t.Errorf("nothing may be written to podman.baseDir any more: %v %v", entries, err)
+	}
+}
+
+// TestDeployPodmanReplacesTheBundleOnPodman47: with `secret create --replace` available
+// the bundle is written by one create alone, with no rm and no label, and the stored value
+// is read back first so an unchanged certificate is left in place.
+func TestDeployPodmanReplacesTheBundleOnPodman47(t *testing.T) {
+	cfg := ctrCfg(config.Podman, "false")
+	want := certFixture(t, cfg)
+	cfg.Podman.QuadletDir = t.TempDir()
+
+	m, rr, _ := newCapMgr(cfg, config.Podman)
+	m.Geteuid = func() int { return -1 }
+	versionAnswer(rr, "5.2.0\n")
+	if err := m.Deploy(context.Background(), config.Primary); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	const name = "sol-pod-tls-servercertificate"
+	c, ok := certCreate(rr, name)
+	if !ok {
+		t.Fatalf("no `secret create` for %s:\n%+v", name, rr.calls)
+	}
+	wantArgs := secretCreateArgs(name, true)
+	if !eqArgs(c.args, wantArgs) {
+		t.Errorf("create argv = %v, want %v", c.args, wantArgs)
+	}
+	if c.stdin != want {
+		t.Errorf("the secret's stdin = %q, want the key then the certificate", c.stdin)
+	}
+	for _, other := range []string{name, "sol-pod-admin-password"} {
+		if hasCall(rr, "podman", []string{"secret", "rm", "--ignore", other}) {
+			t.Errorf("--replace makes the rm unnecessary, but %s was removed:\n%+v", other, rr.calls)
+		}
 	}
 }
 
@@ -393,24 +436,25 @@ func TestDeployPodmanFailsBeforeWritingAnythingOnABadCert(t *testing.T) {
 	}
 }
 
-// TestCertSecretLabelDrivesTheRestart is why the label exists. The unit names the
-// secret rather than its value, so a renewed certificate leaves the unit
-// byte-identical; the digest label is the only thing that tells a redeploy the
-// running broker is serving a stale certificate. The secret's name is derived, so the
-// label decides alone: an equal one leaves the secret in place and is "nothing to do";
-// a different or missing one -- a first deploy through this path, or a host an
-// earlier build deployed -- overwrites it and asks to restart.
+// TestCertSecretLabelDrivesTheRestart is why the store is read back. The unit names the
+// secret rather than its value, so a renewed certificate leaves the unit byte-identical;
+// comparing the stored bundle with the configured one is the only thing that tells a
+// redeploy the running broker is serving a stale certificate. An equal one leaves the
+// secret in place and is "unchanged"; a different or absent one, or one that cannot be
+// read back, overwrites it and asks to restart. The credentials are compared the same way,
+// and an equal one is left alone too.
 func TestCertSecretLabelDrivesTheRestart(t *testing.T) {
+	const certName = "sol-pod-tls-servercertificate"
 	for _, tc := range []struct {
 		name      string
 		label     func(want string) string
 		fail      bool
 		wantAsked bool
 	}{
-		{"same certificate", func(want string) string { return bundleHash(want) }, false, false},
-		{"renewed certificate", func(string) string { return bundleHash("an older bundle") }, false, true},
-		{"no label yet", func(string) string { return "" }, false, true},
-		{"label unreadable", func(want string) string { return bundleHash(want) }, true, true},
+		{"same certificate", func(want string) string { return want }, false, false},
+		{"renewed certificate", func(string) string { return "an older bundle" }, false, true},
+		{"nothing stored yet", func(string) string { return "" }, false, true},
+		{"read-back fails", func(want string) string { return want }, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := ctrCfg(config.Podman, "false")
@@ -423,22 +467,17 @@ func TestCertSecretLabelDrivesTheRestart(t *testing.T) {
 			}
 			m, rr, _ := newCapMgr(cfg, config.Podman)
 			m.Geteuid = func() int { return -1 }
-			rr.outFor = func(_ string, args []string) []byte {
-				switch {
-				case slices.Contains(args, "is-active"):
-					return []byte("active\n")
-				case slices.Contains(args, "inspect"):
-					return []byte(tc.label(want) + "\n")
-				}
-				return nil
-			}
+			podmanHost(rr, "active", map[string]string{
+				certName:                 tc.label(want),
+				"sol-pod-admin-password": "secret-pass",
+			})
 			if tc.fail {
 				failOnCall(rr, func(_ string, args []string) bool {
-					return slices.Contains(args, "secret") && slices.Contains(args, "inspect")
+					return slices.Contains(args, "--showsecret") && slices.Contains(args, certName)
 				})
 			}
 			var asked bool
-			m.Confirm = func(string) bool { asked = true; return true }
+			m.Confirm = func(string) (bool, error) { asked = true; return true, nil }
 			if err := m.Deploy(context.Background(), config.Primary); err != nil {
 				t.Fatalf("Deploy: %v", err)
 			}
@@ -446,72 +485,66 @@ func TestCertSecretLabelDrivesTheRestart(t *testing.T) {
 			if asked != tc.wantAsked || restarted != tc.wantAsked {
 				t.Errorf("asked=%t restarted=%t, want both %t:\n%+v", asked, restarted, tc.wantAsked, rr.calls)
 			}
-			const name = "sol-pod-tls-servercertificate"
-			_, created := certCreate(rr, name)
-			removed := hasCall(rr, "podman", []string{"secret", "rm", "--ignore", name})
-			if created != tc.wantAsked || removed != tc.wantAsked {
-				t.Errorf("overwrote the certificate secret: rm=%t create=%t, want both %t:\n%+v",
-					removed, created, tc.wantAsked, rr.calls)
+			_, created := certCreate(rr, certName)
+			if created != tc.wantAsked {
+				t.Errorf("overwrote the certificate secret = %t, want %t:\n%+v", created, tc.wantAsked, rr.calls)
 			}
-			// The credentials are overwritten either way: they carry no label.
-			if !hasCall(rr, "podman", []string{"secret", "rm", "--ignore", "sol-pod-admin-password"}) {
-				t.Errorf("the admin password must still be reloaded:\n%+v", rr.calls)
+			// The password's stored value matched, so it is left in the store whatever the
+			// certificate did.
+			if wroteSecret(rr, "sol-pod-admin-password") {
+				t.Errorf("an unchanged credential must not be reloaded:\n%+v", rr.calls)
 			}
 		})
 	}
 }
 
-// TestDockerCertLabelDrivesTheRecreate is the docker counterpart. Compose keeps no
-// secret object to label, so the digest rides the container as a label, filled from
-// the compose child's environment; a redeploy reads it back from the running
-// container. Under a compose file that is already current, an equal label is "nothing
-// to do"; a different or missing one -- or an inspect that cannot answer -- asks
-// before recreating, and recreates with --force-recreate on consent.
-func TestDockerCertLabelDrivesTheRecreate(t *testing.T) {
+// TestDockerCertRenewalDrivesTheRecreate is the docker counterpart. Compose keeps no
+// secret object to label, so the deploy digest (the file and every value, the bundle
+// included) rides the container as a label, filled from the compose child's environment;
+// a redeploy reads it back from the running container. An equal label is "unchanged" and
+// asks nothing; a different or missing one -- a renewed certificate, a container an
+// earlier build created -- or an inspect that cannot answer asks before `up -d` recreates.
+func TestDockerCertRenewalDrivesTheRecreate(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
-		label     func(want string) string
+		label     func(t *testing.T, cfg *config.Config) string
 		fail      bool
 		wantAsked bool
 	}{
-		{"same certificate", func(want string) string { return bundleHash(want) }, false, false},
-		{"renewed certificate", func(string) string { return bundleHash("an older bundle") }, false, true},
-		{"no label yet", func(string) string { return "" }, false, true},
-		{"inspect fails", func(string) string { return "" }, true, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			cfg := ctrCfg(config.Docker, "false")
-			want := certFixture(t, cfg)
-			cfg.Docker.ComposeFile = filepath.Join(dir, "compose.yml")
-			if err := os.WriteFile(cfg.Docker.ComposeFile,
-				render.Compose(cfg, cfg.ResolveNode(config.Primary)), 0o600); err != nil {
+		{"same certificate", func(t *testing.T, cfg *config.Config) string { return deployDigest(t, cfg) }, false, false},
+		{"renewed certificate", func(t *testing.T, cfg *config.Config) string {
+			// The container was created from the certificate as it WAS: take the digest,
+			// then renew the files the deploy now reads.
+			label := deployDigest(t, cfg)
+			if err := os.WriteFile(cfg.TLS.Cert,
+				[]byte("-----BEGIN CERTIFICATE-----\nRENEWED\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			m, rr, buf := newCapMgr(cfg, config.Docker)
-			rr.outFor = func(_ string, args []string) []byte {
-				switch {
-				case slices.Contains(args, "ps"):
-					return []byte("solace\n")
-				case slices.Contains(args, "inspect"):
-					return []byte(tc.label(want) + "\n")
-				}
-				return nil
-			}
+			return label
+		}, false, true},
+		{"no label yet", func(*testing.T, *config.Config) string { return "" }, false, true},
+		{"inspect fails", func(*testing.T, *config.Config) string { return "" }, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := ctrCfg(config.Docker, "false")
+			certFixture(t, cfg)
+			label := tc.label(t, cfg)
+			m, rr, _ := newCapMgr(cfg, config.Docker)
+			dockerHost(rr, true, label)
 			if tc.fail {
 				failOnCall(rr, func(_ string, args []string) bool { return slices.Contains(args, "inspect") })
 			}
 			var asked bool
-			m.Confirm = func(string) bool { asked = true; return true }
+			m.Confirm = func(string) (bool, error) { asked = true; return true, nil }
 			if err := m.Deploy(context.Background(), config.Primary); err != nil {
 				t.Fatalf("Deploy: %v", err)
 			}
-			recreated := hasCall(rr, "docker", []string{"compose", "-f", cfg.Docker.ComposeFile, "up", "-d", "--force-recreate"})
-			if asked != tc.wantAsked || recreated != tc.wantAsked {
-				t.Errorf("asked=%t recreated=%t, want both %t:\n%+v", asked, recreated, tc.wantAsked, rr.calls)
+			if asked != tc.wantAsked {
+				t.Errorf("asked=%t, want %t:\n%+v", asked, tc.wantAsked, rr.calls)
 			}
-			if tc.wantAsked && !strings.Contains(buf.String(), "server certificate differs") {
-				t.Errorf("the reason for the recreate should be reported:\n%s", buf.String())
+			// Either way compose is left to decide: a plain `up -d`.
+			if up := composeUp(t, rr); !eqArgs(up.args, composeUpArgs()) {
+				t.Errorf("up argv = %v, want a plain `up -d`", up.args)
 			}
 		})
 	}
@@ -519,7 +552,7 @@ func TestDockerCertLabelDrivesTheRecreate(t *testing.T) {
 
 // TestUpdateServerCertSecretPersistsWithoutRestarting is the store half of `broker
 // configure server-certs`, which never restarts anything. Podman overwrites only the
-// certificate secret, under the deploy rule (a matching label leaves it, a different
+// certificate secret, under the deploy rule (a matching stored value leaves it, a different
 // or missing one replaces it), so the next start mounts it; docker keeps no secret
 // object and says so; no certificate configured touches nothing.
 func TestUpdateServerCertSecretPersistsWithoutRestarting(t *testing.T) {
@@ -529,20 +562,15 @@ func TestUpdateServerCertSecretPersistsWithoutRestarting(t *testing.T) {
 		label     func(want string) string
 		wantWrite bool
 	}{
-		{"same certificate", func(want string) string { return bundleHash(want) }, false},
-		{"renewed certificate", func(string) string { return bundleHash("an older bundle") }, true},
-		{"no label yet", func(string) string { return "" }, true},
+		{"same certificate", func(want string) string { return want }, false},
+		{"renewed certificate", func(string) string { return "an older bundle" }, true},
+		{"nothing stored yet", func(string) string { return "" }, true},
 	} {
 		t.Run("podman/"+tc.name, func(t *testing.T) {
 			cfg := ctrCfg(config.Podman, "false")
 			want := certFixture(t, cfg)
 			m, rr, _ := newCapMgr(cfg, config.Podman)
-			rr.outFor = func(_ string, args []string) []byte {
-				if slices.Contains(args, "inspect") {
-					return []byte(tc.label(want) + "\n")
-				}
-				return nil
-			}
+			podmanHost(rr, "active", map[string]string{name: tc.label(want)})
 			if err := m.UpdateServerCertSecret(context.Background()); err != nil {
 				t.Fatalf("UpdateServerCertSecret: %v", err)
 			}
@@ -608,31 +636,6 @@ func TestUpdateServerCertSecretPersistsWithoutRestarting(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestDockerCertChangedEdges covers the two answers TestDockerCertLabelDrivesTheRecreate
-// cannot reach through Deploy, where prepareSecrets reads the certificate first: a
-// preview compares nothing (no container exists to ask), and an unreadable certificate
-// is an error naming the file rather than a guess either way.
-func TestDockerCertChangedEdges(t *testing.T) {
-	cfg := ctrCfg(config.Docker, "false")
-	certFixture(t, cfg)
-	echo, buf := newEchoMgr(cfg, config.Docker)
-	if changed, err := echo.dockerCertChanged(context.Background()); changed || err != nil {
-		t.Errorf("preview: changed=%t err=%v, want an unchanged answer", changed, err)
-	}
-	if buf.Len() != 0 {
-		t.Errorf("a preview must not probe the container:\n%s", buf.String())
-	}
-
-	cfg.TLS.Cert = filepath.Join(filepath.Dir(cfg.TLS.Cert), "gone.crt")
-	m, rr, _ := newCapMgr(cfg, config.Docker)
-	if _, err := m.dockerCertChanged(context.Background()); err == nil || !strings.Contains(err.Error(), "gone.crt") {
-		t.Errorf("err = %v, want a failure naming the unreadable file", err)
-	}
-	if len(rr.calls) != 0 {
-		t.Errorf("nothing may be inspected once the certificate cannot be read: %+v", rr.calls)
 	}
 }
 
@@ -775,7 +778,7 @@ func TestLegacyBundleRemovalFailureIsFatal(t *testing.T) {
 
 // TestDryRunNeedsNoCertificateOnDisk is the previewability guarantee, one level up
 // from the pre-shared key's: a preview must work before any certificate exists, show
-// the store write with a placeholder rather than a digest, and write nothing.
+// the store write, probe nothing and write nothing.
 func TestDryRunNeedsNoCertificateOnDisk(t *testing.T) {
 	cfg := ctrCfg(config.Podman, "false")
 	cfg.Podman.QuadletDir = t.TempDir()
@@ -788,8 +791,8 @@ func TestDryRunNeedsNoCertificateOnDisk(t *testing.T) {
 		t.Fatalf("a dry-run must not need the certificate on disk: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "secret create --label 'solace-util.sha256=(preview)' sol-pod-tls-servercertificate -") {
-		t.Errorf("the preview should show the certificate's store write, labelled with the placeholder:\n%s", out)
+	if !strings.Contains(out, "secret create sol-pod-tls-servercertificate -") {
+		t.Errorf("the preview should show the certificate's store write, with no label:\n%s", out)
 	}
 	if strings.Contains(out, "PRIVATE KEY") || strings.Contains(out, "secret inspect") {
 		t.Errorf("a preview must not print key material or probe the store:\n%s", out)
@@ -904,7 +907,7 @@ func TestSolaceRowsRefusesAnEngineReturnedNameBackIntoArgv(t *testing.T) {
 		"$(whoami)\t" + img + "\tUp 6 hours",
 	}, "\n")
 
-	got := solaceRows(sink, raw)
+	got := solaceRows(sink, containercli.ParseList(raw))
 
 	want := []string{"good-broker", "also.good_1"}
 	if len(got) != len(want) {
@@ -925,5 +928,18 @@ func TestSolaceRowsRefusesAnEngineReturnedNameBackIntoArgv(t *testing.T) {
 		if !strings.Contains(out, "not inspected") {
 			t.Errorf("the skip must be stated, not silent:\n%s", out)
 		}
+	}
+}
+
+// TestUpdateServerCertSecretFailsWhenTheStoreWriteFails: `configure server-certs` stops, naming
+// the config key behind the secret, when podman cannot store it.
+func TestUpdateServerCertSecretFailsWhenTheStoreWriteFails(t *testing.T) {
+	cfg := ctrCfg(config.Podman, "false")
+	certFixture(t, cfg)
+	m, rr, _ := newCapMgr(cfg, config.Podman)
+	rr.fail = failOn("create")
+	err := m.UpdateServerCertSecret(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "tls.cert") {
+		t.Fatalf("err = %v, want a failure naming tls.cert", err)
 	}
 }

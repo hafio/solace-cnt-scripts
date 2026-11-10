@@ -3,9 +3,11 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
+
+	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
 
 	"solace/internal/broker"
 	"solace/internal/config"
@@ -13,23 +15,21 @@ import (
 )
 
 // The k8s handlers wire the cobra tree to the two Kubernetes entry types: k8s.Cluster
-// (operations that talk to the cluster/operator, over engine.Runner) and broker.Ops
+// (operations that talk to the cluster/operator, over runner.Runner) and broker.Ops
 // (config/verify operations against a running broker, over the kubectl Transport).
-// A test installs engine.Echo through App.NewRunner, so every handler is exercisable
+// A test installs runner.Echo through App.NewRunner, so every handler is exercisable
 // without a cluster. Progress goes to stderr via step; rendered artifacts are the only
 // stdout (emit).
 
 // k8sCluster builds a Cluster over the app's runner/config, wiring stdout as the report
-// sink. It wires no reader: the package asks exactly one question, through Confirm.
+// sink. It wires no reader: the package asks two questions, through Confirm and ConfirmScope.
 func k8sCluster(a *App) *k8s.Cluster {
-	c := k8s.NewCluster(a.Runner, a.Cfg, lineSink(), os.Stdout)
-	// Same seam container.Manager carries: the one question this side asks is
-	// whether to downgrade the cluster-scoped operator. It is the ONE question
-	// --no-prompt cannot answer -- `deploy operator` does not register the flag,
-	// and confirmDowngrade has no escape for it, so a non-interactive run always
-	// declines. Rolling every broker in a cluster back is a decision made by a
-	// human at a terminal or not at all.
-	c.Confirm = func(question string) bool { return confirmDowngrade(a, question) }
+	c := k8s.NewCluster(a.Runner, a.Cfg, a.lineSink(), a.stdout())
+	// Same seam container.Manager carries. The downgrade is answered by --no-prompt on
+	// `operator deploy`; widening the watch to every namespace is NOT -- it has its own
+	// seam, which asks a terminal and nothing else, so no flag can approve it.
+	c.Confirm = func(question string) (bool, error) { return confirmDowngrade(a, question) }
+	c.ConfirmScope = func(question string) (bool, error) { return confirmScope(a, question) }
 	return c
 }
 
@@ -194,9 +194,9 @@ func opK8sConfigServerCerts(a *App) error {
 		if err != nil {
 			return err
 		}
-		if !confirmAction(a, "Remove the TLS server certificate from", "remove the TLS server certificate from",
-			k8sWhat(a, "broker "+a.Cfg.K8s.Name)) {
-			return nil
+		if ok, err := confirmAction(a, "Remove the TLS server certificate from", "remove the TLS server certificate from",
+			k8sWhat(a, "broker "+a.Cfg.K8s.Name)); err != nil || !ok {
+			return err
 		}
 		return k8sOps(a).RemoveServerCerts(bg(), roles...)
 	}
@@ -241,9 +241,9 @@ func opK8sConfigDomainCerts(a *App) error {
 		return err
 	}
 	if remove {
-		if !confirmAction(a, "Remove", "remove",
-			k8sWhat(a, "the configured domain CA certificates from broker "+a.Cfg.K8s.Name)) {
-			return nil
+		if ok, err := confirmAction(a, "Remove", "remove",
+			k8sWhat(a, "the configured domain CA certificates from broker "+a.Cfg.K8s.Name)); err != nil || !ok {
+			return err
 		}
 		return k8sOps(a).RemoveDomainCerts(bg(), role, domainCANames(certs))
 	}
@@ -264,9 +264,9 @@ func opK8sConfigProductKeys(a *App) error {
 		return err
 	}
 	if remove {
-		if !confirmAction(a, "Revoke every configured product key from", "revoke the product keys from",
-			k8sWhat(a, "broker "+a.Cfg.K8s.Name)) {
-			return nil
+		if ok, err := confirmAction(a, "Revoke every configured product key from", "revoke the product keys from",
+			k8sWhat(a, "broker "+a.Cfg.K8s.Name)); err != nil || !ok {
+			return err
 		}
 		return k8sOps(a).RemoveProductKeys(bg(), a.Cfg.Broker.ProductKeys, roles...)
 	}
@@ -289,9 +289,9 @@ func opK8sConfigDefaultVPN(a *App) error {
 	if enable {
 		return k8sOps(a).EnableDefaultVPN(bg(), role)
 	}
-	if !confirmAction(a, "Shut down", "shut down",
-		k8sWhat(a, "the default message-VPN on broker "+a.Cfg.K8s.Name)) {
-		return nil
+	if ok, err := confirmAction(a, "Shut down", "shut down",
+		k8sWhat(a, "the default message-VPN on broker "+a.Cfg.K8s.Name)); err != nil || !ok {
+		return err
 	}
 	return k8sOps(a).DisableDefaultVPN(bg(), role)
 }
@@ -311,9 +311,9 @@ func opK8sConfigDefaultUsers(a *App) error {
 	if enable {
 		return k8sOps(a).EnableDefaultUsers(bg(), role)
 	}
-	if !confirmAction(a, "Shut down", "shut down",
-		k8sWhat(a, "the default client-username in every message-VPN on broker "+a.Cfg.K8s.Name)) {
-		return nil
+	if ok, err := confirmAction(a, "Shut down", "shut down",
+		k8sWhat(a, "the default client-username in every message-VPN on broker "+a.Cfg.K8s.Name)); err != nil || !ok {
+		return err
 	}
 	return k8sOps(a).DisableDefaultUsers(bg(), role)
 }
@@ -496,24 +496,27 @@ func opK8sStatusOperator(a *App) error {
 }
 
 func opK8sLogs(a *App, role config.Role) error {
-	args, err := logArgs(a)
+	o, err := logOptions(a)
 	if err != nil {
 		return err
 	}
-	// --previous is kubernetes-only, so it is appended here rather than in logArgs,
-	// which builds only the tokens every platform shares.
-	if a.previous {
-		args = append(args, "-p")
-	}
-	return k8sCluster(a).Logs(bg(), role, args)
+	// --previous is kubernetes-only, so it is set here rather than in logOptions,
+	// which builds only the options every platform shares.
+	o.Previous = a.previous
+	return k8sCluster(a).Logs(bg(), role, o)
 }
 
 // opK8sCLI / opK8sShell hand the terminal to a session in the pod, so the session's
-// own exit status is this tool's (childExit, exit.go). `broker perform cli-script` is
+// own exit status is this tool's (exitcode.ChildExit). `broker perform cli-script` is
 // deliberately NOT marked: it runs a script through the CLI and reports on the
 // script, which is this tool's own judgement rather than a status to pass along.
-func opK8sCLI(a *App, role config.Role) error   { return childExit(k8sCluster(a).CLI(bg(), role)) }
-func opK8sShell(a *App, role config.Role) error { return childExit(k8sCluster(a).Shell(bg(), role)) }
+func opK8sCLI(a *App, role config.Role) error {
+	return exitcode.ChildExit(k8sCluster(a).CLI(bg(), role))
+}
+
+func opK8sShell(a *App, role config.Role) error {
+	return exitcode.ChildExit(k8sCluster(a).Shell(bg(), role))
+}
 
 func opK8sCopyFrom(a *App, files []string) error {
 	role, err := podRole(a)
@@ -545,18 +548,18 @@ func opK8sStopBroker(a *App) error  { return k8sCluster(a).ReplicasStop(bg()) }
 func opK8sRestart(a *App, roleArg string) error {
 	c := k8sCluster(a)
 	if roleArg == "" {
-		if !confirmAction(a, "Restart", "restart",
-			k8sWhat(a, "every broker pod, one at a time (monitor, backup, primary),")) {
-			return nil
+		if ok, err := confirmAction(a, "Restart", "restart",
+			k8sWhat(a, "every broker pod, one at a time (monitor, backup, primary),")); err != nil || !ok {
+			return err
 		}
 		return c.RestartRolling(bg())
 	}
 	role, err := config.ParseRole(roleArg)
 	if err != nil {
-		return asUsage(err)
+		return exitcode.AsUsage(err)
 	}
-	if !confirmAction(a, "Restart", "restart", k8sWhat(a, "the "+roleWord(role)+" broker pod")) {
-		return nil
+	if ok, err := confirmAction(a, "Restart", "restart", k8sWhat(a, "the "+roleWord(role)+" broker pod")); err != nil || !ok {
+		return err
 	}
 	return c.RestartPod(bg(), role)
 }
@@ -585,9 +588,9 @@ func opK8sOperatorDeploy(a *App) error {
 // The layer question is the CRDs, whose deletion cascades to every PubSubPlusEventBroker
 // in the cluster -- including brokers this env file has never heard of.
 func opK8sOperatorRemove(a *App) error {
-	if !confirmDelete(a, "the EventBroker operator in namespace "+
-		k8s.OperatorNamespace(a.Cfg)+k8sContext(a)) {
-		return nil
+	if ok, err := confirmDelete(a, "the EventBroker operator in namespace "+
+		k8s.OperatorNamespace(a.Cfg)+k8sContext(a)); err != nil || !ok {
+		return err
 	}
 	c := k8sCluster(a)
 	// The CRDs are the retained layer, gated exactly as `broker remove --delete-data`
@@ -616,7 +619,10 @@ func opK8sOperatorRemove(a *App) error {
 			warn("could not list the broker resources across the cluster (%v); --delete-crd needs that list to "+
 				"prove no broker would be cascade-deleted, so it is checked again before anything is removed", listErr)
 		}
-		deleteCRDs = confirmLayer(a, layerCRD)
+		var err error
+		if deleteCRDs, err = confirmLayer(a, layerCRD); err != nil {
+			return err
+		}
 	case brokersExist:
 		warn("%d broker resource(s) still exist, so the operator CRDs are kept "+
 			"(deleting them would cascade-delete every one): %s", len(refs), strings.Join(refs, ", "))
@@ -632,20 +638,20 @@ func opK8sOperatorRemove(a *App) error {
 func opK8sOperatorStart(a *App) error { return k8sCluster(a).OperatorScale(bg(), 1) }
 
 func opK8sOperatorStop(a *App) error {
-	if !confirmAction(a, "Stop", "stop", "the operator, freezing reconciliation for every broker "+
-		"it watches"+k8sContext(a)) {
-		return nil
+	if ok, err := confirmAction(a, "Stop", "stop", "the operator, freezing reconciliation for every broker "+
+		"it watches"+k8sContext(a)); err != nil || !ok {
+		return err
 	}
 	return k8sCluster(a).OperatorScale(bg(), 0)
 }
 
 func opK8sOperatorRestart(a *App) error { return k8sCluster(a).OperatorRestart(bg()) }
 func opK8sOperatorLogs(a *App) error {
-	args, err := logArgs(a)
+	o, err := logOptions(a)
 	if err != nil {
 		return err
 	}
-	return k8sCluster(a).OperatorLogs(bg(), args...)
+	return k8sCluster(a).OperatorLogs(bg(), o)
 }
 
 // opK8sGenBroker / opK8sGenOperator print what deploy would apply and change nothing.
@@ -706,15 +712,18 @@ func opK8sRemoveBroker(a *App) error {
 	if a.Cfg.AdminSecretName() == "" {
 		warnWhereTheAdminPasswordIs(a)
 	}
-	if !confirmDelete(a, k8sWhat(a, "broker "+a.Cfg.K8s.Name)) {
-		return nil
+	if ok, err := confirmDelete(a, k8sWhat(a, "broker "+a.Cfg.K8s.Name)); err != nil || !ok {
+		return err
 	}
 	c := k8sCluster(a)
 	ctx := bg()
 	// The layer question is asked once, before any of the work, so a removal cannot get
 	// halfway through and then stop to ask something -- and every permission the removal
 	// will use is asked about next, so it cannot get halfway through and then be refused.
-	purge := confirmLayer(a, layerData)
+	purge, err := confirmLayer(a, layerData)
+	if err != nil {
+		return err
+	}
 	if err := c.PreflightRemoval(ctx, purge); err != nil {
 		return err
 	}
@@ -724,7 +733,8 @@ func opK8sRemoveBroker(a *App) error {
 	if err := c.DeleteSecrets(ctx); err != nil {
 		return err
 	}
-	return removeNamespaceIfEmpty(a, c)
+	removeNamespaceIfEmpty(a, c)
+	return nil
 }
 
 // warnWhereTheAdminPasswordIs says where the broker's admin password is when this env file
@@ -753,37 +763,63 @@ func warnWhereTheAdminPasswordIs(a *App) {
 		"-o jsonpath='{.data.username_admin_password}'", name, gen, cli, gen, ns)
 }
 
-// removeNamespaceIfEmpty offers the namespace for deletion ONLY when nothing else is in
-// it, and never deletes one Kubernetes owns.
+// removeNamespaceIfEmpty offers the namespace for deletion ONLY when nothing of anyone
+// else's is in it, and never deletes one Kubernetes owns. It never fails the removal that
+// ran it: by now everything this env file owns is gone, and every way out of the gate short
+// of a confirmed delete keeps the namespace with a warning.
 //
 // Deleting a namespace cascades to everything inside, including whatever another team put
 // there, and this tool very often did not create it -- so the namespace is not in the
-// removal's delete set at all. Anything still there is listed and the namespace kept, on
-// every path including --no-prompt: a warning an operator can act on beats a prompt whose
-// yes would destroy someone else's work.
+// removal's delete set at all. The gate is the shared one (kube/nsgate), in its order:
 //
-// A check that cannot run keeps the namespace too. That direction is the safety property:
-// a namespace wrongly reported empty gets cascade-deleted, while one wrongly reported
+//  1. the protected namespaces are never touched;
+//  2. the namespace is listed, and what is left is judged: the broker CR and what it owns
+//     (its StatefulSets, Pods and Services by ownerReference, and the Secrets this env
+//     file built), what is being deleted, and what Kubernetes puts in every namespace are
+//     discounted; anything else -- retained data PVCs, a second broker's objects -- is
+//     listed and the namespace kept, on every path including --no-prompt, since a warning
+//     an operator can act on beats a prompt whose yes would destroy someone else's work;
+//  3. `delete namespaces` is probed BEFORE the question, so nobody is asked and then refused;
+//  4. the question (--no-prompt approves it); a decline keeps the namespace, and so does a
+//     run with no terminal and no --no-prompt;
+//  5. the delete, whose failure is a warning too.
+//
+// A check that cannot run keeps the namespace. That direction is the safety property: a
+// namespace wrongly reported empty gets cascade-deleted, while one wrongly reported
 // occupied merely stays.
-func removeNamespaceIfEmpty(a *App, c *k8s.Cluster) error {
-	if c.NamespaceIsProtected() {
-		warn("namespace %q is a Kubernetes namespace and is never removed by this tool",
-			a.Cfg.K8s.Namespace)
-		return nil
+func removeNamespaceIfEmpty(a *App, c *k8s.Cluster) {
+	ns := a.Cfg.K8s.Namespace
+	if nsgate.Protected(ns) {
+		warn("namespace %q is a Kubernetes namespace and is never removed by this tool", ns)
+		return
 	}
-	contents, err := c.NamespaceContents(bg())
+	occupants, answered, err := c.NamespaceOccupants(bg())
 	if err != nil {
 		warn("%v", err)
-		return nil
+		return
 	}
-	if len(contents) > 0 {
-		c.ReportNamespaceOccupied(contents)
-		return nil
+	if !answered {
+		return
 	}
-	if !confirmDelete(a, "the now-empty namespace "+a.Cfg.K8s.Namespace+k8sContext(a)) {
-		return nil
+	if len(occupants) > 0 {
+		c.ReportNamespaceOccupied(occupants)
+		return
 	}
-	return c.DeleteNamespace(bg())
+	if err := c.PreflightAll(bg(), nsgate.DeleteProbe()); err != nil {
+		warn("namespace %q kept: %v", ns, err)
+		return
+	}
+	ok, err := confirmDelete(a, "the now-empty namespace "+ns+k8sContext(a))
+	if err != nil {
+		warn("namespace %q kept: %v", ns, err)
+		return
+	}
+	if !ok {
+		return
+	}
+	if err := c.DeleteNamespace(bg()); err != nil {
+		warn("namespace %q kept: could not delete it: %v", ns, err)
+	}
 }
 
 // k8sWhat labels a destructive Kubernetes target the way containerWhat labels a
@@ -832,7 +868,7 @@ func domainCANames(certs []config.DomainCert) []string {
 // "every pod, rolling".
 func podRole(a *App) (config.Role, error) {
 	role, err := config.ParseRole(a.pod)
-	return role, asUsage(err)
+	return role, exitcode.AsUsage(err)
 }
 
 // podRoles resolves --pod against the role set an operation would use by default.

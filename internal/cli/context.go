@@ -1,13 +1,14 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"io"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/confirm"
+	"github.com/hafio/go-deploy-utility/runner"
 	"github.com/spf13/cobra"
 
 	"solace/internal/config"
@@ -38,20 +39,20 @@ type App struct {
 
 	Platform config.Platform
 	Cfg      *config.Config
-	Runner   engine.EnvRunner
+	Runner   runner.Runner
 
 	// Prompt seams, in the spirit of Manager.Resolve/Geteuid: the confirm
-	// helpers gate destructive actions on an interactive terminal, and a test cannot
-	// supply one. Interactive nil means stdinCanAnswer and PromptIn nil means
+	// helpers gate destructive actions on a terminal, and a test cannot supply
+	// one. Interactive nil means confirm.StdinIsTerminal and PromptIn nil means
 	// os.Stdin. Nothing user-facing sets either field; only tests do.
 	Interactive func() bool
 	PromptIn    io.Reader
 
-	// The run's single buffered prompt reader, built on first use by promptSource.
-	// It must be shared across questions: a per-call reader discards whatever it
-	// buffered past the line it returned, which loses the answer to the NEXT
-	// question in the same run.
-	promptReader *bufio.Reader
+	// The run's single Prompter, built on first use by prompter. It must be shared
+	// across questions: it holds the one buffered reader, and a per-call reader
+	// discards whatever it buffered past the line it returned, which loses the
+	// answer to the NEXT question in the same run.
+	prompt *confirm.Prompter
 
 	// NewRunner builds the Runner every command executes through. It exists as a
 	// seam for the same reason Interactive/PromptIn do: a test cannot supply a
@@ -60,7 +61,7 @@ type App struct {
 	// a test ever substitutes one -- there is no user-facing way to make this tool
 	// print commands instead of running them, because `generate` is how you look
 	// at an artifact before applying it.
-	NewRunner func(a *App) engine.EnvRunner
+	NewRunner func(a *App) runner.Runner
 
 	// Command-local flag scratch space. Only one command runs per invocation,
 	// so sharing these on the app context is safe.
@@ -127,6 +128,12 @@ type App struct {
 	// a pipe.
 	Sleep    func(ctx context.Context, d time.Duration) error
 	Terminal func() bool
+
+	// frameOut and frameLog are where a report and its progress and warning lines go
+	// while a --watch refresh collects them into its frame (watch.go); nil, the rest of
+	// the time, is stdout and stderr. Only watchLoop sets them, one refresh at a time.
+	frameOut io.Writer
+	frameLog func(string, ...any)
 
 	// kubeContext is the kubeconfig context announceKubeContext resolved at load,
 	// repeated by every destructive Kubernetes prompt (k8sWhat). Empty when it
@@ -239,7 +246,7 @@ func (a *App) hostname() (string, error) {
 // Like announceCommands it never fails: a kubeconfig with no current context is
 // a real state (a fresh install, or --kubeconfig pointing somewhere bare) and
 // the first real call reports it far better than a preamble could. kubectl's own
-// stderr still reaches the operator when that happens -- engine.Exec wires the
+// stderr still reaches the operator when that happens -- runner.Exec wires the
 // child's stderr straight through -- which is left alone deliberately: this tool
 // has no --context of its own, so a kubeconfig with no current context is about
 // to fail every call, and saying so once here is a head start, not noise.
@@ -251,7 +258,7 @@ func (a *App) announceKubeContext() {
 	if err != nil {
 		return
 	}
-	out, err := a.Runner.Output(bg(), kc.Name(), kc.Args("config", "current-context")...)
+	out, err := engine.Output(bg(), a.Runner, runner.Cmd{Argv: kc.Argv("config", "current-context")})
 	if ctx := strings.TrimSpace(string(out)); err == nil && ctx != "" {
 		a.kubeContext = ctx
 		step("kube-context: %q", ctx) // engine output, so quoted before it reaches a terminal
@@ -269,7 +276,7 @@ func (a *App) announceKubeContext() {
 // chosen here, not by an env file, so they are announced only under --verbose.
 //
 // It never fails. A name that resolves nowhere is skipped silently: this is a report,
-// and the first real execution already fails with engine.Resolve's own actionable
+// and the first real execution already fails with runner.Resolve's own actionable
 // message (not found on PATH, or the current-directory refusal).
 func (a *App) announceCommands() {
 	var cmds []config.Command
@@ -292,7 +299,7 @@ func (a *App) announceCommands() {
 	// one binary and deserve one line, while a standalone docker-compose gets its own.
 	seen := make(map[string]bool, len(cmds))
 	for _, c := range cmds {
-		path, err := engine.Resolve(c.Name())
+		path, err := runner.Resolve(c.Name())
 		if err != nil || seen[path] {
 			continue
 		}
@@ -313,6 +320,24 @@ func progress() *output.Sink { return output.New(os.Stderr) }
 // prefixes there, which is why this deliberately is not `step` -- passing a
 // prefixing function would prefix twice, once here and once in the callee.
 func lineSink() func(string, ...any) { return progress().Line }
+
+// stdout is the report sink the k8s and container entry types are handed: a --watch
+// refresh's frame while one is being collected, stdout otherwise.
+func (a *App) stdout() io.Writer {
+	if a.frameOut != nil {
+		return a.frameOut
+	}
+	return os.Stdout
+}
+
+// lineSink is lineSink for the entry types this App builds: a --watch refresh's frame
+// while one is being collected, so a warning is drawn with the report it belongs to.
+func (a *App) lineSink() func(string, ...any) {
+	if a.frameLog != nil {
+		return a.frameLog
+	}
+	return lineSink()
+}
 
 // warn prints a non-fatal warning to stderr in the house [WARN] style.
 func warn(format string, args ...any) { progress().Warn(format, args...) }

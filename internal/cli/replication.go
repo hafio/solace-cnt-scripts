@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
+
 	"solace/internal/broker"
 	"solace/internal/config"
 	"solace/internal/k8s"
@@ -28,7 +30,7 @@ import (
 // here points a switchover at the wrong broker.
 func resolveSites(a *App, o *broker.Ops, role config.Role) (self, mate config.ReplSite, err error) {
 	if !a.Cfg.Replication.Configured() {
-		return config.ReplSite{}, config.ReplSite{}, usagef(
+		return config.ReplSite{}, config.ReplSite{}, exitcode.Usagef(
 			"this env file declares no replication: section, so there is no DR pair to act on")
 	}
 	name, err := o.RouterName(bg(), role)
@@ -57,8 +59,8 @@ func opConfigureReplication(a *App, o *broker.Ops, role config.Role) error {
 	// internal/broker/replicationops.go) and only the listed ones are turned back on; a
 	// listed VPN itself cycles through a shutdown while its role is applied; and a VPN
 	// the file does not list has its replication shut down for good.
-	if !confirmReplicationConfig(a, self, mate) {
-		return nil
+	if ok, err := confirmReplicationConfig(a, self, mate); err != nil || !ok {
+		return err
 	}
 
 	res, err := o.ConfigureReplication(bg(), role, self, mate, a.Cfg.Replication.VPNs)
@@ -81,7 +83,7 @@ func opConfigureReplication(a *App, o *broker.Ops, role config.Role) error {
 // promise, and it is the bigger of the two hammers this command can swing: phase 1, when
 // it runs, stops replication on EVERY VPN this broker currently replicates, including
 // ones the file does not even mention, not only the listed ones named below.
-func confirmReplicationConfig(a *App, self, mate config.ReplSite) bool {
+func confirmReplicationConfig(a *App, self, mate config.ReplSite) (bool, error) {
 	roles := broker.PlannedRoles(a.Cfg.Replication.VPNs, self)
 	names := make([]string, 0, len(roles))
 	for v := range roles {
@@ -184,8 +186,8 @@ func opPerformReplication(a *App, o *broker.Ops, role config.Role, mateFor mateC
 		step("nothing to move; the pair already matches the env file")
 		return reportReplicationStatus(chans)
 	}
-	if !confirmReplicationSwitch(a, plan) {
-		return nil
+	if ok, err := confirmReplicationSwitch(a, plan); err != nil || !ok {
+		return err
 	}
 
 	if err := broker.ExecuteSwitchPlan(bg(), chans, plan, vpns, lineSink()); err != nil {
@@ -253,7 +255,7 @@ func reportReplicationStatus(chans map[string]broker.MateChannel) error {
 
 // confirmReplicationSwitch names every move before asking. A switch interrupts message
 // flow for the VPNs it moves, so it takes the exact-`yes` gate.
-func confirmReplicationSwitch(a *App, plan broker.SwitchPlan) bool {
+func confirmReplicationSwitch(a *App, plan broker.SwitchPlan) (bool, error) {
 	moves := plan.Moves()
 	for _, v := range moves {
 		step("  message-vpn %q will be demoted, confirmed, then promoted", v)
@@ -289,7 +291,7 @@ func mateChannel(a *App, o *broker.Ops, site config.ReplSite) (broker.MateChanne
 		}
 		return o.NewSEMPMate(site, pass)
 	default:
-		return nil, usagef("replication site %q has no via: block, so this tool cannot reach it. "+
+		return nil, exitcode.Usagef("replication site %q has no via: block, so this tool cannot reach it. "+
 			"A switch has to change the role at BOTH sites, so the mate must be reachable",
 			site.VirtualRouterName)
 	}
@@ -312,7 +314,7 @@ func mateSEMPPassword(a *App, site config.ReplSite) (string, error) {
 		return s.Pass, nil
 	}
 	if s.PassSecret == nil {
-		return "", usagef("replication site %q declares via.semp but no password: set pass, point "+
+		return "", exitcode.Usagef("replication site %q declares via.semp but no password: set pass, point "+
 			"passEnv at an environment variable, or name a Kubernetes Secret in passSecret",
 			site.VirtualRouterName)
 	}

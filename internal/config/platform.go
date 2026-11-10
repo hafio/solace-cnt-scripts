@@ -5,9 +5,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/abbrev"
 	"gopkg.in/yaml.v3"
-
-	"solace/internal/abbrev"
 )
 
 // Platforms lists every platform, in the order they are offered to a user and

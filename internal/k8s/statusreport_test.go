@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
-	"solace/internal/engine"
 )
 
 // These replace the tests that pinned the old kubectl-passthrough survey. They
@@ -38,15 +41,19 @@ type fixtureRunner struct {
 	refuse map[string]bool
 }
 
-func (f *fixtureRunner) Run(context.Context, string, ...string) error              { return nil }
-func (f *fixtureRunner) RunInput(context.Context, []byte, string, ...string) error { return nil }
-func (f *fixtureRunner) RunEnv(context.Context, []string, string, ...string) error { return nil }
-func (f *fixtureRunner) RunInteractive(context.Context, string, ...string) error   { return nil }
-func (f *fixtureRunner) OutputInput(context.Context, []byte, string, ...string) ([]byte, error) {
-	return nil, nil
+// Run answers a captured read from the fixtures and every other call with nothing.
+func (f *fixtureRunner) Run(_ context.Context, c runner.Cmd, stdout, _ io.Writer) error {
+	if legacyMethod(c, stdout) != "Output" {
+		return nil
+	}
+	out, err := f.output(c.Argv[1:])
+	_, _ = stdout.Write(out)
+	return err
 }
 
-func (f *fixtureRunner) Output(_ context.Context, _ string, args ...string) ([]byte, error) {
+func (f *fixtureRunner) Attach(runner.Cmd, *os.File, *os.File, *os.File) (int, error) { return 0, nil }
+
+func (f *fixtureRunner) output(args []string) ([]byte, error) {
 	joined := strings.Join(args, " ")
 	f.calls = append(f.calls, joined)
 	for i, a := range args {
@@ -350,7 +357,7 @@ func TestStatusReportsArePreviewableUnderEcho(t *testing.T) {
 	cfg.K8s.Namespace = "solace"
 	cfg.K8s.Operator.Namespace = "solace-operator"
 	cfg.K8s.Command = config.Command{"kubectl"}
-	c := NewCluster(engine.Echo{W: buf}, cfg, nil, buf)
+	c := NewCluster(runner.Echo{W: buf}, cfg, nil, buf)
 
 	for name, fn := range map[string]func() error{
 		"broker":  func() error { return c.BrokerReport(context.Background(), true) },
@@ -457,10 +464,10 @@ func TestReportsDegradeRatherThanFalselyAlarm(t *testing.T) {
 	t.Run("malformed JSON names the command to run by hand", func(t *testing.T) {
 		c, _ := reportCluster(t, &fixtureRunner{})
 		var list brokerList
-		err := c.getJSON(context.Background(), &list, "garbage-kind")
+		err := c.getJSON(context.Background(), &list, getRead{what: []string{"garbage-kind"}})
 		_ = err // the fixture runner answers valid JSON; the shape below is the check
 		if e := (&Cluster{R: &badJSONRunner{}, Cfg: c.Cfg}).getJSON(
-			context.Background(), &list, "pods", "-n", "solace"); e == nil ||
+			context.Background(), &list, getRead{kube.GetOptions{Namespace: "solace"}, []string{"pods"}}); e == nil ||
 			!strings.Contains(e.Error(), "kubectl get") {
 			t.Errorf("err = %v, want it to name the command to run by hand", e)
 		}
@@ -470,8 +477,9 @@ func TestReportsDegradeRatherThanFalselyAlarm(t *testing.T) {
 // badJSONRunner answers with bytes that are not JSON, for the decode-failure path.
 type badJSONRunner struct{ fixtureRunner }
 
-func (*badJSONRunner) Output(context.Context, string, ...string) ([]byte, error) {
-	return []byte("not json at all"), nil
+func (*badJSONRunner) Run(_ context.Context, _ runner.Cmd, stdout, _ io.Writer) error {
+	_, err := stdout.Write([]byte("not json at all"))
+	return err
 }
 
 // TestOwnsPodFallsBackToTheNameInfix covers the branch taken when the operator
@@ -672,7 +680,7 @@ func TestOperatorReportWhenTheDeploymentListIsEmpty(t *testing.T) {
 // `+ microk8s kubectl get ...` line that reads as something this tool would have run.
 func TestBrokerReportPreviewStopsAtAnUnapprovedCommand(t *testing.T) {
 	var buf bytes.Buffer
-	c := NewCluster(engine.Echo{W: &buf}, unapprovedCfg(), nil, &buf)
+	c := NewCluster(runner.Echo{W: &buf}, unapprovedCfg(), nil, &buf)
 	err := c.BrokerReport(context.Background(), true)
 	if err == nil || !strings.Contains(err.Error(), "--allow-command microk8s") {
 		t.Fatalf("BrokerReport under Echo err = %v, want the guard to name the escape hatch", err)

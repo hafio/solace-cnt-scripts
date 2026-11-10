@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/podman"
 	"gopkg.in/yaml.v3"
 )
 
@@ -56,12 +57,15 @@ func Load(path string, p Platform, allowCommands ...string) (*Config, error) {
 	// leading '~' is a form the checks are supposed to see RESOLVED, not a form they
 	// are supposed to accept. `dataDir: ~/solace/data` is not absolute by
 	// IsAbsHostPath, so validating first refused it before anything could expand it;
-	// and CheckCommand polices what will actually be handed to exec, which after this
+	// and execguard.Check polices what will actually be handed to exec, which after this
 	// pass is the expanded token. That is what lets both guards refuse a surviving
 	// '~' outright -- one arriving at either of them means the field is missing from
 	// a list here, or the Config never came from a file (each of the two functions
 	// says so in its own message). Each pass' doc comment carries the full argument.
 	if err := c.expandCommandHomes(p); err != nil {
+		return nil, err
+	}
+	if err := c.resolveQuadletDir(p); err != nil {
 		return nil, err
 	}
 	if err := c.expandHomePaths(); err != nil {
@@ -243,10 +247,10 @@ func (c *Config) applyContainerDefaults(p Platform) {
 	setDefault(&c.Docker.Container.Name, "solace")
 	setDefault(&c.Podman.Container.Name, "solace")
 	// The run user is the one container knob whose default depends on the platform
-	// AND, for podman, on rootless. Rootless is read straight from YAML, so it is
+	// AND, for podman, on rootless. Rootful is read straight from YAML, so it is
 	// already settled here even though the knobs derived from it are filled below.
 	applyContainerBlockDefaults(&c.Docker.Container, ImageRunUser)
-	applyContainerBlockDefaults(&c.Podman.Container, podmanRunUser(c.Podman.Rootless))
+	applyContainerBlockDefaults(&c.Podman.Container, podmanRunUser(!c.Podman.Rootful))
 
 	// Bridge, because host networking is a widening (docs/container-security.md,
 	// rule 1): the container would share this host's network namespace and bind every
@@ -267,15 +271,15 @@ func (c *Config) applyContainerDefaults(p Platform) {
 	}
 	if p == Podman {
 		setDefaultCmd(&c.Podman.Command, "podman")
-		// Derive the three rootless-dependent knobs in one place.
-		if c.Podman.Rootless {
-			if c.Podman.QuadletDir == "" {
-				c.Podman.QuadletDir = filepath.ToSlash(filepath.Join(xdgConfigHome(), "containers", "systemd"))
-			}
+		// Derive the three rootless-dependent knobs in one place. The rootless
+		// quadletDir is NOT among them: it needs the environment and a home
+		// directory, which can fail, and a default that can fail is not an
+		// ApplyDefaults job -- resolveQuadletDir fills it, with an error.
+		if !c.Podman.Rootful {
 			c.Podman.SystemctlUser = "--user"
 			c.Podman.WantedBy = "default.target"
 		} else {
-			setDefault(&c.Podman.QuadletDir, "/etc/containers/systemd")
+			setDefault(&c.Podman.QuadletDir, podman.SystemQuadletDir)
 			c.Podman.SystemctlUser = ""
 			c.Podman.WantedBy = "multi-user.target"
 		}
@@ -374,17 +378,6 @@ func (c *Config) NetworkBlock(p Platform) Network {
 		return c.Podman.Network
 	}
 	return c.Docker.Network
-}
-
-func xdgConfigHome() string {
-	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
-		return v
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		home = "~"
-	}
-	return filepath.Join(home, ".config")
 }
 
 func setDefault(p *string, v string) {

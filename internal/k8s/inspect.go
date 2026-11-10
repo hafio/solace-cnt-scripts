@@ -7,6 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/kube"
+
+	"solace/internal/engine"
 	"solace/internal/output"
 )
 
@@ -36,25 +39,47 @@ func (c *Cluster) now() time.Time {
 	return time.Now()
 }
 
-// getJSON runs `kubectl get <args...> -o json` and decodes into v. A get that
+// getRead is one `get`: what to read and how (kube.Get's options and objects), without
+// the output format, which getJSON always makes json.
+type getRead struct {
+	opts kube.GetOptions
+	what []string
+}
+
+// getJSON runs `kubectl get <what...> -o json` and decodes into v. A get that
 // fails is returned as-is: the caller decides whether a kind it cannot list is
 // fatal (it is not, for a report) or worth reporting.
-func (c *Cluster) getJSON(ctx context.Context, v any, args ...string) error {
-	raw, err := c.kubectlOutput(ctx, append(append([]string{"get"}, args...), "-o", "json")...)
+func (c *Cluster) getJSON(ctx context.Context, v any, r getRead) error {
+	_, err := c.getJSONTee(ctx, v, r)
+	return err
+}
+
+// getJSONTee is getJSON that also returns what kubectl wrote to stderr, which still
+// reaches the terminal, for a read whose refusal the caller tells from other failures with
+// kube.Forbidden.
+func (c *Cluster) getJSONTee(ctx context.Context, v any, r getRead) (string, error) {
+	base, err := c.base()
 	if err != nil {
-		return err
+		return "", err
+	}
+	r.opts.Output = "json"
+	cmd := kube.Get(base, r.opts, r.what...)
+	raw, stderr, err := engine.OutputTee(ctx, c.R, cmd)
+	if err != nil {
+		return stderr, err
 	}
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		// The Echo runner returns nothing. Not an error: a preview has no cluster
 		// to answer, and the caller renders "skipped (preview)".
-		return nil
+		return stderr, nil
 	}
 	raw = normalizeToList(raw)
 	if err := json.Unmarshal(raw, v); err != nil {
-		return fmt.Errorf("could not read `kubectl get %s -o json` output: %w -- "+
-			"run `kubectl get %s -o json` yourself to see what it returned", strings.Join(args, " "), err, strings.Join(args, " "))
+		shown := strings.Join(cmd.Argv[len(base):], " ")
+		return stderr, fmt.Errorf("could not read `kubectl %s` output: %w -- "+
+			"run `kubectl %s` yourself to see what it returned", shown, err, shown)
 	}
-	return nil
+	return stderr, nil
 }
 
 // normalizeToList makes both shapes kubectl returns decode into the same

@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/hafio/go-deploy-utility/containercli"
+	"github.com/hafio/go-deploy-utility/exitcode"
+
 	"solace/internal/broker"
 	"solace/internal/config"
 	"solace/internal/container"
@@ -12,9 +15,9 @@ import (
 
 // The container (docker/podman) handlers wire the cobra tree to the two entry
 // types, mirroring the k8s handlers: container.Manager (host operations --
-// prep/deploy/delete/status, over engine.Runner) and broker.Ops (config/verify
+// prep/deploy/delete/status, over runner.Runner) and broker.Ops (config/verify
 // against the running broker, over the node-local container Transport). a.Platform
-// selects docker vs podman downstream. A test installs engine.Echo through
+// selects docker vs podman downstream. A test installs runner.Echo through
 // App.NewRunner, so every handler is exercisable without a real engine.
 //
 // The container transport is node-local (one broker per host) and ignores the role, so
@@ -42,15 +45,15 @@ func ctrOps(a *App) *broker.Ops {
 	return o
 }
 
-// ctrManager builds a container host Manager, wiring stdout as the report sink and
-// stdin as the prompt source. The env path is deliberately NOT passed: nothing in this
+// ctrManager builds a container host Manager, wiring stdout as the report sink, stdin
+// as the prompt source and the redeploy gate (confirmRedeploy) as its Confirm. The env path is deliberately NOT passed: nothing in this
 // tool writes to an env file, now that the redundancy pre-shared key is the operator's
 // to supply rather than something a first deploy invented and wrote back.
 func ctrManager(a *App) *container.Manager {
-	m := container.NewManager(a.Runner, a.Cfg, a.Platform, lineSink(), os.Stdout)
+	m := container.NewManager(a.Runner, a.Cfg, a.Platform, a.lineSink(), a.stdout())
 	m.In = os.Stdin
 	m.RestartApproved = a.restart
-	m.Confirm = func(question string) bool { return confirmRestart(a, question) }
+	m.Confirm = func(question string) (bool, error) { return confirmRedeploy(a, question) }
 	return m
 }
 
@@ -95,8 +98,8 @@ func opCtrStopBroker(a *App) error  { return ctrManager(a).Stop(bg()) }
 // on Kubernetes. It asks with confirmAction's own verb ("Restart"), since the
 // action is not a deletion and a prompt that says otherwise would be read as one.
 func opCtrRestartBroker(a *App) error {
-	if !confirmAction(a, "Restart", "restart", containerWhat(a)) {
-		return nil
+	if ok, err := confirmAction(a, "Restart", "restart", containerWhat(a)); err != nil || !ok {
+		return err
 	}
 	return ctrManager(a).Restart(bg())
 }
@@ -121,9 +124,9 @@ func opCtrConfigServerCerts(a *App) error {
 		return err
 	}
 	if remove {
-		if !confirmAction(a, "Remove the TLS server certificate from", "remove the TLS server certificate from",
-			containerWhat(a)) {
-			return nil
+		if ok, err := confirmAction(a, "Remove the TLS server certificate from", "remove the TLS server certificate from",
+			containerWhat(a)); err != nil || !ok {
+			return err
 		}
 		return ctrOps(a).RemoveServerCerts(bg(), config.Primary)
 	}
@@ -147,9 +150,9 @@ func opCtrConfigDomainCerts(a *App) error {
 		return err
 	}
 	if remove {
-		if !confirmAction(a, "Remove the configured domain CA certificates from",
-			"remove the configured domain CA certificates from", containerWhat(a)) {
-			return nil
+		if ok, err := confirmAction(a, "Remove the configured domain CA certificates from",
+			"remove the configured domain CA certificates from", containerWhat(a)); err != nil || !ok {
+			return err
 		}
 		return ctrOps(a).RemoveDomainCerts(bg(), config.Primary, domainCANames(certs))
 	}
@@ -162,9 +165,9 @@ func opCtrConfigProductKeys(a *App) error {
 		return err
 	}
 	if remove {
-		if !confirmAction(a, "Revoke every configured product key from", "revoke the product keys from",
-			containerWhat(a)) {
-			return nil
+		if ok, err := confirmAction(a, "Revoke every configured product key from", "revoke the product keys from",
+			containerWhat(a)); err != nil || !ok {
+			return err
 		}
 		return ctrOps(a).RemoveProductKeys(bg(), a.Cfg.Broker.ProductKeys, config.Primary)
 	}
@@ -182,9 +185,9 @@ func opCtrConfigDefaultVPN(a *App) error {
 	if enable {
 		return ctrOps(a).EnableDefaultVPN(bg(), config.Primary)
 	}
-	if !confirmAction(a, "Shut down the default message-VPN on",
-		"shut down the default message-VPN on", containerWhat(a)) {
-		return nil
+	if ok, err := confirmAction(a, "Shut down the default message-VPN on",
+		"shut down the default message-VPN on", containerWhat(a)); err != nil || !ok {
+		return err
 	}
 	return ctrOps(a).DisableDefaultVPN(bg(), config.Primary)
 }
@@ -200,9 +203,9 @@ func opCtrConfigDefaultUsers(a *App) error {
 	if enable {
 		return ctrOps(a).EnableDefaultUsers(bg(), config.Primary)
 	}
-	if !confirmAction(a, "Shut down the default client-username in every message-VPN on",
-		"shut down the default client-username in every message-VPN on", containerWhat(a)) {
-		return nil
+	if ok, err := confirmAction(a, "Shut down the default client-username in every message-VPN on",
+		"shut down the default client-username in every message-VPN on", containerWhat(a)); err != nil || !ok {
+		return err
 	}
 	return ctrOps(a).DisableDefaultUsers(bg(), config.Primary)
 }
@@ -236,8 +239,8 @@ func opCtrConfigLeader(a *App) error {
 	if err != nil || !ok {
 		return err
 	}
-	if !confirmAssertFromBackup(a) {
-		return nil
+	if ok, err := confirmAssertFromBackup(a); err != nil || !ok {
+		return err
 	}
 	return o.LeaderAssert(bg(), role)
 }
@@ -261,7 +264,7 @@ func leaderAsksFirst(a *App, role config.Role) bool {
 // confirmAssertFromBackup is assert-leader's question on a backup host. The warning comes
 // first, and is printed even under --no-prompt, so an unattended log still says whose
 // configuration won.
-func confirmAssertFromBackup(a *App) bool {
+func confirmAssertFromBackup(a *App) (bool, error) {
 	warn("this host is the backup node: asserting the config-sync leader here makes its router and " +
 		"message-VPN configuration the copy config-sync pushes to the primary, overwriting the primary's")
 	return confirmAction(a, "Assert the config-sync leader from", "assert the config-sync leader from",
@@ -349,17 +352,19 @@ func ctrLogin(a *App, o *broker.Ops) error {
 // day-2 ops (node-local)
 func opCtrStatus(a *App) error { return ctrManager(a).Status(bg()) }
 func opCtrLogs(a *App) error {
-	args, err := logArgs(a)
+	since, err := logSince(a)
 	if err != nil {
 		return err
 	}
-	return ctrManager(a).Logs(bg(), args...)
+	return ctrManager(a).Logs(bg(), containercli.LogOptions{
+		Follow: a.follow, Timestamps: a.timestamps, Tail: a.tail, Since: since,
+	}, a.previous)
 }
 
 // opCtrCLI / opCtrShell hand the terminal over, so the session's own exit status is
 // this tool's -- the container half of what opK8sCLI/opK8sShell document.
-func opCtrCLI(a *App) error      { return childExit(ctrManager(a).CLI(bg())) }
-func opCtrShell(a *App) error    { return childExit(ctrManager(a).Shell(bg())) }
+func opCtrCLI(a *App) error      { return exitcode.ChildExit(ctrManager(a).CLI(bg())) }
+func opCtrShell(a *App) error    { return exitcode.ChildExit(ctrManager(a).Shell(bg())) }
 func opCtrDescribe(a *App) error { return ctrManager(a).Describe(bg()) }
 
 // opCtrStatusBroker reports on this host's broker: the running-artifact summary,
@@ -429,10 +434,14 @@ func opCtrGenArtifact(a *App) error {
 // ownership prep gave it; removing the certificate is NOT optional and a failure there is
 // fatal, because leaving a private key on the host is the worst outcome available.
 func opCtrRemoveBroker(a *App) error {
-	if !confirmDelete(a, containerWhat(a)) {
-		return nil
+	if ok, err := confirmDelete(a, containerWhat(a)); err != nil || !ok {
+		return err
 	}
-	return ctrManager(a).Delete(bg(), confirmLayer(a, layerData))
+	purge, err := confirmLayer(a, layerData)
+	if err != nil {
+		return err
+	}
+	return ctrManager(a).Delete(bg(), purge)
 }
 
 // opCtrDeployHost carries the whole per-host bring-up: check, prep host, deploy. The
@@ -492,12 +501,12 @@ func containerRenderRole(a *App) (config.Role, error) {
 func detectContainerRole(a *App, arg string, mustDetect bool, cmd string) (config.Role, error) {
 	if !a.Cfg.RedundancyEnabled() {
 		role, err := config.ParseRole(arg)
-		return role, asUsage(err)
+		return role, exitcode.AsUsage(err)
 	}
 	if arg != "" {
 		role, err := config.ParseRole(arg)
 		if err != nil {
-			return "", asUsage(err)
+			return "", exitcode.AsUsage(err)
 		}
 		// An explicit role wins, but it is still CHECKED against what the host looks
 		// like: naming the wrong one is how a second primary joins a group, and the

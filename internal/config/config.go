@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/execguard"
 	"gopkg.in/yaml.v3"
 )
 
@@ -57,15 +58,15 @@ type Config struct {
 	Docker DockerConfig `yaml:"docker"`
 	Podman PodmanConfig `yaml:"podman"`
 
-	// extraAllowed holds the binaries the operator approved for this invocation
+	// approvals holds the binaries the operator approved for this invocation
 	// with --allow-command. Unexported on purpose: yaml.v3 cannot decode into an
 	// unexported field, so no env file can widen its own allowlist -- that
 	// authority stays with the person at the keyboard (see AllowCommands).
-	extraAllowed map[string]bool
+	approvals execguard.Approvals
 
 	// baseDir is the directory of the env file this Config was loaded from, and
 	// every relative host path in the file resolves against it (rebaseHostPaths).
-	// Unexported for the same reason extraAllowed is: yaml.v3 cannot decode into
+	// Unexported for the same reason approvals is: yaml.v3 cannot decode into
 	// it, so a file cannot declare its own base and thereby reach a path outside
 	// the directory it was found in.
 	//
@@ -276,6 +277,17 @@ func (c Command) Args(extra ...string) []string {
 	}
 	out := make([]string, 0, len(c)-1+len(extra))
 	out = append(out, c[1:]...)
+	return append(out, extra...)
+}
+
+// Argv is the whole command line for one call -- the program, the configured leading
+// arguments, then the call's own -- as the argv a runner.Cmd takes. Like Args it always
+// builds a new slice. An unset Command has no program, so the result starts with the
+// call's own first argument and the runner refuses it as an empty program rather than
+// running that as one.
+func (c Command) Argv(extra ...string) []string {
+	out := make([]string, 0, len(c)+len(extra))
+	out = append(out, c...)
 	return append(out, extra...)
 }
 
@@ -564,7 +576,7 @@ type ReplViaSEMP struct {
 
 	// Exactly one of these supplies the mate's admin password. The username is always
 	// config.AdminUser -- the broker's own name, not this schema's. There is no stdin
-	// prompt: promptLine echoes, and a no-echo read is a dependency decision this
+	// prompt: the shared prompt echoes, and a no-echo read is a dependency decision this
 	// feature does not need to take.
 	Pass       string          `yaml:"pass"`       // secret; discouraged, this file travels
 	PassEnv    string          `yaml:"passEnv"`    // env var holding pass instead
@@ -956,10 +968,16 @@ type DockerConfig struct {
 	// plugin is a runtime subcommand (`docker compose`), the standalone v1 binary
 	// is its own executable (`docker-compose`). Unset defaults to the configured
 	// runtime plus `compose`; this tool appends every argument after it.
-	Compose     Command   `yaml:"compose"`
-	ComposeFile string    `yaml:"composeFile"` // DOCKER_COMPOSE_FILE
-	Network     Network   `yaml:"network"`
-	Container   Container `yaml:"container"`
+	Compose   Command   `yaml:"compose"`
+	Network   Network   `yaml:"network"`
+	Container Container `yaml:"container"`
+
+	// ComposeFile is retained so an env file carrying the retired docker.composeFile
+	// fails with an actionable message (validateRenamedKeys) instead of a bare
+	// unknown-field decode error. The compose file is no longer a file at all: it goes
+	// to compose on stdin, so there is no path to choose. NEVER defaulted, expanded or
+	// rebased.
+	ComposeFile string `yaml:"composeFile"`
 
 	// Runtime is retained so an env file carrying the removed docker.runtime
 	// fails with an actionable rename error (validateRenamedKeys) instead of a
@@ -972,14 +990,17 @@ type DockerConfig struct {
 type PodmanConfig struct {
 	Command Command `yaml:"command"` // CONTAINER_RUNTIME override (default: podman)
 
-	// Rootless is DECLARED, never detected from the invoking euid. It decides where
+	// Rootful is DECLARED, never detected from the invoking euid, and false (rootless)
+	// is the default: rootful podman is deployed only when asked for. It decides where
 	// the unit is installed, which systemd instance loads it, which uid:gid the
 	// container runs as and where the private key lands -- so one env file must
 	// render one artifact from any account and any OS, which is what `generate`
 	// promises. The euid is then checked AGAINST it before any podman command runs
 	// (container.GuardPodmanEUID, called by cli.prepare), rather than being allowed
 	// to pick the other mode silently: `sudo` is a refusal, not a second deployment.
-	Rootless   bool   `yaml:"rootless"`   // PODMAN_ROOTLESS
+	// It replaces the retired podman.rootless (Rootless below), whose default was
+	// rootful.
+	Rootful    bool   `yaml:"rootful"`
 	QuadletDir string `yaml:"quadletDir"` // QUADLET_DIR override
 	// BaseDir is OPTIONAL and UNUSED, bar one legacy clean-up. It is not
 	// Config.BaseDir(), which is the directory the env FILE was loaded from.
@@ -1004,9 +1025,16 @@ type PodmanConfig struct {
 	Network   Network   `yaml:"network"`
 	Container Container `yaml:"container"`
 
-	// Derived from Rootless in ApplyDefaults (not read from YAML).
+	// Derived from Rootful in ApplyDefaults (not read from YAML).
 	SystemctlUser string `yaml:"-"`
 	WantedBy      string `yaml:"-"`
+
+	// Rootless is retained so an env file carrying the retired podman.rootless fails
+	// with an actionable message (validateRenamedKeys) instead of a bare
+	// unknown-field decode error. A pointer, because the old key's false was a real
+	// answer (rootful) that must be refused too. NEVER defaulted, and never read
+	// anywhere else: the mode is Rootful alone.
+	Rootless *bool `yaml:"rootless"`
 
 	// Runtime is retained so an env file carrying the removed podman.runtime
 	// fails with an actionable rename error (validateRenamedKeys) instead of a

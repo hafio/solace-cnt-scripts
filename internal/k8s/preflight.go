@@ -2,18 +2,12 @@ package k8s
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"strings"
-)
 
-// errNotAllowed marks a permission question the API server ANSWERED with a refusal, as
-// opposed to one nobody could answer -- an expired login, an unreachable server, a reply
-// that could not be read. preflightOne wraps it into its refusal, so a caller that may
-// degrade a guard to a warning when the identity merely lacks a grant can tell the two
-// apart with errors.Is, and still fails loud on everything else. The message text is the
-// same either way.
-var errNotAllowed = errors.New("not allowed")
+	"github.com/hafio/go-deploy-utility/kube/rbac"
+	"github.com/hafio/go-deploy-utility/runner"
+
+	"solace/internal/engine"
+)
 
 // Preflight is the read-only probe every mutating operation runs first. It asks the
 // cluster one question -- may this identity create this resource here -- using the
@@ -34,7 +28,7 @@ var errNotAllowed = errors.New("not allowed")
 // credential store's; a tool that offered to fix an auth failure would be teaching
 // people to hand it credentials it has no business holding.
 func (c *Cluster) Preflight(ctx context.Context, verb, resource string) error {
-	return c.PreflightAll(ctx, probe{verb: verb, resource: resource})
+	return c.PreflightAll(ctx, rbac.Probe{Verb: verb, Resource: resource})
 }
 
 // PreflightAll asks several permission questions, stopping at the first refusal.
@@ -50,7 +44,7 @@ func (c *Cluster) Preflight(ctx context.Context, verb, resource string) error {
 // needing wildcard expansion, which would trade a fail-safe verdict for a parser that
 // can be wrong in the permissive direction. Each probe is one cheap API call and the
 // whole surface is single-digit, so the batching win would be nil.
-func (c *Cluster) PreflightAll(ctx context.Context, probes ...probe) error {
+func (c *Cluster) PreflightAll(ctx context.Context, probes ...rbac.Probe) error {
 	for _, p := range probes {
 		if err := c.preflightOne(ctx, p); err != nil {
 			return err
@@ -59,74 +53,46 @@ func (c *Cluster) PreflightAll(ctx context.Context, probes ...probe) error {
 	return nil
 }
 
-func (c *Cluster) preflightOne(ctx context.Context, p probe) error {
-	verb, resource := p.verb, p.target()
-	where, binding := c.nsFor(p), "role binding"
-	if where == "" {
-		// A RoleBinding cannot grant anything outside its own namespace, so advising one
-		// for a cluster-wide question would send the operator to ask for the wrong thing.
-		where, binding = "the cluster", "cluster role binding"
+func (c *Cluster) preflightOne(ctx context.Context, p rbac.Probe) error {
+	p = c.scope(p)
+	cmd, err := c.canICmd(p)
+	if err != nil {
+		return err
 	}
-	args := c.canIArgs(p)
 	if c.isEcho() {
 		// Echo the probe so a preview still shows it, then skip the assertion --
 		// the Echo runner answers nothing, and there is no cluster to answer.
-		if err := c.kubectl(ctx, args...); err != nil {
+		if err := engine.Run(ctx, c.R, cmd); err != nil {
 			return err
 		}
 		c.report().KVRow(reportKeyWidth, "permission", "skipped (preview)")
 		return nil
 	}
-
-	out, err := c.kubectlOutput(ctx, args...)
-	answer := canIAnswer(out)
-	switch {
-	case err == nil && answer == "yes":
-		return nil
-	case canIRefused(answer):
-		// Reached the API server and got a real answer: this is RBAC, not auth.
-		// kubectl already printed its own explanation to stderr; add the one line
-		// that says what to ask for.
-		return fmt.Errorf("%w to %s %s in %s: ask a cluster admin for a %s "+
-			"granting %s on %s there, then re-run", errNotAllowed, verb, resource, where, binding, verb, resource)
-	case err != nil:
-		// No usable answer: an expired token, no context, an unreachable API
-		// server. kubectl's own message is on stderr and wrapped in here too.
-		return fmt.Errorf("cannot check permission to %s %s in %s: %w\n"+
-			"  log in first (kubectl: `kubectl config use-context <ctx>`; OpenShift: `oc login <server>`), "+
-			"or point kubernetes.command at the right profile", verb, resource, where, err)
-	default:
-		// Exit 0 with something other than "yes" -- a wrapper that swallowed the
-		// answer, or a kubectl whose output shape changed. Refusing is the safe
-		// direction: proceeding would mean assuming a permission nobody confirmed.
-		return fmt.Errorf("could not read the answer to `auth can-i %s %s` (got %q); "+
-			"if kubernetes.command wraps kubectl, make sure it passes stdout through unchanged", verb, resource, answer)
-	}
+	// stdout alone is the verdict, and stderr already reached the terminal as it
+	// arrived, so rbac.Check is given none. A refusal is a *rbac.RefusedError.
+	out, err := engine.Output(ctx, c.R, cmd)
+	return rbac.Check(p, string(out), "", err)
 }
 
-// canIAnswer extracts the verdict from `auth can-i` output. The answer is the LAST
-// non-empty line, not the whole trimmed body: kubectl prints advisory lines above it
-// on stdout -- "Warning: resource 'x' is not namespace scoped" is the common one, and
-// a cluster with deprecated APIs adds more. Comparing the whole output would turn
-// every such cluster into the "could not read the answer" branch and block a deploy
-// the operator is perfectly entitled to make.
-func canIAnswer(out []byte) string {
-	lines := strings.Split(string(out), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if line := strings.TrimSpace(lines[i]); line != "" {
-			return line
-		}
+// scope puts the broker namespace on a probe for a namespaced resource that names none,
+// so the refusal names the namespace asked about rather than "the current namespace".
+// A cluster-scoped resource and an AllNamespaces question stay cluster-wide, which
+// rbac.CanI turns into --all-namespaces.
+func (c *Cluster) scope(p rbac.Probe) rbac.Probe {
+	if p.Namespace == "" && !p.AllNamespaces && !rbac.ClusterScoped(p.Resource) {
+		p.Namespace = c.ns()
 	}
-	return ""
+	return p
 }
 
-// canIRefused reports whether an `auth can-i` verdict is a refusal. kubectl spells one
-// answer three ways: a bare `no`, `no - <reason>` when the authorizer gave a reason, and
-// `no (<evaluation error>)`. Only the bare form used to count, so a reasoned refusal fell
-// into the could-not-check branch and sent the operator off to log in again. Anything
-// else that merely starts with "no" -- a wrapper printing "no such host" -- is not one.
-func canIRefused(answer string) bool {
-	return answer == "no" || strings.HasPrefix(answer, "no - ") || strings.HasPrefix(answer, "no (")
+// canICmd is the `auth can-i` command for a probe already scoped, over the guarded
+// cluster CLI.
+func (c *Cluster) canICmd(p rbac.Probe) (runner.Cmd, error) {
+	base, err := c.base()
+	if err != nil {
+		return runner.Cmd{}, err
+	}
+	return rbac.CanI(base, p), nil
 }
 
 // canI asks one permission question WITHOUT failing on the answer, for a caller choosing
@@ -134,119 +100,27 @@ func canIRefused(answer string) bool {
 // whether a report row that could not be read was refused or broken. allowed is the
 // verdict; answered is false when there was none to read -- an expired login, an
 // unreachable server, a reply that was neither yes nor no -- which every caller must treat
-// as unknown, never as either answer.
+// as unknown, never as either answer (rbac.Verdict).
 //
 // Under the Echo runner it echoes the probe and answers yes, exactly as preflightOne
 // passes, so a preview shows the question and then takes the path a permitted run takes.
-func (c *Cluster) canI(ctx context.Context, p probe) (allowed, answered bool) {
-	args := c.canIArgs(p)
+func (c *Cluster) canI(ctx context.Context, p rbac.Probe) (allowed, answered bool) {
+	p = c.scope(p)
+	cmd, err := c.canICmd(p)
+	if err != nil {
+		return false, false
+	}
 	if c.isEcho() {
-		if err := c.kubectl(ctx, args...); err != nil {
+		if err := engine.Run(ctx, c.R, cmd); err != nil {
 			return false, false
 		}
 		return true, true
 	}
-	out, err := c.kubectlOutput(ctx, args...)
-	switch answer := canIAnswer(out); {
-	case err == nil && answer == "yes":
-		return true, true
-	case canIRefused(answer):
-		return false, true
-	default:
-		return false, false
-	}
+	out, err := engine.Output(ctx, c.R, cmd)
+	return rbac.Verdict(string(out), err)
 }
 
 // brokerResource is the CRD the operator reconciles -- the thing every broker
 // deploy ultimately creates. Named in full (resource.group) so `auth can-i` cannot
 // match a same-named resource in another group.
 const brokerResource = "pubsubpluseventbrokers.pubsubplus.solace.com"
-
-// clusterScoped names the resources whose permission check must NOT carry a
-// namespace. Passing `-n` for one of these makes kubectl print
-//
-//	Warning: resource 'customresourcedefinitions' is not namespace scoped
-//
-// and, when the namespace does not exist yet, also fail with a NotFound that has
-// nothing to do with the permission being checked -- which is exactly what a
-// first `deploy operator` looked like: two scary lines about a namespace, in
-// front of a probe that was asking about a cluster-scoped resource.
-var clusterScoped = map[string]bool{
-	"customresourcedefinitions": true,
-	"namespaces":                true,
-	"nodes":                     true,
-	"clusterroles":              true,
-	"clusterrolebindings":       true,
-	"storageclasses":            true,
-	"persistentvolumes":         true,
-}
-
-// probe is one permission question: may this identity do verb to resource, and
-// where. An empty ns means the broker namespace, which is what almost every probe
-// wants; the operator paths set it explicitly because they act somewhere else.
-//
-// A namespace field exists because getting this wrong is silent. OperatorRestart
-// probed `patch deployments` with no namespace of its own, so the question went to
-// the BROKER namespace while the restart it guards happens in the operator's -- an
-// identity permitted in one and not the other would pass the check and fail the work.
-type probe struct {
-	verb     string
-	resource string
-	ns       string
-	// name narrows the question to one object, asked as `resource/name`. Empty asks about
-	// every object of the kind, which is what almost every probe wants. The `bind` probe
-	// sets it: RBAC checks bind against the one role being bound, and a grant of it can be
-	// limited to that role by resourceNames, so asking about every ClusterRole would refuse
-	// an identity granted exactly enough. Only name a probe whose real request carries the
-	// name -- a create does not, which is why the `escalate` probe leaves it empty.
-	name string
-	// allNamespaces asks about a NAMESPACED kind across every namespace, which is the
-	// question a cluster-wide list raises. Only the CRD cascade gate needs it: it has to see
-	// every PubSubPlusEventBroker before the CRDs go. Adding that kind to clusterScoped
-	// instead would turn every broker probe into a cluster-wide one and refuse each
-	// namespace-scoped identity this tool otherwise serves.
-	allNamespaces bool
-}
-
-// target is what the probe asks about: the resource, or `resource/name` for a named probe.
-// Scoping is still decided by the bare resource, so a named cluster-scoped probe carries
-// --all-namespaces like any other.
-func (p probe) target() string {
-	if p.name == "" {
-		return p.resource
-	}
-	return p.resource + "/" + p.name
-}
-
-// nsFor is the namespace a probe asks about: its own, else the broker's, and none at
-// all for a cluster-scoped resource or a question asked across every namespace.
-func (c *Cluster) nsFor(p probe) string {
-	if clusterScoped[p.resource] || p.allNamespaces {
-		return ""
-	}
-	if p.ns != "" {
-		return p.ns
-	}
-	return c.ns()
-}
-
-// canIArgs builds the `auth can-i` argv, scoping it to a namespace only for
-// resources that live in one.
-func (c *Cluster) canIArgs(p probe) []string {
-	args := []string{"auth", "can-i", p.verb, p.target()}
-	if ns := c.nsFor(p); ns != "" {
-		return append(args, "-n", ns)
-	}
-	// Omitting -n is NOT enough for a cluster-scoped resource: kubectl falls back to
-	// the kubeconfig context's namespace, so the access review still carries one.
-	// That is both the source of
-	//
-	//	Warning: resource 'namespaces' is not namespace scoped
-	//
-	// on an otherwise clean `broker remove`, and a check that can answer WRONG --
-	// with a namespace in the review, RBAC also evaluates namespaced Roles there, so
-	// a RoleBinding granting `delete namespaces` in that one namespace would make the
-	// probe say yes while the delete it guards still fails. --all-namespaces clears
-	// the namespace from the review, which is the question actually being asked.
-	return append(args, "--all-namespaces")
-}

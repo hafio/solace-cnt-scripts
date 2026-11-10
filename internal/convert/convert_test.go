@@ -442,8 +442,11 @@ func TestConvertPlatformDetection(t *testing.T) {
 func TestConvertPodmanSection(t *testing.T) {
 	res := convertOK(t, ctrEnv+"PODMAN_ROOTLESS=\"true\"\nQUADLET_DIR=\"/home/u/.config/containers/systemd\"\n", "")
 	c := strictDecode(t, res.YAML)
-	if !c.Podman.Rootless {
-		t.Error("podman.rootless should be true")
+	if c.Podman.Rootful {
+		t.Error("PODMAN_ROOTLESS=true is the default now, so podman.rootful must not be set")
+	}
+	if c.Podman.Rootless != nil {
+		t.Errorf("the retired podman.rootless must never be written:\n%s", res.YAML)
 	}
 	if c.Podman.QuadletDir != "/home/u/.config/containers/systemd" {
 		t.Errorf("podman.quadletDir = %q", c.Podman.QuadletDir)
@@ -454,6 +457,35 @@ func TestConvertPodmanSection(t *testing.T) {
 	// The docker section must stay empty when podman was selected.
 	if strings.Contains(string(res.YAML), "\ndocker:") {
 		t.Errorf("podman conversion emitted a docker section:\n%s", res.YAML)
+	}
+}
+
+// TestConvertPodmanRootfulKeepsTheLegacyMeaning: the legacy default was rootful, and
+// rootless is the schema default now, so a source that meant rootful -- PODMAN_ROOTLESS
+// false, or unset -- must come out as `rootful: true` to keep its meaning. An unreadable
+// value is read the way the legacy script did, as not true, with a warning.
+func TestConvertPodmanRootfulKeepsTheLegacyMeaning(t *testing.T) {
+	for _, tc := range []struct {
+		name, extra string
+		wantWarn    bool
+	}{
+		{"false", "PODMAN_ROOTLESS=\"false\"\n", false},
+		{"unset", "QUADLET_DIR=\"/etc/containers/systemd\"\n", false},
+		{"unreadable", "PODMAN_ROOTLESS=\"maybe\"\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := convertOK(t, ctrEnv+tc.extra, config.Podman)
+			c := strictDecode(t, res.YAML)
+			if !c.Podman.Rootful {
+				t.Errorf("a rootful source must emit podman.rootful: true:\n%s", res.YAML)
+			}
+			if c.Podman.Rootless != nil {
+				t.Errorf("the retired key must not be written:\n%s", res.YAML)
+			}
+			if got := hasWarning(res.Warnings, "read as false (rootful)"); got != tc.wantWarn {
+				t.Errorf("warning for an unreadable value = %v, want %v: %v", got, tc.wantWarn, res.Warnings)
+			}
+		})
 	}
 }
 
@@ -606,6 +638,27 @@ func TestConvertDockerRunModeWarns(t *testing.T) {
 	}
 	if !hasWarning(res.Warnings, "DOCKER_MODE") {
 		t.Errorf("warnings should name DOCKER_MODE, got %v", res.Warnings)
+	}
+}
+
+// TestConvertDockerComposeFileIsDropped pins the retired docker.composeFile: the compose
+// file now goes to compose on stdin and is never written, so DOCKER_COMPOSE_FILE has no
+// key to carry into. It is read (so it does not resurface as unmapped), dropped from the
+// YAML, and named in a warning -- and a file that never set it warns of nothing.
+func TestConvertDockerComposeFileIsDropped(t *testing.T) {
+	base := "SOLBK_IMAGE=\"r\"\nSOLBK_IMG_TAG=\"t\"\nSOLBK_ADM_PASS=\"p\"\nSOLBK_NODE_PRI_NAME=\"h\"\n"
+	res := convertOK(t, base+"DOCKER_COMPOSE_FILE=\"stack/compose.yml\"\n", config.Docker)
+	if strings.Contains(string(res.YAML), "composeFile") || strings.Contains(string(res.YAML), "stack/compose.yml") {
+		t.Errorf("the retired key must not be carried over:\n%s", res.YAML)
+	}
+	if !hasWarning(res.Warnings, "DOCKER_COMPOSE_FILE") || !hasWarning(res.Warnings, "no longer used") {
+		t.Errorf("warnings should name DOCKER_COMPOSE_FILE as no longer used, got %v", res.Warnings)
+	}
+	if hasWarning(res.Warnings, "no YAML equivalent") {
+		t.Errorf("the variable was read, so it must not be reported unmapped: %v", res.Warnings)
+	}
+	if res := convertOK(t, base+"DOCKER_COMPOSE_FILE=\"\"\n", config.Docker); hasWarning(res.Warnings, "DOCKER_COMPOSE_FILE") {
+		t.Errorf("an empty value is nothing to drop: %v", res.Warnings)
 	}
 }
 

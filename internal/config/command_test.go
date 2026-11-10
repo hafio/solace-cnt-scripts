@@ -174,6 +174,35 @@ func TestCommandNameAndArgs(t *testing.T) {
 	}
 }
 
+// TestCommandArgv: the whole line for one call is the command followed by the call's own
+// arguments, in a slice of its own, so a later call cannot rewrite an earlier one's argv.
+func TestCommandArgv(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  Command
+		want string
+	}{
+		{"unset", nil, "get pods"},
+		{"bare binary", Command{"kubectl"}, "kubectl get pods"},
+		{"wrapper", Command{"microk8s", "kubectl"}, "microk8s kubectl get pods"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strings.Join(tc.cmd.Argv("get", "pods"), " "); got != tc.want {
+				t.Errorf("Argv() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	base := make([]string, 0, 8)
+	base = append(base, "microk8s", "kubectl")
+	cmd := Command(base)
+	first := cmd.Argv("get", "pods")
+	_ = cmd.Argv("delete", "ns")
+	if got := strings.Join(first, " "); got != "microk8s kubectl get pods" {
+		t.Errorf("a second Argv overwrote the first: %q", got)
+	}
+}
+
 // TestCommandArgsDoesNotAliasCommand guards the aliasing trap: a Command is a
 // long-lived config value reused by every call, so building argv with
 // append(cmd[1:], extra...) would write into its backing array whenever there is
@@ -220,7 +249,7 @@ func TestCommandString(t *testing.T) {
 // is rendered into the compose/quadlet artifact and run by the container engine
 // inside the broker, so the execution guard's allowlist and subcommand rules would
 // be meaningless -- a probe is legitimately a shell pipeline, and the engine, not
-// this process, decides what it means. Contrast TestCheckCommandRejects, which is
+// this process, decides what it means. Contrast the shared execguard reject tests, which are
 // the field-by-field opposite for everything that does become argv here.
 func TestValidateProbeCommandAccepts(t *testing.T) {
 	cases := []struct {
@@ -253,6 +282,8 @@ func TestValidateProbeCommandRejects(t *testing.T) {
 		{"empty argument", Command{"curl", ""}, "docker.container.healthCheck.cmd[1] is an empty argument"},
 		{"newline", Command{"curl\n-f"}, "docker.container.healthCheck.cmd[0] contains a control character"},
 		{"NUL", Command{"cu\x00rl"}, "docker.container.healthCheck.cmd[0] contains a control character"},
+		{"zero-width space", Command{"curl", "-f", "http://localhost\u200b/"}, "docker.container.healthCheck.cmd[2] contains an invisible formatting character"},
+		{"invalid UTF-8", Command{"curl", "\xff"}, "docker.container.healthCheck.cmd[1] is not valid UTF-8"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -8,7 +8,7 @@
 // is generated from it by examples_test.go's -update flag. Editing the sample
 // directly fails that gate rather than drifting.
 //
-// Like internal/abbrev and internal/output this is a stdlib-only leaf, so any
+// Like internal/output this is a stdlib-only leaf, so any
 // package can import it. It deliberately does not import internal/config: the
 // templates are text, and examples_test.go is what proves the text still loads.
 package examples

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/execguard"
 	"gopkg.in/yaml.v3"
 )
 
@@ -50,10 +51,10 @@ func TestGuardConfigIsValid(t *testing.T) {
 
 // TestExecBinariesCoversEveryPlatform pins the allowlist against Platforms(). A
 // missing key is not a compile error and not an obvious runtime one either:
-// commandRules.allowed would return an empty set, so EVERY command that platform
-// names would be refused as un-allowlisted, and commandRules.list would offer an
-// empty "allowed" list in the error -- a confusing refusal rather than a loud
-// wiring failure. This is the test that turns that into a build-time answer.
+// rulesFor would hand execguard an empty Allowed, so Check would refuse every
+// command that platform names with a wiring error, and the "allowed" list in the
+// error would be empty -- a confusing refusal rather than a loud wiring failure.
+// This is the test that turns that into a build-time answer.
 func TestExecBinariesCoversEveryPlatform(t *testing.T) {
 	for _, p := range Platforms() {
 		names, ok := execBinaries[p]
@@ -68,365 +69,6 @@ func TestExecBinariesCoversEveryPlatform(t *testing.T) {
 	if len(execBinaries) != len(Platforms()) {
 		t.Errorf("execBinaries has %d entries but there are %d platforms: an entry for a platform that does not exist is dead allowlist",
 			len(execBinaries), len(Platforms()))
-	}
-}
-
-// --- layers 1-3: what a command may be ---------------------------------------
-
-// TestCheckCommandAccepts is the accept half of the guard matrix: the shapes an
-// operator legitimately writes. Each case names the field it stands for, because
-// the same rules apply to kubernetes.command, docker.command, podman.command and
-// docker.compose from one implementation.
-func TestCheckCommandAccepts(t *testing.T) {
-	cases := []struct {
-		name  string
-		rules commandRules
-		cmd   Command
-		extra map[string]bool
-	}{
-		// Every allowlisted binary, bare.
-		{"kubectl bare", clusterRules(), Command{"kubectl"}, nil},
-		{"oc bare", clusterRules(), Command{"oc"}, nil},
-		{"docker bare", runtimeRules(Docker), Command{"docker"}, nil},
-		{"nerdctl bare", runtimeRules(Docker), Command{"nerdctl"}, nil},
-		{"podman bare", runtimeRules(Podman), Command{"podman"}, nil},
-
-		// A profile: flags and their values are the normal way to carry a context.
-		{"flag args", clusterRules(), Command{"kubectl", "--context", "prod", "-n", "solace"}, nil},
-		{"kubeconfig profile", clusterRules(), Command{"kubectl", "--kubeconfig", "/tmp/kc"}, nil},
-		// --flag=value is self-contained, so the NEXT token is not its value and
-		// must stand on its own -- here another flag.
-		{"joined flag then flag", clusterRules(), Command{"kubectl", "--context=prod", "--namespace=solace"}, nil},
-		// A bare "-" is a flag by shape; kubectl and docker both use it for stdin.
-		{"lone dash", clusterRules(), Command{"kubectl", "-"}, nil},
-
-		// The subword is accepted LAST after any prefix that already validated -- the
-		// tokens before it do not have to be an allowed binary. This is the tool's own
-		// derived default: with `docker.command: docker --context prod`, ComposeCommand
-		// appends `compose`, and requiring `prod` to be an allowed binary refused a
-		// valid docker deployment at load, with an error about a subcommand position
-		// the operator never wrote. TestCheckCommandRejects still holds the other
-		// half: `docker compose up` has a token this tool did not append.
-		{"compose after a flag value", composeRules(), Command{"docker", "--context", "prod", "compose"}, nil},
-		{"compose after a joined flag", composeRules(), Command{"docker", "--log-level=error", "compose"}, nil},
-
-		// An EMBEDDED tilde is an 8.3 short name, which is what a real Windows home
-		// directory routinely is -- and therefore what expandCommandHomes itself
-		// produces there, so refusing it would refuse this tool's own expansion. Only
-		// a LEADING one is refused (TestCheckCommandRejects).
-		{"8.3 short name in a flag value", clusterRules(),
-			Command{"kubectl", "--kubeconfig", "C:/Users/RUNNER~1/.kube/config"}, nil},
-
-		// Windows portability: one .exe suffix is stripped before the allowlist.
-		{"exe suffix", clusterRules(), Command{"kubectl.exe"}, nil},
-		{"EXE suffix", runtimeRules(Docker), Command{"docker.EXE"}, nil},
-
-		// Chained runners, only WITH the operator's approval. All non-escalating:
-		// --allow-command can never approve sudo and its relatives (neverAllowed).
-		{"lima podman with hatch", runtimeRules(Podman), Command{"lima", "podman"}, map[string]bool{"lima": true}},
-		{"microk8s kubectl with hatch", clusterRules(), Command{"microk8s", "kubectl"}, map[string]bool{"microk8s": true}},
-		{"lima flag then nerdctl", runtimeRules(Docker), Command{"lima", "--tty=false", "nerdctl"}, map[string]bool{"lima": true}},
-
-		// docker.compose is the one field allowed a bare subcommand, and only this one.
-		{"compose plugin", composeRules(), Command{"docker", "compose"}, nil},
-		{"compose standalone", composeRules(), Command{"docker-compose"}, nil},
-		// Derived from a wrapped runtime: `compose` still lands last, directly after
-		// the allowed binary, which is the position the rule is written for.
-		{"compose behind a wrapper", composeRules(), Command{"lima", "nerdctl", "compose"}, map[string]bool{"lima": true}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := CheckCommand(tc.rules, tc.cmd, tc.extra); err != nil {
-				t.Errorf("CheckCommand(%q) = %v, want accepted", tc.cmd, err)
-			}
-		})
-	}
-}
-
-// TestCheckCommandRejects is the reject half. Every case carries the substring the
-// message must contain, because an error that does not name the offending token and
-// the way out is a failed error, not a passed test.
-func TestCheckCommandRejects(t *testing.T) {
-	cases := []struct {
-		name  string
-		rules commandRules
-		cmd   Command
-		extra map[string]bool
-		want  string
-	}{
-		// Empty.
-		{"empty command", clusterRules(), Command{}, nil, "kubernetes.command is empty"},
-		{"nil command", clusterRules(), nil, nil, "kubernetes.command is empty"},
-		{"empty argument", clusterRules(), Command{"kubectl", ""}, nil, "kubernetes.command[1] is an empty argument"},
-
-		// Layer 2: an unlisted binary, whatever it is.
-		{"curl", clusterRules(), Command{"curl"}, nil, `"curl" is not a binary this tool runs`},
-		{"bash", runtimeRules(Docker), Command{"bash"}, nil, `"bash" is not a binary this tool runs`},
-		// Right binary, wrong platform: podman is not a Kubernetes CLI.
-		{"cross-platform binary", clusterRules(), Command{"podman"}, nil, `"podman" is not a binary this tool runs`},
-		// The allowlist and the escape hatch are both named in the message.
-		{"names the way out", clusterRules(), Command{"curl"}, nil, "--allow-command curl"},
-		{"names the allowlist", clusterRules(), Command{"curl"}, nil, "kubectl, oc"},
-
-		// Layer 2: any path form. This is the attack the bare-name rule exists for --
-		// a kubectl shipped in the same archive as the env file.
-		{"relative path", clusterRules(), Command{"./kubectl"}, nil, "must be a bare binary name, not a path"},
-		{"absolute path", clusterRules(), Command{"/usr/bin/kubectl"}, nil, "must be a bare binary name, not a path"},
-		{"windows path", clusterRules(), Command{"C:/tools/kubectl.exe"}, nil, "must be a bare binary name, not a path"},
-		{"parent dir", clusterRules(), Command{"../kubectl"}, nil, "must be a bare binary name, not a path"},
-		// A backslash path trips the charset first, which is also a refusal.
-		{"backslash path", clusterRules(), Command{`.\kubectl.exe`}, nil, `is not allowed in a command token`},
-
-		// Layer 3: a bare word in subcommand position.
-		{"bare subcommand", clusterRules(), Command{"kubectl", "delete"}, nil, "not allowed in subcommand position"},
-		{"smuggled delete", clusterRules(), Command{"kubectl", "delete", "ns", "prod"}, nil, "not allowed in subcommand position"},
-		{"compose smuggling rm", composeRules(), Command{"docker", "rm"}, nil, "not allowed in subcommand position"},
-		// After --flag=value the next token is NOT a flag value, so a bare word there
-		// is still smuggling.
-		{"joined flag then word", clusterRules(), Command{"kubectl", "--context=prod", "delete"}, nil, "not allowed in subcommand position"},
-		// The subword exception is field-scoped: `compose` is a bare word anywhere
-		// except index 1 of docker.compose.
-		{"compose subword on command", runtimeRules(Docker), Command{"docker", "compose"}, nil, "not allowed in subcommand position"},
-		// ...and only as the LAST token: anything after it is a token this tool did
-		// not append, which is the smuggling the rule exists to stop.
-		{"compose then extra word", composeRules(), Command{"docker", "compose", "up"}, nil, "not allowed in subcommand position"},
-
-		// Layer 3: a chained runner WITHOUT the escape hatch.
-		{"lima no hatch", runtimeRules(Podman), Command{"lima", "podman"}, nil, `"lima" is not a binary this tool runs`},
-		{"microk8s no hatch", clusterRules(), Command{"microk8s", "kubectl"}, nil, `"microk8s" is not a binary this tool runs`},
-		// The hatch approves the name it was given, not any other.
-		{"wrong hatch", runtimeRules(Podman), Command{"lima", "podman"}, map[string]bool{"colima": true}, `"lima" is not a binary this tool runs`},
-		// An escalation wrapper is refused even when something managed to put it in
-		// the extra-allowed set: allowed() strips the category back out (neverAllowed).
-		{"sudo cannot be approved", runtimeRules(Podman), Command{"sudo", "podman"}, map[string]bool{"sudo": true}, `"sudo" is not a binary this tool runs`},
-		{"doas cannot be approved", runtimeRules(Podman), Command{"doas", "podman"}, map[string]bool{"doas": true}, `"doas" is not a binary this tool runs`},
-		{"pkexec cannot be approved", clusterRules(), Command{"pkexec", "kubectl"}, map[string]bool{"pkexec": true}, `"pkexec" is not a binary this tool runs`},
-
-		// Layer 3: the literal end-of-flags token.
-		{"double dash", clusterRules(), Command{"kubectl", "--"}, nil, `"--" is not allowed`},
-		{"double dash then word", clusterRules(), Command{"kubectl", "--", "delete"}, nil, `"--" is not allowed`},
-
-		// Layer 1: the charset, one case per class.
-		{"semicolon", clusterRules(), Command{"kubectl;rm"}, nil, `contains ";"`},
-		{"pipe", clusterRules(), Command{"kubectl|tee"}, nil, `contains "|"`},
-		{"ampersand", clusterRules(), Command{"kubectl&"}, nil, `contains "&"`},
-		{"redirect out", clusterRules(), Command{"kubectl>out"}, nil, `contains ">"`},
-		{"redirect in", clusterRules(), Command{"kubectl<in"}, nil, `contains "<"`},
-		{"subshell open", clusterRules(), Command{"kubectl("}, nil, `contains "("`},
-		{"subshell close", clusterRules(), Command{"kubectl)"}, nil, `contains ")"`},
-		{"glob star", clusterRules(), Command{"kube*"}, nil, `contains "*"`},
-		{"glob question", clusterRules(), Command{"kubectl?"}, nil, `contains "?"`},
-		{"bracket open", clusterRules(), Command{"kubectl["}, nil, `contains "["`},
-		{"bracket close", clusterRules(), Command{"kubectl]"}, nil, `contains "]"`},
-		{"brace open", clusterRules(), Command{"kubectl{"}, nil, `contains "{"`},
-		{"brace close", clusterRules(), Command{"kubectl}"}, nil, `contains "}"`},
-		{"hash", clusterRules(), Command{"kubectl#x"}, nil, `contains "#"`},
-		{"bang", clusterRules(), Command{"kubectl!"}, nil, `contains "!"`},
-		{"dollar", clusterRules(), Command{"$KUBECTL"}, nil, `contains "$"`},
-		{"backtick", clusterRules(), Command{"`kubectl`"}, nil, "contains \"`\""},
-		{"single quote", clusterRules(), Command{"'kubectl'"}, nil, `contains "'"`},
-		{"double quote", clusterRules(), Command{`"kubectl"`}, nil, `contains "\""`},
-		{"backslash", clusterRules(), Command{`kube\ctl`}, nil, `contains "\\"`},
-		{"control char", clusterRules(), Command{"kubectl\n--all"}, nil, "contains a control character"},
-		{"NUL", clusterRules(), Command{"kube\x00ctl"}, nil, "contains a control character"},
-		{"DEL", clusterRules(), Command{"kubectl\x7f"}, nil, "contains a control character"},
-		// Whitespace inside ONE argument -- only reachable through the list form,
-		// since the scalar form splits on whitespace before it gets here.
-		{"embedded space", clusterRules(), Command{"C:/Program Files/kubectl.exe"}, nil, "contains whitespace inside one argument"},
-		{"space in flag value", clusterRules(), Command{"kubectl", "--kubeconfig", "/tmp/my kc"}, nil, "contains whitespace inside one argument"},
-		// ...and whitespace means the whole Unicode property, not just ASCII space.
-		// The scalar YAML form splits on all of these (strings.Fields is
-		// Unicode-aware), so an ASCII-only check here would accept through the
-		// sequence form exactly what the scalar form rejects.
-		{"nbsp", clusterRules(), Command{"kubectl", "--context", "pr\u00a0od"}, nil, "contains whitespace inside one argument"},
-		{"ideographic space", clusterRules(), Command{"kubectl", "--context", "pr\u3000od"}, nil, "contains whitespace inside one argument"},
-		{"figure space", clusterRules(), Command{"kubectl", "--context", "pr\u2007od"}, nil, "contains whitespace inside one argument"},
-		{"line separator", clusterRules(), Command{"kubectl", "--context", "pr\u2028od"}, nil, "contains whitespace inside one argument"},
-		{"paragraph separator", clusterRules(), Command{"kubectl", "--context", "pr\u2029od"}, nil, "contains whitespace inside one argument"},
-		{"ogham space mark", clusterRules(), Command{"kubectl", "--context", "pr\u1680od"}, nil, "contains whitespace inside one argument"},
-		{"NEL", clusterRules(), Command{"kubectl", "--context", "pr\u0085od"}, nil, "contains whitespace inside one argument"},
-		// Invisible formatting characters get their own refusal: they are not
-		// whitespace and split nothing, but a token that renders identically to a
-		// legitimate one defeats the review this guard asks an operator to do.
-		{"zero-width space", clusterRules(), Command{"kubectl", "--context", "pr\u200bod"}, nil, "invisible formatting character"},
-		{"zero-width joiner", clusterRules(), Command{"kubectl", "--context", "pr\u200dod"}, nil, "invisible formatting character"},
-		{"RTL override", clusterRules(), Command{"kubectl", "--context", "pr\u202eod"}, nil, "invisible formatting character"},
-		{"soft hyphen", clusterRules(), Command{"kubectl", "--context", "pr\u00adod"}, nil, "invisible formatting character"},
-		// The message names the code point, since the character cannot be seen.
-		{"names the code point", clusterRules(), Command{"kubectl", "--context", "pr\u200bod"}, nil, "U+200B"},
-		// The charset applies to every token, not just argv[0].
-		{"metachar in later token", clusterRules(), Command{"kubectl", "--context", "prod;rm"}, nil, `kubernetes.command[2]`},
-		// A LEADING tilde, refused at every position but with two different
-		// messages, because the two mean different things. At index 0 it is an
-		// operator writing a path where a bare binary name belongs; anywhere else it
-		// means the Command never went through Load (expandCommandHomes resolves
-		// those before Validate), which is the fail-closed half the executors'
-		// re-check depends on. TestCommandTildeExpansion covers the resolving half.
-		{"tilde as argv[0]", clusterRules(), Command{"~/bin/kubectl"}, nil, "argv[0] names the binary to run"},
-		{"bare tilde as argv[0]", clusterRules(), Command{"~"}, nil, "a home directory cannot be part of it"},
-		{"unexpanded tilde in a flag value", clusterRules(),
-			Command{"kubectl", "--kubeconfig", "~/solace/kubecontext"}, nil, "nothing downstream expands"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := CheckCommand(tc.rules, tc.cmd, tc.extra)
-			if err == nil {
-				t.Fatalf("CheckCommand(%q) accepted a value it must reject", tc.cmd)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("error = %v\n  want it to contain %q", err, tc.want)
-			}
-		})
-	}
-}
-
-// TestFlagValuePositionIsNotGuaranteed documents the guard's one acknowledged
-// limit, so it is a stated property rather than a surprise found later. A token
-// following a value-shaped flag is accepted as that flag's value, because argument
-// arity is unknowable without modelling every flag of every allowed binary -- so
-// `docker --tls rm` passes even though --tls takes no value, and the appended
-// subcommand would land after `rm`.
-//
-// This is the reason the hard guarantee is stated as "argv[0] and bare tokens",
-// and the reason the trust-model note tells reviewers to read the whole command
-// field rather than trusting the parser. If a future change narrows this -- an
-// arity table, or refusing any token after a flag -- this test should fail and be
-// rewritten as a rejection.
-// TestEscalationFloorFoldsCaseBothWays covers B4 and the asymmetry it forced.
-//
-// neverAllowed's keys are lowercase and both enforcement points used to match them
-// exactly, so `--allow-command Sudo` was accepted, stored as extraAllowed["Sudo"],
-// and survived the purge in allowed() -- which deleted only the lowercase key. Both
-// belts had the identical hole, and it matters precisely where filesystems are
-// case-insensitive: Windows (which has shipped sudo.exe since 2024) and macOS by
-// default, where `Sudo` resolves to exactly the binary `sudo` names.
-//
-// The fix folds case on the DENY list only. The allowlist must stay exact, which
-// the last subtest pins: folding it too would let an env file naming `KUBECTL` be
-// approved by `kubectl`'s entry and then execute a different file on any
-// case-sensitive filesystem.
-func TestEscalationFloorFoldsCaseBothWays(t *testing.T) {
-	t.Run("AllowCommands refuses any casing", func(t *testing.T) {
-		for _, name := range []string{"Sudo", "SUDO", "sUdO", "Sudo.exe", "RunAs", "PkExec"} {
-			cfg := &Config{}
-			if err := cfg.AllowCommands([]string{name}); err == nil {
-				t.Errorf("AllowCommands(%q) was accepted; the escalation floor must refuse every casing", name)
-			}
-		}
-	})
-	t.Run("the allowed() purge is the second belt", func(t *testing.T) {
-		// Straight past AllowCommands, as a future caller populating extraAllowed
-		// some other way would arrive: the purge alone must still strip it.
-		set := runtimeRules(Docker).allowed(map[string]bool{"Sudo": true, "SUDO": true, "docker": true})
-		for _, gone := range []string{"Sudo", "SUDO"} {
-			if set[gone] {
-				t.Errorf("allowed() kept %q; the purge must strip an escalation wrapper whatever its casing", gone)
-			}
-		}
-		if !set["docker"] {
-			t.Error("allowed() dropped a legitimate binary")
-		}
-	})
-	t.Run("the allowlist itself stays case-sensitive", func(t *testing.T) {
-		// The deliberate asymmetry: a deny list may only ever refuse more, but
-		// loosening a positive match adds binaries nobody approved. On a
-		// case-sensitive filesystem KUBECTL is simply a different file.
-		cmd := Command{"KUBECTL"}
-		if err := CheckCommand(clusterRules(), cmd, nil); err == nil {
-			t.Error("CheckCommand accepted KUBECTL: the allowlist must match exactly, unlike neverAllowed")
-		}
-	})
-}
-
-func TestFlagValuePositionIsNotGuaranteed(t *testing.T) {
-	// Note what these actually are: `--tls` and `--insecure-skip-tls-verify` take
-	// NO value, so the word after each is not a flag value at all -- it reaches
-	// subcommand position, and the real argv becomes `docker --tls rm <what this
-	// tool appends>` / `kubectl --insecure-skip-tls-verify delete apply -f -`.
-	// Arity is what the guard cannot know, so it cannot tell this from a genuine
-	// value; the file header explains why closing it is not worth the cost, and
-	// this is the pin that keeps it a KNOWN limit. If either of these ever starts
-	// being refused, that is an improvement -- replace the case, do not restore it.
-	for _, tc := range []struct {
-		rules commandRules
-		cmd   Command
-	}{
-		{runtimeRules(Docker), Command{"docker", "--tls", "rm"}},
-		{clusterRules(), Command{"kubectl", "--insecure-skip-tls-verify", "delete"}},
-	} {
-		if err := CheckCommand(tc.rules, tc.cmd, nil); err != nil {
-			t.Fatalf("the flag-value limit changed: CheckCommand(%q) now returns %v -- "+
-				"if that is deliberate, replace this test with a rejection case", tc.cmd, err)
-		}
-	}
-	// What the guard DOES still hold onto in that position: the whole charset --
-	// metacharacters, and the invisible characters that would otherwise make a flag
-	// value unreviewable. This is the half an adversarial review found incomplete
-	// once already (Unicode whitespace beyond ASCII space), so it is asserted here
-	// rather than assumed from the accept matrix.
-	for _, dirty := range []Command{
-		{"docker", "--tls", "rm;curl"},
-		{"docker", "--tls", "rm\u3000curl"},
-		{"docker", "--tls", "r\u200bm"},
-	} {
-		if err := CheckCommand(runtimeRules(Docker), dirty, nil); err == nil {
-			t.Errorf("CheckCommand(%q) accepted a charset violation in a flag value", dirty)
-		}
-	}
-}
-
-// TestCharsetAgreesAcrossBothYAMLForms is the regression guard for how the gap
-// above arose. A Command may be written as a scalar (split with strings.Fields,
-// which is Unicode-aware) or as an explicit sequence (preserved token for token).
-// If the guard's own whitespace test were narrower than Fields', the sequence form
-// would accept exactly what the scalar form splits apart -- two spellings of one
-// config with two different verdicts.
-func TestCharsetAgreesAcrossBothYAMLForms(t *testing.T) {
-	spaces := []rune{' ', '\u00a0', '\u1680', '\u2000', '\u2007', '\u2028', '\u2029', '\u202f', '\u205f', '\u3000'}
-	for _, r := range spaces {
-		// The scalar form: Fields splits here, so the character never survives into
-		// a token. Any rune Fields treats as a separator...
-		scalar := decodeCommand(t, "kubernetes:\n  command: \"kubectl --context a"+string(r)+"b\"\n")
-		if len(scalar) != 4 {
-			t.Errorf("U+%04X: scalar form produced %d tokens (%q), want 4 -- strings.Fields did not split it", r, len(scalar), scalar)
-		}
-		// ...the sequence form must refuse to carry embedded.
-		seq := Command{"kubectl", "--context", "a" + string(r) + "b"}
-		if err := CheckCommand(clusterRules(), seq, nil); err == nil {
-			t.Errorf("U+%04X: the sequence form accepted a character the scalar form splits on", r)
-		}
-	}
-}
-
-// TestGuardErrorsAreActionable holds every guard message to the one-line,
-// name-the-remedy bar: the offending token quoted, and either the allowlist or the
-// escape hatch named. A message that only says "invalid" leaves the operator
-// guessing which of four fields to edit.
-func TestGuardErrorsAreActionable(t *testing.T) {
-	cases := []Command{
-		{"curl"},
-		{"./kubectl"},
-		{"kubectl", "delete"},
-		{"kubectl", "--"},
-		{"kubectl;rm"},
-	}
-	for _, cmd := range cases {
-		err := CheckCommand(clusterRules(), cmd, nil)
-		if err == nil {
-			t.Fatalf("CheckCommand(%q) must fail", cmd)
-		}
-		msg := err.Error()
-		if strings.Contains(msg, "\n") {
-			t.Errorf("CheckCommand(%q) message spans lines; it must be one line: %q", cmd, msg)
-		}
-		if !strings.Contains(msg, "kubernetes.command") {
-			t.Errorf("CheckCommand(%q) message does not name the field: %q", cmd, msg)
-		}
-		if !strings.Contains(msg, "--allow-command") && !strings.Contains(msg, "kubectl, oc") &&
-			!strings.Contains(msg, "remove it") && !strings.Contains(msg, "let PATH resolve it") &&
-			!strings.Contains(msg, "forward slashes") {
-			t.Errorf("CheckCommand(%q) message names no remedy: %q", cmd, msg)
-		}
 	}
 }
 
@@ -465,6 +107,13 @@ func TestValidatorAndExecutorAgree(t *testing.T) {
 		{"metachar rejected", K8s, Command{"kubectl;rm"}, nil, false},
 		{"docker unlisted rejected", Docker, Command{"curl"}, nil, false},
 		{"podman unlisted rejected", Podman, Command{"curl"}, nil, false},
+
+		// The shared guard's additions over the old local one: C1 control characters
+		// and invalid UTF-8 in a token, and the eight escalators it gained.
+		{"C1 character rejected", K8s, Command{"kubectl", "--context", "pr\u009bod"}, nil, false},
+		{"invalid UTF-8 rejected", K8s, Command{"kubectl", "--context", "pr\x9bod"}, nil, false},
+		{"runuser rejected", Podman, Command{"runuser", "podman"}, nil, false},
+		{"chroot rejected even with the hatch", Docker, Command{"chroot", "docker"}, []string{"lima"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -489,7 +138,7 @@ func TestValidatorAndExecutorAgree(t *testing.T) {
 					tc.cmd, validatorErr, executorErr)
 			}
 			if gotOK := executorErr == nil; gotOK != tc.wantOK {
-				t.Errorf("CheckCommand(%q) accepted = %v, want %v (err: %v)", tc.cmd, gotOK, tc.wantOK, executorErr)
+				t.Errorf("executor check(%q) accepted = %v, want %v (err: %v)", tc.cmd, gotOK, tc.wantOK, executorErr)
 			}
 		})
 	}
@@ -542,124 +191,30 @@ func TestExecutorRejectsWithoutValidate(t *testing.T) {
 	}
 }
 
-// --- layer 4: the escape hatch ------------------------------------------------
-
-func TestAllowCommandsAccepts(t *testing.T) {
-	c := &Config{}
-	if err := c.AllowCommands([]string{"lima", "microk8s", "colima.exe"}); err != nil {
-		t.Fatalf("AllowCommands = %v, want accepted", err)
-	}
-	// Repeatable: each value extends the same set, and .exe folds to one entry.
-	for _, want := range []string{"lima", "microk8s", "colima"} {
-		if !c.extraAllowed[want] {
-			t.Errorf("AllowCommands did not record %q (got %v)", want, c.extraAllowed)
-		}
-	}
-}
-
-// TestAllowCommandsRejects: a bad value is a usage error, and in particular the
-// hatch cannot be used to smuggle back the path form layer 2 refuses.
-func TestAllowCommandsRejects(t *testing.T) {
-	cases := []struct {
-		name  string
-		value string
-		want  string
-	}{
-		{"relative path", "./evil", "must be a bare binary name, not a path"},
-		{"absolute path", "/usr/bin/evil", "must be a bare binary name, not a path"},
-		{"backslash path", `C:\evil.exe`, "not allowed in a command token"},
-		{"metacharacter", "lima;rm", "not allowed in a command token"},
-		{"whitespace", "lima nerdctl", "whitespace inside one argument"},
-		{"control character", "lima\n", "control character"},
-		{"empty", "", "empty argument"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			c := &Config{}
-			err := c.AllowCommands([]string{tc.value})
-			if err == nil {
-				t.Fatalf("AllowCommands(%q) accepted a value it must reject", tc.value)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("error = %v, want it to contain %q", err, tc.want)
-			}
-			if !strings.Contains(err.Error(), "--allow-command") {
-				t.Errorf("error = %v, want it to name the flag the value came from", err)
-			}
-		})
-	}
-}
-
-// TestAllowCommandsRejectsEscalation: the escape hatch has a floor. Privilege
-// escalation is not something an env file may ask for OR an operator may grant here,
-// because granting it once on the command line elevates every command this tool
-// issues for the whole life of that env file -- while `sudo solace-util ...` elevates one
-// invocation the operator chose, at the moment they chose it. The category is
-// refused, not the word: blocking `sudo` while allowing `doas` would be a control in
-// name only.
-func TestAllowCommandsRejectsEscalation(t *testing.T) {
-	for _, name := range []string{"sudo", "sudoedit", "doas", "su", "pkexec", "run0", "systemd-run", "machinectl",
-		"setpriv", "capsh", "unshare", "nsenter", "runas", "gsudo", "sudo.exe", "gsudo.EXE"} {
+// TestNewEscalatorsAreNeverApproved: the eight wrappers the shared guard added to
+// the escalation ban are refused in a command and as an --allow-command value, with
+// the message that names running solace-util itself under the wrapper. A sample of
+// the old list is not repeated here -- the shared module's own tests carry it.
+func TestNewEscalatorsAreNeverApproved(t *testing.T) {
+	for _, name := range []string{"runuser", "sg", "chroot", "gosu", "su-exec", "setuidgid", "s6-setuidgid", "chpst"} {
 		t.Run(name, func(t *testing.T) {
-			c := &Config{}
-			err := c.AllowCommands([]string{name})
+			c := guardConfig(Podman)
+			c.Podman.Command = Command{name, "podman"}
+			err := c.Validate(Podman)
+			if err == nil || !strings.Contains(err.Error(), "privilege-escalation wrapper") {
+				t.Errorf("Validate with command %q = %v, want the privilege-escalation refusal", name, err)
+			}
+
+			err = (&Config{}).AllowCommands([]string{name})
 			if err == nil {
 				t.Fatalf("AllowCommands(%q) approved a privilege-escalation wrapper", name)
 			}
-			if !strings.Contains(err.Error(), "is never permitted") {
-				t.Errorf("error = %v, want it to say the value is never permitted", err)
-			}
-			// The message must point at the supported alternative, or the rule reads
-			// as "you cannot do this" rather than "do it the other way".
-			if !strings.Contains(err.Error(), "solace ...") {
-				t.Errorf("error = %v, want it to name the `<escalator> solace ...` alternative", err)
-			}
-			if c.extraAllowed[execBase(name)] {
-				t.Errorf("AllowCommands(%q) recorded the name despite failing", name)
+			for _, want := range []string{"--allow-command " + name + " is never permitted", name + " solace-util ..."} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("AllowCommands(%q) = %v\n  want it to contain %q", name, err, want)
+				}
 			}
 		})
-	}
-}
-
-// TestEscalationCannotBeAllowedByAnyRoute is the structural backstop: even if a
-// future edit put an escalation wrapper into execBinaries, or some other caller
-// populated extraAllowed directly, allowed() strips the category back out. The rule
-// does not depend on AllowCommands being the only door.
-func TestEscalationCannotBeAllowedByAnyRoute(t *testing.T) {
-	forced := map[string]bool{"sudo": true, "doas": true, "pkexec": true}
-	for _, cmd := range []Command{
-		{"sudo", "podman"},
-		{"doas", "podman"},
-		{"podman", "sudo"},
-	} {
-		if err := CheckCommand(runtimeRules(Podman), cmd, forced); err == nil {
-			t.Errorf("CheckCommand(%q) accepted an escalation wrapper from a forced allow-set", cmd)
-		}
-	}
-	// The floor is specific to escalation: a legitimate wrapper in the same forced
-	// set still works, so this is a deny-list and not a broken allow-set.
-	if err := CheckCommand(runtimeRules(Podman), Command{"lima", "podman"}, map[string]bool{"lima": true}); err != nil {
-		t.Errorf("the deny-list broke a legitimate approval: %v", err)
-	}
-}
-
-// TestAllowedBinaryIsNotGloballyAllowed: an approval widens the allowlist for the
-// invocation, not for the process image -- it is stored per-Config, so a second
-// config in the same run does not inherit it.
-func TestAllowedBinaryIsNotGloballyAllowed(t *testing.T) {
-	approved := &Config{}
-	if err := approved.AllowCommands([]string{"lima"}); err != nil {
-		t.Fatalf("AllowCommands = %v", err)
-	}
-	approved.Podman.Command = Command{"lima", "podman"}
-	if _, err := approved.RuntimeCommand(Podman); err != nil {
-		t.Fatalf("approved config rejected `lima podman`: %v", err)
-	}
-
-	plain := &Config{}
-	plain.Podman.Command = Command{"lima", "podman"}
-	if _, err := plain.RuntimeCommand(Podman); err == nil {
-		t.Error("an --allow-command approval leaked into a config that never received it")
 	}
 }
 
@@ -710,14 +265,14 @@ func TestComposeDerivationInheritsRejection(t *testing.T) {
 // escape hatch is a load error, not a silently ignored one. The field backing it is
 // unexported, so yaml.v3 could not write it even without strict mode.
 func TestAllowCommandIsNotASchemaKey(t *testing.T) {
-	for _, key := range []string{"allowCommand", "allow-command", "allowCommands", "extraAllowed"} {
+	for _, key := range []string{"allowCommand", "allow-command", "allowCommands", "approvals"} {
 		doc := "redundancy:\n  enabled: false\n" + key + ": [lima]\n"
 		var c Config
 		if err := decodeStrict(doc, &c); err == nil {
 			t.Errorf("an env file key %q was accepted; the allowlist must not be settable from config", key)
 		}
-		if c.extraAllowed != nil {
-			t.Errorf("an env file key %q reached the allowlist: %v", key, c.extraAllowed)
+		if err := execguard.Check(runtimeRules(Podman), Command{"lima", "podman"}, c.approvals); err == nil {
+			t.Errorf("an env file key %q reached the allowlist: `lima podman` was accepted", key)
 		}
 	}
 }
@@ -729,7 +284,7 @@ func TestAllowCommandIsNotASchemaKey(t *testing.T) {
 // (this one and validateExecCommands') cannot silently drift: a field missing from
 // the pass keeps its literal '~' and the row here fails.
 //
-// Every case runs the whole pass and then CheckCommand, because the two halves are
+// Every case runs the whole pass and then execguard.Check, because the two halves are
 // one feature: expansion has to produce something the guard accepts, which is what
 // makes `--kubeconfig ~/solace/kubecontext` work end to end.
 func TestCommandTildeExpansion(t *testing.T) {
@@ -741,7 +296,7 @@ func TestCommandTildeExpansion(t *testing.T) {
 		platform Platform
 		set      func(*Config)
 		get      func(*Config) Command
-		rules    commandRules
+		rules    execguard.Rules
 	}{
 		{
 			"kubernetes.command", K8s,
@@ -757,7 +312,7 @@ func TestCommandTildeExpansion(t *testing.T) {
 		},
 		{
 			// The STANDALONE binary, not `docker compose`, and the guard is what
-			// decides that: checkFlagShape admits the `compose` subword only as the
+			// decides that: the flag-shape rule admits the `compose` subword only as the
 			// LAST token and only directly after an allowed binary, so there is no
 			// position left for a flag value in that shape -- `docker --config ~/dk
 			// compose` is refused for the subword, not for the tilde. A tilde in
@@ -800,15 +355,15 @@ func TestCommandTildeExpansion(t *testing.T) {
 					"expandCommandHomes' list", tc.name, last, home+"/")
 			}
 			// The point of expanding at all: the guard must then accept it.
-			if err := CheckCommand(tc.rules, got, nil); err != nil {
-				t.Errorf("CheckCommand after expansion = %v, want accepted", err)
+			if err := execguard.Check(tc.rules, got, execguard.Approvals{}); err != nil {
+				t.Errorf("execguard.Check after expansion = %v, want accepted", err)
 			}
 		})
 	}
 
 	// argv[0] is deliberately NOT expanded: it names a bare binary resolved through
 	// the operator's PATH, so a home directory cannot be part of it. The pass leaves
-	// it alone and checkBinary's own message is what the operator sees.
+	// it alone and the shared guard's own message is what the operator sees.
 	t.Run("argv[0] is left alone and then refused", func(t *testing.T) {
 		c := guardConfig(K8s)
 		seam(c)
@@ -819,7 +374,7 @@ func TestCommandTildeExpansion(t *testing.T) {
 		if c.K8s.Command[0] != "~/bin/kubectl" {
 			t.Errorf("argv[0] = %q, want it untouched", c.K8s.Command[0])
 		}
-		if err := CheckCommand(clusterRules(), c.K8s.Command, nil); err == nil {
+		if err := execguard.Check(clusterRules(), c.K8s.Command, execguard.Approvals{}); err == nil {
 			t.Error("an unexpanded argv[0] was accepted; the guard must refuse a path there")
 		}
 	})
@@ -858,7 +413,7 @@ func TestCommandTildeExpansion(t *testing.T) {
 	})
 
 	// A home with a space in it is refused HERE, in the words that fit a command --
-	// checkToken's own whitespace message tells the operator to write each argument
+	// the shared guard's own whitespace message tells the operator to write each argument
 	// as its own list entry, which is wrong advice for a space they did not type.
 	t.Run("a home with whitespace is refused in command words", func(t *testing.T) {
 		c := guardConfig(K8s)

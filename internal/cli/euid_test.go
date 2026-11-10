@@ -6,11 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"solace/internal/engine"
+	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/runner"
 )
 
 // The euid guard cli.prepare runs (container.GuardPodmanEUID) is the one place the
-// DECLARED podman.rootless is checked against the account running the command. It
+// DECLARED podman.rootful (unset means rootless) is checked against the account running the command. It
 // sits in prepare rather than in the Manager because fifteen container commands --
 // every `broker configure *` and `broker perform *` -- reach the broker over
 // `podman exec` and never build a Manager at all.
@@ -20,8 +21,9 @@ import (
 // reason and prove nothing. That is also why App.Geteuid exists: without it these
 // would pass or fail on whichever account runs `go test`.
 
-// writeRootlessPodmanEnv is a podman-only env file declaring rootless: true, so the
-// guard has something to disagree with. Podman only, so no --platform is needed.
+// writeRootlessPodmanEnv is a podman-only env file that leaves podman.rootful unset,
+// which is rootless, so the guard has something to disagree with. Podman only, so no
+// --platform is needed.
 func writeRootlessPodmanEnv(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "rootless.yaml")
@@ -33,8 +35,7 @@ func writeRootlessPodmanEnv(t *testing.T) string {
 		"  tag: \"10.10.1.128\"\n" +
 		"semp:\n" +
 		"  adminPass: " + smokeAdminPass + "\n" +
-		"podman:\n" +
-		"  rootless: true\n"
+		"podman: {}\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write rootless podman env: %v", err)
 	}
@@ -49,7 +50,7 @@ func runGuarded(t *testing.T, euid int, args ...string) (string, error, *opRunne
 	rr := &opRunner{}
 	out, err := runRootWith(t, args, func(a *App) {
 		a.Geteuid = func() int { return euid }
-		a.NewRunner = func(*App) engine.EnvRunner { return rr }
+		a.NewRunner = func(*App) runner.Runner { return rr }
 	})
 	return out, err, rr
 }
@@ -91,8 +92,8 @@ func TestPodmanEUIDGuardRefusesBeforeAnyCommand(t *testing.T) {
 			}
 			// Exit 2: a different invocation is what fixes it, and retrying the
 			// same one cannot -- prepare's own rule (platform.go).
-			if code := ExitCode(err); code != exitUsage {
-				t.Errorf("exit code = %d, want %d (usage)", code, exitUsage)
+			if code := exitcode.Code(err); code != exitcode.Usage {
+				t.Errorf("exit code = %d, want %d (usage)", code, exitcode.Usage)
 			}
 			if len(rr.calls) != 0 {
 				t.Errorf("nothing may reach the engine once the euid is wrong:\n%+v", rr.calls)

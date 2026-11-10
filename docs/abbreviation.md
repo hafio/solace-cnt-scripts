@@ -31,7 +31,7 @@ execution: each word is expanded by whatever already owns that input.
 | `--platform` value | `config.ParsePlatform` | flag handling |
 | Flag shorthand | pflag | flag parsing |
 
-What the four share is `internal/abbrev`, which owns the rules rather than the
+What the four share is `github.com/hafio/go-deploy-utility/abbrev`, which owns the rules rather than the
 words: a short form is lowercase letters or digits, is strictly shorter than the
 word it stands for, is claimed by one word only, and never shadows a canonical
 name. A declaration that breaks one of those fails at construction, so it cannot

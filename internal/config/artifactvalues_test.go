@@ -254,3 +254,49 @@ func TestValidateK8sArtifactValues(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckTimezone: the timezone is the one free-text value every platform writes
+// into its artifact, so the load holds it to an IANA-name charset. Zone names, the
+// empty "keep the image default" value included, pass; anything that is not UTF-8,
+// is invisible or whitespace, or is shell or quoting syntax is refused with the
+// field and the value named, and Validate refuses it before anything renders.
+func TestCheckTimezone(t *testing.T) {
+	for _, good := range []string{"", "UTC", "Europe/London", "Asia/Singapore", "Etc/GMT+8",
+		"America/Argentina/Buenos_Aires", "America/Port-au-Prince"} {
+		if err := checkTimezone("timezone", good); err != nil {
+			t.Errorf("checkTimezone(%q) = %v, want accepted", good, err)
+		}
+		c := validK8sConfig()
+		c.Timezone = good
+		if err := c.Validate(K8s); err != nil {
+			t.Errorf("Validate with timezone %q = %v, want accepted", good, err)
+		}
+	}
+	for _, tc := range []struct{ name, tz, want string }{
+		{"dollar sign", "Etc/GMT$0", `contains "$"`},
+		{"space", "Europe/ London", "contains whitespace"},
+		{"newline", "Europe/London\n", "control character"},
+		{"C1 control", "Europe/London\u009b", "control character"},
+		{"zero-width space", "Europe/Lon\u200bdon", "invisible formatting character"},
+		{"invalid UTF-8", "Europe/\xff", "not valid UTF-8"},
+		{"double quote", `Europe/"London`, `contains "\""`},
+		{"single quote", "Europe/'London", `contains "'"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkTimezone("timezone", tc.tz)
+			if err == nil {
+				t.Fatalf("checkTimezone(%q) accepted a value it must refuse", tc.tz)
+			}
+			for _, want := range []string{"timezone = " + strconv.Quote(tc.tz), tc.want, "Europe/London"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q should contain %q", err, want)
+				}
+			}
+			c := validK8sConfig()
+			c.Timezone = tc.tz
+			if err := c.Validate(K8s); err == nil || !strings.Contains(err.Error(), "timezone = ") {
+				t.Errorf("Validate with timezone %q: err = %v, want the timezone refusal", tc.tz, err)
+			}
+		})
+	}
+}

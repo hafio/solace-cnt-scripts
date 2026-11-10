@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
-	"solace/internal/engine"
 )
 
 // adminsecret.go is where this deployment's admin password lives on Kubernetes when the
@@ -44,7 +45,7 @@ func AdminSecretInUse(cfg *config.Config) string {
 // command that must authenticate when the env file carries no semp.adminPass. It goes
 // through readSecretKey, the reader replication already uses, and adds the next step that
 // fits whichever Secret it was.
-func ReadAdminPassword(r engine.Runner, cfg *config.Config) (string, error) {
+func ReadAdminPassword(r runner.Runner, cfg *config.Config) (string, error) {
 	cmd, err := cfg.ClusterCommand()
 	if err != nil {
 		return "", err
@@ -73,7 +74,9 @@ func ReadAdminPassword(r engine.Runner, cfg *config.Config) (string, error) {
 // already needs to confirm its own apply -- rather than `list`, which a Role written for
 // this tool's own operations need not grant.
 func (c *Cluster) LiveAdminSecret(ctx context.Context) (name string, found bool, err error) {
-	raw, err := c.kubectlOutput(ctx, "get", brokerResource, c.Cfg.K8s.Name, "-n", c.ns(), "--ignore-not-found", "-o", "json")
+	raw, err := c.outKube(ctx, func(b []string) runner.Cmd {
+		return kube.Get(b, kube.GetOptions{Namespace: c.ns(), IgnoreNotFound: true, Output: "json"}, brokerResource, c.Cfg.K8s.Name)
+	})
 	if err != nil {
 		return "", false, err
 	}
@@ -113,27 +116,23 @@ func (c *Cluster) LiveAdminSecret(ctx context.Context) (name string, found bool,
 // preview and test seams), so there is nothing to refuse on.
 //
 // Both reads are BY NAME -- this broker's CR, and its own data claims -- so each needs
-// only `get` on its kind, and each is permission-probed first, so an expired login or a
-// missing grant gets the preflight's own guidance rather than a message about passwords.
-// The two halves fail differently. The CR probe stops the deploy when refused, since the
-// deploy's own apply needs that same `get` and would fail later, after writing. The
-// claims probe does not: reading claims is no part of a deploy, so a refused grant there
-// is a WARNING naming what went unchecked and the way to settle it, and the deploy goes
-// on -- a wrong guess here costs a broker that needs semp.adminPass set and a redeploy,
-// never data.
+// only `get` on its kind. Neither is probed first: a read is not a requirement, so each is
+// simply made, and a read the cluster REFUSES (kube.Forbidden on kubectl's own words) is
+// told apart from every other failure. A refused CR read is not fatal: the deploy's own
+// apply, not this check, is what needs that grant, and the data check below decides. A
+// refused claims read is a WARNING naming what went unchecked and the way to settle it, and
+// the deploy goes on -- a wrong guess here costs a broker that needs semp.adminPass set and a
+// redeploy, never data. Any other failed claims read keeps its error, with the way out.
 //
-// A failed CR read after its probe passed is most often the CRD not being installed yet,
-// where no broker can exist: it is not fatal on its own, and the data check decides -- a
-// running broker always has its data claims, so a refusal still follows whenever there is
-// something to lose. Claims under a custom volume mount are not checked: they exist before
-// a first deploy, so their presence says nothing about earlier data (docs/configuration.md,
-// "The admin Secret", says so).
+// A failed CR read -- most often the CRD not being installed yet, where no broker can exist,
+// or this identity not being allowed to get brokers -- is not fatal on its own, and the data
+// check decides: a running broker always has its data claims, so a refusal still follows
+// whenever there is something to lose. Claims under a custom volume mount are not checked:
+// they exist before a first deploy, so their presence says nothing about earlier data
+// (docs/configuration.md, "The admin Secret", says so).
 func (c *Cluster) AdminPasswordPreflight(ctx context.Context) error {
 	if c.Cfg.AdminSecretName() != "" {
 		return nil
-	}
-	if err := c.Preflight(ctx, "get", brokerResource); err != nil {
-		return err
 	}
 	name, generated := c.Cfg.K8s.Name, c.Cfg.OperatorAdminSecretName()
 	live, found, crErr := c.LiveAdminSecret(ctx)
@@ -148,28 +147,26 @@ func (c *Cluster) AdminPasswordPreflight(ctx context.Context) error {
 		}
 		return nil
 	}
-	if err := c.Preflight(ctx, "get", "persistentvolumeclaims"); err != nil {
-		if !errors.Is(err, errNotAllowed) {
-			return err
-		}
-		c.progress().Warn("not checked: whether namespace %s holds an earlier broker's data -- this identity may "+
-			"not get persistentvolumeclaims there. If broker %s was removed with its data kept, set semp.adminPass "+
-			"to its admin password (or kubernetes.adminSecret to a Secret holding it) before deploying: the "+
-			"operator would otherwise generate a new password the kept data does not accept", c.ns(), name)
-		return nil
-	}
 	var pvcs struct {
 		Items []struct {
 			Metadata objectMeta `json:"metadata"`
 		} `json:"items"`
 	}
 	want := map[string]bool{}
-	read := []string{"pvc"}
+	what := []string{"pvc"}
 	for _, role := range HARoles(c.Cfg) {
 		want[pvcName(c.Cfg, role)] = true
-		read = append(read, pvcName(c.Cfg, role))
+		what = append(what, pvcName(c.Cfg, role))
 	}
-	if err := c.getJSON(ctx, &pvcs, append(read, "-n", c.ns(), "--ignore-not-found")...); err != nil {
+	stderr, err := c.getJSONTee(ctx, &pvcs, getRead{kube.GetOptions{Namespace: c.ns(), IgnoreNotFound: true}, what})
+	if err != nil && kube.Forbidden(stderr) {
+		c.progress().Warn("not checked: whether namespace %s holds an earlier broker's data -- this identity may "+
+			"not get persistentvolumeclaims there. If broker %s was removed with its data kept, set semp.adminPass "+
+			"to its admin password (or kubernetes.adminSecret to a Secret holding it) before deploying: the "+
+			"operator would otherwise generate a new password the kept data does not accept", c.ns(), name)
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("check namespace %q for an earlier broker's data before letting the operator generate "+
 			"its admin password: %w\n  Set semp.adminPass (or kubernetes.adminSecret) to deploy without this check",
 			c.ns(), err)

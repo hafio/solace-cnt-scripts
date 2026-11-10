@@ -2,14 +2,13 @@ package container
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
-	"solace/internal/engine"
 	"solace/internal/render"
 )
 
@@ -61,11 +60,10 @@ func TestPreflightRunsBeforeAnything(t *testing.T) {
 
 // TestPreflightFailureStopsTheDeploy: when the engine cannot be reached, Deploy
 // stops nonzero with the engine's own error passed through and one actionable hint
-// -- and writes nothing. Without the "writes nothing" half the probe would be
-// decoration.
+// -- and runs nothing else. Without the "runs nothing" half the probe would be
+// decoration. The message is containercli.InfoError's, shared with solmq-conn-util, and
+// the engine's own output is not repeated in it (stderr already streamed it).
 func TestPreflightFailureStopsTheDeploy(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
 	cfg := ctrCfg(config.Docker, "false")
 	m, rr, _ := newCapMgr(cfg, config.Docker)
 	rr.outFail = failOn("info")
@@ -84,10 +82,7 @@ func TestPreflightFailureStopsTheDeploy(t *testing.T) {
 	if !strings.Contains(msg, "injected failure") {
 		t.Errorf("error = %v, want it to carry the engine's own error", msg)
 	}
-	// Nothing written, nothing else run.
-	if _, statErr := os.Stat(filepath.Join(dir, "docker-compose.yml")); statErr == nil {
-		t.Error("a compose file was written despite a failed preflight")
-	}
+	// Nothing else run: no compose, no probe, no secret.
 	if len(rr.calls) != 1 {
 		t.Errorf("%d calls made after a failed preflight, want only the probe: %+v", len(rr.calls), rr.calls)
 	}
@@ -140,7 +135,7 @@ func TestPreflightHintIsPlatformShaped(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := ctrCfg(tc.p, "false")
-			cfg.Podman.Rootless = tc.rootless
+			cfg.Podman.Rootful = !tc.rootless
 			m, rr, _ := newCapMgr(cfg, tc.p)
 			rr.outFail = failOn("info")
 
@@ -234,7 +229,8 @@ func TestComposeSecretEnvNamesCannotBeSystemVars(t *testing.T) {
 // TestComposeSecretEnvIsTheOnlyChildEnvironment guards the assumption the two tests
 // above rest on: if a second code path ever starts adding variables to a child, it
 // must be audited the same way. render.ContainerSecrets is that single source: one
-// variable per secret, plus the certificate's DigestEnvVar, which render also names.
+// variable per secret. The deploy digest is added by deployDocker alone, under the
+// fixed name render.DeployDigestEnvVar.
 func TestComposeSecretEnvIsTheOnlyChildEnvironment(t *testing.T) {
 	cfg := ctrCfg(config.Docker, "true")
 	m, _, _ := newCapMgr(cfg, config.Docker)
@@ -251,19 +247,15 @@ func TestComposeSecretEnvIsTheOnlyChildEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("composeSecretEnv: %v", err)
 	}
-	masked := engine.MaskEnv(raw)
+	masked := runner.MaskEnv(raw)
 	if strings.Contains(masked, "secret-pass") || strings.Contains(masked, "test-psk") {
 		t.Errorf("MaskEnv leaked a secret value: %q", masked)
 	}
-	// With a certificate, exactly the variables render names: each EnvVar, and the
-	// certificate's DigestEnvVar.
+	// With a certificate, exactly the variables render names: each EnvVar.
 	cfg.TLS.Cert, cfg.TLS.CertKey = "certs/tls.crt", "certs/tls.key"
 	var names []string
 	for _, s := range render.ContainerSecrets(cfg, config.Docker) {
 		names = append(names, s.EnvVar())
-		if len(s.SourceFiles) > 0 {
-			names = append(names, s.DigestEnvVar())
-		}
 	}
 	withCert, err := m.composeSecretEnv(true)
 	if err != nil {

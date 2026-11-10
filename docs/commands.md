@@ -589,8 +589,10 @@ solace-util broker copy into files... [flags]
 Deploy the broker and its prerequisites
 
 Applies every prerequisite -- namespace, secrets, TLS -- then the broker, and is
-safe to re-run. A running broker is restarted for a change only on consent or
---restart. Kubernetes readiness is not waited on; `broker status` watches it.
+safe to re-run. A running broker is restarted for a change only on consent, or
+with --restart (docker/podman also take --no-prompt, which approves; with no
+terminal and no --no-prompt the deploy fails before it changes anything).
+Kubernetes readiness is not waited on; `broker status` watches it.
 
 ```
 solace-util broker deploy [flags]
@@ -601,8 +603,9 @@ Also available as: dp
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--no-prompt` | `false` | do not ask: answer yes to every question this command would ask (docker/podman only) |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (docker/podman only) |
-| `--restart` | `false` | restart an already-running broker when the deploy changed its artifact or its server certificate (otherwise you are asked, and a non-interactive run leaves it running) |
+| `--restart` | `false` | restart or recreate an already-running broker without asking, for a changed artifact, secret or server certificate and also for an unchanged one (otherwise docker/podman ask, and fail with no terminal unless --no-prompt is given; Kubernetes asks only about a renewed certificate) |
 
 
 ### solace-util broker generate
@@ -983,7 +986,7 @@ Also available as: sts
 | `--all` | `false` | report every Solace broker found, not just the one this env file describes (Kubernetes: across all namespaces; docker/podman: every Solace container on this host) |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 | `--detail` | `false` | include the static artifacts, not just the running ones (Kubernetes: secrets, configmaps and PVCs; docker/podman: mounts, which is also where secrets appear) |
-| `--interval` | (none) | how often --watch refreshes, as a duration such as 5s or 1m (default 5s, at least 1s) |
+| `--interval` | (none) | how often --watch refreshes, as a duration such as 5s or 1m (default 5s, at least 1s, at most 1h) |
 | `--pod` | (none) | role to act on: primary (p), backup (b) or monitor (m). Kubernetes: which pod. Docker/podman: which node THIS host is, detected from this host's name or address when omitted (kubernetes only) |
 | `--watch` | `false` | re-run the report every --interval until Ctrl-C; on a terminal the screen is redrawn in place |
 
@@ -1117,8 +1120,10 @@ Install the operator, or add this env file's namespaces to it (kubernetes only)
 Installs the operator, or unions this env file's namespaces into an
 already-running one's watch list.
 
-Widening the watch to all namespaces, or installing an older version,
-needs an interactive confirmation with no unattended override.
+Installing an older version asks first; --no-prompt approves it. Widening
+the watch to all namespaces needs a terminal and is never approved by
+--no-prompt: name the namespaces in kubernetes.operator.watchNamespaces
+instead.
 
 ```
 solace-util operator deploy [flags]
@@ -1131,6 +1136,7 @@ Applies to: kubernetes. On any other platform this command fails rather than doi
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
+| `--no-prompt` | `false` | approve an operator downgrade without asking; never approves widening the watch to every namespace |
 
 
 ### solace-util operator generate
@@ -1273,7 +1279,7 @@ Applies to: kubernetes. On any other platform this command fails rather than doi
 | --- | --- | --- |
 | `--allow-command` | `[]` | approve one extra binary for the config's platform command, for this run only (repeatable; a bare name, never a path). The env file cannot grant this |
 | `--detail` | `false` | include the full description of the operator deployment |
-| `--interval` | (none) | how often --watch refreshes, as a duration such as 5s or 1m (default 5s, at least 1s) |
+| `--interval` | (none) | how often --watch refreshes, as a duration such as 5s or 1m (default 5s, at least 1s, at most 1h) |
 | `--watch` | `false` | re-run the report every --interval until Ctrl-C; on a terminal the screen is redrawn in place |
 
 

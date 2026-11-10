@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/containercli/inspect"
+
 	"solace/internal/config"
 )
 
@@ -46,24 +48,17 @@ const podmanInspect = `[{
   "Mounts": [{"Source": "/opt/solace/data", "Destination": "/var/lib/solace/jail", "RW": true}]
 }]`
 
-// TestInspectNameLosesDockersLeadingSlash. `/solbroker` is not a name either engine
-// accepts back, and printing it beside podman's `solbroker` would make one engine's
-// report disagree with the other about what the container is called.
-func TestInspectNameLosesDockersLeadingSlash(t *testing.T) {
-	for _, tc := range []struct{ name, raw string }{
-		{"docker", dockerInspect},
-		{"podman", podmanInspect},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s, err := decodeInspect([]byte(tc.raw))
-			if err != nil {
-				t.Fatalf("decode: %v", err)
-			}
-			if got := s.containerName(); got != "solbroker" {
-				t.Errorf("containerName() = %q, want %q", got, "solbroker")
-			}
-		})
+// decodeOne decodes an engine reply with the shared decoder, which owns the engine
+// differences (docker's leading slash, the two health spellings, an empty or malformed
+// answer) and has its own tests (inspect.TestDecode*). What is tested here is what this
+// tool makes of the result.
+func decodeOne(t *testing.T, raw string) inspect.Container {
+	t.Helper()
+	cs, err := inspect.Decode(raw)
+	if err != nil || len(cs) != 1 {
+		t.Fatalf("decode: %v (%d containers)", err, len(cs))
 	}
+	return cs[0]
 }
 
 // TestInspectHealthReadsBothSpellings is the one that matters most: a report naming
@@ -71,20 +66,12 @@ func TestInspectNameLosesDockersLeadingSlash(t *testing.T) {
 // "no healthcheck configured" -- the most misleading thing this report could say
 // about a broker.
 func TestInspectHealthReadsBothSpellings(t *testing.T) {
-	docker, err := decodeInspect([]byte(dockerInspect))
-	if err != nil {
-		t.Fatalf("decode docker: %v", err)
-	}
-	status, configured := docker.health()
+	status, configured := health(decodeOne(t, dockerInspect))
 	if !configured || status != "healthy" {
 		t.Errorf("docker health: got (%q, %v), want (\"healthy\", true)", status, configured)
 	}
 
-	podman, err := decodeInspect([]byte(podmanInspect))
-	if err != nil {
-		t.Fatalf("decode podman: %v", err)
-	}
-	status, configured = podman.health()
+	status, configured = health(decodeOne(t, podmanInspect))
 	if !configured {
 		t.Fatal("podman health: reported as not configured, but Healthcheck.Status is set")
 	}
@@ -102,24 +89,45 @@ func TestInspectHealthReadsBothSpellings(t *testing.T) {
 func TestInspectDistinguishesNoHealthcheckFromUnknown(t *testing.T) {
 	const noHealth = `[{"Name": "b", "State": {"Status": "running", "Running": true},
 	  "Config": {"Image": "i"}}]`
-	s, err := decodeInspect([]byte(noHealth))
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if status, configured := s.health(); configured || status != "" {
+	if status, configured := health(decodeOne(t, noHealth)); configured || status != "" {
 		t.Errorf("health() on a container with no healthcheck: got (%q, %v), want (\"\", false)",
 			status, configured)
 	}
 }
 
-// TestInspectRejectsAnEmptyReply. An engine answers a name it does not know with an
-// empty ARRAY and exit 0 on some versions, so the absence has to be turned into an
-// error here or the caller reports a container with no name, no image and no state
-// as though that were its condition.
-func TestInspectRejectsAnEmptyReply(t *testing.T) {
-	for _, raw := range []string{"[]", "", "not json"} {
-		if _, err := decodeInspect([]byte(raw)); err == nil {
-			t.Errorf("decodeInspect(%q) returned no error", raw)
+// TestInspectContainerRejectsAnUnusableReply. An engine answers a name it does not know
+// with an empty ARRAY and exit 0 on some versions, so the absence has to be turned into
+// an error here or the caller reports a container with no name, no image and no state
+// as though that were its condition. An empty answer and one that is not JSON are the
+// decoder's errors, passed through.
+func TestInspectContainerRejectsAnUnusableReply(t *testing.T) {
+	for _, tc := range []struct{ reply, want string }{
+		{"[]", "no container named"},
+		{"", "answered nothing"},
+		{"not json", "not a list of containers"},
+	} {
+		m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
+		rr.out = []byte(tc.reply)
+		_, err := m.inspectContainer(context.Background(), "solace")
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("reply %q: err = %v, want one containing %q", tc.reply, err, tc.want)
+		}
+	}
+}
+
+// TestInspectContainerArgv pins the engine call: `container inspect <name>`, the
+// subcommand that answers for containers alone, so an image or a volume with the same
+// name never does.
+func TestInspectContainerArgv(t *testing.T) {
+	for _, p := range []config.Platform{config.Docker, config.Podman} {
+		m, rr, _ := newCapMgr(ctrCfg(p, "false"), p)
+		rr.out = inspectReply(m.name(), 0)
+		if _, err := m.inspectContainer(context.Background(), m.name()); err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		if got := rr.last(); got.method != "Output" || got.name != string(p) ||
+			!eqArgs(got.args, []string{"container", "inspect", m.name()}) {
+			t.Errorf("%s inspect argv = %+v, want `container inspect %s`", p, got, m.name())
 		}
 	}
 }
@@ -129,17 +137,14 @@ func TestInspectRejectsAnEmptyReply(t *testing.T) {
 // point, and three quarters of it is worth more than none.
 func TestInspectDecodesPartialOutput(t *testing.T) {
 	const partial = `[{"Name": "/b", "State": {"Status": "exited", "ExitCode": 137, "Error": "OOMKilled"}}]`
-	s, err := decodeInspect([]byte(partial))
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if s.Config.Image != "" {
-		t.Errorf("Image = %q, want empty", s.Config.Image)
+	s := decodeOne(t, partial)
+	if s.Image != "" {
+		t.Errorf("Image = %q, want empty", s.Image)
 	}
 	if s.State.ExitCode != 137 || s.State.Error != "OOMKilled" {
 		t.Errorf("exit state = (%d, %q), want (137, \"OOMKilled\")", s.State.ExitCode, s.State.Error)
 	}
-	if orUnknown(s.Config.Image) != "(unknown)" {
+	if orUnknown(s.Image) != "(unknown)" {
 		t.Error("a missing field must render as (unknown), not as an empty column")
 	}
 }
@@ -165,16 +170,16 @@ func TestRestartCountComesFromSystemdOnPodman(t *testing.T) {
 		return inspectReply("sol-pod", 0) // the engine's counter: untouched by systemd
 	}
 
-	s, err := m.inspectState(context.Background(), m.name())
+	s, err := m.inspectContainer(context.Background(), m.name())
 	if err != nil {
-		t.Fatalf("inspectState: %v", err)
+		t.Fatalf("inspectContainer: %v", err)
 	}
 	got, ok := m.restartCount(context.Background(), s)
 	if !ok || got != 12 {
 		t.Fatalf("podman restart count = (%d, %v), want (12, true) -- systemd's NRestarts, "+
 			"not the engine's %d", got, ok, s.RestartCount)
 	}
-	if !hasCall(rr, "systemctl", []string{"show", "-p", "NRestarts", "--value", "sol-pod.service"}) {
+	if !hasCall(rr, "systemctl", []string{"show", "sol-pod.service", "-p", "NRestarts", "--value"}) {
 		t.Errorf("expected systemd to be asked for NRestarts on the unit:\n%+v", rr.calls)
 	}
 }
@@ -185,9 +190,9 @@ func TestRestartCountUsesTheEngineOnDocker(t *testing.T) {
 	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 	rr.outFor = func(string, []string) []byte { return inspectReply("/solace", 3) }
 
-	s, err := m.inspectState(context.Background(), m.name())
+	s, err := m.inspectContainer(context.Background(), m.name())
 	if err != nil {
-		t.Fatalf("inspectState: %v", err)
+		t.Fatalf("inspectContainer: %v", err)
 	}
 	got, ok := m.restartCount(context.Background(), s)
 	if !ok || got != 3 {
@@ -213,9 +218,9 @@ func TestRestartCountDoesNotAttributeOurUnitToAnotherContainer(t *testing.T) {
 		return inspectReply("someone-elses-broker", 5)
 	}
 
-	s, err := m.inspectState(context.Background(), "someone-elses-broker")
+	s, err := m.inspectContainer(context.Background(), "someone-elses-broker")
 	if err != nil {
-		t.Fatalf("inspectState: %v", err)
+		t.Fatalf("inspectContainer: %v", err)
 	}
 	got, ok := m.restartCount(context.Background(), s)
 	if !ok || got != 5 {
@@ -237,6 +242,7 @@ func TestRestartCountUnknownRatherThanZero(t *testing.T) {
 	for _, tc := range []struct{ name, reply string }{
 		{"not a number", "n/a\n"},
 		{"empty", ""},
+		{"negative", "-1\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, rr, buf := newCapMgr(ctrCfg(config.Podman, "false"), config.Podman)
@@ -246,9 +252,9 @@ func TestRestartCountUnknownRatherThanZero(t *testing.T) {
 				}
 				return inspectReply("sol-pod", 0)
 			}
-			s, err := m.inspectState(context.Background(), m.name())
+			s, err := m.inspectContainer(context.Background(), m.name())
 			if err != nil {
-				t.Fatalf("inspectState: %v", err)
+				t.Fatalf("inspectContainer: %v", err)
 			}
 			if _, ok := m.restartCount(context.Background(), s); ok {
 				t.Error("an unreadable NRestarts must report unknown, not a number")
@@ -372,20 +378,20 @@ func TestReportStateOnAHealthyRunningContainer(t *testing.T) {
 	}
 }
 
-// TestInspectStateSurfacesTheEngineError: an engine that cannot be asked -- daemon
+// TestInspectContainerSurfacesTheEngineError: an engine that cannot be asked -- daemon
 // down, socket gone -- must surface its own error rather than a parse failure about
 // the empty output that follows from it. The parse error would send whoever reads it
 // looking for a malformed reply that was never sent.
-func TestInspectStateSurfacesTheEngineError(t *testing.T) {
+func TestInspectContainerSurfacesTheEngineError(t *testing.T) {
 	m, rr, _ := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
 	rr.outErr = errListFailed
 
-	_, err := m.inspectState(context.Background(), m.name())
+	_, err := m.inspectContainer(context.Background(), m.name())
 	if err == nil {
 		t.Fatal("an engine failure must not be reported as a successful inspect")
 	}
 	if !errors.Is(err, errListFailed) {
-		t.Errorf("inspectState should pass the engine's own error through, got %v", err)
+		t.Errorf("inspectContainer should pass the engine's own error through, got %v", err)
 	}
 	if strings.Contains(err.Error(), "parsing inspect output") {
 		t.Errorf("an engine failure was reported as a parse failure: %v", err)
@@ -401,9 +407,9 @@ func TestRestartCountUnknownWhenSystemctlFails(t *testing.T) {
 	rr.outFor = func(string, []string) []byte { return inspectReply("sol-pod", 0) }
 	rr.outFail = failOn("systemctl")
 
-	s, err := m.inspectState(context.Background(), m.name())
+	s, err := m.inspectContainer(context.Background(), m.name())
 	if err != nil {
-		t.Fatalf("inspectState: %v", err)
+		t.Fatalf("inspectContainer: %v", err)
 	}
 	if n, ok := m.restartCount(context.Background(), s); ok {
 		t.Errorf("a failed systemctl must report unknown, got %d", n)
@@ -425,20 +431,31 @@ func kvValue(report, key string) string {
 	return ""
 }
 
-// TestPrintableStripsControlCharacters: image names, statuses, error text and mount paths
-// come out of `<runtime> inspect` -- data about a container this tool did not necessarily
-// create -- and land in a report a terminal renders. A terminal escape inside one would be
-// executed by the terminal reading it.
-func TestPrintableStripsControlCharacters(t *testing.T) {
-	for in, want := range map[string]string{
-		"solace/pubsub:10.10":   "solace/pubsub:10.10",
-		"exited\x1b[2J":         "exited[2J",
-		"a\x00b\x7fc":           "abc",
-		"line\nbreak":           "linebreak",
-		"":                      "",
-	} {
-		if got := printable(in); got != want {
-			t.Errorf("printable(%q) = %q, want %q", in, got, want)
+// TestReportStatePrintsEngineTextThroughPrintable: the name, image, state, error text and
+// mount paths come out of `<runtime> container inspect` -- data about a container this
+// tool did not necessarily create -- and land in a report a terminal renders. A terminal
+// escape inside one would be executed by the terminal reading it, so each passes through
+// inspect.Printable, which also drops the C1 controls a bare ESC filter misses. The
+// filter itself is tested in the shared package (inspect.TestPrintable).
+func TestReportStatePrintsEngineTextThroughPrintable(t *testing.T) {
+	const hostile = `[{"Name": "/sol\u001b[2Jace", "State": {"Status": "exi\u009bted", "Running": false,
+	  "ExitCode": 1, "Error": "boom\u001b]0;pwned\u0007", "FinishedAt": "2026\u001b"},
+	  "Config": {"Image": "img\u001b[31m"},
+	  "Mounts": [{"Source": "/src\u0085", "Destination": "/dst\u001b[0m", "RW": true}]}]`
+	m, rr, buf := newCapMgr(ctrCfg(config.Docker, "false"), config.Docker)
+	rr.outFor = func(string, []string) []byte { return []byte(hostile) }
+	if err := m.inspectAndReport(context.Background(), m.name()); err != nil {
+		t.Fatalf("inspectAndReport: %v", err)
+	}
+	got := buf.String()
+	for _, bad := range []string{"\x1b", "\x07", "\u009b", "\u0085"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("control character %q reached the report:\n%q", bad, got)
+		}
+	}
+	for _, want := range []string{"sol[2Jace", "exited", "boom]0;pwned", "/src -> /dst[0m (rw)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the printable text %q must survive:\n%q", want, got)
 		}
 	}
 }

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/rootless"
+
 	"solace/internal/config"
 	"solace/internal/render"
 )
@@ -24,11 +26,23 @@ import (
 const (
 	healthyNrOpen           = "1048576\n"
 	healthySessionNoFile    = "1048576\n"
-	healthySessionCore      = "unlimited\n"
+	healthySessionCore      = "unlimited"
 	healthyUserManagerProps = "LimitNOFILE=1048576\nLimitNOFILESoft=1024\n" +
 		"LimitMEMLOCK=infinity\nLimitCORE=infinity\n" +
 		"DelegateControllers=cpu cpuset io memory pids\n"
 )
+
+// procLimits is /proc/self/limits as the kernel prints it, with the hard core limit
+// set to hard: the answer to `cat /proc/self/limits` (rootless.ProcLimits) that the
+// session core row reads. The session's own soft core limit is 0, which is the usual
+// shell default and is never gated, only the hard one.
+func procLimits(hard string) string {
+	return "Limit                     Soft Limit           Hard Limit           Units     \n" +
+		"Max cpu time              unlimited            unlimited            seconds   \n" +
+		"Max file size             unlimited            unlimited            bytes     \n" +
+		"Max core file size        0                    " + hard + "            bytes     \n" +
+		"Max open files            1024                 1048576              files     \n"
+}
 
 // limitsMgr builds a Manager for platform p whose limit probes answer nrOpen and
 // whose every other probe answers healthily, so these tests fail on the host
@@ -37,20 +51,20 @@ const (
 //
 // SysctlDropIn is redirected into a temp directory. The default is /etc, and a
 // test that raised nr_open would otherwise write to the machine running it.
-func limitsMgr(t *testing.T, p config.Platform, rootless bool, nrOpen string) (*Manager, *capRunner, *bytes.Buffer) {
+func limitsMgr(t *testing.T, p config.Platform, userMode bool, nrOpen string) (*Manager, *capRunner, *bytes.Buffer) {
 	t.Helper()
 	cfg := ctrCfg(p, "false") // standalone -> the PSK step is skipped
 	if p == config.Podman {
-		cfg.Podman.Rootless = rootless
-		// Both knobs ApplyDefaults derives from Rootless; ctrCfg skips ApplyDefaults.
-		if rootless {
+		cfg.Podman.Rootful = !userMode
+		// Both knobs ApplyDefaults derives from Rootful; ctrCfg skips ApplyDefaults.
+		if userMode {
 			cfg.Podman.SystemctlUser = "--user"
 			cfg.Podman.WantedBy = "default.target"
 		}
 	}
 	m, rr, buf := newCapMgr(cfg, p)
 	euid := 1000
-	if p == config.Podman && !rootless {
+	if p == config.Podman && !userMode {
 		euid = 0
 	}
 	m.Geteuid = func() int { return euid }
@@ -508,8 +522,8 @@ func TestCheckLimitsRootlessSessionCore(t *testing.T) {
 	m, rr, buf := limitsMgr(t, config.Podman, true, healthyNrOpen)
 	healthy := rr.outFor
 	rr.outFor = func(name string, args []string) []byte {
-		if name == "sh" && slices.Contains(args, sessionCoreScript) {
-			return []byte("0\n")
+		if name == "cat" && slices.Contains(args, "/proc/self/limits") {
+			return []byte(procLimits("0"))
 		}
 		return healthy(name, args)
 	}
@@ -545,9 +559,9 @@ func TestCheckLimitsRootlessSessionCoreFollowsTheConfiguredLimit(t *testing.T) {
 		name, core, session string
 		wantErr             []string
 	}{
-		{"no dumps on a session granting none", "0", "0\n", nil},
-		{"1 GiB on an unlimited session", "1073741824", "unlimited\n", nil},
-		{"1 GiB on a 1 MiB session", "1073741824", "1048576\n",
+		{"no dumps on a session granting none", "0", "0", nil},
+		{"1 GiB on an unlimited session", "1073741824", "unlimited", nil},
+		{"1 GiB on a 1 MiB session", "1073741824", "1048576",
 			[]string{"session core is 1048576, needs 1073741824", "solace hard core 1048576",
 				"podman.container.ulimits.core to 1048576 or less"}},
 	} {
@@ -556,8 +570,8 @@ func TestCheckLimitsRootlessSessionCoreFollowsTheConfiguredLimit(t *testing.T) {
 			m.Cfg.Podman.Container.Ulimits.Core = tc.core
 			healthy := rr.outFor
 			rr.outFor = func(name string, args []string) []byte {
-				if name == "sh" && slices.Contains(args, sessionCoreScript) {
-					return []byte(tc.session)
+				if name == "cat" && slices.Contains(args, "/proc/self/limits") {
+					return []byte(procLimits(tc.session))
 				}
 				return healthy(name, args)
 			}
@@ -586,13 +600,14 @@ func TestCheckLimitsSessionCoreUnreadable(t *testing.T) {
 		wantErr      string
 	}{
 		{"empty", "", ""},
-		{"garbled", "lots\n", "cannot parse the limit"},
+		{"garbled", procLimits("lots"), "cannot parse the limit"},
+		{"no core line", "Limit  Soft Limit  Hard Limit  Units\n", "has no \"Max core file size\" line"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, rr, buf := limitsMgr(t, config.Podman, true, healthyNrOpen)
 			healthy := rr.outFor
 			rr.outFor = func(name string, args []string) []byte {
-				if name == "sh" && slices.Contains(args, sessionCoreScript) {
+				if name == "cat" && slices.Contains(args, "/proc/self/limits") {
 					return []byte(tc.answer)
 				}
 				return healthy(name, args)
@@ -728,10 +743,8 @@ func TestCheckLimitsSessionRowsAreRootlessOnly(t *testing.T) {
 			if err := m.checkLimits(context.Background(), false); err != nil {
 				t.Fatalf("checkLimits: %v", err)
 			}
-			for _, probe := range []string{"ulimit -Hn", sessionCoreScript} {
-				if hasCall(rr, "sh", []string{"-c", probe}) {
-					t.Errorf("a privileged daemon is not bounded by this shell (%s):\n%+v", probe, rr.calls)
-				}
+			if hasCall(rr, "sh", []string{"-c", "ulimit -Hn"}) || hasCall(rr, "cat", []string{"/proc/self/limits"}) {
+				t.Errorf("a privileged daemon is not bounded by this shell:\n%+v", rr.calls)
 			}
 		})
 	}
@@ -765,7 +778,7 @@ func TestPamCoreValue(t *testing.T) {
 		floor int
 		want  string
 	}{
-		{limitUnbounded, "unlimited"},
+		{rootless.Unbounded, "unlimited"},
 		{0, "0"},
 		{1024, "1"},
 		{1025, "2"},
@@ -773,30 +786,6 @@ func TestPamCoreValue(t *testing.T) {
 	} {
 		if got := pamCoreValue(tc.floor); got != tc.want {
 			t.Errorf("pamCoreValue(%d) = %q, want %q", tc.floor, got, tc.want)
-		}
-	}
-}
-
-func TestParseLimit(t *testing.T) {
-	for _, tc := range []struct {
-		in      string
-		want    int
-		wantErr bool
-	}{
-		{"1048576", 1048576, false},
-		{"0", 0, false},
-		{"infinity", limitUnbounded, false},  // systemd's spelling
-		{"unlimited", limitUnbounded, false}, // the shell's
-		{"", 0, true},
-		{"not-a-number", 0, true},
-	} {
-		got, err := parseLimit(tc.in, "fixture")
-		if (err != nil) != tc.wantErr {
-			t.Errorf("parseLimit(%q) err = %v, wantErr %v", tc.in, err, tc.wantErr)
-			continue
-		}
-		if err == nil && got != tc.want {
-			t.Errorf("parseLimit(%q) = %d, want %d", tc.in, got, tc.want)
 		}
 	}
 }

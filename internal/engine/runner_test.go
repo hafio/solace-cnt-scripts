@@ -2,79 +2,19 @@ package engine
 
 import (
 	"bytes"
-	"context"
-	"fmt"
+	"errors"
 	"io"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/runner"
+	"github.com/hafio/go-deploy-utility/runner/runnertest"
 )
 
-// WHY `go test -cover ./internal/engine` PRINTS 0.0% WHILE THIS PACKAGE IS WELL COVERED.
-//
-// It is not: `go tool cover -func` over the profile from the same run reports 95.2%, every
-// function between 88.9% and 100%, and the repo-wide profile the `cov` task builds carries
-// all of it -- so the coverage floor has always counted this package correctly. Only the
-// per-package SUMMARY LINE reads zero, and the helper-process pattern below is why: the
-// tests re-exec this very binary as a child, and the child exits through os.Exit without
-// flushing counters the way a normal test process does.
-//
-// Recorded here because the number is alarming and the wrong conclusion is easy. It was
-// reported as a gate-integrity hole -- a whole package invisible to the floor -- and acting
-// on that would have meant changing the dev scripts to fix something that was never broken.
-// The check that settles it costs nothing: coverage/coverage.out is on disk after any cov
-// run, so read the profile rather than the summary.
-//
-// TestHelperProcess is not a real test: it is re-invoked as the child process
-// by the Exec tests via the standard os/exec helper-process pattern. It only
-// runs when GO_WANT_HELPER_PROCESS=1, so under a normal `go test` run it is a
-// no-op. Everything after the "--" separator in os.Args is the fake command.
-func TestHelperProcess(t *testing.T) {
-	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
-		return
-	}
-	// Find the "--" separator and take the args after it.
-	args := os.Args
-	for i, a := range args {
-		if a == "--" {
-			args = args[i+1:]
-			break
-		}
-	}
-	if len(args) == 0 {
-		os.Exit(0)
-	}
-	switch args[0] {
-	case "echo":
-		fmt.Fprint(os.Stdout, strings.Join(args[1:], " "))
-	case "cat":
-		_, _ = io.Copy(os.Stdout, os.Stdin)
-	case "env":
-		// Prints the value of the variable named by the next arg, which is how the
-		// RunEnv test proves the child actually received it.
-		if len(args) > 1 {
-			fmt.Fprint(os.Stdout, os.Getenv(args[1]))
-		}
-	case "fail":
-		os.Exit(3)
-	default:
-		os.Exit(0)
-	}
-	os.Exit(0)
-}
-
-// helperCommand builds the re-invocation of the test binary as a fake external
-// command. Exec inherits os.Environ(), so callers set GO_WANT_HELPER_PROCESS
-// via t.Setenv before running.
-func helperCommand(extra ...string) (string, []string) {
-	name := os.Args[0]
-	args := append([]string{"-test.run=TestHelperProcess", "--"}, extra...)
-	return name, args
-}
-
-// captureStdout swaps os.Stdout for a pipe while fn runs and returns whatever
-// fn (or a child process streaming to os.Stdout) wrote. os.Stdout is always
-// restored. Not safe with t.Parallel.
+// captureStdout swaps os.Stdout for a pipe while fn runs and returns whatever fn wrote to
+// it. os.Stdout is always restored. Not safe with t.Parallel.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	old := os.Stdout
@@ -109,418 +49,308 @@ func captureStdout(t *testing.T, fn func()) string {
 	return string(out)
 }
 
-func TestQuoteTok(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"empty", "", "''"},
-		{"plain", "kubectl", "kubectl"},
-		{"plainDashes", "--dry-run=client", "--dry-run=client"},
-		{"spaces", "hello world", "'hello world'"},
-		{"tab", "a\tb", "'a\tb'"},
-		{"newline", "a\nb", "'a\nb'"},
-		{"singleQuote", "it's", `'it'\''s'`},
-		{"dollar", "$HOME", "'$HOME'"},
-		{"pipe", "a|b", "'a|b'"},
-		{"semicolon", "a;b", "'a;b'"},
-		{"redirect", "a>b", "'a>b'"},
-		{"glob", "*.yaml", "'*.yaml'"},
-		{"brackets", "a[0]", "'a[0]'"},
-		{"braces", "a{b}", "'a{b}'"},
-		{"parens", "a(b)", "'a(b)'"},
-		{"doubleQuote", `a"b`, `'a"b'`},
-		{"ampersand", "a&b", "'a&b'"},
-		{"question", "a?b", "'a?b'"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := quoteTok(tt.in); got != tt.want {
-				t.Errorf("quoteTok(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestQuote(t *testing.T) {
-	tests := []struct {
-		name string
-		cmd  string
-		args []string
-		want string
-	}{
-		{"nameOnly", "kubectl", nil, "kubectl"},
-		{"nameAndArgs", "kubectl", []string{"get", "pods"}, "kubectl get pods"},
-		{"quotedArg", "echo", []string{"hello world"}, "echo 'hello world'"},
-		{"emptyArg", "echo", []string{""}, "echo ''"},
-		{"quoteInArg", "echo", []string{"it's"}, `echo 'it'\''s'`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := Quote(tt.cmd, tt.args...); got != tt.want {
-				t.Errorf("Quote(%q, %q) = %q, want %q", tt.cmd, tt.args, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestEchoRun(t *testing.T) {
-	var buf bytes.Buffer
-	e := Echo{W: &buf}
-	if err := e.Run(context.Background(), "kubectl", "get", "pods"); err != nil {
-		t.Fatalf("Run: unexpected err %v", err)
-	}
-	want := "+ kubectl get pods\n"
-	if got := buf.String(); got != want {
-		t.Errorf("Run wrote %q, want %q", got, want)
-	}
-}
-
-func TestEchoRunInteractive(t *testing.T) {
-	var buf bytes.Buffer
-	e := Echo{W: &buf}
-	if err := e.RunInteractive(context.Background(), "bash", "-c", "echo hi"); err != nil {
-		t.Fatalf("RunInteractive: unexpected err %v", err)
-	}
-	want := "+ bash -c 'echo hi'\n"
-	if got := buf.String(); got != want {
-		t.Errorf("RunInteractive wrote %q, want %q", got, want)
-	}
-}
-
-func TestEchoRunInput(t *testing.T) {
-	var buf bytes.Buffer
-	e := Echo{W: &buf}
-	in := []byte("apiVersion: v1")
-	if err := e.RunInput(context.Background(), in, "kubectl", "apply", "-f", "-"); err != nil {
-		t.Fatalf("RunInput: unexpected err %v", err)
-	}
-	want := fmt.Sprintf("+ kubectl apply -f -  <<< (%d bytes on stdin)\n", len(in))
-	if got := buf.String(); got != want {
-		t.Errorf("RunInput wrote %q, want %q", got, want)
-	}
-}
-
-// TestEchoRunEnv is the dry-run half of the secret-carrying path: the variable
-// names must be visible (they are what an operator checks) and no value may be.
-// The command still leads the line, so "+ <cmd>" stays greppable.
-func TestEchoRunEnv(t *testing.T) {
-	var buf bytes.Buffer
-	e := Echo{W: &buf}
-	env := []string{"SOLACE_ADMIN_PASSWORD=hunter2", "SOLACE_REDUNDANCY_PSK=psk-value"}
-	if err := e.RunEnv(context.Background(), env, "docker", "compose", "up", "-d"); err != nil {
-		t.Fatalf("RunEnv: unexpected err %v", err)
-	}
-	want := "+ docker compose up -d  <<< (env: SOLACE_ADMIN_PASSWORD=*** SOLACE_REDUNDANCY_PSK=***)\n"
-	if got := buf.String(); got != want {
-		t.Errorf("RunEnv wrote %q, want %q", got, want)
-	}
-}
-
-// TestEchoRunEnvNoEnv covers the empty-environment arm: with nothing to annotate
-// the line is exactly what Run would print, rather than a dangling "(env: )".
-func TestEchoRunEnvNoEnv(t *testing.T) {
-	var buf bytes.Buffer
-	e := Echo{W: &buf}
-	if err := e.RunEnv(context.Background(), nil, "docker", "compose", "ps"); err != nil {
-		t.Fatalf("RunEnv: unexpected err %v", err)
-	}
-	want := "+ docker compose ps\n"
-	if got := buf.String(); got != want {
-		t.Errorf("RunEnv wrote %q, want %q", got, want)
-	}
-}
-
-func TestMaskEnv(t *testing.T) {
-	tests := []struct {
-		name string
-		in   []string
-		want string
-	}{
-		{"none", nil, ""},
-		{"one", []string{"A=b"}, "A=***"},
-		{"two", []string{"A=b", "C=d"}, "A=*** C=***"},
-		{"valueWithEquals", []string{"A=b=c"}, "A=***"},
-		{"emptyValue", []string{"A="}, "A=***"},
-		{"oddName", []string{"A B=c"}, "'A B'=***"},
-		// No '=' at all: the entry must not be echoed as if it were a key, since the
-		// whole entry may be the value this function exists to hide.
-		{"noEquals", []string{"hunter2"}, "'<malformed>'=***"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := MaskEnv(tt.in); got != tt.want {
-				t.Errorf("MaskEnv(%v) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestEchoOutput(t *testing.T) {
-	var buf bytes.Buffer
-	e := Echo{W: &buf}
-	out, err := e.Output(context.Background(), "helm", "version")
-	if err != nil {
-		t.Fatalf("Output: unexpected err %v", err)
-	}
-	if out != nil {
-		t.Errorf("Output returned %v, want nil", out)
-	}
-	want := "+ helm version\n"
-	if got := buf.String(); got != want {
-		t.Errorf("Output wrote %q, want %q", got, want)
-	}
-}
-
-// TestEchoDefaultWriter exercises Echo.w()'s default branch: a zero-value Echo
-// (nil W) writes to os.Stdout.
-func TestEchoDefaultWriter(t *testing.T) {
-	got := captureStdout(t, func() {
-		if err := (Echo{}).Run(context.Background(), "kubectl", "get", "pods"); err != nil {
-			t.Errorf("Run: unexpected err %v", err)
-		}
-	})
-	want := "+ kubectl get pods\n"
-	if got != want {
-		t.Errorf("Echo{}.Run wrote %q, want %q", got, want)
-	}
-}
-
-func TestExecOutput(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-
-	name, args := helperCommand("echo", "hello")
-	out, err := Exec{}.Output(context.Background(), name, args...)
-	if err != nil {
-		t.Fatalf("Output(echo): unexpected err %v", err)
-	}
-	if !strings.Contains(string(out), "hello") {
-		t.Errorf("Output(echo) = %q, want it to contain %q", out, "hello")
-	}
-}
-
-func TestExecOutputFail(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-
-	name, args := helperCommand("fail")
-	out, err := Exec{}.Output(context.Background(), name, args...)
-	if err == nil {
-		t.Fatalf("Output(fail): expected err, got nil (out=%q)", out)
-	}
-	if !strings.Contains(err.Error(), name) {
-		t.Errorf("Output(fail) err = %q, want it to contain binary name %q", err, name)
-	}
-}
-
-func TestExecRun(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-
-	// Success path: default case in the helper exits 0.
-	nameOK, argsOK := helperCommand("echo", "streamed")
-	var errOK error
-	_ = captureStdout(t, func() {
-		errOK = Exec{}.Run(context.Background(), nameOK, argsOK...)
-	})
-	if errOK != nil {
-		t.Fatalf("Run(echo): unexpected err %v", errOK)
-	}
-
-	// Failure path: helper exits 3.
-	nameFail, argsFail := helperCommand("fail")
-	var errFail error
-	_ = captureStdout(t, func() {
-		errFail = Exec{}.Run(context.Background(), nameFail, argsFail...)
-	})
-	if errFail == nil {
-		t.Fatalf("Run(fail): expected err, got nil")
-	}
-	if !strings.Contains(errFail.Error(), nameFail) {
-		t.Errorf("Run(fail) err = %q, want it to contain binary name %q", errFail, nameFail)
-	}
-}
-
-func TestExecRunInput(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-
-	name, args := helperCommand("cat")
-	in := []byte("meow")
-	var err error
-	got := captureStdout(t, func() {
-		err = Exec{}.RunInput(context.Background(), in, name, args...)
-	})
-	if err != nil {
-		t.Fatalf("RunInput(cat): unexpected err %v", err)
-	}
-	if !strings.Contains(got, "meow") {
-		t.Errorf("RunInput(cat) streamed %q, want it to contain %q", got, "meow")
-	}
-
-	// Failure path: proves RunInput wraps a child failure the same way
-	// Run/RunEnv/RunInteractive do (name: err), not just on success.
-	nameFail, argsFail := helperCommand("fail")
-	var errFail error
-	_ = captureStdout(t, func() {
-		errFail = Exec{}.RunInput(context.Background(), []byte("meow"), nameFail, argsFail...)
-	})
-	if errFail == nil {
-		t.Fatal("RunInput(fail): expected err, got nil")
-	}
-	if !strings.Contains(errFail.Error(), nameFail) {
-		t.Errorf("RunInput(fail) err = %q, want it to contain binary name %q", errFail, nameFail)
-	}
-}
-
-// TestExecRunEnv proves both halves of RunEnv's contract: the child receives the
-// extra variable, and it still inherits this process's environment (the helper
-// only runs at all because GO_WANT_HELPER_PROCESS was inherited).
-func TestExecRunEnv(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-
-	name, args := helperCommand("env", "SOLACE_TEST_SECRET")
-	var err error
-	got := captureStdout(t, func() {
-		err = Exec{}.RunEnv(context.Background(), []string{"SOLACE_TEST_SECRET=from-parent"}, name, args...)
-	})
-	if err != nil {
-		t.Fatalf("RunEnv: unexpected err %v", err)
-	}
-	if !strings.Contains(got, "from-parent") {
-		t.Errorf("RunEnv child printed %q, want it to contain the injected value", got)
-	}
-
-	nameFail, argsFail := helperCommand("fail")
-	var errFail error
-	_ = captureStdout(t, func() {
-		errFail = Exec{}.RunEnv(context.Background(), []string{"A=b"}, nameFail, argsFail...)
-	})
-	if errFail == nil {
-		t.Fatal("RunEnv(fail): expected err, got nil")
-	}
-	if !strings.Contains(errFail.Error(), nameFail) {
-		t.Errorf("RunEnv(fail) err = %q, want it to name the binary %q", errFail, nameFail)
-	}
-}
-
-func TestExecRunInteractive(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-
-	name, args := helperCommand() // no extra args -> helper exits 0
-	var err error
-	_ = captureStdout(t, func() {
-		err = Exec{}.RunInteractive(context.Background(), name, args...)
-	})
-	if err != nil {
-		t.Fatalf("RunInteractive: unexpected err %v", err)
-	}
-
-	// Failure path: proves RunInteractive wraps a child failure the same way
-	// Run/RunInput/RunEnv do (name: err); this backs `exec -it` / shell
-	// sessions, so a silent-failure regression here would hide a broken shell.
-	nameFail, argsFail := helperCommand("fail")
-	var errFail error
-	_ = captureStdout(t, func() {
-		errFail = Exec{}.RunInteractive(context.Background(), nameFail, argsFail...)
-	})
-	if errFail == nil {
-		t.Fatal("RunInteractive(fail): expected err, got nil")
-	}
-	if !strings.Contains(errFail.Error(), nameFail) {
-		t.Errorf("RunInteractive(fail) err = %q, want it to contain binary name %q", errFail, nameFail)
-	}
-}
-
-// TestExecOutputInput proves OutputInput wires stdin from `in` into the child
-// and captures stdout into the returned buffer -- not streamed to the real
-// stdout -- since this is the curl -K - path with no other way to get the
-// response body back to the caller.
-func TestExecOutputInput(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-
-	name, args := helperCommand("cat")
-	in := []byte("secret-body")
-	out, err := Exec{}.OutputInput(context.Background(), in, name, args...)
-	if err != nil {
-		t.Fatalf("OutputInput(cat): unexpected err %v", err)
-	}
-	if !strings.Contains(string(out), "secret-body") {
-		t.Errorf("OutputInput(cat) = %q, want it to contain %q", out, "secret-body")
-	}
-}
-
-// TestExecOutputInputFail mirrors TestExecOutputFail: OutputInput must wrap a
-// child failure the same way its stdin-less sibling Output does.
-func TestExecOutputInputFail(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-
-	name, args := helperCommand("fail")
-	out, err := Exec{}.OutputInput(context.Background(), []byte("secret-body"), name, args...)
-	if err == nil {
-		t.Fatalf("OutputInput(fail): expected err, got nil (out=%q)", out)
-	}
-	if !strings.Contains(err.Error(), name) {
-		t.Errorf("OutputInput(fail) err = %q, want it to contain binary name %q", err, name)
-	}
-}
-
-// TestEchoOutputInput is the dry-run half of OutputInput, the same
-// credential-bearing call RunInput backs (curl -K - with a password on
-// stdin): the byte count must be visible but the stdin body must never reach
-// dry-run output, which is printed, logged and pasted into tickets.
-func TestEchoOutputInput(t *testing.T) {
-	var buf bytes.Buffer
-	e := Echo{W: &buf}
-	in := []byte("password=hunter2")
-	out, err := e.OutputInput(context.Background(), in, "curl", "-K", "-")
-	if err != nil {
-		t.Fatalf("OutputInput: unexpected err %v", err)
-	}
-	if out != nil {
-		t.Errorf("OutputInput returned %v, want nil", out)
-	}
-	want := fmt.Sprintf("+ curl -K -  <<< (%d bytes on stdin)\n", len(in))
-	if got := buf.String(); got != want {
-		t.Errorf("OutputInput wrote %q, want %q", got, want)
-	}
-	if strings.Contains(buf.String(), "hunter2") {
-		t.Errorf("OutputInput leaked stdin body into dry-run output: %q", buf.String())
-	}
-}
-
 // TestOnlyEnvRunnerCarriesRunEnv pins the narrowing, which is a security boundary rather
 // than a tidiness one.
 //
-// RunEnv is how a secret reaches a child process without passing through an argv, and
+// Cmd.Env is how a secret reaches a child process without passing through an argv, and
 // exactly one caller in the tool needs it: the container manager's compose deploy, for
 // docker's environment-sourced secrets. Every other holder of a runner -- the Kubernetes
 // cluster, both broker transports, the replication mate channel -- has no business putting
-// a value in a child's environment, and an interface that offered them the ability is an
-// invitation to do it.
-//
-// A compile-time assertion is the whole test: Exec and Echo must satisfy BOTH, so nothing
-// about wiring changes, while a plain Runner must NOT expose RunEnv. If someone puts the
-// method back on Runner this still compiles and passes, which is why the negative half is
-// asserted through an interface that deliberately lacks it.
+// a value in a child's environment, so each wraps its runner in NoEnv. The compose holder
+// keeps the runner as given and still passes environment; NoEnv refuses it, naming the
+// program and never the value, and never reaches the runner underneath. IsEcho sees through
+// the wrapper, so a preview is still a preview.
 func TestOnlyEnvRunnerCarriesRunEnv(t *testing.T) {
-	// Both real implementations satisfy the wider interface, so a caller that needs
-	// RunEnv can always be given one.
-	var _ EnvRunner = Exec{}
-	var _ EnvRunner = Echo{}
-	// And both satisfy the narrow one, which is what every other caller takes.
-	var _ Runner = Exec{}
-	var _ Runner = Echo{}
+	const secret = "hunter2-secret-value"
+	withEnv := runner.Cmd{Argv: []string{"docker", "compose", "up"}, Env: []string{"SOLACE_ADMIN_PASSWORD=" + secret}}
+	plain := runner.Cmd{Argv: []string{"kubectl", "get", "pods"}}
 
-	// The narrowing itself: a value held as a plain Runner cannot reach RunEnv. A type
-	// assertion is how that is observable at runtime -- it succeeds only because the
-	// CONCRETE type has the method, which is exactly the distinction being drawn.
-	var r Runner = Echo{}
-	if _, ok := r.(interface {
-		RunEnv(ctx context.Context, extraEnv []string, name string, args ...string) error
-	}); !ok {
-		t.Fatal("Echo must still implement RunEnv; only the Runner INTERFACE drops it")
+	t.Run("the unwrapped runner passes environment", func(t *testing.T) {
+		fake := &runnertest.Fake{}
+		if err := fake.Run(t.Context(), withEnv, nil, nil); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if calls := fake.Calls(); len(calls) != 1 || len(calls[0].Env) != 1 {
+			t.Errorf("calls = %+v, want the one call with its environment", calls)
+		}
+	})
+
+	t.Run("a wrapped runner refuses environment on Run", func(t *testing.T) {
+		fake := &runnertest.Fake{}
+		err := NoEnv(fake).Run(t.Context(), withEnv, nil, nil)
+		if err == nil {
+			t.Fatal("Run with Env was accepted")
+		}
+		if !strings.Contains(err.Error(), "docker") || !strings.Contains(err.Error(), "compose") {
+			t.Errorf("error = %q, want it to name the program and say only compose may pass environment", err)
+		}
+		if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "SOLACE_ADMIN_PASSWORD") {
+			t.Errorf("error = %q, want no environment entry in it", err)
+		}
+		if n := len(fake.Calls()); n != 0 {
+			t.Errorf("%d calls reached the runner underneath, want none", n)
+		}
+	})
+
+	t.Run("a wrapped runner refuses environment on Attach", func(t *testing.T) {
+		fake := &runnertest.Fake{}
+		code, err := NoEnv(fake).Attach(withEnv, os.Stdin, os.Stdout, os.Stderr)
+		if err == nil || code != 0 {
+			t.Fatalf("Attach with Env = (%d, %v), want a refusal", code, err)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error = %q, want no environment value in it", err)
+		}
+		if n := len(fake.Calls()); n != 0 {
+			t.Errorf("%d calls reached the runner underneath, want none", n)
+		}
+	})
+
+	t.Run("a wrapped runner refuses a malformed command first", func(t *testing.T) {
+		fake := &runnertest.Fake{}
+		if err := NoEnv(fake).Run(t.Context(), runner.Cmd{}, nil, nil); err == nil {
+			t.Error("a Cmd with no program was accepted")
+		}
+	})
+
+	t.Run("a wrapped runner passes everything else through", func(t *testing.T) {
+		fake := &runnertest.Fake{Script: runnertest.Seq(runnertest.Reply{}, runnertest.Reply{Code: 5})}
+		r := NoEnv(fake)
+		if err := r.Run(t.Context(), plain, nil, nil); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		code, err := r.Attach(plain, os.Stdin, os.Stdout, os.Stderr)
+		if err != nil || code != 5 {
+			t.Fatalf("Attach = (%d, %v), want (5, nil)", code, err)
+		}
+		if calls := fake.Calls(); len(calls) != 2 || calls[0].Attach || !calls[1].Attach {
+			t.Errorf("calls = %+v, want a Run then an Attach", calls)
+		}
+	})
+
+	t.Run("IsEcho sees through the wrapper", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			r    runner.Runner
+			want bool
+		}{
+			{"echo", runner.Echo{}, true},
+			{"wrapped echo", NoEnv(runner.Echo{}), true},
+			{"exec", runner.Exec{}, false},
+			{"wrapped exec", NoEnv(runner.Exec{}), false},
+			{"fake", &runnertest.Fake{}, false},
+		} {
+			if got := IsEcho(tc.r); got != tc.want {
+				t.Errorf("IsEcho(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		}
+	})
+}
+
+// TestRunStreamsToThisProcess: Run hands the child this process's stdout and stderr, so a
+// command's output reaches the operator as it arrives, and a failure comes back as the
+// runner returned it.
+func TestRunStreamsToThisProcess(t *testing.T) {
+	boom := errors.New("kubectl: exit status 1")
+	fake := &runnertest.Fake{Script: runnertest.Seq(
+		runnertest.Reply{Stdout: "applied\n"},
+		runnertest.Reply{Err: boom},
+	)}
+	c := runner.Cmd{Argv: []string{"kubectl", "apply", "-f", "-"}, Stdin: []byte("kind: Namespace")}
+
+	var err error
+	got := captureStdout(t, func() { err = Run(t.Context(), fake, c) })
+	if err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	if _, isEnv := any(struct{ Runner }{r}).(EnvRunner); isEnv {
-		t.Error("a value reached only through Runner must not satisfy EnvRunner -- if it does, " +
-			"RunEnv is back on Runner and every caller can put a secret in a child's environment")
+	if got != "applied\n" {
+		t.Errorf("streamed %q, want the child's stdout", got)
+	}
+	if err := Run(t.Context(), fake, c); !errors.Is(err, boom) {
+		t.Errorf("Run error = %v, want the runner's error", err)
+	}
+	for i, call := range fake.Calls() {
+		// The first call ran while stdout was swapped for the capture pipe, so only the
+		// second can be compared with the restored os.Stdout; the pipe's output above is
+		// what proves the first one streamed.
+		if i == 1 && call.Stdout != io.Writer(os.Stdout) {
+			t.Errorf("call %d got stdout %v, want this process's own", i, call.Stdout)
+		}
+		if call.Stderr != io.Writer(os.Stderr) {
+			t.Errorf("call %d got stderr %v, want this process's own", i, call.Stderr)
+		}
+		if string(call.Stdin) != "kind: Namespace" {
+			t.Errorf("call %d stdin = %q, want the command's", i, call.Stdin)
+		}
+	}
+}
+
+// TestOutputCapturesStdoutAndStreamsStderr: Output returns what the child wrote to stdout,
+// even when it failed -- a broker CLI or kubectl often says why in that stream -- while its
+// stderr goes live to this process's.
+func TestOutputCapturesStdoutAndStreamsStderr(t *testing.T) {
+	boom := errors.New("kubectl: exit status 1")
+	fake := &runnertest.Fake{Script: runnertest.Seq(
+		runnertest.Reply{Stdout: "answer"},
+		runnertest.Reply{Stdout: "reason", Err: boom},
+	)}
+	c := runner.Cmd{Argv: []string{"kubectl", "get", "pods"}}
+
+	out, err := Output(t.Context(), fake, c)
+	if err != nil || string(out) != "answer" {
+		t.Fatalf("Output = (%q, %v), want (answer, nil)", out, err)
+	}
+	out, err = Output(t.Context(), fake, c)
+	if !errors.Is(err, boom) || string(out) != "reason" {
+		t.Errorf("failed Output = (%q, %v), want the captured text and the runner's error", out, err)
+	}
+	for i, call := range fake.Calls() {
+		if call.Stdout == io.Writer(os.Stdout) {
+			t.Errorf("call %d streamed stdout, want it captured", i)
+		}
+		if call.Stderr != io.Writer(os.Stderr) {
+			t.Errorf("call %d stderr = %v, want this process's own", i, call.Stderr)
+		}
+	}
+}
+
+// TestTeeKeepsStderrLiveAndReturnsIt: RunTee and OutputTee hand back what the child wrote
+// to stderr, which is also forwarded to this process's own stderr as it arrives (the
+// writer is a tee over it, so it is no longer os.Stderr itself), and the captured stdout
+// of OutputTee stays out of this process's stdout.
+func TestTeeKeepsStderrLiveAndReturnsIt(t *testing.T) {
+	boom := errors.New("kubectl: exit status 1")
+	forbidden := `Error from server (Forbidden): deployments.apps "x" is forbidden`
+	fake := &runnertest.Fake{Script: runnertest.Seq(
+		runnertest.Reply{Stderr: forbidden, Err: boom},
+		runnertest.Reply{Stdout: "answer", Stderr: "warn"},
+	)}
+	c := runner.Cmd{Argv: []string{"kubectl", "rollout", "status", "deployment/x"}}
+
+	errText, err := RunTee(t.Context(), fake, c)
+	if !errors.Is(err, boom) || errText != forbidden {
+		t.Errorf("RunTee = (%q, %v), want the stderr text and the runner's error", errText, err)
+	}
+	out, errText, err := OutputTee(t.Context(), fake, c)
+	if err != nil || string(out) != "answer" || errText != "warn" {
+		t.Errorf("OutputTee = (%q, %q, %v), want (answer, warn, nil)", out, errText, err)
+	}
+	calls := fake.Calls()
+	if calls[0].Stdout != io.Writer(os.Stdout) {
+		t.Errorf("RunTee stdout = %v, want this process's own", calls[0].Stdout)
+	}
+	if calls[1].Stdout == io.Writer(os.Stdout) {
+		t.Error("OutputTee streamed stdout, want it captured")
+	}
+	for i, call := range calls {
+		if call.Stderr == io.Writer(os.Stderr) || call.Stderr == nil {
+			t.Errorf("call %d stderr = %v, want a tee that is not os.Stderr alone", i, call.Stderr)
+		}
+	}
+}
+
+// TestRedirectSendsTheChildsStreamsToItsWriters: under Redirect -- here inside NoEnv, as
+// a holder wraps it -- Run, Output, RunTee and OutputTee send what they would have
+// streamed to this process to the Redirect's writers instead, nothing reaches this
+// process's stdout, and what a helper captures (Output's answer) still comes back to the
+// caller rather than landing in the frame.
+func TestRedirectSendsTheChildsStreamsToItsWriters(t *testing.T) {
+	fake := &runnertest.Fake{Script: runnertest.Seq(
+		runnertest.Reply{Stdout: "run-out\n", Stderr: "run-err\n"},
+		runnertest.Reply{Stdout: "answer", Stderr: "output-err\n"},
+		runnertest.Reply{Stdout: "tee-out\n", Stderr: "tee-err\n"},
+		runnertest.Reply{Stdout: "otee-answer", Stderr: "otee-err\n"},
+	)}
+	var frame bytes.Buffer
+	r := NoEnv(Redirect(fake, &frame, &frame))
+	c := runner.Cmd{Argv: []string{"kubectl", "get", "pods"}}
+
+	var runErr, outErr, teeErr, oteeErr error
+	var out, otee []byte
+	var teeText, oteeText string
+	stdout := captureStdout(t, func() {
+		runErr = Run(t.Context(), r, c)
+		out, outErr = Output(t.Context(), r, c)
+		teeText, teeErr = RunTee(t.Context(), r, c)
+		otee, oteeText, oteeErr = OutputTee(t.Context(), r, c)
+	})
+	if runErr != nil || outErr != nil || teeErr != nil || oteeErr != nil {
+		t.Fatalf("errors = %v, %v, %v, %v; want none", runErr, outErr, teeErr, oteeErr)
+	}
+	if stdout != "" {
+		t.Errorf("this process's stdout got %q, want nothing under a Redirect", stdout)
+	}
+	if want := "run-out\nrun-err\noutput-err\ntee-out\ntee-err\notee-err\n"; frame.String() != want {
+		t.Errorf("frame = %q, want every streamed byte in order:\n%q", frame.String(), want)
+	}
+	if string(out) != "answer" || string(otee) != "otee-answer" || teeText != "tee-err\n" || oteeText != "otee-err\n" {
+		t.Errorf("captured = %q, %q, %q, %q; want each helper's own capture", out, otee, teeText, oteeText)
+	}
+	for i, call := range fake.Calls() {
+		if call.Stderr == io.Writer(os.Stderr) {
+			t.Errorf("call %d streamed stderr to this process, want the Redirect's writer", i)
+		}
+	}
+}
+
+// TestRedirectIsSeenThrough: the outermost Redirect's writers win when two are stacked,
+// and IsEcho looks through Redirect as it does through NoEnv, so a preview inside a
+// `--watch` refresh is still a preview.
+func TestRedirectIsSeenThrough(t *testing.T) {
+	var inner, outer bytes.Buffer
+	if out, errOut := streams(Redirect(Redirect(&runnertest.Fake{}, &inner, &inner), &outer, &outer)); out != &outer || errOut != &outer {
+		t.Errorf("streams = %v, %v; want the outermost Redirect's writers", out, errOut)
+	}
+	if out, errOut := streams(NoEnv(&runnertest.Fake{})); out != io.Writer(os.Stdout) || errOut != io.Writer(os.Stderr) {
+		t.Errorf("streams without a Redirect = %v, %v; want this process's own", out, errOut)
+	}
+	if !IsEcho(NoEnv(Redirect(runner.Echo{}, &outer, &outer))) {
+		t.Error("IsEcho must see an Echo through NoEnv and Redirect")
+	}
+	if IsEcho(Redirect(&runnertest.Fake{}, &outer, &outer)) {
+		t.Error("IsEcho must not call a redirected real runner an echo")
+	}
+}
+
+// TestInteractiveReturnsTheSessionStatus: Interactive attaches this process's terminal; a
+// clean session is nil, a non-zero one is an exitcode.Exited error that carries the
+// status (so the CLI can pass it through with ChildExit, and not otherwise), and an
+// Attach error -- the session never ran -- is returned as it is.
+func TestInteractiveReturnsTheSessionStatus(t *testing.T) {
+	c := runner.Cmd{Argv: []string{"kubectl", "exec", "-it", "pod", "--", "bash"}}
+	neverRan := errors.New("kubectl: not found on PATH")
+	fake := &runnertest.Fake{Script: runnertest.Seq(
+		runnertest.Reply{},
+		runnertest.Reply{Code: 7},
+		runnertest.Reply{Err: neverRan},
+	)}
+
+	if err := Interactive(fake, c); err != nil {
+		t.Errorf("a session that exited 0: %v, want nil", err)
+	}
+
+	err := Interactive(fake, c)
+	if err == nil || err.Error() != "kubectl: exit status 7" {
+		t.Fatalf("a session that exited 7: %v, want %q", err, "kubectl: exit status 7")
+	}
+	if code := exitcode.Code(err); code != exitcode.Failure {
+		t.Errorf("unmarked status exits %d, want %d: only ChildExit passes a session's status through",
+			code, exitcode.Failure)
+	}
+	if code, ok := exitcode.ChildStatus(exitcode.ChildExit(err)); !ok || code != 7 {
+		t.Errorf("ChildStatus(ChildExit(err)) = (%d, %v), want (7, true)", code, ok)
+	}
+
+	err = Interactive(fake, c)
+	if !errors.Is(err, neverRan) {
+		t.Errorf("an Attach error: %v, want it returned as is", err)
+	}
+	if _, ok := exitcode.ChildStatus(exitcode.ChildExit(err)); ok {
+		t.Error("an Attach error carries an exit status, want none")
+	}
+	for i, call := range fake.Calls() {
+		if !call.Attach {
+			t.Errorf("call %d was not an Attach", i)
+		}
 	}
 }

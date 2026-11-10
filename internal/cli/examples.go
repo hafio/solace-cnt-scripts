@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/spf13/cobra"
 
 	"solace/internal/config"
@@ -72,13 +73,13 @@ func runExample(a *App, platform string) error {
 	if platform != "" {
 		p, err := config.ParsePlatform(platform)
 		if err != nil {
-			return asUsage(err)
+			return exitcode.AsUsage(err)
 		}
 		name = string(p)
 	}
 	ex, err := examples.Get(name)
 	if err != nil {
-		return asUsage(err)
+		return exitcode.AsUsage(err)
 	}
 	// emitOrWrite owns stdout-vs-file, the overwrite confirmation and the 0600 mode, so
 	// this command and `generate` cannot drift on any of the three. The file is a template

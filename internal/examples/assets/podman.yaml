@@ -28,10 +28,14 @@ semp:
   adminPass: CHANGE-ME-admin        # secret, mandatory
 
 podman:
-  rootless: false                   # true = rootless: user systemd, `podman unshare`,
-                                    # and runUser 1000:0 instead of 1000001:0
+  # rootful: true                   # omitted = rootless, the default: user systemd,
+                                    # `podman unshare`, runUser 1000:0, run as this
+                                    # user. true = the rootful engine: system systemd,
+                                    # runUser 1000001:0, run as root
   # baseDir: /opt/solace            # optional and unused: earlier builds wrote the
                                     # server-certificate bundle here; set it only so
                                     # deploy/remove delete that old file
   container:
-    dataDir: /opt/solace/data       # host bind mount holding the message spool
+    dataDir: ~/solace/data          # host bind mount holding the message spool, in
+                                    # this user's home: a rootless deploy cannot
+                                    # create a directory under /opt itself

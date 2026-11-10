@@ -44,10 +44,10 @@ An env file that cannot be found, cannot be parsed, fails validation, declares n
 section or declares several without `--platform` is therefore **2**, not 1 -- you chose that
 file, and no amount of waiting fixes it. So is a command or flag that does not apply to the
 platform the file selected, a bad `--pod`/`--platform`/`--since` value,
-`--allow-command` on a command that renders without executing, a `podman.rootless`
-that disagrees with the account you ran as -- `true` under `sudo`, or `false` without it --
+`--allow-command` on a command that renders without executing, a `podman.rootful`
+that disagrees with the account you ran as -- `rootful: true` without root, or root without it --
 a `cli-script`/`shell-script` argument that is a path, or names no file in
-`broker.cliScriptsDir`, and a `--interval` that is not a duration, is below 1s, or comes
+`broker.cliScriptsDir`, and a `--interval` that is not a duration, is below 1s or above 1h, or comes
 without `--watch`.
 
 **One documented exception:** a mistyped *top-level* command exits **1**, not 2
@@ -63,12 +63,17 @@ other command does this: everything else runs kubectl or a container engine as a
 implementation detail, and leaking those codes would make the table above meaningless.
 
 **A `--watch` ends with 0 on Ctrl-C** -- that is how a watch stops, not a failure -- and a
-refresh that fails mid-watch is shown and retried rather than ending it.
+refresh that fails mid-watch is shown and retried rather than ending it. Each refresh is
+collected before the screen is cleared, so the last report stays on screen while the next
+is gathered; the report, the output of the commands it runs and its warnings are then drawn
+together under the header, and a refresh cut short by Ctrl-C draws nothing.
 
 ## The preflight
 
 Every command that writes a file or changes remote state runs one cheap **read-only** probe
-first, using the same command the real work will use:
+first, using the same command the real work will use. On Kubernetes the probes ask about
+**writes only**: a read is made, never probed as a requirement, and a refused read becomes a
+warning (see [Permissions](#permissions)).
 
 | Platform | Probe | Answers |
 | --- | --- | --- |
@@ -79,19 +84,22 @@ If it fails, the command stops nonzero **before the first byte is written**, pas
 CLI's own error through, and adds one line saying what to do -- log in, ask for a role
 binding (a cluster role binding for a cluster-wide question, which a role binding cannot
 grant), start the daemon. kubectl spells a refusal `no`, `no - <reason>` or
-`no (<evaluation error>)`, and all three are read as the refusal they are. `broker deploy`
+`no (<evaluation error>)`, and all three are read as the refusal they are; the message names
+the permission, where it applies (`namespace "solace"`, `the cluster`, or `the current
+namespace` when the context supplies it) and the binding to ask for. `broker deploy`
 asks whether it may create every kind it writes before its first write, and `broker remove`
 about every kind it will delete before its first delete, so a refused grant cannot stop
-either halfway. The namespace a removal empties is the exception: it is probed only when it
-is deleted, after the broker is gone. (A re-deploy's `kubectl apply` also patches what already exists; `patch` is
+either halfway. The namespace a removal empties is the exception: `delete namespaces` is
+probed only after the broker is gone, and before the question, so nobody is asked and then
+refused; a refusal keeps the namespace with a warning and the removal still succeeds. (A re-deploy's `kubectl apply` also patches what already exists; `patch` is
 not asked about in advance.) It never logs you in or starts anything on your behalf, and
 there is no flag to skip it: previewing a command's effect without touching a cluster is
 what `generate` is for, and a render-only command never runs the preflight because it never
 runs anything.
 
-On podman one check precedes even that probe. The declared `podman.rootless` is compared
-with the account running the command, and a mismatch is refused before `podman info` can
-run as the wrong one -- a rootful `info` succeeding as root says nothing true about the
+On podman one check precedes even that probe. The declared `podman.rootful` (unset is rootless)
+is compared with the account running the command, and a mismatch is refused before `podman info`
+can run as the wrong one -- a rootful `info` succeeding as root says nothing true about the
 rootless user's session. `generate` alone does not check, because it renders from anywhere.
 
 ## Permissions
@@ -105,16 +113,16 @@ bound only inside the broker namespace can deploy, report on and remove its brok
 
 | Command | Needs, in the broker namespace | Used when allowed; otherwise a warning |
 | --- | --- | --- |
-| `broker deploy` | `get`, `create`, `patch` on the broker resource and on Secrets -- `create` and the CR's `get` are asked before the first write, `patch` (a re-deploy) is not; `create namespaces` only when the namespace does not exist yet | `get` on the namespace itself; `get` on PVCs (the [admin-password data check](configuration.md#the-admin-secret)); `get` on pods (the restart offer after a renewed certificate) |
+| `broker deploy` | `create` on the broker resource and on Secrets -- asked before the first write; `patch` (a re-deploy) is not; `create namespaces` only when the namespace does not exist yet | `get` on the broker resource (the read-back after the apply; refused, it warns that the apply could not be confirmed); `get` on the namespace itself; `get` on PVCs (the [admin-password data check](configuration.md#the-admin-secret); refused, it warns); `get` on pods (the restart offer after a renewed certificate) |
 | `validate`, `broker validate` | `create` on the broker resource (a `[FAIL]` row) | Deployments listed cluster-wide (else the operator namespace is read by name); StorageClasses, which are cluster-scoped (else `[SKIP]`) |
 | `broker status` | `get` on the broker resource | `get` on pods, Services, StatefulSets and, with `--detail`, PVCs -- each section this identity may not read is a `[SKIP]` row |
 | `broker status --all` | `list` on the broker resource in every namespace | -- |
-| `broker remove` | `delete` on the broker resource, on the Secrets this env file owns and, with `--delete-data`, on PVCs -- all asked before the first delete; `delete namespaces` (cluster-wide) only when the removal leaves the namespace empty and its deletion is confirmed -- refused, the removal ends with that refusal, the broker already gone | listing what is left in the namespace (else the namespace is kept) |
+| `broker remove` | `delete` on the broker resource, on the Secrets this env file owns and, with `--delete-data`, on PVCs -- all asked before the first delete | listing what is left in the namespace; `delete namespaces` (cluster-wide), probed after the broker is gone and before the question -- a refusal, a decline, no terminal or a failed delete keeps the namespace with a warning, and the removal itself succeeds |
 | `broker cli`, `shell`, `copy`, `configure`, `perform` | `create` on `pods/exec`, `get` on pods; `get` on Secrets where the admin password is read back; `configure server-certs` also `get` and `patch` on the TLS Secret | -- |
 | `broker logs` | `get` on pods and `pods/log` | -- |
-| `broker start`, `stop`, `restart` | scaling the StatefulSets (`statefulsets/scale`, start and stop), `delete` on pods (restart), `get` and `watch` on StatefulSets to follow the rollout | -- |
+| `broker start`, `stop`, `restart` | scaling the StatefulSets (`statefulsets/scale`, start and stop), `delete` on pods (restart) | `get` and `watch` on StatefulSets to follow the rollout; a refused wait warns that the change was applied and the step succeeds (a timeout still fails) |
 | `operator status` | -- | `get` on Deployments in the operator namespace (else a `[SKIP]` row) |
-| `operator deploy`, `remove` | Cluster-wide: CRDs (`remove` only with `--delete-crd`, which also lists the broker resource in every namespace), ClusterRoles and ClusterRoleBindings; in the operator namespace: ServiceAccounts, Roles, RoleBindings, Deployments, and the image-pull Secret when credentials are set | Deployments listed cluster-wide (else the operator namespace is read by name) |
+| `operator deploy`, `remove` | Cluster-wide: CRDs (`remove` only with `--delete-crd`, which also reads the broker resource in every namespace before the first delete -- a read, not probed; a refusal stops the removal there with nothing deleted), ClusterRoles and ClusterRoleBindings; in the operator namespace: ServiceAccounts, Roles, RoleBindings, Deployments, and the image-pull Secret when credentials are set | Deployments listed cluster-wide (else the operator namespace is read by name) |
 
 The built-in `admin` and `edit` roles do **not** cover the broker resource: they grant only
 what ClusterRoles labelled `aggregate-to-admin`/`aggregate-to-edit` add, and the operator
@@ -182,8 +190,9 @@ of them at runtime**:
 
 | Component | Floor | What needs it | If older |
 | --- | --- | --- | --- |
-| Docker Compose | 2.23.1 | The `environment:` secret source in the generated compose file | `broker deploy` fails on the secret source. Loud. On a host with only the standalone v1 binary, set `docker.compose: docker-compose` |
-| podman | 4.7 | `ShmSize=` and `Ulimit=` in the quadlet unit. Below them: `HostName=` (4.6), `Secret=...,type=mount` with an absolute target and the `Health*=` keys (4.5), `NoNewPrivileges=` and `DropCapability=` (4.4), and `secret create --label` for the certificate's change-detection label (4.3). The memory cap rides `PodmanArgs=--memory=` rather than quadlet's own `Memory=` key, which needs **5.5** | Quadlet refuses a unit carrying a key it does not know, so the unit fails to load at deploy time. Loud. `TestQuadletKeysAreWithinTheFloor` holds every key the unit emits to this floor |
+| Docker Compose | 2.23.1 | The `environment:` secret source in the generated compose file, and `-f -` (the file read from stdin, with `--project-directory` for its relative paths -- documented for compose v2 and for standalone v1; nerdctl compose reads it through compose-go, which is not verified here) | `broker deploy` fails on the secret source or the stdin file. Loud. On a host with only the standalone v1 binary, set `docker.compose: docker-compose` |
+| podman | 4.7 | `ShmSize=` and `Ulimit=` in the quadlet unit. Below them: `HostName=` (4.6), `Secret=...,type=mount` with an absolute target and the `Health*=` keys (4.5), `NoNewPrivileges=` and `DropCapability=` (4.4), and `secret create --label` for every secret's change-detection label (4.3). The memory cap rides `PodmanArgs=--memory=` rather than quadlet's own `Memory=` key, which needs **5.5** | Quadlet refuses a unit carrying a key it does not know, so the unit fails to load at deploy time. Loud. `TestQuadletKeysAreWithinTheFloor` holds every key the unit emits to this floor |
+| podman 4.7 (adaptive) | 4.7 | `secret create --replace`, which `broker deploy` uses to store a secret in one command | Not a floor: the deploy asks `podman version` once and, when the answer is older than 4.7 or cannot be read, removes the secret with `secret rm --ignore` and then creates it. A preview shows that older pair |
 | Solace broker image | 10.26 | The built-in readiness endpoint the opt-in health check uses with no `cmd` of its own | Refused at load: an older tag and an unidentifiable one are both rejected. This is the one floor that IS checked, because the tag is in the env file rather than on the host |
 | EventBroker operator | bundled 1.4.2 | The `PubSubPlusEventBroker` schema this tool renders | `operator deploy` installs the bundled version. A newer operator already in the cluster prompts before a downgrade -- one the deploy can see; an identity that cannot list Deployments cluster-wide sees only the operator namespace ([Bringing up a fresh cluster](#bringing-up-a-fresh-cluster)) |
 | kubectl / oc | none | Namespace, Secret and the custom resource are all core API shapes plus the operator's own CRD | n/a |
@@ -192,7 +201,9 @@ of them at runtime**:
 Why nothing enforces them: `version` reports this tool's own build, the preflight probes
 reachability and one permission, and `validate` proves only that the runtime answers
 `version`. Parsing an engine's version string is its own class of problem, so the floors are
-documented rather than gated. The consequence worth knowing is that a floor failure is loud on
+documented rather than gated. The one version the deploy does read is podman's own, to choose
+between `secret create --replace` and remove-then-create ([Podman secret flags](#podman-secret-flags)).
+The consequence worth knowing is that a floor failure is loud on
 every row above, so an under-versioned engine tells you at deploy time rather than running a
 broker that quietly cannot read its own credentials.
 
@@ -272,7 +283,9 @@ solace-util broker perform assert-leader -e dev.yaml     # HA only, once the pri
 ```
 
 On Kubernetes, `broker deploy` reads the CR back after applying it, since `kubectl apply`
-exiting 0 does not prove the object actually exists. It creates the namespace only when it is
+exiting 0 does not prove the object actually exists; an identity that may create the broker
+but not get it is warned that the apply could not be confirmed, and the deploy succeeds. It
+creates the namespace only when it is
 missing: a namespace that exists -- the usual case for an identity confined to it -- is read
 by name and left alone, so `create namespaces`, which only a cluster-wide grant gives, is
 asked for only when there is a namespace to create. An identity that may neither read the
@@ -363,13 +376,13 @@ Steps 3, 4 and 5 can be undone from here: `broker configure domain-certs --remov
 
 Each step's own scope and failure mode is worth knowing. `server-certs` is a **hot-swap and
 never restarts the broker**: it first updates the stored copy -- the TLS Secret on
-Kubernetes, the store secret on podman (left alone when its digest label already matches) --
+Kubernetes, the store secret on podman (left alone when its stored value already matches) --
 so a later restart keeps the new certificate, then loads the certificate over the Solace CLI,
 which is what the running broker serves. It acts on every node in the redundancy group on
 Kubernetes (`--pod` narrows), and on this host's container on docker/podman, so an HA
 container group runs it on each host. Docker keeps no secret store: its container holds the
 certificate it was created with until `broker deploy` recreates it, which that deploy offers
-because the digest label no longer matches. If
+because the deploy digest no longer matches. If
 the env file names a Secret it supplies no certificate files for, that Secret is assumed
 managed elsewhere (kubectl, cert-manager) and the command refuses rather than guessing, and
 with a TLS Secret in play -- named in `kubernetes.tlsServerSecret`, or derived as
@@ -527,7 +540,10 @@ That left the CLI, which brought two problems the replacement has to solve:
 The `docker` and `podman` halves of the command tree share one implementation for a
 **host-local** broker: one container per host, driven over `<runtime> exec`/`cp` (no
 operator, no cluster). Only the deploy artifact differs -- Docker renders a compose file
-and brings it up with `docker compose`, Podman a systemd **quadlet** `.container` unit.
+and feeds it to `docker compose` on stdin (`-f -`, with `--project-directory` set to the env
+file's directory), so **no compose file is written to disk** -- and a compose file left by an
+earlier build is no longer read and may be deleted; Podman writes a systemd **quadlet**
+`.container` unit.
 (Docker always deploys through compose -- there is no `docker.mode` key to choose a mode
 with. A bare `docker run` cannot recreate an existing container, so re-deploying after an
 image-tag bump would fail on a name conflict where compose recreates cleanly. An env file
@@ -545,7 +561,8 @@ directory -- silently starts a new project and leaves the old containers, networ
 volumes as orphans `docker compose down` can no longer find. Declaring it in the file (rather
 than passing `docker compose -p`) also keeps it visible in `broker generate`, and leaves
 `COMPOSE_PROJECT_NAME` working as an override: compose's own precedence puts that environment
-variable above a file's `name:`. Export it before `broker deploy` if you need a specific
+variable above a file's `name:`. With the file on stdin there is no directory to derive a
+name from either. Export it before `broker deploy` if you need a specific
 project name -- for instance to adopt containers an earlier deployment created under the
 directory-derived name.
 
@@ -554,8 +571,11 @@ reports the operator's CR conditions, then pods, Services and StatefulSets -- re
 only this env file's broker and the objects the operator builds for it, so `get` on each kind
 is enough; a section this identity may not read is a `[SKIP]` row and the report goes on.
 `--all` lists every broker resource in the cluster, so it needs `list` on them in every
-namespace and fails, naming that grant, without it.) The `ps` line above it is deliberately
-narrowed to NAMES, IMAGE and STATUS: a broker publishes a dozen or more ports, and the
+namespace and fails, naming that grant, without it.) The listing above it is `ps --all --no-trunc` with an
+explicit NAMES, IMAGE and STATUS template, filtered to this container's exact name (so a
+sibling called `solace-edge` is never mistaken for `solace`) and printed as a table, with
+every string the engine supplied stripped of control characters -- C1 controls included --
+before it reaches the terminal. It is deliberately narrowed to NAMES, IMAGE and STATUS: a broker publishes a dozen or more ports, and the
 engine's default PORTS column spends most of a terminal line listing both host bindings of
 each one, wrapping every other column into illegibility on the one report whose job is to
 answer "is it up". The ports are in the env file that chose them and in the artifact
@@ -569,25 +589,30 @@ fields there are not what the engine's own `ps` or a `--format` template would g
 *Health* is read under whichever spelling this engine uses -- docker nests it at
 `State.Health`, podman at `State.Healthcheck` -- and "no healthcheck configured" is printed
 distinctly from "unknown", because those are a deployment choice and a missing answer. On
-podman the *restart count* comes from `systemctl show -p NRestarts`, not from the engine:
+podman the *restart count* comes from `systemctl show <unit> -p NRestarts --value`, not from the engine:
 systemd restarts a quadlet unit by replacing the container, so the engine's own counter
-reads 0 on a broker that has restarted twenty times. `broker status --all` discovers
+reads 0 on a broker that has restarted twenty times. A negative or non-numeric answer, or none
+(systemd answers a unit it does not know with an empty value), is shown as unknown rather than
+as a number. `broker status --all` discovers
 containers by image, and any it finds that this env file does not name gets the engine's
 counter instead -- this deployment's unit is not their unit. `--detail` adds the full
-`inspect` dump on top. The container's **environment is never printed** on either platform:
+`container inspect` dump on top. The container's **environment is never printed** on either platform:
 on docker the compose secrets are environment-sourced, so secrets appear only as the mount
 paths that name them.
 
 **`--watch` keeps the report on screen.** `broker status` (with or without `--all` and
 `--detail`) and `operator status` take `--watch`, which re-runs the same report every
-`--interval` (default `5s`, at least `1s`) until Ctrl-C. On a terminal each refresh clears
+`--interval` (default `5s`, at least `1s`, at most `1h`) until Ctrl-C. On a terminal each refresh clears
 the screen and redraws under a header naming the command, the interval and the time; on
 Windows the console is first asked to interpret the escape sequence, and an old console
 that refuses falls back to appending. Piped or redirected -- into a log, through `tee`, or
 under Git Bash, whose terminal is a pipe -- nothing is cleared: each report is appended under
 its own timestamped `===` line, so the output stays plain text. A refresh that fails, such
 as an unreachable cluster or engine, prints its error on stderr and the watch carries on;
-the screen clears before each read, so it stays blank for as long as the read takes.
+the screen clears before each read, so it stays blank for as long as the read takes. The loop
+and the interval bounds are the shared `watch` package's, the same one `solmq-conn-util` runs.
+An interval above `1h` is refused as a usage error: a report refreshed less often than hourly
+is better run by hand or by a scheduler.
 
 `broker logs --previous` is Kubernetes only, because a container engine keeps no prior-run
 log to read; `--since` is re-serialised through Go's duration parser before it reaches
@@ -657,7 +682,7 @@ them. The layout also cannot be built from one env file: every role on a host ge
 `container.name`, and so the same container, quadlet unit or compose project, data directory
 and secret names -- so deploying a second role on a host that already runs one does not add
 a node, it **replaces** the one that is there (a changed unit, so under the usual restart
-prompt, or at once with `--restart`). With host networking the three would also contend for
+prompt, or at once with `--restart` or `--no-prompt`). With host networking the three would also contend for
 the same ports. Role detection refuses a host that matches more than one `redundancy.*`
 entry, which is what an env file pointing every role at one machine produces; `--pod` skips
 detection but does not make the layout work. Run each role on its own host, as in the
@@ -676,13 +701,13 @@ group table every host renders, and no host can fill in another machine's.
 
 Both artifacts always carry a `-u` equivalent -- quadlet `User=`/`Group=`, compose `user:` --
 so `container.runUser` overrides whatever USER the image declares. The default is chosen by
-platform, and for podman by `rootless`:
+platform, and for podman by whether it is rootful (`podman.rootful`, default rootless):
 
 | Deployment | Default `runUser` | Why |
 | --- | --- | --- |
 | docker | `1000001:0` | the image's own user and group. The engine is privileged, so container uid 0 would be **host root** |
 | podman, rootful | `1000001:0` | same reason |
-| podman, rootless | `1000:0` | the image's uid is unreachable here (below), so a low id the stock subuid allocation covers |
+| podman, rootless (the default) | `1000:0` | the image's uid is unreachable here (below), so a low id the stock subuid allocation covers |
 
 The rootless split is arithmetic, not preference. A rootless container's uids are drawn from
 the invoking user's subuid range, and a range has to reach the id itself -- so uid `1000001`
@@ -692,7 +717,8 @@ would need **1000002** entries against the 65536 `useradd` allocates by default.
 **The gid is 0 everywhere**, which is the group the broker image expects and also the one gid
 that costs nothing on either side: rootful maps it to the root group, and rootless maps
 container gid 0 to the invoking user's own primary group. So a rootless deployment needs a
-**subuid** allocation but no subgid one.
+**subuid** allocation but no subgid one: id 0 always passes the `id mapping` row, even for a
+user with no subgid allocation at all.
 
 It is worth being explicit about what uid 0 means in each mode, because it is the usual
 source of confusion:
@@ -754,7 +780,7 @@ TLS) and, on an HA member, the redundancy ports 8300-8302 and 8741.
 
 ### Rootless podman prerequisites
 
-`podman.rootless: true` deploys as an ordinary user, and a rootless host needs preparation
+Rootless is the default (`podman.rootful` unset): it deploys as an ordinary user, and a rootless host needs preparation
 most of which this tool deliberately does **not** perform. `validate` and the first step of
 `broker deploy` read the same block, so there is one definition of a ready host; they differ
 only in what they are allowed to do about it. `validate` never changes anything, as its help
@@ -762,10 +788,10 @@ promises:
 
 | Row | What it asserts | If it fails |
 | --- | --- | --- |
-| `euid` | not root when `rootless: true`, root when `false` | refused before any row is read and before `podman info` runs, exit 2. Re-run as the account the file names, or change `podman.rootless`. Probed as the wrong account every row below would answer about a user the deploy never uses |
-| `user session` | `XDG_RUNTIME_DIR` names a directory that exists | you are under `sudo`/`su`/cron, or the user has no session |
-| `id mapping` | this user has a subuid/subgid allocation **and** it reaches `container.runUser` | an administrator allocates or widens it (below), then you run `podman system migrate` |
-| `linger` | `loginctl show-user <uid> --property=Linger` reports `yes` | **`broker deploy` enables it for you**; `validate` reports it |
+| `euid` | rootless (the default): not root. `podman.rootful: true`: root. Root without `rootful: true` is refused, and so is `rootful: true` as an ordinary user | refused before any row is read and before `podman info` runs, exit 2. Re-run as the account the file names -- the rootless user itself, without `sudo` -- or set `podman.rootful: true` and run as root. Rootful is never assumed. Probed as the wrong account every row below would answer about a user the deploy never uses |
+| `user session` | `XDG_RUNTIME_DIR` names a directory that exists (`sh -c 'test -d <dir>'`: exit status 1 is a missing directory, any other failure is a probe that could not run) | you are under `sudo`/`su`/cron, or the user has no session |
+| `id mapping` | `podman info` shows a subuid/subgid range that reaches `container.runUser`; container id 0 is the invoking user and always passes | an administrator allocates or widens it (below), then you run `podman system migrate` |
+| `linger` | `loginctl show-user <uid> --property=Linger` reports `yes` | **`broker deploy` enables it for you**; `validate` reports it, and its refusal names the account and the `loginctl enable-linger` command |
 | `user systemd` | `systemctl --user` answers | `systemctl --user start podman.socket` |
 | `data dir` | `container.dataDir`'s nearest existing parent is writable, or the directory is already writable inside the user namespace | move `dataDir`, or pre-create and chown it |
 
@@ -870,11 +896,20 @@ podman system migrate
 storage that already exist. Setting `podman.container.dataDir` to something under your own
 home (`~/solace/data`) removes the third step entirely.
 
+**The quadlet directory.** A rootless unit is written to `$XDG_CONFIG_HOME/containers/systemd`, or
+`$HOME/.config/containers/systemd` when that is unset, unless `podman.quadletDir` says
+otherwise. The directory is worked out when the env file loads, and a relative `XDG_CONFIG_HOME`
+(which podman's generator cannot use either) or a home directory that cannot be resolved stops the
+load with exit 2 instead of writing the unit somewhere systemd never looks. The generator runs
+under the user's systemd manager, so an `XDG_CONFIG_HOME` exported only from a shell profile is
+not seen there: set it for the manager too, or set `podman.quadletDir`.
+
 **The session variables are set for you too.** `systemctl --user` and
 `loginctl` reach the user bus through `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`, and
 both are unset under `sudo`, `su` and bare cron. Those describe *this invocation* rather than
 the host, so when either is empty it is derived -- `XDG_RUNTIME_DIR=/run/user/<uid>` and
-`DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus`. A value you already set is never
+`DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus` (the shared `rootless.UserSession` rule,
+exported once per run). A value you already set is never
 overwritten, and the report says which half came from where:
 
 ```
@@ -890,53 +925,86 @@ bus.
 
 Boot-start is where linger bites hardest, and why prep enables it rather than asking: the
 quadlet carries `WantedBy=default.target`, but without lingering systemd tears the user's
-instance down at logout and starts nothing at boot, so the broker simply disappears when you
-log out. It is worth knowing that linger is scoped to the **account**, not to this
+instance down at logout and starts nothing at boot, so the user's units -- the broker among
+them -- simply disappear when you log out. It is worth knowing that linger is scoped to the **account**, not to this
 deployment -- it makes every one of that user's services survive logout, and `broker remove`
 does not turn it off again.
 
 ### Re-deploying is safe and explicit
 
-`broker deploy` renders the artifact and compares it with
-what is already on disk, so the three outcomes are distinguishable:
+`broker deploy` on Docker and Podman works in the order **compare, ask, write**. It works
+out what would change before it writes or restarts anything: what is deployed is compared
+with what this env file would deploy, and only a **running** broker that would be restarted
+or recreated for a change is asked about. A "no" leaves the host exactly as it was -- no
+file written, no secret stored, no container touched -- so the next deploy asks again.
 
-- **Unchanged, broker running** -- reported as nothing to do; the broker is not touched.
-  With `--restart` it is recreated/restarted anyway, which is how a rotated password or
-  pre-shared key is applied (nothing in the artifact changes when one does). A renewed
-  server certificate needs no `--restart`: its digest label marks the change (below).
-- **Broker not running** -- recreated from the current config, so a rotated secret takes
-  effect without `--restart`. A stopped container would otherwise be *started* with the
-  credentials it was created with; there is no traffic to protect here, so no consent is
-  asked. `--restart` is only needed for a running broker, which is the case where applying
-  a change costs a bounce. Confirmed on Docker (`--force-recreate`); on Podman this relies
-  on quadlet's own container replacement at unit start, which is assumed but has not been
-  independently verified.
-  On Docker, "not running" has to be an answered probe, not an assumption: if the `ps` check
-  itself fails (a transient engine hiccup), `broker deploy` now aborts naming the container
-  rather than guessing "not running" and force-recreating a broker that might still be live --
-  by hand, check `<runtime> ps` and re-run. A probe that answers and simply finds no match
-  (genuinely absent, or stopped) is unaffected. Podman's equivalent path issues a plain
-  `systemctl start`, a no-op on an already-active unit, so it carries no such risk and still
-  treats an unanswered probe as "not active".
-- **Changed, broker not running** -- written and started.
-- **Changed, broker running** -- written, then you are asked before it is bounced.
-  `--restart` pre-approves; a non-interactive run declines, leaving the new artifact in
-  place and warning that the running broker is still on the previous one. `--restart` is
-  deliberately its own flag: dropping messaging traffic is its own decision.
+What is compared, and how the platform acts on it:
+
+- **Docker.** The compose file goes to `docker compose` on stdin (`-f -`, with
+  `--project-directory` set to the env file's directory); nothing is written to disk. The
+  file carries one container label, `solace-util.deploy-sha256`, whose value compose fills
+  from the environment `broker deploy` gives it: the digest of the file **and of every value
+  the compose child receives** -- every password, the pre-shared key, the certificate bundle.
+  Compose recreates a container when its service configuration changes, but a secret's
+  *content* is not part of that configuration, which is exactly the gap the label closes: a
+  changed file, a rotated password and a renewed certificate all change the label, so compose
+  recreates the container, and an unchanged deploy changes nothing. The tool always runs
+  `compose up -d` and leaves the decision to compose. The digest is also how it *predicts* the
+  recreate: before `up`, it asks the engine whether the broker is running (a `ps` that cannot
+  answer aborts the deploy naming the container, never a guess), and if so reads the running
+  container's label with `container inspect`. A different label, no label (a container an
+  earlier build created) or an inspect that fails counts as changed, and you are asked first.
+- **Podman.** The unit rendered now is compared with the file on disk (a missing file is a
+  change), and each secret's stored value with the configured one, read back from the store
+  (`podman secret inspect --showsecret`, podman 4.7 and later; on an older podman, or when the
+  version cannot be read, every secret counts as changed and nothing is read back). Only what
+  changed is written -- the secrets that differ, the unit if it differs --
+  `daemon-reload` runs only when something was written, and an unchanged deploy writes and
+  restarts nothing.
+
+The outcomes:
+
+- **Unchanged, broker running** -- left alone. Docker runs the plain `compose up -d`, which
+  compose leaves as it is; Podman does nothing and says so. Nothing is asked. With `--restart`
+  it is recreated or restarted anyway (Docker adds `--force-recreate`).
+- **Changed, broker running** -- you are asked before it is restarted or recreated.
+  `--restart` pre-approves and asks nothing, and `--no-prompt` approves too. With no terminal
+  and no `--no-prompt` the deploy **fails with exit 1**, naming `--no-prompt`, **before it
+  changes anything**; a reply of `n` is a decision, not a failure: the deploy prints that
+  nothing was changed and exits 0. A rotated password or a renewed server certificate is such a
+  change -- `--restart` is no longer the only way to apply one. It is deliberately a decision
+  of its own: dropping messaging traffic is not something a script should do by accident.
+- **Broker not running** -- nothing to protect, so nothing is asked. Docker runs `compose up
+  -d` without `--force-recreate`: compose starts an unchanged container and, because the
+  label covers the secrets, recreates one whose file or secrets changed. Podman writes what
+  changed, reloads and starts the unit; that start re-reads the store, **which is assumed from
+  quadlet's own container replacement at unit start and has not been independently
+  verified**. Podman reads the unit's state from the word `systemctl is-active` prints on
+  stdout (its exit status says nothing a stopped unit and an unreachable systemd do not
+  share): `active` and `reloading` both count as running. An unanswered probe there reads as
+  "not active", which takes the plain start -- a no-op on a running unit -- so the change is
+  written but the running service keeps its old unit until it is restarted.
+- **Not predicted: a new local image under the same tag.** Compose recreates the container
+  for that on its own, but it is neither the artifact nor a secret, so no question covers it:
+  the platform decides.
+
+A preview (`broker generate`, or any dry run) asks nothing and counts every artifact and
+secret as changed, the way it always has.
 
 This is what makes an image-tag bump a one-command upgrade: edit `image.tag`, then
-`solace-util broker deploy --pod <role> --restart -e prod.yaml` (podman) or
-`solace-util broker deploy --restart -e prod.yaml` (docker). Podman needs `--restart`
-because `systemctl start` on an already-active unit is a no-op, so without it the unit file
-is rewritten but the running container keeps the previous image.
+`solace-util broker deploy --pod <role> -e prod.yaml` and answer the question, or add
+`--no-prompt` (or `--restart`) in a script. `systemctl start` on an already-active unit is a
+no-op, which is why Podman restarts explicitly after a change rather than relying on the
+start.
 
 **Secrets.** `broker deploy` externalizes every secret before applying the artifact, so no
 value is ever written into the compose file or quadlet unit (see the table under
 [Rendering without applying](#rendering-without-applying) for the names and
-paths). Podman loads them into its own secret store (`podman secret rm --ignore` then
-`podman secret create`, value on stdin) and the unit mounts them; Docker's compose file names a host environment
+paths). Podman loads them into its own secret store (`podman secret create --replace` on 4.7
+and later, else `podman secret rm --ignore` then `podman secret create`; value on stdin) and the
+unit mounts them; Docker's compose file names a host environment
 variable per secret, and `broker deploy` sets those variables for its own `docker compose`
-process, so no value ever reaches an argv or a file beside the compose file. A missing
+process, so no value ever reaches an argv, a file, or the compose file on stdin. A missing
 value fails the deploy loudly rather than starting a broker without a password.
 `redundancy.psk` never gets that far: it is mandatory in an HA container group and an empty
 one is refused at LOAD, with the `openssl rand -base64 32` command in the message. Nothing
@@ -944,7 +1012,7 @@ here generates it -- a key one host invented is a key the other two never see.
 
 What that does and does not buy you: **nothing is written next to the artifact** (no
 plaintext file a project-directory backup, `tar`, or non-root user would pick up, and
-nothing to clean up on teardown), but the value still ends up at rest -- Docker
+nothing to clean up on teardown -- on Docker there is no compose file on disk at all), but the value still ends up at rest -- Docker
 materializes each secret into the container's own filesystem as a `0444` root-owned file
 at the absolute `target:` the compose file names (`/mnt/secrets/<setting>`), which is the
 same at-rest exposure class as podman's store. It is not in the container's environment, so
@@ -965,25 +1033,35 @@ deployments on one host collide only if they also share a container name and a u
 which the engine and systemd already refuse; rootful and rootless deployments keep separate
 secret stores.
 
-**A `solace-util.sha256` digest is how `broker deploy` notices a renewed certificate**, on
-every platform, even though the unit, compose file or CR itself did not change. Podman puts
-it as a label on the store secret. Docker has no secret object to label, so it goes on the
-container: the compose file names `${<NAME>_TLS_SERVERCERTIFICATE_SHA256}`, filled from the
-compose child's environment like the secret itself, so the file stays byte-identical across a
-renewal and holds no digest. Kubernetes puts it as an annotation on the TLS Secret this env
-file builds (a label value stops at 63 characters; the digest is 64). On every platform the
-digest covers the `tls.cas` chain too, so a renewed CA is noticed like a renewed certificate. The rule is the same everywhere, and since the name is derived the
-digest decides alone: a **matching** one leaves the certificate as it is; a **different or
-missing** one (a host or cluster an earlier build deployed) means every artifact is applied
-and, **if the broker is running**, you are asked before it restarts -- or it restarts at once
-under `--restart`, and a non-interactive run leaves it running and says how to finish. A
-broker that is not running is simply deployed with the new certificate. The restart is the
-platform's own: podman restarts the unit, docker recreates the container, and Kubernetes
-restarts every pod in `broker restart`'s rolling order, since a Secret's content is not part
-of the pod template and the operator does not roll pods for it. If the same Kubernetes
-deploy also changed the CR, the operator may already be rolling the pods with the new Secret
-mounted, and declining is then the right answer. `broker configure server-certs` is the way
-to apply a renewed certificate with no restart at all.
+**A digest is how `broker deploy` notices a renewed certificate, or a rotated password**, on
+every platform, even though the unit, compose file or CR itself did not change. On Podman every
+store secret -- the certificate and each credential -- is compared by reading its stored value
+back (`podman secret inspect --showsecret`, podman 4.7 and later) and comparing it with the
+configured one in memory; an equal one is left in the store, and a different, absent or
+unreadable one is rewritten. No label is written, since a label would put something derived
+from the value on the command line, and the value read back is never printed or logged. On a
+podman below 4.7, or one whose version cannot be read, there is nothing to read back with, so
+every secret counts as changed. Docker has no secret object to read, so
+one container label, `solace-util.deploy-sha256`, covers the compose file and every value the
+compose child receives, the certificate bundle included: the file names
+`${SOLACE_DEPLOY_SHA256:-}`, filled from the compose child's environment like the secrets
+themselves, so the file stays byte-identical across a renewal and holds no digest. Kubernetes
+puts the certificate's `solace-util.sha256` as an annotation on the TLS Secret this env file
+builds (a label value stops at 63 characters; the digest is 64). On every platform the
+certificate digest covers the `tls.cas` chain too, so a renewed CA is noticed like a renewed
+certificate. The rule is the same everywhere, and since the name is derived the comparison
+decides alone: a **matching** one leaves the secret as it is; a **different or missing** one
+(a host or cluster an earlier build deployed) means it is applied and, **if the broker is
+running**, you are asked before it restarts -- `--restart` or `--no-prompt` answers, and a
+non-interactive run without either fails before it changes anything on docker and podman
+(Kubernetes leaves it running and says how to finish). A broker that is not running is
+simply deployed with the new certificate. The restart is the platform's own: podman restarts
+the unit, docker recreates the container, and Kubernetes restarts every pod in `broker
+restart`'s rolling order, since a Secret's content is not part of the pod template and the
+operator does not roll pods for it. If the same Kubernetes deploy also changed the CR, the
+operator may already be rolling the pods with the new Secret mounted, and declining is then
+the right answer. `broker configure server-certs` is the way to apply a renewed certificate
+with no restart at all.
 
 Earlier builds wrote podman's bundle to `<podman.baseDir>/<container.name>-tls-servercertificate.pem`
 instead, `0600` and owned by container root, which the default non-root broker could not
@@ -1000,11 +1078,12 @@ docker by passing them to the compose child's environment. If you run `docker co
 by hand against the generated file, you must export the variables it names yourself; unset,
 compose refuses.
 
-**Rotating a secret** takes `--restart`. A new password or PSK changes no artifact (its
-value lives in the config and, for Docker, only in the environment), so the ordinary
-"unchanged, nothing to do" path cannot see it; `broker deploy --restart` recreates the
-container (Docker) or restarts the service (Podman) to pick it up, and the no-op message
-names that as the way to apply one.
+**Rotating a secret** is a change like any other: a new password or PSK changes no artifact
+(its value lives in the config and, for Docker, only in the environment), but it changes the
+digest, so `broker deploy` notices it, asks before it restarts a running broker, and applies
+it. On Podman only the secret that changed is rewritten. `--restart` or `--no-prompt`
+answers the question for a script, and `broker deploy --restart` still recreates or restarts
+a broker whose deploy did not change.
 
 **Config source.** The container platform has no separate config namespace: its post-deploy
 `config` steps read the platform-neutral `broker.*` fields -- `broker.domainCerts`,
@@ -1017,7 +1096,7 @@ mate). The rest of the `redundancy.*`
 table and `redundancy.psk` are consumed earlier, by `broker deploy`, which externalizes the
 key as a secret -- it does not create it, and no command here writes to an env file.
 Container-only knobs live under `docker.*` /
-`podman.*` (runtime, compose invocation, container name, data dir, network mode, rootless).
+`podman.*` (runtime, compose invocation, container name, data dir, network mode, rootful).
 See a bare `solace-util examples`, or the same text at [env/sample.yaml](../env/sample.yaml).
 
 ## Rendering without applying
@@ -1027,7 +1106,7 @@ apply before it touches a cluster or a host. There is no `--dry-run` and no per-
 render flag. It prints to stdout and changes nothing: it runs no external command at all,
 which is what makes it the safe way to inspect an env file you did not write (see
 [The command fields are executable content](configuration.md#the-command-fields-are-executable-content)).
-On podman it is also the one command that does not check `podman.rootless` against your
+On podman it is also the one command that does not check `podman.rootful` against your
 account, for the same reason -- a rootless file renders under `sudo` and a rootful one
 renders on a laptop, so what you read is the artifact the file describes:
 
@@ -1131,7 +1210,8 @@ Deleting the CRDs is the sharper of the two layers, because they are cluster-wid
 cascade-deletes **every** PubSubPlusEventBroker in the cluster, including ones this env file
 has never heard of. So `--delete-crd` refuses outright while any PubSubPlusEventBroker still
 exists anywhere -- each is named `<namespace>/<name>` in the refusal, and a failure to even
-list them refuses too, as does an identity that may not list them in every namespace. The
+list them refuses too, as does an identity that may not list them in every namespace (that
+list is read for real before the first delete, not probed with the writes). The
 refusal comes **before anything is deleted**: the operator stays installed and the error says
 so, so a retry once the brokers are gone does the whole job. Without `--delete-crd` the CRDs
 are kept and nothing about them is asked or required.
@@ -1146,7 +1226,7 @@ one removal teaches the other:
 | no | either | either | Layer **kept**. Nothing is asked about it. |
 | yes | no | yes | Prompted; only an exact, case-insensitive `yes` deletes it. |
 | yes | yes | either | **Deleted**, unattended. |
-| yes | no | no | Layer **kept**, with a loud warning naming `--no-prompt`. The removal itself still proceeds. |
+| yes | no | no | **Fails** with exit 1 and an error naming `--no-prompt`, before anything is deleted. |
 
 So a fully unattended removal that also drops the data is `--delete-data --no-prompt`: the
 two flags answer different questions and deliberately **compose**. There is no global
@@ -1154,7 +1234,7 @@ two flags answer different questions and deliberately **compose**. There is no g
 
 The last row is the one worth reading twice. A scripted removal cannot lose data by
 omission, and it cannot lose it by *asking* either: without a terminal to answer the
-question, the layer survives and the run says so rather than proceeding in silence.
+question, the run fails and names `--no-prompt` rather than proceeding in silence.
 
 On docker and podman the directory `--delete-data` empties is exactly
 `<platform>.container.dataDir`, which is why that key is **required to be an absolute path**
@@ -1184,38 +1264,66 @@ Two more properties hold on every path:
 ### The namespace is only offered when it is empty
 
 The namespace is **never in the delete set**. After everything this env file owns is gone,
-what remains is enumerated, and only an otherwise-empty namespace is *offered* for removal --
-as its own question, which `--no-prompt` answers yes.
+what remains is listed, and only a namespace holding nothing of anyone else's is *offered*
+for removal -- as its own question, which `--no-prompt` answers yes.
 
 An occupied namespace is **listed and kept, on every path, `--no-prompt` included**. There is
 no flag that deletes it: deleting a namespace takes everything in it, including objects
 another team put there, and this tool may not have created it in the first place.
 
-- Four Kubernetes system namespaces -- `default`, `kube-system`, `kube-public`,
-  `kube-node-lease` -- are refused outright and unconditionally. There is no interpretation
-  of "delete kube-system" this tool should ever carry out.
-- Occupancy is checked ownership-BLIND, by one classifier (`Cluster.NamespaceContents`): it
-  lists a fixed set of kinds (`all`, PersistentVolumeClaims, Secrets, ConfigMaps) and
-  discounts only what Kubernetes itself puts in every namespace -- the `kube-root-ca.crt`
-  ConfigMap and the default ServiceAccount (without that, no namespace would ever read as
-  empty) -- plus a LimitRange, ResourceQuota or Event, which are cluster policy rather than
-  occupancy. Anything else still there blocks removal, with no further judgement of who put
-  it there: **a second Solace broker sharing the namespace** blocks it exactly like anything
-  else would.
-- **Retained data keeps the namespace too.** Without `--delete-data` the PVCs are still
-  there, so the namespace is not empty and is kept -- which is what makes "delete the
-  namespace and take the retained data with it" impossible to reach by accident rather than
-  merely discouraged.
-- A failure to even list the contents keeps the namespace: being unable to see what is in
-  there is not permission to proceed. That direction is the whole safety property -- a
-  namespace wrongly reported empty gets cascade-deleted, while one wrongly reported occupied
-  merely stays.
+The gate is the one `solmq-conn-util` runs, and it **never fails the removal**: by the time it
+runs the broker, its data (if asked) and its Secrets are already gone, so every way out short
+of a confirmed delete keeps the namespace with a warning and the command still succeeds. It
+runs in this order, stopping at the first step that does not pass:
+
+1. The four Kubernetes system namespaces -- `default`, `kube-system`, `kube-public`,
+   `kube-node-lease` -- are refused outright and unconditionally. There is no interpretation
+   of "delete kube-system" this tool should ever carry out.
+2. The namespace is listed (`get all,persistentvolumeclaims,secrets,configmaps -o json`) and
+   what is left is judged. A listing that fails or cannot be read keeps the namespace with a
+   warning: being unable to see what is in there is not permission to proceed. A runner that
+   answers nothing at all -- a dry run -- prints `check skipped (no answer from the runner)`
+   and keeps it quietly.
+3. If anything is left, it is listed and the namespace is kept. This is **not
+   ownership-blind**: these are discounted --
+   - the broker CR and everything the operator builds for it, which carry
+     `ownerReferences` back to it and are followed to the end: its StatefulSets, Pods,
+     Services and the Secrets the operator generates;
+   - the Secrets **this env file builds** (the admin, TLS, image-pull and additional-users
+     Secrets it owns). A Secret the env file only *names*
+     (`kubernetes.adminSecret`, `kubernetes.tlsServerSecret`, `kubernetes.imagePullSecret`
+     with nothing to build it from) is not owned, so it still counts;
+   - objects already being deleted (terminating);
+   - what Kubernetes itself puts in every namespace -- the `kube-root-ca.crt` ConfigMap, the
+     default ServiceAccount and the default ServiceAccount's token Secret (without that, no
+     namespace would ever read as empty) -- plus a LimitRange, ResourceQuota or Event, which
+     are cluster policy rather than occupancy.
+
+   Anything else blocks removal: **a second Solace broker sharing the namespace** blocks it,
+   because its objects hang off another CR.
+4. `delete namespaces` is probed **before** the question, cluster-wide (a namespace delete is
+   cluster-scoped, so a role binding in the namespace cannot grant it). Refused, or with no
+   usable answer, the namespace is kept with a warning and nobody is asked.
+5. The question (`--no-prompt` answers yes). A **no** keeps the namespace. So does a run with
+   **no terminal and no `--no-prompt`**: it keeps the namespace with a warning that names
+   `--no-prompt`, rather than failing the removal that already happened.
+6. The delete. If it fails, that is a warning and the namespace is kept.
+
+**Retained data keeps the namespace too.** Without `--delete-data` the PVCs are still there,
+and no `ownerReference` ties them to the broker, so the namespace is not empty and is kept --
+which is what makes "delete the namespace and take the retained data with it" impossible to
+reach by accident rather than merely discouraged. That direction is the whole safety property:
+a namespace wrongly reported empty gets cascade-deleted, while one wrongly reported occupied
+merely stays.
 
 **Docker and Podman have their own teardown wrinkles**, on top of the `--delete-data` layer.
-The sequence is: stop the container, remove it, remove the quadlet unit on podman (the
-compose file stays where `broker deploy` wrote it), remove the engine secrets (and, on
-podman, any legacy certificate file under `podman.baseDir`), then ask about the data
-directory -- whose CONTENTS are what `--delete-data` removes; the directory stays.
+The sequence is: stop the container and remove it (Docker: `compose down`, fed the file
+rendered now on stdin, so there is no compose file to find or leave behind; a compose file an
+earlier build wrote is not read and may be deleted), remove the quadlet unit on podman, remove
+the engine secrets (and, on podman, any legacy certificate file under `podman.baseDir`),
+then ask about the data directory -- whose CONTENTS are what `--delete-data` removes; the
+directory stays. `compose down` needs every secret *defined* but never reads one, so it gets
+placeholders and a certificate that has since moved cannot block a teardown.
 
 - Podman's secret store is a real, separate persistence layer -- `broker remove` removes
   every secret `broker deploy` loaded into it as part of removing the container. A secret
@@ -1224,15 +1332,15 @@ directory -- whose CONTENTS are what `--delete-data` removes; the directory stay
   is **fatal** (after every other secret has been attempted), and so is failing to delete a
   legacy certificate file under `podman.baseDir`, because leaving a private key on the host
   is the worst outcome available.
-- If `systemctl stop` (Podman) or `stop` (Docker) fails, the removal aborts before touching
-  the unit, the container, or the data directory -- it continues only when the broker is
-  *confirmed* down: systemd reporting `inactive`, `failed` or `unknown`, or the engine
-  listing no running container. "Still running" and "could not be confirmed either way" both
-  abort, because the case this guard exists for -- a rootless Podman whose systemd user
-  session is unreachable while `podman info` still succeeds -- produces the second one, and
-  silence is not confirmation.
-- `broker remove` against a host with nothing deployed -- no compose file, no container by
-  that name -- is a no-op rather than an error, matching `--ignore-not-found` elsewhere.
+- If `systemctl stop` (Podman) fails, the removal aborts before touching the unit, the
+  container, or the data directory -- it continues only when the broker is *confirmed* down:
+  systemd reporting `inactive`, `failed` or `unknown`. "Still running" and "could not be
+  confirmed either way" both abort, because the case this guard exists for -- a rootless
+  Podman whose systemd user session is unreachable while `podman info` still succeeds --
+  produces the second one, and silence is not confirmation. On Docker the stop belongs to
+  `compose down`, whose own failure fails the removal.
+- `broker remove` against a host with nothing deployed -- no container, no project by that
+  name -- is a no-op rather than an error, matching `--ignore-not-found` elsewhere.
 
 ### Removing the operator does not always remove it
 
@@ -1263,18 +1371,29 @@ deletes certificate authorities already configured on the broker. So does
 `broker perform assert-leader` on a docker/podman host that is, or looks like, the backup --
 asserting there makes that node's router and message-VPN configuration the copy config-sync
 pushes to the primary -- though only once its read has shown it holds activity; it never asks
-on Kubernetes or on the primary. An interactive terminal is
-asked `[y/N]`; a session that does not answer, and was not given `--no-prompt`, refuses
-loudly rather than destroying anything unattended.
+on Kubernetes or on the primary. A terminal is asked `[y/N]`; a
+session without one, and without `--no-prompt`, fails at once with exit 1 and an error that
+names `--no-prompt`, rather than destroying anything unattended. Declining at a terminal is an
+answer, not a failure: it prints nothing more and exits 0. The one question that never fails
+the command is the namespace question that ends `broker remove`: by then the removal has
+happened, so with no terminal and no `--no-prompt` the namespace is kept with a warning that
+names `--no-prompt`, and the command exits 0 (see
+[the namespace gate](#the-namespace-is-only-offered-when-it-is-empty)).
 
-**What counts as "answered" is decided by reading, not by what kind of stream stdin is.**
-The question always goes to stderr and the answer is always read from stdin, so a shell
-that hands this tool a pipe rather than a console -- Git Bash, and anything that wraps the
-binary -- is asked and answered normally. An input that ends without a reply is the
-unattended case, and the refusal names `--no-prompt`. The one case with no good answer is
-a scripted run whose stdin is an open pipe that nothing ever writes to and nothing ever
-closes: it waits at the question instead of refusing it. **Pass `--no-prompt` in any
-unattended run** -- CI, cron, a systemd unit -- and none of this arises.
+**A human is present when stdin is a terminal, and nothing else counts.** A terminal here is a
+character device. Without one, a destructive confirmation fails before asking: the question is
+not written and **a pipe is never read**, so a stale `yes |` can never approve a deletion. End of
+input at a terminal (`Ctrl-D`) is the same kind of error, with "reading input: EOF" as its cause.
+`/dev/null` is a character device too, so `solace-util broker remove < /dev/null` is asked, reads
+end of input at once, and fails naming the flag. A shell that hands this tool a pipe instead of a
+console -- Git Bash and other mintty-style shells, and anything that wraps the binary -- cannot be
+asked, so **pass `--no-prompt`** there, and in every unattended run: CI, cron, a systemd unit.
+
+`operator deploy` takes `--no-prompt` too, with a narrower meaning: it approves an operator
+**downgrade** and nothing else. Letting the operator watch **every** namespace is a
+least-privilege decision no flag makes for you, so that question needs a terminal; without one,
+or when the input ends unanswered, the deploy fails and names the env-file setting that selects
+the watched namespaces instead, `kubernetes.operator.watchNamespaces`.
 
 On Kubernetes, deleting a pod is graceful, not abrupt: it sends SIGTERM and honours
 `terminationGracePeriodSeconds`, and only `--force --grace-period=0` would kill outright --
@@ -1789,15 +1908,16 @@ primary. Check with `solace-util broker perform redundancy-test` first.
 **Docker / Podman** (on each host, with its own role)
 
 ```
-solace-util broker deploy --pod primary -e prod.yaml --restart    # prod.yaml: a podman env file
-solace-util broker deploy -e prod.yaml --restart             # prod.yaml: a docker env file
+solace-util broker deploy --pod primary -e prod.yaml    # prod.yaml: a podman env file; asks first
+solace-util broker deploy -e prod.yaml --no-prompt      # prod.yaml: a docker env file; approves in a script
 ```
 
-`broker deploy` compares the rendered artifact with the one on disk: unchanged is a no-op,
-changed is written and then applied to the running broker -- with `--restart`, or
-after being asked. Without consent the new artifact is left in place and the command
-says the broker is still on the previous one. In an HA group, upgrade the monitor and
-backup before the primary.
+`broker deploy` compares what it would apply with what is deployed -- the artifact and every
+secret -- before it writes anything: unchanged is a no-op, and a change to a running broker is
+applied after you are asked, or with `--restart` or `--no-prompt`. A "no" leaves the host
+exactly as it was, and with no terminal and no flag the deploy fails before it changes
+anything ([Re-deploying is safe and explicit](#re-deploying-is-safe-and-explicit)). In an HA
+group, upgrade the monitor and backup before the primary.
 
 ## Troubleshooting
 
@@ -1887,8 +2007,9 @@ error: session nofile is 524288, needs 1048576.
 ```
 
 The session's hard **core** limit is held to `ulimits.core` the same way the user manager's
-`LimitCORE` is -- `unlimited` for the default `-1`, nothing for `0`. It is read from
-`/proc/self/limits`, which counts bytes whatever shell `sh` is. Hardened baselines often set
+`LimitCORE` is -- `unlimited` for the default `-1`, nothing for `0`. It is read with `cat /proc/self/limits`,
+the `Max core file size` line, which counts bytes whatever shell `sh` is; a host with no
+`/proc` answers nothing and the row is skipped, while an answer that does not parse is refused. Hardened baselines often set
 `* hard core 0`; the container then starts fine, but `podman exec` -- and so every
 `broker cli`, `shell`, `configure` and `perform` command -- fails with
 `crun: setrlimit RLIMIT_CORE: Operation not permitted`. A line naming the user overrides the
@@ -1896,7 +2017,7 @@ The session's hard **core** limit is held to `ulimits.core` the same way the use
 
 ```
 [FAIL] session core: 0 (need infinity)
-error: session core is 0, needs infinity: podman exec, and so every command run inside the broker, would fail with `setrlimit RLIMIT_CORE: Operation not permitted`.
+error: session core is 0, needs infinity: podman exec, and so every command run inside the container, would fail with `setrlimit RLIMIT_CORE: Operation not permitted`. Raise this user's hard core limit to infinity, or lower the container's core ulimit to 0 or less.
   Create /etc/security/limits.d/99-solace.conf as root:
     solace hard core unlimited
     solace soft core unlimited
@@ -1921,21 +2042,27 @@ artifact. And the two drop-ins are not alternatives -- the unit one is the conta
 ceiling, the `limits.d` one is your shell's, and a rootless host wants both.
 
 `validate` reports all of this and changes nothing -- once it is running as the account
-`podman.rootless` names. The wrong account is refused before the first row.
+`podman.rootful` selects. The wrong account is refused before the first row.
 
 ### Podman secret flags
 
-`broker deploy` stores the broker's secrets with `podman secret rm --ignore` followed by
-`podman secret create` (value on stdin) and mounts them into the container (`type=mount`),
-none of which the oldest podman builds support. The symptom is an unknown-flag or unknown-
-directive error at deploy time, because `validate` proves only that the runtime answers
-`version`. See [Version floors](#version-floors) for the floor and why `--replace` is
-deliberately not used.
+`broker deploy` stores the broker's secrets with `podman secret create --replace` (value on
+stdin) when `podman version` reports 4.7 or later, and with `podman secret rm --ignore` followed
+by `podman secret create` below that, or when the version cannot be read -- only for the
+secrets whose stored value differs, which it finds by reading each back with `podman secret
+inspect --showsecret` (4.7 and later; below that every secret is rewritten); it mounts them into the
+container (`type=mount`), none of which the oldest podman builds support. The symptom is an
+unknown-flag or unknown-directive error at deploy time, because `validate` proves only that the
+runtime answers `version`. See [Version floors](#version-floors) for the floors. The version is
+asked once per deploy, from stdout alone, and a preview (the Echo runner) never asks and shows the
+remove-then-create pair. `broker remove` removes each secret with its own `secret rm --ignore`.
 
 ### Docker compose secrets need compose 2.23.1+
 
 The generated compose file sources each secret from a host environment variable, so an older
-compose does not understand the `environment:` secret source and `broker deploy` fails. See
+compose does not understand the `environment:` secret source and `broker deploy` fails. The
+file reaches compose on stdin (`-f -`), which compose v2, standalone v1 and nerdctl compose read
+the same way; a compose that rejects it fails the deploy before anything is created. See
 [Version floors](#version-floors) for the version and the v1 fallback.
 
 ### Wrong cluster (kubeconfig drift)

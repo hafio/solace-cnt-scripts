@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/kube"
 	"github.com/spf13/cobra"
 
 	"solace/internal/config"
@@ -65,7 +67,7 @@ func group(use, short, long string) *cobra.Command {
 		if len(args) == 0 {
 			return cmd.Help()
 		}
-		return usagef("%q is not something %s can act on; run `%s` to see what it can",
+		return exitcode.Usagef("%q is not something %s can act on; run `%s` to see what it can",
 			args[0], cmd.CommandPath(), cmd.CommandPath())
 	}
 	return c
@@ -114,8 +116,10 @@ func newBrokerValidateCmd(app *App) *cobra.Command {
 }
 
 const brokerDeployLong = "Applies every prerequisite -- namespace, secrets, TLS -- then the broker, and is\n" +
-	"safe to re-run. A running broker is restarted for a change only on consent or\n" +
-	"--restart. Kubernetes readiness is not waited on; `broker status` watches it."
+	"safe to re-run. A running broker is restarted for a change only on consent, or\n" +
+	"with --restart (docker/podman also take --no-prompt, which approves; with no\n" +
+	"terminal and no --no-prompt the deploy fails before it changes anything).\n" +
+	"Kubernetes readiness is not waited on; `broker status` watches it."
 
 func newBrokerDeployCmd(app *App) *cobra.Command {
 	c := wireExec(app, &cobra.Command{
@@ -135,6 +139,11 @@ func newBrokerDeployCmd(app *App) *cobra.Command {
 	// Every platform: on Kubernetes a renewed certificate is the one change the operator
 	// does not roll out itself (opK8sDeploy).
 	addRestartFlag(c, app)
+	// Docker/podman only: the answer to the redeploy question. On Kubernetes the operator
+	// rolls a changed CR itself, and the one question a deploy asks there (a renewed
+	// certificate) is answered by --restart or a terminal.
+	addRemoveFlags(c, app, nil)
+	flagOnlyOn(c, "no-prompt", config.Docker, config.Podman)
 	return c
 }
 
@@ -695,12 +704,19 @@ func newOperatorValidateCmd(app *App) *cobra.Command {
 
 const operatorDeployLong = "Installs the operator, or unions this env file's namespaces into an\n" +
 	"already-running one's watch list.\n\n" +
-	"Widening the watch to all namespaces, or installing an older version,\n" +
-	"needs an interactive confirmation with no unattended override."
+	"Installing an older version asks first; --no-prompt approves it. Widening\n" +
+	"the watch to all namespaces needs a terminal and is never approved by\n" +
+	"--no-prompt: name the namespaces in kubernetes.operator.watchNamespaces\n" +
+	"instead."
 
 func newOperatorDeployCmd(app *App) *cobra.Command {
-	return onlyOn(withLong(leaf(app, "deploy", "Install the operator, or add this env file's namespaces to it",
+	c := onlyOn(withLong(leaf(app, "deploy", "Install the operator, or add this env file's namespaces to it",
 		opK8sOperatorDeploy), operatorDeployLong), config.K8s)
+	// Not addRemoveFlags: that flag answers yes to every question, and this command has
+	// one question it must never answer.
+	c.Flags().BoolVar(&app.noPrompt, "no-prompt", false,
+		"approve an operator downgrade without asking; never approves widening the watch to every namespace")
+	return c
 }
 
 const operatorRemoveLong = "Removes this env file's namespaces from the operator's watch list,\n" +
@@ -808,34 +824,30 @@ func addLogFlags(c *cobra.Command, app *App) {
 	registerFlagCompletion(c, "since", cobra.NoFileCompletions)
 }
 
-// logArgs turns the log flags into the passthrough tokens kubectl and the container
-// engines both accept. One builder for both platforms: the spellings are identical, and
-// a second copy is how one of them would quietly lose a flag.
+// logOptions turns the log flags into the kube.LogOptions kubectl takes. The container
+// engines read the same flags through their own options, so the flags are read in one
+// place and a second copy is not how one of them would quietly lose one.
 //
-// --tail and --since are emitted as two tokens rather than --flag=value because both
-// engines accept that form and it keeps the value a separate argv element. --since is
-// canonicalised through Go's duration parser first, so a free-form operator string never
-// needs charset checking -- round-tripping through a trusted parser beats enumerating
-// bad characters.
-func logArgs(a *App) ([]string, error) {
-	var args []string
-	if a.follow {
-		args = append(args, "-f")
+// --tail is passed as given (kubectl validates it). --since is canonicalised through Go's
+// duration parser first, so a free-form operator string never needs charset checking --
+// round-tripping through a trusted parser beats enumerating bad characters.
+func logOptions(a *App) (kube.LogOptions, error) {
+	since, err := logSince(a)
+	if err != nil {
+		return kube.LogOptions{}, err
 	}
-	if a.tail != "" {
-		args = append(args, "--tail", a.tail)
+	return kube.LogOptions{Follow: a.follow, Tail: a.tail, Since: since, Timestamps: a.timestamps}, nil
+}
+
+// logSince is --since canonicalised through Go's duration parser, "" when it is not set.
+// Both the kubectl options (logOptions) and the container engines' options take it, so
+// a free-form operator string never needs charset checking on either.
+func logSince(a *App) (string, error) {
+	d, err := config.CanonicalDuration("--since", a.since)
+	if err != nil {
+		return "", exitcode.AsUsage(err)
 	}
-	if a.since != "" {
-		d, err := config.CanonicalDuration("--since", a.since)
-		if err != nil {
-			return nil, asUsage(err)
-		}
-		args = append(args, "--since", d)
-	}
-	if a.timestamps {
-		args = append(args, "--timestamps")
-	}
-	return args, nil
+	return d, nil
 }
 
 // podFlagUsage is --pod's help text. One flag, two readings, and the flag has to say
@@ -902,10 +914,10 @@ func noRolePositional(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	if _, err := config.ParseRole(args[0]); err == nil {
-		return usagef("%s does not take a role argument; use --pod %s instead "+
+		return exitcode.Usagef("%s does not take a role argument; use --pod %s instead "+
 			"(on kubernetes --pod picks the pod to act on, on docker/podman it says which "+
 			"node this host is)",
 			cmd.CommandPath(), args[0])
 	}
-	return usagef("unknown command %q for %q", args[0], cmd.CommandPath())
+	return exitcode.Usagef("unknown command %q for %q", args[0], cmd.CommandPath())
 }

@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/rootless"
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
+	"solace/internal/engine"
 )
 
 // Where the two host limits that bind a container actually live. NOT
@@ -47,10 +50,6 @@ var delegatedControllers = []string{"cpu", "cpuset", "io", "memory", "pids"}
 // delegateSetting is that list as the drop-in states it.
 func delegateSetting() string { return "Delegate=" + strings.Join(delegatedControllers, " ") }
 
-// limitUnbounded is what systemd's "infinity" and the shell's "unlimited" mean.
-// Making it the largest int keeps every comparison plain integer arithmetic.
-const limitUnbounded = math.MaxInt
-
 // errLimitUnreadable marks a limit this host cannot be ASKED about, as opposed to
 // one that answered in a shape this cannot read. Docker Desktop runs the engine in
 // a VM, so /proc here belongs to a kernel no container will run under -- refusing
@@ -65,7 +64,7 @@ var errLimitUnreadable = errors.New("this host exposes no such limit")
 // quadlet carries, and how the data directory is prepared. Spelled once because
 // those answers must never disagree.
 func (m *Manager) rootlessPodman() bool {
-	return m.P == config.Podman && m.Cfg.Podman.Rootless
+	return m.P == config.Podman && !m.Cfg.Podman.Rootful
 }
 
 // checkLimits proves this host can give the broker container the limits both
@@ -138,7 +137,7 @@ func (m *Manager) checkNrOpen(ctx context.Context, fix bool) error {
 		return err
 	}
 	if got >= config.ContainerNoFileHard {
-		r.OK("nr_open: %s (need %d)", limitText(got), config.ContainerNoFileHard)
+		r.OK("nr_open: %s (need %d)", rootless.LimitText(got), config.ContainerNoFileHard)
 		return nil
 	}
 	if fix && m.Geteuid() == 0 {
@@ -157,7 +156,7 @@ func (m *Manager) checkNrOpen(ctx context.Context, fix bool) error {
 // raiseNrOpen applies the value now and writes the drop-in that survives a reboot.
 func (m *Manager) raiseNrOpen(ctx context.Context) error {
 	setting := fmt.Sprintf("fs.nr_open=%d", config.ContainerNoFileHard)
-	if err := m.R.Run(ctx, "sysctl", "-w", setting); err != nil {
+	if err := engine.Run(ctx, m.R, runner.Cmd{Argv: []string{"sysctl", "-w", setting}}); err != nil {
 		return fmt.Errorf("sysctl -w %s: %w", setting, err)
 	}
 	body := fmt.Sprintf("# Written by solace-util: the broker container needs nofile %d.\nfs.nr_open = %d\n",
@@ -185,9 +184,9 @@ func (m *Manager) checkUserManagerLimits(ctx context.Context, user string) error
 	unit := fmt.Sprintf("user@%d.service", m.Geteuid())
 	// m.R.Output directly, NOT m.systemctl: that helper prepends --user when
 	// rootless, and this is a question for the SYSTEM manager about a system unit.
-	out, err := m.R.Output(ctx, "systemctl", "show", unit,
+	out, err := engine.Output(ctx, m.R, runner.Cmd{Argv: []string{"systemctl", "show", unit,
 		"-p", "LimitNOFILE", "-p", "LimitNOFILESoft", "-p", "LimitMEMLOCK", "-p", "LimitCORE",
-		"-p", "DelegateControllers")
+		"-p", "DelegateControllers"}})
 	if err != nil {
 		r.Fail("user manager: cannot read %s limits", unit)
 		return fmt.Errorf("cannot read %s limits (`systemctl show %s`): %w", unit, unit, err)
@@ -207,7 +206,7 @@ func (m *Manager) checkUserManagerLimits(ctx context.Context, user string) error
 		min  int
 	}{
 		{"LimitNOFILE", config.ContainerNoFileHard},
-		{"LimitMEMLOCK", limitUnbounded},
+		{"LimitMEMLOCK", rootless.Unbounded},
 		{"LimitCORE", coreMin},
 	} {
 		raw, ok := props[want.prop]
@@ -215,13 +214,13 @@ func (m *Manager) checkUserManagerLimits(ctx context.Context, user string) error
 			r.Fail("user manager: %s did not report %s", unit, want.prop)
 			return fmt.Errorf("`systemctl show %s` did not report %s", unit, want.prop)
 		}
-		got, parseErr := parseLimit(raw, "systemctl show "+unit)
+		got, parseErr := rootless.ParseLimit(raw, "systemctl show "+unit)
 		if parseErr != nil {
 			r.Fail("user manager: %s reported %s=%q", unit, want.prop, raw)
 			return parseErr
 		}
 		if got < want.min {
-			short = append(short, fmt.Sprintf("%s is %s, needs %s", want.prop, limitText(got), limitText(want.min)))
+			short = append(short, fmt.Sprintf("%s is %s, needs %s", want.prop, rootless.LimitText(got), rootless.LimitText(want.min)))
 		}
 	}
 	// The cgroup controllers, in the same row and the same drop-in: without cpuset
@@ -271,14 +270,14 @@ func (m *Manager) coreFloor() int {
 	if n, err := strconv.Atoi(m.Cfg.ContainerBlock(m.P).CoreLimit()); err == nil && n >= 0 {
 		return n
 	}
-	return limitUnbounded
+	return rootless.Unbounded
 }
 
 // pamCoreValue spells a core floor the way pam_limits takes it: "unlimited", or KILOBYTES
 // -- limits.conf counts core in KB where the engines count bytes -- rounded up, so the grant
 // covers the ask rather than falling a fraction short of it.
 func pamCoreValue(floor int) string {
-	if floor == limitUnbounded {
+	if floor == rootless.Unbounded {
 		return "unlimited"
 	}
 	return strconv.Itoa((floor + 1023) / 1024)
@@ -309,24 +308,17 @@ func (m *Manager) checkSessionNoFile(ctx context.Context, user string) error {
 		return err
 	}
 	if got >= config.ContainerNoFileHard {
-		r.OK("session nofile: %s (need %d)", limitText(got), config.ContainerNoFileHard)
+		r.OK("session nofile: %s (need %d)", rootless.LimitText(got), config.ContainerNoFileHard)
 		return nil
 	}
-	r.Fail("session nofile: %s (need %d)", limitText(got), config.ContainerNoFileHard)
+	r.Fail("session nofile: %s (need %d)", rootless.LimitText(got), config.ContainerNoFileHard)
 	return fmt.Errorf("session nofile is %s, needs %d.\n"+
 		"  Create %s as root:\n"+
 		"    %s hard nofile %d\n"+
 		"    %s soft nofile %d",
-		limitText(got), config.ContainerNoFileHard, pamLimitsDropIn,
+		rootless.LimitText(got), config.ContainerNoFileHard, pamLimitsDropIn,
 		user, config.ContainerNoFileHard, user, config.ContainerNoFileSoft)
 }
-
-// sessionCoreScript reads this session's HARD core limit, in bytes. Not `ulimit -Hc`: the
-// shell reports that in blocks whose size depends on which shell sh is -- 512 bytes in
-// dash and in bash's POSIX mode, 1024 in plain bash -- while /proc/self/limits always
-// says bytes, the unit ulimits.core is written in. The awk reading it inherits the
-// session's limits, so its own entry is the session's.
-const sessionCoreScript = `awk '/^Max core file size/ {print $6}' /proc/self/limits`
 
 // checkSessionCore is checkSessionNoFile's twin for core dumps. `podman exec` gives the
 // process it starts the container's rlimits from THIS session, and an unprivileged crun
@@ -334,13 +326,17 @@ const sessionCoreScript = `awk '/^Max core file size/ {print $6}' /proc/self/lim
 // (the `* hard core 0` hardened baselines set) runs a container that starts fine under
 // the user manager and then fails every broker cli, shell, configure and perform command
 // with crun's `setrlimit RLIMIT_CORE: Operation not permitted`.
+//
+// The read and the comparison are the shared rootless.ProcLimits, HardLimit and
+// CheckCore; the drop-in that grants the limit, and the ulimits.core key that lowers
+// the ask, are this tool's and follow the shared refusal.
 func (m *Manager) checkSessionCore(ctx context.Context, user string) error {
 	if !m.rootlessPodman() {
 		return nil
 	}
 	r := m.report()
 	want := m.coreFloor()
-	got, err := m.hostLimit(ctx, sessionCoreScript)
+	got, err := m.sessionCoreLimit(ctx)
 	if errors.Is(err, errLimitUnreadable) {
 		r.Skip("session core: skipped (/proc/self/limits answered nothing)")
 		return nil
@@ -349,25 +345,46 @@ func (m *Manager) checkSessionCore(ctx context.Context, user string) error {
 		r.Fail("session core: cannot read this session's hard limit")
 		return err
 	}
-	if got >= want {
-		r.OK("session core: %s (need %s)", limitText(got), limitText(want))
+	refusal := rootless.CheckCore(got, want)
+	if refusal == nil {
+		r.OK("session core: %s (need %s)", rootless.LimitText(got), rootless.LimitText(want))
 		return nil
 	}
-	r.Fail("session core: %s (need %s)", limitText(got), limitText(want))
-	return fmt.Errorf("session core is %s, needs %s: podman exec, and so every command run inside the broker, "+
-		"would fail with `setrlimit RLIMIT_CORE: Operation not permitted`.\n"+
+	r.Fail("session core: %s (need %s)", rootless.LimitText(got), rootless.LimitText(want))
+	return fmt.Errorf("%w.\n"+
 		"  Create %s as root:\n"+
 		"    %s hard core %s\n"+
 		"    %s soft core %s\n"+
 		"  Or, to keep core dumps limited, set podman.container.ulimits.core to %d or less and run broker deploy again",
-		limitText(got), limitText(want), pamLimitsDropIn, user, pamCoreValue(want), user, pamCoreValue(want), got)
+		refusal, pamLimitsDropIn, user, pamCoreValue(want), user, pamCoreValue(want), got)
+}
+
+// sessionCoreLimit reads this session's HARD core limit, in bytes, from
+// /proc/self/limits (rootless.ProcLimits, run through the runner so it asks the host
+// the runner reaches). Not `ulimit -Hc`: the shell reports that in blocks whose size
+// depends on which shell sh is, while /proc/self/limits always says bytes, the unit
+// ulimits.core is written in. The cat inherits the session's limits, so its own entry
+// is the session's.
+//
+// A probe that cannot run, or answers nothing, is errLimitUnreadable (no /proc here: a
+// host this cannot see into). An answer that does not parse is an anomaly and is not.
+func (m *Manager) sessionCoreLimit(ctx context.Context) (int, error) {
+	probe := rootless.ProcLimits()
+	out, err := engine.Output(ctx, m.R, probe)
+	if err != nil {
+		return 0, fmt.Errorf("%w (`%s`): %w", errLimitUnreadable, strings.Join(probe.Argv, " "), err)
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return 0, fmt.Errorf("%w (`%s` printed nothing)", errLimitUnreadable, strings.Join(probe.Argv, " "))
+	}
+	return rootless.HardLimit(string(out), "Max core file size")
 }
 
 // hostLimit reads one number out of a shell probe. Through a shell for the reason
 // nearestWritableScript uses one: /proc is a path on the LINUX host, and this tool
 // is routinely driven from Windows.
 func (m *Manager) hostLimit(ctx context.Context, script string) (int, error) {
-	out, err := m.R.Output(ctx, "sh", "-c", script)
+	out, err := engine.Output(ctx, m.R, runner.Cmd{Argv: []string{"sh", "-c", script}})
 	if err != nil {
 		return 0, fmt.Errorf("%w (`sh -c %q`): %w", errLimitUnreadable, script, err)
 	}
@@ -375,7 +392,7 @@ func (m *Manager) hostLimit(ctx context.Context, script string) (int, error) {
 	if got == "" {
 		return 0, fmt.Errorf("%w (`sh -c %q` printed nothing)", errLimitUnreadable, script)
 	}
-	return parseLimit(got, script)
+	return rootless.ParseLimit(got, script)
 }
 
 // parseUnitProps reads systemd's KEY=value output. A property systemd cannot
@@ -406,27 +423,4 @@ func missingControllers(got string) []string {
 		}
 	}
 	return missing
-}
-
-// parseLimit reads one limit value: a decimal, or systemd's "infinity" and the
-// shell's "unlimited" for an absent ceiling.
-func parseLimit(v, source string) (int, error) {
-	switch v {
-	case "infinity", "unlimited":
-		return limitUnbounded, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return 0, fmt.Errorf("cannot parse the limit %q from %s: %w", v, source, err)
-	}
-	return n, nil
-}
-
-// limitText spells the sentinel back out as the word, so a message never carries
-// an implausible number.
-func limitText(v int) string {
-	if v == limitUnbounded {
-		return "infinity"
-	}
-	return strconv.Itoa(v)
 }

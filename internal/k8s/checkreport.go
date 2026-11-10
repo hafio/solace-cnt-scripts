@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/kube/rbac"
+
 	"solace/internal/config"
 	"solace/internal/output"
 )
@@ -625,7 +627,7 @@ func (c *Cluster) storageRows(ctx context.Context, rep *checkReport) {
 	name, err := c.resolveStorageClass(ctx)
 	if err != nil {
 		rep.broker = append(rep.broker, c.storageReadRow(ctx, err,
-			probe{verb: "list", resource: "storageclasses"}, "the default StorageClass"))
+			rbac.Probe{Verb: "list", Resource: "storageclasses"}, "the default StorageClass"))
 		return
 	}
 	if name == "" {
@@ -638,7 +640,7 @@ func (c *Cluster) storageRows(ctx context.Context, rep *checkReport) {
 	binding, expansion, err := c.storageClassAttrs(ctx, name)
 	if err != nil {
 		rep.broker = append(rep.broker, c.storageReadRow(ctx, err,
-			probe{verb: "get", resource: "storageclasses", name: name}, "StorageClass "+name))
+			rbac.Probe{Verb: "get", Resource: "storageclasses", Name: name}, "StorageClass "+name))
 		return
 	}
 	// Report what was actually found, not a summary of what was wanted: when a
@@ -658,12 +660,12 @@ func (c *Cluster) storageRows(ctx context.Context, rep *checkReport) {
 // not checked, as when the cluster is unreachable, naming the grant that would check it and
 // what a cluster admin can confirm instead. Everything else stays [FAIL]: a verdict (more than
 // one default class), a class that is not there, or a permission question nobody answered.
-func (c *Cluster) storageReadRow(ctx context.Context, err error, p probe, what string) checkRow {
+func (c *Cluster) storageReadRow(ctx context.Context, err error, p rbac.Probe, what string) checkRow {
 	if !errors.Is(err, errMultipleDefaultClasses) {
 		if allowed, answered := c.canI(ctx, p); answered && !allowed {
-			return skipRow("storage class", "not checked -- this identity may not %s %s (cluster-scoped), so %s "+
+			return skipRow("storage class", "not checked -- this identity may not %s (cluster-scoped), so %s "+
 				"could not be read. Grant get and list on storageclasses, or have a cluster admin confirm it has "+
-				"volumeBindingMode=WaitForFirstConsumer and allowVolumeExpansion=true", p.verb, p.target(), what)
+				"volumeBindingMode=WaitForFirstConsumer and allowVolumeExpansion=true", p, what)
 		}
 	}
 	return failRow("storage class", "%v", err)

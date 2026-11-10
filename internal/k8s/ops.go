@@ -4,26 +4,26 @@ import (
 	"context"
 	"fmt"
 
-	"solace/internal/config"
-)
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/runner"
 
-// rolloutTimeout bounds the readiness wait after scaling a broker StatefulSet up.
-// The bash replicas-start busy-waited forever (replicas-start-broker.sh:19-21); this
-// port waits via `kubectl rollout status --timeout` so a stuck pod fails loud instead
-// of hanging.
-const rolloutTimeout = "300s"
+	"solace/internal/config"
+	"solace/internal/engine"
+)
 
 // Status prints the broker's pods, services and StatefulSets in the broker namespace,
 // porting get-broker-status.sh:16-20. Each `get` streams straight through the runner,
 // so the Echo runner records the three commands.
 func (c *Cluster) Status(ctx context.Context) error {
-	if err := c.kubectl(ctx, "get", "pods", "-n", c.ns(), "-o", "wide"); err != nil {
+	in := kube.GetOptions{Namespace: c.ns()}
+	wide := kube.GetOptions{Namespace: c.ns(), Output: "wide"}
+	if err := c.runKube(ctx, func(b []string) runner.Cmd { return kube.Get(b, wide, "pods") }); err != nil {
 		return err
 	}
-	if err := c.kubectl(ctx, "get", "svc", "-n", c.ns()); err != nil {
+	if err := c.runKube(ctx, func(b []string) runner.Cmd { return kube.Get(b, in, "svc") }); err != nil {
 		return err
 	}
-	return c.kubectl(ctx, "get", "statefulset", "-n", c.ns())
+	return c.runKube(ctx, func(b []string) runner.Cmd { return kube.Get(b, in, "statefulset") })
 }
 
 // DescribeBroker describes a role's broker pod, porting desc-broker.sh:18.
@@ -36,22 +36,25 @@ func (c *Cluster) DescribeLB(ctx context.Context) error {
 	return c.kubectl(ctx, "describe", "service/"+lbServiceName(c.Cfg), "-n", c.ns())
 }
 
-// Logs streams a role's pod logs, porting logs-broker.sh:20. passthrough carries any
-// extra `kubectl logs` args (-f, --tail=N, ...) straight through.
-func (c *Cluster) Logs(ctx context.Context, role config.Role, passthrough []string) error {
-	args := append([]string{"logs", "-n", c.ns(), "pod/" + podName(c.Cfg, role)}, passthrough...)
-	return c.kubectl(ctx, args...)
+// Logs streams a role's pod logs, porting logs-broker.sh:20. o carries the log flags
+// (follow, tail, since, ...); the namespace is this env file's.
+func (c *Cluster) Logs(ctx context.Context, role config.Role, o kube.LogOptions) error {
+	o.Namespace = c.ns()
+	return c.runKube(ctx, func(b []string) runner.Cmd { return kube.Logs(b, "pod/"+podName(c.Cfg, role), o) })
 }
 
-// interactiveExec runs `kubectl exec -it -n <ns> <pod> -- argv...` with this process's
+// interactiveExec runs `kubectl exec -i -t <pod> -n <ns> -- argv...` with this process's
 // stdio wired through, for the interactive sessions (Solace CLI, shell).
 func (c *Cluster) interactiveExec(ctx context.Context, role config.Role, argv ...string) error {
-	args := append([]string{"exec", "-it", "-n", c.ns(), podName(c.Cfg, role), "--"}, argv...)
-	k, err := c.cmd()
+	base, err := c.base()
 	if err != nil {
 		return err
 	}
-	return c.R.RunInteractive(ctx, k.Name(), k.Args(args...)...)
+	cmd, err := kube.Exec(base, podName(c.Cfg, role), kube.ExecOptions{Namespace: c.ns(), Stdin: true, TTY: true}, argv...)
+	if err != nil {
+		return err
+	}
+	return engine.Interactive(c.R, cmd)
 }
 
 // CLI opens an interactive Solace CLI session on a role's pod, porting
@@ -137,10 +140,28 @@ func (c *Cluster) RestartPod(ctx context.Context, role config.Role) error {
 	}
 	sts := stsName(c.Cfg, role)
 	c.logf("waiting for %s to become ready", sts)
-	if err := c.kubectl(ctx, "rollout", "status", "statefulset/"+sts, "-n", c.ns(), "--timeout="+rolloutTimeout); err != nil {
-		return fmt.Errorf("%s did not become ready within %s after restarting %s: %w", sts, rolloutTimeout, pod, err)
+	if err := c.waitRollout(ctx, "statefulset", sts, c.ns()); err != nil {
+		return fmt.Errorf("%s did not become ready within %s after restarting %s: %w", sts, kube.RolloutTimeout, pod, err)
 	}
 	return nil
+}
+
+// waitRollout waits for kind/name to roll out, bounded by kube.RolloutTimeout. The bash
+// replicas-start busy-waited forever (replicas-start-broker.sh:19-21); this waits via
+// `kubectl rollout status --timeout` so a stuck pod fails loud instead of hanging.
+//
+// The wait is a convenience over a change that is already applied, so a wait the cluster
+// REFUSES (kube.Forbidden on kubectl's own words, which still reach the terminal) is a
+// warning and the step succeeds. A timeout or any other failure is returned for the
+// caller to word.
+func (c *Cluster) waitRollout(ctx context.Context, kind, name, ns string) error {
+	stderr, err := c.teeKube(ctx, func(b []string) runner.Cmd { return kube.RolloutStatus(b, kind, name, ns, "") })
+	if err != nil && kube.Forbidden(stderr) {
+		c.progress().Warn("the rollout wait for %s/%s was refused (this identity may not read its rollout status "+
+			"in %s), so readiness is not confirmed; the change was applied", kind, name, ns)
+		return nil
+	}
+	return err
 }
 
 // RestartRolling restarts every broker pod in RestartOrder, stopping at the first
@@ -158,12 +179,12 @@ func (c *Cluster) ReplicasStart(ctx context.Context) error {
 	for _, role := range HARoles(c.Cfg) {
 		sts := stsName(c.Cfg, role)
 		c.logf("scaling %s up to 1 replica", sts)
-		if err := c.kubectl(ctx, "scale", "statefulset", sts, "-n", c.ns(), "--replicas=1"); err != nil {
+		if err := c.runKube(ctx, func(b []string) runner.Cmd { return kube.Scale(b, "statefulset", sts, c.ns(), 1) }); err != nil {
 			return fmt.Errorf("scaling %s up: %w", sts, err)
 		}
 		c.logf("waiting for %s to become ready", sts)
-		if err := c.kubectl(ctx, "rollout", "status", "statefulset/"+sts, "-n", c.ns(), "--timeout="+rolloutTimeout); err != nil {
-			return fmt.Errorf("%s did not become ready within %s: %w", sts, rolloutTimeout, err)
+		if err := c.waitRollout(ctx, "statefulset", sts, c.ns()); err != nil {
+			return fmt.Errorf("%s did not become ready within %s: %w", sts, kube.RolloutTimeout, err)
 		}
 	}
 	return nil
@@ -176,7 +197,7 @@ func (c *Cluster) ReplicasStop(ctx context.Context) error {
 	for _, role := range HARoles(c.Cfg) {
 		sts := stsName(c.Cfg, role)
 		c.logf("scaling %s down to 0 replicas", sts)
-		if err := c.kubectl(ctx, "scale", "statefulset", sts, "-n", c.ns(), "--replicas=0"); err != nil {
+		if err := c.runKube(ctx, func(b []string) runner.Cmd { return kube.Scale(b, "statefulset", sts, c.ns(), 0) }); err != nil {
 			return fmt.Errorf("scaling %s down: %w", sts, err)
 		}
 	}

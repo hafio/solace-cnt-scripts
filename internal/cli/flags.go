@@ -3,6 +3,8 @@ package cli
 import (
 	"time"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/watch"
 	"github.com/spf13/cobra"
 
 	"solace/internal/broker"
@@ -76,7 +78,7 @@ func addDisableEnableFlags(c *cobra.Command, app *App) {
 // the pair is read, so two leaves cannot decide the precedence differently.
 func wantRemove(a *App) (bool, error) {
 	if a.flagApply && a.flagRemove {
-		return false, usagef("--apply and --remove ask for opposite things; pass one or neither " +
+		return false, exitcode.Usagef("--apply and --remove ask for opposite things; pass one or neither " +
 			"(neither means --apply)")
 	}
 	return a.flagRemove, nil
@@ -85,7 +87,7 @@ func wantRemove(a *App) (bool, error) {
 // wantEnable reports whether a --disable/--enable leaf should enable.
 func wantEnable(a *App) (bool, error) {
 	if a.flagDisable && a.flagEnable {
-		return false, usagef("--disable and --enable ask for opposite things; pass one or neither " +
+		return false, exitcode.Usagef("--disable and --enable ask for opposite things; pass one or neither " +
 			"(neither means --disable)")
 	}
 	return a.flagEnable, nil
@@ -116,7 +118,7 @@ func addExportFlags(c *cobra.Command, app *App) {
 // once rather than in each caller.
 func exportScope(a *App) ([]string, bool, error) {
 	if a.brokerOnly && len(a.vpns) > 0 {
-		return nil, false, usagef("--broker-only excludes every message-VPN, so naming --vpn %s "+
+		return nil, false, exitcode.Usagef("--broker-only excludes every message-VPN, so naming --vpn %s "+
 			"asks for opposite things; pass one or neither (neither captures both)", a.vpns[0])
 	}
 	// The value itself is checked here, at the flag, so an unusable name is the exit
@@ -124,7 +126,7 @@ func exportScope(a *App) ([]string, bool, error) {
 	// broker failed". broker.ExportConfig checks again; this decides the exit code.
 	for _, v := range a.vpns {
 		if err := broker.ValidVPNName(v); err != nil {
-			return nil, false, asUsage(err)
+			return nil, false, exitcode.AsUsage(err)
 		}
 	}
 	return a.vpns, a.brokerOnly, nil
@@ -145,7 +147,7 @@ func addDiagnosticsFlags(c *cobra.Command, app *App) {
 // upper bound -- Solace documents none, and the broker remains the judge of one.
 func diagnosticsOptions(a *App) (broker.DiagnosticsOptions, error) {
 	if a.days < 1 {
-		return broker.DiagnosticsOptions{}, usagef("--days must be at least 1 (got: %d): it is how many "+
+		return broker.DiagnosticsOptions{}, exitcode.Usagef("--days must be at least 1 (got: %d): it is how many "+
 			"days of history gather-diagnostics collects", a.days)
 	}
 	return broker.DiagnosticsOptions{Days: a.days, Encrypt: a.encrypt}, nil
@@ -161,31 +163,33 @@ func addWatchFlags(c *cobra.Command, app *App) {
 	c.Flags().BoolVar(&app.watch, "watch", false,
 		"re-run the report every --interval until Ctrl-C; on a terminal the screen is redrawn in place")
 	c.Flags().StringVar(&app.interval, "interval", "",
-		"how often --watch refreshes, as a duration such as 5s or 1m (default 5s, at least 1s)")
+		"how often --watch refreshes, as a duration such as 5s or 1m (default 5s, at least 1s, at most 1h)")
 	registerFlagCompletion(c, "interval", cobra.NoFileCompletions)
 }
 
-// defaultWatchInterval is how often --watch refreshes when --interval is not given.
-const defaultWatchInterval = 5 * time.Second
-
 // watchInterval reads --interval. It is refused without --watch -- a script passing it
-// alone expects a watch it would not get -- and below 1s, since every refresh re-reads the
-// cluster or the engine. Each refusal is a usage error: a different command line fixes it.
+// alone expects a watch it would not get -- below 1s, since every refresh re-reads the
+// cluster or the engine, and above 1h (both bounds are the shared watch package's). Each
+// refusal is a usage error: a different command line fixes it.
 func watchInterval(a *App) (time.Duration, error) {
 	if a.interval == "" {
-		return defaultWatchInterval, nil
+		return watch.DefaultInterval, nil
 	}
 	if !a.watch {
-		return 0, usagef("--interval %q sets how often --watch refreshes, so it means nothing without "+
+		return 0, exitcode.Usagef("--interval %q sets how often --watch refreshes, so it means nothing without "+
 			"--watch: add --watch, or drop --interval", a.interval)
 	}
 	d, err := time.ParseDuration(a.interval)
 	if err != nil {
-		return 0, usagef("--interval %q is not a duration: use a number with a unit, like 5s, 30s or 1m", a.interval)
+		return 0, exitcode.Usagef("--interval %q is not a duration: use a number with a unit, like 5s, 30s or 1m", a.interval)
 	}
-	if d < time.Second {
-		return 0, usagef("--interval %q is below 1s: every refresh re-reads the cluster or the engine, "+
+	if d < watch.MinInterval {
+		return 0, exitcode.Usagef("--interval %q is below 1s: every refresh re-reads the cluster or the engine, "+
 			"so it must be at least 1s", a.interval)
+	}
+	if d > watch.MaxInterval {
+		return 0, exitcode.Usagef("--interval %q is above 1h: a watch that refreshes less often than hourly is "+
+			"better run by hand or by a scheduler; pick 1h or less", a.interval)
 	}
 	return d, nil
 }
@@ -216,7 +220,7 @@ func addOutFlags(c *cobra.Command, app *App) {
 // decision, the same way deleting its data is.
 func addRestartFlag(c *cobra.Command, app *App) {
 	c.Flags().BoolVar(&app.restart, "restart", false,
-		"restart an already-running broker when the deploy changed its artifact or its server certificate (otherwise you are asked, and a non-interactive run leaves it running)")
+		"restart or recreate an already-running broker without asking, for a changed artifact, secret or server certificate and also for an unchanged one (otherwise docker/podman ask, and fail with no terminal unless --no-prompt is given; Kubernetes asks only about a renewed certificate)")
 }
 
 // addAllowCommandFlag wires --allow-command onto one command that executes. It is the
@@ -250,6 +254,6 @@ func checkAllowCommand(cmd *cobra.Command, app *App) error {
 	if len(app.AllowCommand) == 0 || app.willExecute(cmd) {
 		return nil
 	}
-	return usagef("--allow-command is only valid on a command that runs something, and %q renders "+
+	return exitcode.Usagef("--allow-command is only valid on a command that runs something, and %q renders "+
 		"without executing; drop the flag", cmd.CommandPath())
 }

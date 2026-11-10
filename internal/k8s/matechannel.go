@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/broker"
 	"solace/internal/config"
 	"solace/internal/engine"
@@ -35,12 +38,13 @@ import (
 // log is the RAW line sink Cluster, Manager and Ops all take, and for the same reason:
 // this leg cleans up after itself and a failed cleanup has to be visible without being
 // fatal. A nil log discards, so a caller that has no sink is not forced to invent one.
-func NewMateChannel(r engine.Runner, cfg *config.Config, site config.ReplSite,
+func NewMateChannel(r runner.Runner, cfg *config.Config, site config.ReplSite,
 	log func(string, ...any)) (broker.MateChannel, error) {
 	k := site.Via.Kubernetes
 	if k == nil {
 		return nil, fmt.Errorf("replication site %q is not reached over kubernetes", site.VirtualRouterName)
 	}
+	r = engine.NoEnv(r)
 	// The guard runs HERE, not only in Validate: this channel is built straight from a
 	// *config.Config and must not assume Validate ever ran -- the same reason
 	// Cluster.cmd and kubectlTransport.cmd re-check their own command on every call.
@@ -56,13 +60,17 @@ func NewMateChannel(r engine.Runner, cfg *config.Config, site config.ReplSite,
 	pod := podNameFor(k.Name, config.Primary)
 
 	what := fmt.Sprintf("site %s (%s/%s)", site.VirtualRouterName, k.Namespace, pod)
+	base := cmd.Argv()
+	opts := kube.ExecOptions{Namespace: k.Namespace}
 	run := func(ctx context.Context, name, script string) ([]byte, error) {
 		// Upload on stdin, never as an argument: a replication script carries no
 		// secret today, but the body-on-stdin rule is the transport's and is not
 		// worth a local exception.
-		shcmd := "cat > " + shSingleQuote(broker.CLIScriptPath(name))
-		if _, err := r.OutputInput(ctx, []byte(script), cmd.Name(),
-			cmd.Args(execArgs(k.Namespace, pod, true, []string{"sh", "-c", shcmd})...)...); err != nil {
+		up, err := kube.Upload(base, pod, opts, broker.CLIScriptPath(name), []byte(script), false)
+		if err != nil {
+			return nil, fmt.Errorf("upload cli script %q to %s: %w", name, what, err)
+		}
+		if _, err := engine.Output(ctx, r, up); err != nil {
 			return nil, fmt.Errorf("upload cli script %q to %s: %w", name, what, err)
 		}
 		// Deleted on every path out, including a failed run. The LOCAL leg has always
@@ -77,17 +85,21 @@ func NewMateChannel(r engine.Runner, cfg *config.Config, site config.ReplSite,
 		// not turn a successful role change into a reported failure, and the operator
 		// can see it in the warning.
 		defer func() {
-			if _, err := r.Output(ctx, cmd.Name(),
-				cmd.Args(execArgs(k.Namespace, pod, false,
-					[]string{"rm", "-f", broker.CLIScriptPath(name)})...)...); err != nil && log != nil {
+			rm, err := kube.Exec(base, pod, opts, "rm", "-f", broker.CLIScriptPath(name))
+			if err == nil {
+				_, err = engine.Output(ctx, r, rm)
+			}
+			if err != nil && log != nil {
 				output.NewFunc(log).Warn("cleanup of cli script %q on %s failed: %v", name, what, err)
 			}
 		}()
 		// The CLI is handed the RELATIVE name: its working directory is the scripts
 		// folder, which is what Ops.RunCLI has always relied on.
-		out, err := r.Output(ctx, cmd.Name(),
-			cmd.Args(execArgs(k.Namespace, pod, false,
-				[]string{broker.CLIBinary, "-Apes", broker.CLIArg(name)})...)...)
+		runCLI, err := kube.Exec(base, pod, opts, broker.CLIBinary, "-Apes", broker.CLIArg(name))
+		if err != nil {
+			return nil, fmt.Errorf("run cli script %q on %s: %w", name, what, err)
+		}
+		out, err := engine.Output(ctx, r, runCLI)
 		if err != nil {
 			return out, fmt.Errorf("run cli script %q on %s: %w", name, what, err)
 		}
@@ -107,7 +119,7 @@ func NewMateChannel(r engine.Runner, cfg *config.Config, site config.ReplSite,
 // shell pipeline: the value never lands in a file and never reaches argv. The kubectl
 // invocation itself goes through the execution guard, like every other command this
 // tool runs.
-func ReadSecretKey(r engine.Runner, cfg *config.Config, site config.ReplSite,
+func ReadSecretKey(r runner.Runner, cfg *config.Config, site config.ReplSite,
 	ref *config.ReplPassSecret) (string, error) {
 	cmd, err := secretCommand(cfg, site)
 	if err != nil {
@@ -125,7 +137,7 @@ func ReadSecretKey(r engine.Runner, cfg *config.Config, site config.ReplSite,
 // goes on to a `curl -K -` config on stdin, where an embedded line break starts a new
 // directive. So a control character is refused here, naming its position and never the
 // value.
-func readSecretKey(r engine.Runner, cmd config.Command, namespace, name, key, whose string) (string, error) {
+func readSecretKey(r runner.Runner, cmd config.Command, namespace, name, key, whose string) (string, error) {
 	// Checked here as well as in Validate, from config's one definition: this reader is
 	// handed values straight from a *config.Config and must not assume Load ran -- the
 	// reason every executor re-runs the command guard. Unchecked, a dash-led name or
@@ -136,8 +148,8 @@ func readSecretKey(r engine.Runner, cmd config.Command, namespace, name, key, wh
 	// The key is a JSON object member, so a name carrying a dot has to be escaped or
 	// jsonpath reads it as a path step and silently returns nothing.
 	jsonpath := fmt.Sprintf(`{.data.%s}`, strings.ReplaceAll(key, ".", `\.`))
-	out, err := r.Output(context.Background(), cmd.Name(),
-		cmd.Args("get", "secret", name, "-n", namespace, "-o", "jsonpath="+jsonpath)...)
+	out, err := engine.Output(context.Background(), engine.NoEnv(r),
+		kube.Get(cmd.Argv(), kube.GetOptions{Namespace: namespace, Output: "jsonpath=" + jsonpath}, "secret", name))
 	if err != nil {
 		return "", fmt.Errorf("read secret %s/%s for %s: %w", namespace, name, whose, err)
 	}
@@ -174,17 +186,4 @@ func secretCommand(cfg *config.Config, site config.ReplSite) (config.Command, er
 		return cfg.SiteCommand(site.VirtualRouterName)
 	}
 	return cfg.ClusterCommand()
-}
-
-// execArgs builds `exec [-i] -n <ns> <pod> -- argv...`, the same shape
-// kubectlTransport.execArgs builds for this deployment's own pods. It is duplicated
-// rather than shared because that one derives the namespace and pod from the config,
-// which is precisely what a mate in another cluster cannot do.
-func execArgs(namespace, pod string, stdin bool, argv []string) []string {
-	args := []string{"exec"}
-	if stdin {
-		args = append(args, "-i")
-	}
-	args = append(args, "-n", namespace, pod, "--")
-	return append(args, argv...)
 }

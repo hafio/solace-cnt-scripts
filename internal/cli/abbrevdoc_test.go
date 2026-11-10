@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/abbrev"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"solace/internal/abbrev"
 	"solace/internal/config"
 )
 
@@ -99,7 +99,7 @@ func renderAbbrevDocs(root *cobra.Command) []byte {
 	var b strings.Builder
 
 	b.WriteString("# Abbreviations\n\n")
-	b.WriteString(supportNoticeMD + "\n")
+	b.WriteString(supportNotice.Markdown() + "\n")
 	b.WriteString("Every short form `solace-util` accepts, and the word it stands for.\n\n")
 	b.WriteString("**Generated from the abbreviation sets and the command tree -- do not edit by hand.**\n")
 	b.WriteString("Regenerate after adding or removing one:\n\n")
@@ -136,7 +136,7 @@ func writeResolutionNotes(b *strings.Builder) {
 	b.WriteString("| Node role | `config.ParseRole` | while the command runs |\n")
 	b.WriteString("| `--platform` value | `config.ParsePlatform` | flag handling |\n")
 	b.WriteString("| Flag shorthand | pflag | flag parsing |\n\n")
-	b.WriteString("What the four share is `internal/abbrev`, which owns the rules rather than the\n")
+	b.WriteString("What the four share is `github.com/hafio/go-deploy-utility/abbrev`, which owns the rules rather than the\n")
 	b.WriteString("words: a short form is lowercase letters or digits, is strictly shorter than the\n")
 	b.WriteString("word it stands for, is claimed by one word only, and never shadows a canonical\n")
 	b.WriteString("name. A declaration that breaks one of those fails at construction, so it cannot\n")

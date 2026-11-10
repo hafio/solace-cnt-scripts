@@ -7,20 +7,13 @@ import (
 	"strconv"
 	"strings"
 
-	"solace/internal/config"
-)
+	"github.com/hafio/go-deploy-utility/podman"
+	"github.com/hafio/go-deploy-utility/rootless"
+	"github.com/hafio/go-deploy-utility/runner"
+	"github.com/hafio/go-deploy-utility/systemd"
 
-// The two variables that decide whether `systemctl --user` and `loginctl` can
-// reach this user's systemd instance at all. Both are unset under sudo, su and
-// bare cron, and a probe that fails for THAT reason is a broken invocation
-// environment rather than an unready host -- which is the distinction
-// ensureUserSession exists to draw before any other row is read.
-const (
-	xdgRuntimeDir  = "XDG_RUNTIME_DIR"
-	dbusSessionBus = "DBUS_SESSION_BUS_ADDRESS"
-	// userRuntimeDirBase is what logind names the per-user runtime directory, and
-	// what XDG_RUNTIME_DIR is derived from when the environment carries none.
-	userRuntimeDirBase = "/run/user/"
+	"solace/internal/config"
+	"solace/internal/engine"
 )
 
 // nearestWritableScript walks up from the configured data directory to the first
@@ -76,8 +69,8 @@ func (m *Manager) checkPodmanHost(ctx context.Context, fix bool) error {
 		r.Fail("euid: %v", err)
 		return err
 	}
-	r.OK("euid: %d, matching podman.rootless=%t", euid, m.Cfg.Podman.Rootless)
-	if !m.Cfg.Podman.Rootless {
+	r.OK("euid: %d, matching podman.rootful=%t", euid, m.Cfg.Podman.Rootful)
+	if m.Cfg.Podman.Rootful {
 		// Rootful podman's engine runs privileged: it owns the id mapping and its
 		// units live under the system systemd instance. Its nofile ceiling is
 		// checked too, but one level up -- it binds every engine (limits.go).
@@ -130,18 +123,23 @@ func (m *Manager) rootlessRows(ctx context.Context, euid int, fix bool) error {
 // a missing XDG_RUNTIME_DIR makes the bus unreachable for a reason that has nothing
 // to do with whether the host is ready.
 //
-// Order is load-bearing: the runtime directory is proven to EXIST before either
-// variable is exported. A derived path to a directory that is not there is worse
-// than no value at all -- it turns "you are under sudo, or this user has no
-// session" into an obscure systemctl or podman failure several rows later.
+// The rule is the shared rootless.UserSession: the runtime directory is proven to
+// EXIST before either variable is exported, since a derived path to a directory
+// that is not there is worse than no value at all -- it turns "you are under sudo,
+// or this user has no session" into an obscure systemctl or podman failure several
+// rows later. An INHERITED value is never overwritten: an operator who set one
+// meant it. Only an empty variable is filled, and the report says which half came
+// from where.
 //
-// An INHERITED value is never overwritten: an operator who set one meant it. Only
-// an empty variable is filled, and the report says which half came from where.
+// The existence probe is `sh -c 'test -d "$0"' <dir>` through the runner, so it asks
+// the host the runner reaches. Exit status 1 is "no such directory"; any other
+// failure is a probe that could not run, which UserSession reports as such rather
+// than as a missing directory.
 //
-// The mechanism is os.Setenv through a seam, not engine.EnvRunner.RunEnv: RunEnv is
-// deliberately a separate interface so that putting a value in a child's
+// The mechanism is os.Setenv through a seam, not Cmd.Env: every holder but the compose
+// manager wraps its runner in engine.NoEnv so that putting a value in a child's
 // environment stays the compose-secrets path alone. Neither of these is a secret,
-// and routing them through RunEnv would reopen the door that split exists to close.
+// and routing them through Cmd.Env would reopen the door that wrapper exists to close.
 //
 // It is memoised because every systemctl call funnels through it, and it must
 // probe once per run rather than once per command.
@@ -158,46 +156,31 @@ func (m *Manager) ensureUserSession(ctx context.Context) error {
 		return nil
 	}
 
-	xdg, derivedDir := m.Getenv(xdgRuntimeDir), false
-	if xdg == "" {
-		xdg, derivedDir = userRuntimeDirBase+strconv.Itoa(euid), true
+	isDir := func(dir string) (bool, error) {
+		_, err := engine.Output(ctx, m.R, runner.Cmd{Argv: []string{"sh", "-c", `test -d "$0"`, dir}})
+		if err == nil {
+			return true, nil
+		}
+		var st interface{ ExitCode() int }
+		if errors.As(err, &st) && st.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, err
 	}
-	if _, err := m.R.Output(ctx, "sh", "-c", `test -d "$0"`, xdg); err != nil {
-		m.sessionErr = fmt.Errorf("the user runtime directory %s does not exist, so `systemctl --user` and "+
-			"`loginctl` have no bus to talk to.\n"+
-			"  Either this process is running under sudo/su/cron (which strip %s -- run as the rootless "+
-			"user's own login session instead), or that user has no session at all "+
-			"(`loginctl enable-linger <user>` is what makes %s%d persist without one)",
-			xdg, xdgRuntimeDir, userRuntimeDirBase, euid)
+	session, err := rootless.UserSession(euid, m.Getenv, isDir)
+	if err != nil {
+		m.sessionErr = err
 		return m.sessionErr
 	}
-	if derivedDir {
-		if err := m.Setenv(xdgRuntimeDir, xdg); err != nil {
-			m.sessionErr = fmt.Errorf("setting %s=%s: %w", xdgRuntimeDir, xdg, err)
+	for _, kv := range session.Env() {
+		key, value, _ := strings.Cut(kv, "=")
+		if err := m.Setenv(key, value); err != nil {
+			m.sessionErr = fmt.Errorf("setting %s=%s: %w", key, value, err)
 			return m.sessionErr
 		}
 	}
-
-	bus, derivedBus := m.Getenv(dbusSessionBus), false
-	if bus == "" {
-		bus, derivedBus = "unix:path="+xdg+"/bus", true
-		if err := m.Setenv(dbusSessionBus, bus); err != nil {
-			m.sessionErr = fmt.Errorf("setting %s=%s: %w", dbusSessionBus, bus, err)
-			return m.sessionErr
-		}
-	}
-	m.sessionDesc = fmt.Sprintf("%s=%s (%s) %s=%s (%s)",
-		xdgRuntimeDir, xdg, origin(derivedDir), dbusSessionBus, bus, origin(derivedBus))
+	m.sessionDesc = session.String()
 	return nil
-}
-
-// origin labels a reported value with where it came from, so an operator can tell
-// a value this tool invented from one their environment already carried.
-func origin(derived bool) string {
-	if derived {
-		return "derived"
-	}
-	return "inherited"
 }
 
 // checkIDMapping asserts that the container's runUser falls inside the subuid and
@@ -217,18 +200,23 @@ func (m *Manager) checkIDMapping(ctx context.Context, user string) error {
 		m.progress().Info("id mapping: runUser %q names accounts rather than numeric ids, so its subuid/subgid range is not checked", runUser)
 		return nil
 	}
-	for _, m2 := range []struct {
-		field, key string
-		id         int
+	rt, err := m.runtime()
+	if err != nil {
+		return err
+	}
+	base := rt.Argv()
+	for _, k := range []struct {
+		file, field string
+		gid         bool
+		id          int
 	}{
-		{"UIDMap", "subuid", uid},
-		{"GIDMap", "subgid", gid},
+		{"subuid", "UIDMap", false, uid},
+		{"subgid", "GIDMap", true, gid},
 	} {
-		out, err := m.output(ctx, "info", "--format",
-			"{{range .Host.IDMappings."+m2.field+"}}{{.ContainerID}}:{{.Size}} {{end}}")
+		out, err := engine.Output(ctx, m.R, podman.IDMap(base, k.gid))
 		if err != nil {
-			r.Fail("id mapping: cannot read this user's %s range from `podman info`", m2.key)
-			return fmt.Errorf("reading the %s range from `podman info` (--format .Host.IDMappings.%s): %w", m2.key, m2.field, err)
+			r.Fail("id mapping: cannot read this user's %s range from `podman info`", k.file)
+			return fmt.Errorf("reading the %s range from `podman info` (--format .Host.IDMappings.%s): %w", k.file, k.field, err)
 		}
 		// This process already runs as the account the container will use, so an
 		// empty list is an answer about THAT account and not a gap in what was
@@ -236,18 +224,16 @@ func (m *Manager) checkIDMapping(ctx context.Context, user string) error {
 		// and this branch is rootless-only, so empty means the account genuinely has
 		// no allocation -- the shape a `useradd --system` or a directory (LDAP/AD)
 		// account arrives in. Reported, not skipped: podman then maps only uid 0, so
-		// every non-zero runUser is unusable and the reason is invisible.
-		ranges := strings.TrimSpace(string(out))
-		if ranges == "" {
-			r.Fail("id mapping: this user has no %s allocation at all", m2.key)
-			return m.idMappingErr(ctx, user, m2.id,
-				fmt.Sprintf("this user has no %s allocation, so container.runUser %q cannot work", m2.key, runUser))
-		}
-		if !idMapCovers(ranges, m2.id) {
-			r.Fail("id mapping: %s %d is outside this user's %s ranges (%s)", m2.key, m2.id, m2.key, ranges)
-			return m.idMappingErr(ctx, user, m2.id,
-				fmt.Sprintf("container.runUser %s %d is outside this user's %s ranges (%s)",
-					m2.key, m2.id, m2.key, ranges))
+		// every non-zero runUser is unusable and the reason is invisible. Id 0
+		// always passes (rootless.CheckIDMap): it is the invoking user itself.
+		if err := rootless.CheckIDMap(string(out), k.file, k.id, "container.runUser", runUser); err != nil {
+			ranges := strings.TrimSpace(string(out))
+			if ranges == "" {
+				r.Fail("id mapping: this user has no %s allocation at all", k.file)
+			} else {
+				r.Fail("id mapping: %s %d is outside this user's %s ranges (%s)", k.file, k.id, k.file, ranges)
+			}
+			return m.idMappingErr(ctx, user, k.id, err)
 		}
 	}
 	r.OK("id mapping: runUser %s is inside this user's subuid/subgid ranges", runUser)
@@ -256,41 +242,27 @@ func (m *Manager) checkIDMapping(ctx context.Context, user string) error {
 
 // idMappingErr is the shared remedy for both subid failures -- none allocated, and
 // allocated but too small. They differ only in the diagnosis, and the commands are
-// the same either way, so the commands live in one place.
+// the same either way, so the commands live in one place: rootless.SubIDFix, fed the
+// range suggestSubIDRange computes from this host's own files.
 //
 // The account is named LITERALLY rather than as `$(id -un)`: the privileged line is
 // meant to be forwarded to an administrator, and a command substitution would resolve
 // to whoever ends up running it. The range has to reach the id itself, so the count
 // is id+1 -- a uid of 1000 needs 1001, which is why the rootless default is a low id
 // rather than the image's own 1000001 (that would need 1000002).
-func (m *Manager) idMappingErr(ctx context.Context, user string, id int, diagnosis string) error {
+func (m *Manager) idMappingErr(ctx context.Context, user string, id int, diagnosis error) error {
 	start, end, computed := m.suggestSubIDRange(ctx, id+1)
-	caveat := "   # /etc/subuid unreadable: check this does not overlap"
-	if computed {
-		caveat = ""
-	}
 	// The reasoning behind the range, the accounts that arrive without one, and the
 	// runUser: "0:0" alternative are all in docs/operations.md. An error says what to
 	// run, not why.
-	return fmt.Errorf("%s.\n"+
-		"  Ask an administrator to run:\n"+
-		"    sudo usermod --add-subuids %d-%d --add-subgids %d-%d %s%s\n"+
-		"  then, as this user:\n"+
-		"    podman system migrate",
-		diagnosis, start, end, start, end, user, caveat)
+	return fmt.Errorf("%w.\n%s", diagnosis, rootless.SubIDFix(user, start, end, computed))
 }
 
-// subIDFloor and subIDBlock mirror shadow-utils' own SUB_UID_MIN and SUB_UID_COUNT
-// defaults, which is where a range would come from if useradd had allocated one.
-const (
-	subIDFloor = 100000
-	subIDBlock = 65536
-)
-
 // suggestSubIDRange proposes a range that does not overlap anything already
-// allocated on this host. Overlap is the reason this is computed rather than
-// hardcoded: two accounts sharing a subuid range map to the same host uids, which is
-// a containment hole, and only the newer shadow-utils refuse to create one.
+// allocated on this host (rootless.NextFreeRange). Overlap is the reason this is
+// computed rather than hardcoded: two accounts sharing a subuid range map to the same
+// host uids, which is a containment hole, and only the newer shadow-utils refuse to
+// create one.
 //
 // Both files are world-readable, so this needs no privilege even though applying the
 // result does. A read that fails is reported as such by the caller rather than being
@@ -300,29 +272,14 @@ const (
 // It cannot see ranges served by SSSD rather than the files (the `subid: sss` route),
 // so on a host configured that way the proposal is still worth checking.
 func (m *Manager) suggestSubIDRange(ctx context.Context, need int) (start, end int, computed bool) {
-	size := max(subIDBlock, need)
-	out, err := m.R.Output(ctx, "sh", "-c", "cat /etc/subuid /etc/subgid 2>/dev/null")
+	out, err := engine.Output(ctx, m.R,
+		runner.Cmd{Argv: []string{"sh", "-c", "cat /etc/subuid /etc/subgid 2>/dev/null"}})
 	if err != nil {
-		return subIDFloor, subIDFloor + size - 1, false
+		start, end = rootless.NextFreeRange("", need)
+		return start, end, false
 	}
-	highest := subIDFloor
-	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
-		// name:start:count -- the name may itself contain no colon, so a line with
-		// anything other than three fields is not one of these and is skipped.
-		f := strings.Split(strings.TrimSpace(line), ":")
-		if len(f) != 3 {
-			continue
-		}
-		first, err1 := strconv.Atoi(f[1])
-		count, err2 := strconv.Atoi(f[2])
-		if err1 != nil || err2 != nil {
-			continue
-		}
-		if first+count > highest {
-			highest = first + count
-		}
-	}
-	return highest, highest + size - 1, true
+	start, end = rootless.NextFreeRange(string(out), need)
+	return start, end, true
 }
 
 // hostUserName resolves the account this process runs as, for the commands handed to
@@ -330,7 +287,7 @@ func (m *Manager) suggestSubIDRange(ctx context.Context, need int) (start, end i
 // /etc/passwd and would miss exactly the directory accounts most likely to be here.
 // The numeric uid is a usable fallback: usermod accepts it too.
 func (m *Manager) hostUserName(ctx context.Context, euid int) string {
-	out, err := m.R.Output(ctx, "id", "-un")
+	out, err := engine.Output(ctx, m.R, runner.Cmd{Argv: []string{"id", "-un"}})
 	if name := strings.TrimSpace(string(out)); err == nil && name != "" {
 		return name
 	}
@@ -354,31 +311,6 @@ func runUserIDs(runUser string) (uid, gid int, numeric bool) {
 		return 0, 0, false
 	}
 	return uid, gid, true
-}
-
-// idMapCovers reports whether id falls inside any `containerID:size` range in the
-// space-separated list podman's IDMappings template produces. An unparseable pair
-// is skipped rather than failing the check: podman owns that output's shape, and a
-// format change should not turn into a refusal to deploy.
-func idMapCovers(ranges string, id int) bool {
-	for _, pair := range strings.Fields(ranges) {
-		first, size, found := strings.Cut(pair, ":")
-		if !found {
-			continue
-		}
-		start, err := strconv.Atoi(first)
-		if err != nil {
-			continue
-		}
-		n, err := strconv.Atoi(size)
-		if err != nil {
-			continue
-		}
-		if id >= start && id < start+n {
-			return true
-		}
-	}
-	return false
 }
 
 // ensureLinger asserts that this user lingers, and on a mutating caller ENABLES it.
@@ -405,7 +337,7 @@ func idMapCovers(ranges string, id int) bool {
 // address.
 func (m *Manager) ensureLinger(ctx context.Context, euid int, user string, fix bool) error {
 	r := m.report()
-	out, err := m.R.Output(ctx, "loginctl", "show-user", strconv.Itoa(euid), "--property=Linger")
+	out, err := engine.Output(ctx, m.R, systemd.ShowLinger(euid))
 	if err != nil {
 		r.Fail("linger: cannot read this user's linger state from loginctl")
 		return fmt.Errorf("cannot read this user's linger state (`loginctl show-user %d --property=Linger`): %w\n"+
@@ -414,24 +346,22 @@ func (m *Manager) ensureLinger(ctx context.Context, euid int, user string, fix b
 	}
 	// `Linger=yes` / `Linger=no`; anything else means a logind that answered in a
 	// shape this does not read, which is reported rather than assumed good.
-	state := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "Linger="))
+	state := systemd.ParseLinger(string(out))
 	if state == "yes" {
 		r.OK("linger: enabled for uid %d", euid)
 		return nil
 	}
 	if !fix {
 		r.Fail("linger: not enabled for uid %d (Linger=%s)", euid, state)
-		// `broker deploy` enables this itself; the command is here for anyone who
-		// wants it done without deploying. Why it matters is in docs/operations.md.
-		return fmt.Errorf("linger is not enabled for uid %d, so the broker would not survive logout.\n"+
-			"  Run:\n"+
-			"    loginctl enable-linger",
-			euid)
+		// `broker deploy` enables this itself; the command is in the shared refusal
+		// for anyone who wants it done without deploying. Why it matters is in
+		// docs/operations.md.
+		return rootless.CheckLinger(euid, state)
 	}
 	// No username argument: this enables it for the invoking user, which is the
 	// variant that needs no privilege. Naming a user would be the one that does.
-	m.logf("enabling linger for uid %d, so the broker survives logout and starts at boot", euid)
-	if err := m.R.Run(ctx, "loginctl", "enable-linger"); err != nil {
+	m.logf("enabling linger for uid %d, so its user units survive logout and start at boot", euid)
+	if err := engine.Run(ctx, m.R, systemd.EnableLinger()); err != nil {
 		r.Fail("linger: could not enable it for uid %d", euid)
 		// polkit normally grants this for your own account, so a refusal means an
 		// inactive session or a tightened set-self-linger -- either way what is left
@@ -451,13 +381,13 @@ func (m *Manager) ensureLinger(ctx context.Context, euid int, user string, fix b
 // leaves an orphan unit behind and breaks Preflight's "nothing happened" promise.
 func (m *Manager) checkUserSystemd(ctx context.Context) error {
 	r := m.report()
-	out, err := m.systemctlOutput(ctx, "show", "--property=Version")
+	out, err := m.systemctlOutput(ctx, systemd.Systemctl(m.systemctlUser(), "show", "--property=Version"))
 	if err != nil {
 		r.Fail("user systemd: the user instance does not answer")
 		return fmt.Errorf("this user's systemd instance does not answer (`systemctl --user show --property=Version`): %w\n"+
 			"  podman quadlets are generated and started by it, so `broker deploy` would install a unit that "+
 			"nothing can load. Start the user session (`systemctl --user start podman.socket`) and make it "+
-			"survive logout (`loginctl enable-linger`) -- do NOT use sudo, podman.rootless=true deploys as this user",
+			"survive logout (`loginctl enable-linger`) -- do NOT use sudo, a rootless deployment runs as this user",
 			err)
 	}
 	r.OK("user systemd: answering (%s)", strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "Version=")))
@@ -472,7 +402,7 @@ func (m *Manager) checkUserSystemd(ctx context.Context) error {
 func (m *Manager) checkDataDir(ctx context.Context, user string) error {
 	r := m.report()
 	dir := m.Cfg.ContainerBlock(m.P).DataDir
-	out, err := m.R.Output(ctx, "sh", "-c", nearestWritableScript, dir)
+	out, err := engine.Output(ctx, m.R, runner.Cmd{Argv: []string{"sh", "-c", nearestWritableScript, dir}})
 	existing := strings.TrimSpace(string(out))
 	if err == nil {
 		r.OK("data dir: %s is creatable (%s is writable)", dir, existing)
@@ -517,7 +447,7 @@ func (m *Manager) namespaceWritable(ctx context.Context, dir string) bool {
 //
 // It ports the guidance the legacy bash carried (002-host-prep.sh) and the Go port
 // dropped: dataDir defaults under /opt, which no unprivileged user can write to,
-// and that default does not change for podman.rootless.
+// and that default does not change when deploying rootless.
 func (m *Manager) dataDirHint(dir string) string {
 	if !m.rootlessPodman() {
 		return ""

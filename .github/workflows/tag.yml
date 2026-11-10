@@ -11,19 +11,26 @@ name: Tag
 #     -> release  created last, with artifacts, checksums, digest
 #
 # A failure anywhere leaves no release. Nothing is public, so there is nothing
-# to clean up: read the logs artifact, push a fix, tag again.
+# to clean up: read the logs artifact, push a fix, tag again. A library is the
+# exception: its tag is fetchable the moment it is pushed, and a module proxy
+# caches it for good, so a library fix goes out under a NEW tag, never the same.
 #
-# THREE SHAPES, ALL VERBATIM. Copy this file unchanged into any repo:
+# FOUR SHAPES, ALL VERBATIM. Copy this file unchanged into any repo:
 #
 #   image-only     Dockerfile present, BUILD_TARGETS unset. Binaries skip.
 #   binaries-only  no Dockerfile, BUILD_TARGETS set. Image and trivy skip.
 #   both           Dockerfile present and BUILD_TARGETS set.
+#   library        no Dockerfile (or SHIP_IMAGE=false), BUILD_TARGETS unset,
+#                  SHIP_LIBRARY=true. Gates run, nothing is built, and the
+#                  release carries notes only; consumers fetch the tag itself.
 #
 # Repo variables (Settings > Secrets and variables > Actions > Variables):
 #   BUILD_TARGETS  JSON array, e.g. [{"os":"linux","arch":"amd64"}]
 #   SHIP_IMAGE     optional override, "true" or "false". Unset means "is
 #                  there a Dockerfile" -- set "false" where a Dockerfile
 #                  exists for local dev but is not published.
+#   SHIP_LIBRARY   "true" for a library that ships no image and no binaries.
+#                  Unset or "false" otherwise. Never inferred.
 #
 # Do NOT also add `on: release`. The release this workflow creates would
 # re-trigger the whole pipeline.
@@ -40,14 +47,15 @@ concurrency:
   cancel-in-progress: false # never abort a half-published pipeline
 
 jobs:
-  # Resolve the shape once, loudly, before anything expensive runs. Both
-  # toggles are validated here so a typo fails with a readable message
+  # Resolve the shape once, loudly, before anything expensive runs. Every
+  # toggle is validated here so a typo fails with a readable message
   # instead of an opaque matrix-expansion error later.
   plan:
     runs-on: ubuntu-24.04 # pinned; see ci.yml
     outputs:
       ship_image: ${{ steps.shape.outputs.ship_image }}
       ship_binaries: ${{ steps.shape.outputs.ship_binaries }}
+      ship_library: ${{ steps.shape.outputs.ship_library }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -55,6 +63,7 @@ jobs:
         env:
           SHIP_IMAGE: ${{ vars.SHIP_IMAGE }}
           BUILD_TARGETS: ${{ vars.BUILD_TARGETS }}
+          SHIP_LIBRARY: ${{ vars.SHIP_LIBRARY }}
           DOCKERFILE: Dockerfile
         run: |
           set -euo pipefail
@@ -76,19 +85,32 @@ jobs:
             bins=false
           fi
 
-          if [ "$img" = false ] && [ "$bins" = false ]; then
-            echo "::error::nothing to ship: no Dockerfile (or SHIP_IMAGE=false) and BUILD_TARGETS unset"
+          case "$(printf '%s' "${SHIP_LIBRARY:-}" | tr '[:upper:]' '[:lower:]')" in
+            true|yes|1) lib=true ;;
+            false|no|0|"") lib=false ;;
+            *) echo "::error::SHIP_LIBRARY must be true or false, got '$SHIP_LIBRARY'"
+               exit 1 ;;
+          esac
+
+          if [ "$lib" = true ] && { [ "$img" = true ] || [ "$bins" = true ]; }; then
+            echo "::error::SHIP_LIBRARY=true ships nothing, but image=$img binaries=$bins: unset SHIP_LIBRARY, or remove the Dockerfile (or set SHIP_IMAGE=false) and unset BUILD_TARGETS"
+            exit 1
+          fi
+
+          if [ "$img" = false ] && [ "$bins" = false ] && [ "$lib" = false ]; then
+            echo "::error::nothing to ship: no Dockerfile (or SHIP_IMAGE=false), BUILD_TARGETS unset, and SHIP_LIBRARY not true (set it for a library such as a Go module)"
             exit 1
           fi
 
           echo "ship_image=$img" >> "$GITHUB_OUTPUT"
           echo "ship_binaries=$bins" >> "$GITHUB_OUTPUT"
-          echo "::notice::shape -- image=$img binaries=$bins"
+          echo "ship_library=$lib" >> "$GITHUB_OUTPUT"
+          echo "::notice::shape -- image=$img binaries=$bins library=$lib"
 
   gates:
     needs: plan
     # `scan` reduces to the applicable subset inside the dev scripts, so this
-    # is valid for all three shapes: with no image it is the dependency scan
+    # is valid for every shape: with no image it is the dependency scan
     # alone. It is fatal on fixable CVEs, so a red gate stops the release.
     uses: ./.github/workflows/ci.yml
 
@@ -209,13 +231,16 @@ jobs:
     needs: [plan, gates, image, binaries]
     # Either producer may be skipped; neither may fail; and at least one must
     # have actually succeeded, so a run that shipped nothing never publishes.
+    # A library is the one shape with no producer: the plan job declared it,
+    # and its release is the notes alone.
     if: >-
       always()
       && needs.plan.result == 'success'
       && needs.gates.result == 'success'
       && needs.image.result != 'failure' && needs.image.result != 'cancelled'
       && needs.binaries.result != 'failure' && needs.binaries.result != 'cancelled'
-      && (needs.image.result == 'success' || needs.binaries.result == 'success')
+      && (needs.image.result == 'success' || needs.binaries.result == 'success'
+      || needs.plan.outputs.ship_library == 'true')
     runs-on: ubuntu-24.04 # pinned; see ci.yml
     permissions:
       contents: write # the only job that can write to the repo

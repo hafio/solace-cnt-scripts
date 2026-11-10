@@ -65,7 +65,7 @@ and if it looks like a legacy bash env file, the error points at `solace-util co
 
 Every **host path** in the file -- `tls.cert`, `tls.certKey`, `tls.cas`,
 `broker.cliScriptsDir`, `broker.hostDiagnosticDir`, `broker.domainCerts.dirs[].path`,
-`broker.domainCerts.files{}`, `docker.composeFile` -- is resolved against **the directory
+`broker.domainCerts.files{}` -- is resolved against **the directory
 the env file itself was found in**, never against the directory the command was run from.
 So `/srv/solace/env/prod.yaml` declaring `tls.cert: certs/tls.crt` means
 `/srv/solace/env/certs/tls.crt`, whichever directory you drive it from. An absolute value
@@ -82,8 +82,8 @@ Three fields deliberately do **not** follow the rule:
 
 | Field | Why |
 | --- | --- |
-| `<platform>.container.dataDir` | **Required absolute** instead. It is the host side of a bind mount *and* what `broker remove --delete-data` empties (the directory itself stays), so quietly changing which directory that points at is not a fix. The default `/opt/solace/data` already satisfies it |
-| `podman.quadletDir` | Checked, never resolved. The unit must live where systemd scans, so resolving a relative value would invent a location systemd never reads. Both defaults are already absolute |
+| `<platform>.container.dataDir` | **Required absolute** instead. It is the host side of a bind mount *and* what `broker remove --delete-data` empties (the directory itself stays), so quietly changing which directory that points at is not a fix. The starters already satisfy it: docker's `/opt/solace/data`, and podman's `~/solace/data`, which expands at load and sits where a rootless deploy can create it |
+| `podman.quadletDir` | Checked, never rebased. The unit must live where systemd scans, so resolving a relative value would invent a location systemd never reads. The defaults are absolute: the rootless one is filled in at load from `$XDG_CONFIG_HOME` or `$HOME/.config` (a relative `XDG_CONFIG_HOME` or an unresolvable home is a load error) |
 | `podman.baseDir` | Optional, and **required absolute when set**. Deploy and remove delete a legacy private-key file under it, so resolving a relative value would aim that delete at a directory you never named |
 
 Host paths are also **character-checked**, and the rule is deliberately looser than the one
@@ -95,7 +95,8 @@ one, see below.) What
 a path may **not** carry is a `$` or a shell metacharacter (both container artifacts write
 these values verbatim, and compose interpolates `$` across the whole document), whitespace
 (a mount is written `source:target:options` on one line, so a space cannot be delimited), or
-a control or invisible character. The check runs on the value as you wrote it, before any
+a control or invisible character, or a byte that is not valid UTF-8 (YAML cannot carry it, so
+re-save the env file as UTF-8). The check runs on the value as you wrote it, before any
 resolution.
 
 **A leading `~` expands to your own home directory, in every path key and in every `command`
@@ -204,13 +205,14 @@ Common optional knobs:
 | `kubernetes.updateStrategy` | `automatedRolling` | `automatedRolling` or `manualPodRestart` |
 | `kubernetes.command` | `kubectl` | Cluster CLI (legacy `KUBE`). A scalar is split on whitespace, so it can be a drop-in (`oc`) or a profile (`kubectl --kubeconfig <file>`). **Restricted** -- see [The command fields are executable content](#the-command-fields-are-executable-content) |
 | `docker.command` / `podman.command` | `docker` / `podman` | Container CLI (legacy `CONTAINER_RUNTIME`), same forms and the same restrictions as `kubernetes.command` |
-| `docker.compose` | `<command> compose` | The compose invocation. Set it to `docker-compose` on a host carrying only the standalone v1 binary; same forms and restrictions as `docker.command`, plus the one permitted `compose` subcommand |
-| `<docker\|podman>.container.healthCheck.enabled` | `false` | Adds an engine health check polling the broker's own `/health-check/readiness` on port 5550 every 5s, so `docker ps` and podman's auto-restart see readiness rather than liveness. Needs broker **10.26 or later** and a version-numbered `image.tag`; set `healthCheck.cmd` to supply your own probe instead (which skips the version check). A custom probe runs inside the container under `no-new-privileges`, so it cannot use `su`, `sudo` or a setuid helper -- see [What the broker cannot gain](operations.md#what-the-broker-cannot-gain). Its `interval`, `timeout` and `startPeriod` are Go durations (`5s`, `1m30s`): `startPeriod` may be `0s`, the other two must be above zero. Container-only by design -- on Kubernetes the operator already probes the pods |
+| `docker.compose` | `<command> compose` | The compose invocation. Set it to `docker-compose` on a host carrying only the standalone v1 binary; same forms and restrictions as `docker.command`, plus the one permitted `compose` subcommand. The compose file itself goes to it on stdin (`-f -`), with `--project-directory` set to the env file's directory, and is never written to disk |
+| `<docker\|podman>.container.healthCheck.enabled` | `false` | Adds an engine health check polling the broker's own `/health-check/readiness` on port 5550 every 5s, so `docker ps` and podman's auto-restart see readiness rather than liveness. Needs broker **10.26 or later** and a version-numbered `image.tag`; set `healthCheck.cmd` to supply your own probe instead (which skips the version check). A custom probe runs inside the container under `no-new-privileges`, so it cannot use `su`, `sudo` or a setuid helper -- see [What the broker cannot gain](operations.md#what-the-broker-cannot-gain). The command may carry whitespace and shell syntax (`sh -c '...'`), but not an empty argument, a control or invisible character, or a byte that is not valid UTF-8. Its `interval`, `timeout` and `startPeriod` are Go durations (`5s`, `1m30s`): `startPeriod` may be `0s`, the other two must be above zero. Container-only by design -- on Kubernetes the operator already probes the pods |
 | `kubernetes.tlsServerSecret` | -- | Name of the TLS Secret the broker uses; a Secret to reference -- named here, or derived -- is what enables the CR's TLS block. **Optional**: unset derives `<kubernetes.name>-tls` when `tls.cert`/`tls.certKey` are set, and names nothing (no `tls` block) when they are not -- the same three states as `kubernetes.imagePullSecret`. Lives under `kubernetes.*` because it names a Kubernetes Secret object -- the cert/key files themselves stay platform-neutral under `tls.*`. **Naming it does not mean building it**: with `tls.cert`/`tls.certKey` set, this tool builds the Secret and removes it on teardown; without them the Secret must already exist and is only referenced -- see [Bring your own TLS Secret](#bring-your-own-tls-secret) |
 | `tls.cert` / `tls.certKey` | -- | The server certificate and its private key, as two separate host files. **Inseparable on every platform**: setting one without the other is refused at load, in both directions. On docker and podman the broker reads the certificate as ONE file containing the key, the certificate, then the `tls.cas` chain, and this tool builds that file from them. Kubernetes takes them as two keys in a Secret and lets the operator assemble them -- a Secret carrying only `tls.crt` is one the broker cannot start a listener over |
 | `tls.cas` | -- | The CA chain the broker presents after its server certificate -- intermediates first, in the order listed. Part of the server certificate on every platform: appended to the docker/podman secret, to the Kubernetes TLS Secret's `tls.crt`, and to what `broker configure server-certs` loads, and covered by the certificate's digest, so a renewed CA is noticed like a renewed certificate. **Not** trusted CAs: those are `broker.domainCerts`, which `broker configure domain-certs` loads |
 | `<docker\|podman>.container.name` | `solace` | The container's name, and the stem of every derived name (the podman unit and service, the host-side secret names). Held to the engines' own grammar: it must start with a letter or digit, then letters, digits, `.`, `_` or `-`. A name that YAML would read as a boolean or number (`yes`, `off`, `0123`) is legal here and quoted in the generated compose file, so it stays the string you wrote. On docker it is also the compose **project** name, lowercased with anything outside `[a-z0-9_-]` folded to `-`, since compose's grammar is narrower than the engines' -- override with `COMPOSE_PROJECT_NAME` ([operations.md](operations.md#docker-and-podman-mechanics)) |
-| `podman.rootless` | `false` | Which podman this file deploys. `true` = the unit under `$XDG_CONFIG_HOME/containers/systemd` loaded by `systemctl --user`, `container.runUser` defaulting to `1000:0`, and ownership applied through `podman unshare`. **Declared, then checked against the account you run as**: every podman command except `generate` refuses when they disagree -- `true` under `sudo`, or `false` without it -- so a mistyped `sudo` is a refusal rather than a second, rootful deployment. `generate` is exempt because one file must render one artifact from any account. See [Rootless podman prerequisites](operations.md#rootless-podman-prerequisites) |
+| `podman.rootful` | `false` | Which podman this file deploys. **Rootless is the default**: omit the key (or `false`) for the unit under `$XDG_CONFIG_HOME/containers/systemd` (else `$HOME/.config/containers/systemd`) loaded by `systemctl --user`, `container.runUser` defaulting to `1000:0`, and ownership applied through `podman unshare`. `true` asks for the **rootful** engine -- the unit under `/etc/containers/systemd`, the system systemd, `runUser` `1000001:0` -- and needs root. **Declared, then checked against the account you run as**: every podman command except `generate` refuses when they disagree -- `rootful: true` as an ordinary user (it needs root), or root **without** it (rootful is never assumed; run as the rootless user itself, without `sudo`) -- so a mistyped `sudo` is a refusal rather than a second, rootful deployment. `generate` is exempt because one file must render one artifact from any account. It replaces the removed `podman.rootless`, whose default was rootful: a file still carrying that key is refused at load, naming this one. See [Rootless podman prerequisites](operations.md#rootless-podman-prerequisites) |
+| `podman.quadletDir` | rootful: `/etc/containers/systemd`; rootless: `$XDG_CONFIG_HOME/containers/systemd`, else `$HOME/.config/containers/systemd` | Where the quadlet unit is written. A rootless default is worked out when the file loads, so a relative `XDG_CONFIG_HOME` (which podman's generator cannot use either) or a home directory that cannot be resolved is a load error (exit 2) rather than a guessed location; set the key to bypass the lookup. It is the directory written, not every directory podman reads: the generator runs under the user's systemd manager, which does not see an `XDG_CONFIG_HOME` set only in a shell profile |
 | `podman.baseDir` | -- | **Optional and unused**; absolute when set. Earlier builds wrote the server-certificate bundle (private key included) here as a host file; the certificate now rides podman's secret store like every other credential, so nothing is written here. When set, `broker deploy` and `broker remove` delete the old `<container.name>-tls-servercertificate.pem` in it, so an upgraded host is not left holding the key. Leave it set until every host has been redeployed once, then remove it |
 | `kubernetes.imagePullSecret` | -- | Name of the image-pull Secret the CR references. **Optional**: unset derives `<kubernetes.name>-image-pull` when registry credentials are configured, and names nothing (no `pullSecrets` block) when they are not. **Naming it does not mean building it**, the same rule `kubernetes.tlsServerSecret` follows above. With `image.user`/`image.pass` set (or their `*Env` equivalents), this tool builds the Secret, applies it alongside the operator's fixed-name `regcred`, and removes both on teardown. Without them, a configured name must already exist -- created by hand or by a cluster admin -- and is only referenced, never built or deleted. The credentials themselves stay under `image.*`; docker and podman use them for `<command> login`, having no operator and no `regcred` |
 | `kubernetes.imagePullPolicy` | -- | `Always` \| `IfNotPresent` \| `Never`; unset keeps the CR's own `IfNotPresent` |
@@ -221,7 +223,7 @@ Common optional knobs:
 | `kubernetes.operator.cpu` / `mem` | `500m` / `512Mi` | The operator container's limits, Kubernetes quantities (no sign or exponent). These four operator keys are substituted into the operator bundle as-is, so each is checked at load |
 | `semp.additionalUsers` | -- | Extra CLI (management) users, each `{username, accessLevel, password\|passwordEnv}` with `accessLevel` one of `none`, `read-only`, `mesh-manager`, `read-write`, `admin`. Created at boot on every platform. The username must start with a letter or `_` and be 1-32 characters (the broker's own rule); on Kubernetes it may not contain `.` or `-` either, because the credentials ride the pod environment there and the kubelet drops variables whose names are not identifiers. See [Extra CLI users differ by platform](operations.md#extra-cli-users-differ-by-platform) |
 | `semp.adminPassEnv` (and every other `*Env`) | -- | Name of an environment variable holding the secret, instead of the value itself. See [Secrets](#secrets) |
-| `timezone` | -- | Broker timezone, all platforms (the CR's `timezone` and the containers' `TZ`). Omitted keeps the image default |
+| `timezone` | -- | Broker timezone, all platforms (the CR's `timezone` and the containers' `TZ`). Omitted keeps the image default. Checked at load: an IANA name such as `Europe/London` or `Etc/GMT+8`; invalid UTF-8, a control or invisible character, whitespace, a quote, a `$` or another shell character is refused |
 | `broker.cliScriptsDir` | `cli` | Host folder `broker perform cli-script` and `shell-script` read scripts from -- the only place they look. A script is named by its bare file name and must exist here; a path is refused and the current directory is never searched. Relative to the env file's directory, so for `env/dev.yaml` the default is `env/cli` |
 | `broker.hostDiagnosticDir` | `diag-configs` | Host folder `broker perform gather-diagnostics` writes its bundle to |
 | `broker.productKeys` | -- | The Solace licence keys `broker configure product-keys` applies. Strings, not paths |
@@ -317,11 +319,11 @@ pods would never become Ready, and nothing would hold the working password. So:
   the namespace, or when the running broker's CR names an admin Secret that the new one would
   drop. Set `semp.adminPass` to the broker's password, or `kubernetes.adminSecret` to a Secret
   holding it. The check reads this broker's CR and its own data claims by name, so it needs
-  only `get` on `pubsubpluseventbrokers` and `persistentvolumeclaims` in the namespace, each
-  probed first like every other permission. A refused `get` on the CR stops the deploy, which
-  needs that grant anyway; a refused `get` on the claims is a warning that the data was not
-  checked, and the deploy goes on -- set `semp.adminPass` first if an earlier broker's data
-  may still be there. Claims under a custom volume mount are not checked, since they exist
+  only `get` on `pubsubpluseventbrokers` and `persistentvolumeclaims` in the namespace, and
+  neither read is probed first: a read is not a requirement. A refused `get` on the CR is
+  not fatal -- the data check decides, and the deploy's own apply is what needs that grant;
+  a refused `get` on the claims is a warning that the data was not checked, and the deploy
+  goes on -- set `semp.adminPass` first if an earlier broker's data may still be there. Claims under a custom volume mount are not checked, since they exist
   before a first deploy.
 
 **Upgrading moves an unset name.** Earlier builds defaulted `kubernetes.adminSecret` to
@@ -423,7 +425,7 @@ them -- see [The limits the container actually gets](operations.md#the-limits-th
 can be lowered, down to `0` for no dumps at all.
 A rootless podman host has further prerequisites, all checked and refused rather than fixed:
 see [Rootless podman prerequisites](operations.md#rootless-podman-prerequisites). The mode
-itself is declared, then checked against who runs the command.
+itself is declared (`podman.rootful`, default rootless), then checked against who runs the command.
 
 ## Secrets
 
@@ -572,7 +574,8 @@ running anything with it.**
 
 To make that review short, the fields are restricted. A command is accepted only when:
 
-1. **Every token is inert and visible.** No control characters, no whitespace inside a single
+1. **Every token is inert and visible.** No control characters (C0, DEL and the C1 range),
+   no invalid UTF-8, no whitespace inside a single
    argument (any Unicode whitespace, not just the ASCII space), no invisible formatting
    characters (zero-width spaces and joiners, bidirectional overrides), no quotes, no
    backslash, no backtick, and none of `$ ; | & < > ( ) * ? [ ] { } # !`. Nothing is ever
@@ -639,8 +642,10 @@ to the person who can see what they are approving. It is rejected on any `genera
 where nothing executes.
 
 **Privilege escalation is never approvable**, by the config or by you: `sudo`, `sudoedit`,
-`doas`, `su`, `pkexec`, `run0`, `systemd-run`, `machinectl`, `setpriv`, `capsh`, `unshare`,
-`nsenter`, `runas` and `gsudo` are refused as `--allow-command` values, in any casing
+`doas`, `su`, `pkexec`, `run0`, `runuser`, `sg`, `systemd-run`, `machinectl`, `setpriv`,
+`capsh`, `unshare`, `nsenter`, `chroot`, `gosu`, `su-exec`, `setuidgid`, `s6-setuidgid`,
+`chpst`, `runas` and `gsudo` are refused as `--allow-command` values and in any command
+field, in any casing
 (`Sudo` and `SUDO.exe` too -- Windows and a default macOS filesystem resolve those to the same
 binary, so matching them exactly would have let a capital letter through a floor that is
 supposed to stop everyone). The allowlist in rule 2 above is the opposite: it stays
@@ -657,7 +662,8 @@ sudo solace-util broker deploy -e prod.yaml   # yes (prod.yaml is a podman env f
 # command: sudo podman  in the env file      # never
 ```
 
-The same check runs twice -- once when the env file is loaded, and again immediately before
+The rules above are the shared `execguard` package's, the same ones solmq-conn-util applies,
+so both tools refuse the same things in the same words. The same check runs twice -- once when the env file is loaded, and again immediately before
 any command line is built -- from a single implementation, so a hostile file is inert even
 on a path that skipped validation.
 
@@ -715,6 +721,7 @@ naming why, for the same reason the renames do:
 | --- | --- |
 | `kubernetes.msgNode.cpu` | Broker CPU is fixed by the scaling tier -- see [Scaling tiers](#scaling-tiers) |
 | `scaling.maxPool` | Named the same broker setting as `scaling.maxSpoolUsageMB`; use that |
+| `docker.composeFile` | Retired: the compose file is no longer written to disk. `broker deploy` and `broker remove` feed it to compose on stdin (`-f -`) with `--project-directory` set to the env file's directory, so there is no path to choose. Drop the key. A compose file an earlier build left behind is no longer read, and can be deleted. `solace-util convert` drops `DOCKER_COMPOSE_FILE` with a warning |
 | `<docker\|podman>.container.shmSize` | `/dev/shm` is fixed at `2g`, which is what the broker needs |
 | `<docker\|podman>.container.ulimits.nofile`, `.ulimits.memlock` | Fixed at `2448:1048576` and `-1`. The host is checked against them -- see [The limits the container actually gets](operations.md#the-limits-the-container-actually-gets). `ulimits.core` was NOT removed: it is live, see [The keys](#the-keys) |
 | `kubernetes.containerSecurity.readOnlyRootFilesystem` | A read-only root filesystem is not supported on any platform, so the key is refused whether it says `true` or `false`; the operator's default, a writable root, applies. `runAsUser` and `runAsGroup` are unaffected |

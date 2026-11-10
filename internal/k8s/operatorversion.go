@@ -137,8 +137,8 @@ func imageFromDeployment(dep *deploymentItem) string {
 // It asks rather than merely warning because the operator is cluster-scoped: the
 // blast radius is every broker in the cluster, including ones this env file has
 // never heard of, and `kubectl apply` would roll the image back without comment.
-// An unattended run (nil Confirm, or --no-prompt wired to decline) therefore does
-// NOT downgrade by default -- the same direction every other destructive question
+// A run with no way to ask (nil Confirm, or no terminal and no --no-prompt) therefore
+// does NOT downgrade by default -- the same direction every other destructive question
 // in this tool takes.
 //
 // It returns nil when there is nothing to ask about: a preview, a first install,
@@ -152,7 +152,11 @@ func (c *Cluster) confirmNoDowngrade(dep *deploymentItem) error {
 		return nil
 	}
 	c.progress().Warning("operator downgrade", body...)
-	if c.confirm("Downgrade the operator?") {
+	ok, err := c.confirm("Downgrade the operator?")
+	if err != nil {
+		return err
+	}
+	if ok {
 		return nil
 	}
 	return fmt.Errorf("operator downgrade declined; nothing was applied. The operator already installed is " +

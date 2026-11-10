@@ -8,17 +8,19 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
+
 	"solace/internal/cli"
 )
 
-// main reports, then exits with the code cli.ExitCode chose: 0 it worked, 2 the
+// main reports, then exits with the code exitcode.Code chose: 0 it worked, 2 the
 // command line or the env file was wrong, 1 anything else. The classification
-// lives in internal/cli (exit.go), beside the errors it classifies and in a
-// package that has tests -- main stays the one line that cannot be tested.
+// lives in the shared exitcode package, which has tests; the errors it classifies
+// are marked in internal/cli -- main stays the one line that cannot be tested.
 func main() {
 	err := cli.Execute()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 	}
-	os.Exit(cli.ExitCode(err))
+	os.Exit(exitcode.Code(err))
 }

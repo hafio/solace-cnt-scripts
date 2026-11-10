@@ -5,6 +5,9 @@ import (
 	"io"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/runner"
+
 	"solace/internal/config"
 	"solace/internal/engine"
 	"solace/internal/output"
@@ -35,7 +38,7 @@ const operatorDeployRef = "deployment/" + operatorDeployment
 // transport. Every command routes through R, so the Echo runner records it and tests capture
 // the exact argv. Out is the report sink; Log is the narration sink.
 type Cluster struct {
-	R   engine.Runner
+	R   runner.Runner
 	Cfg *config.Config
 	// Log is the RAW line sink for progress: it receives one already-formatted
 	// line and emits it verbatim. The `==> ` and `[TAG ] ` prefixes are added by
@@ -48,30 +51,46 @@ type Cluster struct {
 	// testable against a fixed instant. nil means time.Now.
 	Now func() time.Time
 
-	// Confirm asks the operator a yes/no question, the same seam
-	// container.Manager carries. nil DECLINES, which is what an unattended run
-	// must do when the question is "may I downgrade a cluster-scoped operator".
+	// Confirm asks the operator whether to downgrade the cluster-scoped operator, the
+	// same seam container.Manager carries. nil DECLINES, which is what a run with no
+	// way to ask must do. An error is a question that could not be put (no terminal,
+	// no --no-prompt) and is returned as the command's failure, not read as a "no".
 	//
-	// This is the ONLY question this package asks, and it is a func rather than a
-	// reader/writer pair on purpose: internal/cli owns the terminal, so every other
-	// confirmation -- including the removal prompts and the namespace question -- is
-	// asked there and reaches here as a decision already made.
-	Confirm func(question string) bool
+	// A func rather than a reader/writer pair on purpose: internal/cli owns the
+	// terminal, so every other confirmation -- including the removal prompts and the
+	// namespace question -- is asked there and reaches here as a decision already made.
+	Confirm func(question string) (bool, error)
+
+	// ConfirmScope asks whether the operator may watch EVERY namespace. It is its own
+	// seam because --no-prompt answers Confirm and must never answer this: widening
+	// the watch needs a terminal. nil DECLINES; an error is returned as the failure.
+	ConfirmScope func(question string) (bool, error)
 }
 
 // NewCluster builds a Cluster over the given runner, config, line sink and output
 // sink. Confirm is left nil, which DECLINES; a caller that can ask sets it.
-func NewCluster(r engine.Runner, cfg *config.Config, log func(string, ...any), out io.Writer) *Cluster {
-	return &Cluster{R: r, Cfg: cfg, Log: log, Out: out}
+func NewCluster(r runner.Runner, cfg *config.Config, log func(string, ...any), out io.Writer) *Cluster {
+	return &Cluster{R: engine.NoEnv(r), Cfg: cfg, Log: log, Out: out}
 }
 
 // confirm asks the operator question through the Confirm seam. A nil Confirm DECLINES:
-// the questions this package asks are all "may I do something whose blast radius is
-// wider than this env file" -- downgrade a shared operator, widen its watch scope -- and
-// an unattended run must answer no to those. Routed through one helper so the
-// nil-declines rule cannot be spelled differently at a second call site.
-func (c *Cluster) confirm(question string) bool {
-	return c.Confirm != nil && c.Confirm(question)
+// the question this seam carries is "may I do something whose blast radius is wider
+// than this env file" -- downgrade a shared operator -- and a run with no way to ask
+// must answer no. Routed through one helper so the nil-declines rule cannot be spelled
+// differently at a second call site.
+func (c *Cluster) confirm(question string) (bool, error) {
+	if c.Confirm == nil {
+		return false, nil
+	}
+	return c.Confirm(question)
+}
+
+// confirmScope is confirm for the watch-widening question, over ConfirmScope.
+func (c *Cluster) confirmScope(question string) (bool, error) {
+	if c.ConfirmScope == nil {
+		return false, nil
+	}
+	return c.ConfirmScope(question)
 }
 
 // progress is the stderr Sink for this package's narration: phases through Step,
@@ -94,7 +113,7 @@ func (c *Cluster) ns() string { return c.Cfg.K8s.Namespace }
 // KUBE variable, which the scripts expanded unquoted so it could carry a whole
 // profile (`kubectl --kubeconfig <file>`), not just a binary name.
 //
-// It re-runs the execution guard (config.CheckCommand, via ClusterCommand) on every
+// It re-runs the execution guard (execguard.Check, via ClusterCommand) on every
 // call rather than trusting the value Validate already saw. That is the second of
 // the guard's two enforcement points: this package can be driven from a Config that
 // never went through config.Load, and a hostile command must be inert there too. The
@@ -109,27 +128,72 @@ func (c *Cluster) kubectl(ctx context.Context, args ...string) error {
 	if err != nil {
 		return err
 	}
-	return c.R.Run(ctx, k.Name(), k.Args(args...)...)
+	return engine.Run(ctx, c.R, runner.Cmd{Argv: k.Argv(args...)})
+}
+
+// build makes one command from the guarded cluster CLI argv: a closure over a builder
+// in the shared kube package, which takes that argv as its first argument.
+type build func(base []string) runner.Cmd
+
+// base is the guarded cluster CLI as the argv every kube builder starts from (kubectl, or
+// oc, plus any --context or --kubeconfig kubernetes.command carries). It re-runs the
+// execution guard through cmd, for the reason cmd gives.
+func (c *Cluster) base() ([]string, error) {
+	k, err := c.cmd()
+	if err != nil {
+		return nil, err
+	}
+	return k.Argv(), nil
+}
+
+// runKube runs what b builds, streaming stdout/stderr.
+func (c *Cluster) runKube(ctx context.Context, b build) error {
+	base, err := c.base()
+	if err != nil {
+		return err
+	}
+	return engine.Run(ctx, c.R, b(base))
+}
+
+// outKube runs what b builds and returns captured stdout, stderr streaming.
+func (c *Cluster) outKube(ctx context.Context, b build) ([]byte, error) {
+	base, err := c.base()
+	if err != nil {
+		return nil, err
+	}
+	return engine.Output(ctx, c.R, b(base))
+}
+
+// teeKube runs what b builds, streaming both streams as runKube does, and also returns
+// what it wrote to stderr, for a step that must tell a refusal (kube.Forbidden) from any
+// other failure. Echo writes nothing there.
+func (c *Cluster) teeKube(ctx context.Context, b build) (string, error) {
+	base, err := c.base()
+	if err != nil {
+		return "", err
+	}
+	return engine.RunTee(ctx, c.R, b(base))
+}
+
+// outTeeKube is outKube that also returns stderr, which still reaches the terminal.
+func (c *Cluster) outTeeKube(ctx context.Context, b build) ([]byte, string, error) {
+	base, err := c.base()
+	if err != nil {
+		return nil, "", err
+	}
+	return engine.OutputTee(ctx, c.R, b(base))
 }
 
 // apply pipes a rendered manifest to `kubectl apply -f -` on stdin (never a temp
 // file, so secret-bearing manifests stay off disk).
 func (c *Cluster) apply(ctx context.Context, manifest []byte) error {
-	k, err := c.cmd()
-	if err != nil {
-		return err
-	}
-	return c.R.RunInput(ctx, manifest, k.Name(), k.Args("apply", "-f", "-")...)
+	return c.runKube(ctx, func(base []string) runner.Cmd { return kube.Apply(base, manifest) })
 }
 
 // deleteStdin pipes a rendered manifest to `kubectl delete -f - --ignore-not-found`,
 // so teardown mirrors apply through one code path and is idempotent.
 func (c *Cluster) deleteStdin(ctx context.Context, manifest []byte) error {
-	k, err := c.cmd()
-	if err != nil {
-		return err
-	}
-	return c.R.RunInput(ctx, manifest, k.Name(), k.Args("delete", "-f", "-", "--ignore-not-found")...)
+	return c.runKube(ctx, func(base []string) runner.Cmd { return kube.Delete(base, manifest) })
 }
 
 // output runs `kubectl args...` and returns captured stdout.
@@ -138,7 +202,7 @@ func (c *Cluster) kubectlOutput(ctx context.Context, args ...string) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
-	return c.R.Output(ctx, k.Name(), k.Args(args...)...)
+	return engine.Output(ctx, c.R, runner.Cmd{Argv: k.Argv(args...)})
 }
 
 // operatorNS resolves the namespace the operator runs in: the configured
