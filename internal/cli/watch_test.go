@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -10,7 +11,10 @@ import (
 
 	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/hafio/go-deploy-utility/runner"
+	"github.com/hafio/go-deploy-utility/runner/runnertest"
 	"github.com/hafio/go-deploy-utility/watch"
+
+	"solace/internal/engine"
 )
 
 // stopAfter is a Sleep seam that records each interval it was asked to wait and ends the
@@ -135,6 +139,66 @@ func TestWatchEndsQuietlyWhenInterrupted(t *testing.T) {
 	}
 	if strings.Contains(errOut, "trying again") {
 		t.Errorf("an interrupted read was reported as a failure to retry: %q", errOut)
+	}
+}
+
+// TestWatchDrawsTheRefreshAsOneFrame: a refresh's report, its warning and the stdout and
+// stderr of the command it runs are collected into one frame and drawn under the header,
+// in the order they were written, with nothing reaching stdout or stderr on the side; the
+// App's sinks and runner are its own again once the refresh is drawn.
+func TestWatchDrawsTheRefreshAsOneFrame(t *testing.T) {
+	fake := &runnertest.Fake{Script: runnertest.Seq(
+		runnertest.Reply{Stdout: "child stdout\n", Stderr: "child stderr\n"},
+	)}
+	var slept []time.Duration
+	a := &App{Runner: fake, Terminal: func() bool { return true }, Sleep: stopAfter(1, &slept)}
+	var err error
+	var out string
+	errOut := captureStderr(t, func() {
+		out = captureStdout(t, func() {
+			err = watchLoop(context.Background(), a, "operator status", time.Second, func() error {
+				fmt.Fprintln(a.stdout(), "report line")
+				a.lineSink()("[WARN] a refused read")
+				return engine.Run(context.Background(), a.Runner, runner.Cmd{Argv: []string{"kubectl", "describe", "deployment"}})
+			})
+		})
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	head := watch.ClearScreen + "Every 1s: solace-util operator status   "
+	body := "Ctrl-C to stop\n\nreport line\n[WARN] a refused read\nchild stdout\nchild stderr\n"
+	if !strings.HasPrefix(out, head) || !strings.HasSuffix(out, body) || strings.Count(out, watch.ClearScreen) != 1 {
+		t.Errorf("stdout =\n%q\nwant one frame: the clear and header, then everything the refresh wrote, in order", out)
+	}
+	for _, leak := range []string{"report line", "a refused read", "child stdout", "child stderr"} {
+		if strings.Contains(errOut, leak) {
+			t.Errorf("stderr got %q, want it drawn in the frame: %q", leak, errOut)
+		}
+	}
+	if a.frameOut != nil || a.frameLog != nil || a.Runner != runner.Runner(fake) {
+		t.Errorf("after the refresh frameOut=%v, frameLog set=%v, runner=%v; want the App's own back",
+			a.frameOut, a.frameLog != nil, a.Runner)
+	}
+}
+
+// TestWatchDrawsNothingForARefreshCutShort: Ctrl-C while a refresh is being collected
+// draws nothing of it, not even the header, so the last complete report stays on screen,
+// and the watch ends cleanly.
+func TestWatchDrawsNothingForARefreshCutShort(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := &App{Terminal: func() bool { return true }}
+	var err error
+	out := captureStdout(t, func() {
+		err = watchLoop(ctx, a, "broker status", time.Second, func() error {
+			fmt.Fprintln(a.stdout(), "half a report")
+			cancel()
+			return nil
+		})
+	})
+	if err != nil || out != "" {
+		t.Errorf("err = %v, stdout = %q; want nil and nothing drawn", err, out)
 	}
 }
 

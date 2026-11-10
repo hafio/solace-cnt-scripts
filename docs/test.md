@@ -66,7 +66,7 @@ test may point at it -- a fresh CI checkout has no such files.
 
 ## Summary
 
-90 test files, 1666 test functions. One of those is not a test: `TestMain` in
+90 test files, 1670 test functions. One of those is not a test: `TestMain` in
 `internal/cli`, which points `os.Stdin` at an already-closed pipe for the whole package.
 That pipe is not a terminal under `confirm.StdinIsTerminal`, so a test that reaches a confirm
 helper without injecting `App.Interactive` gets the "pass --no-prompt instead" error at once
@@ -78,23 +78,33 @@ own tests carry the os/exec helper-process shim.
 | --- | --- | --- |
 | internal/k8s | 20 | 308 |
 | internal/broker | 24 | 507 |
-| internal/cli | 14 | 267 |
+| internal/cli | 14 | 269 |
 | internal/config | 16 | 237 |
 | internal/container | 8 | 211 |
 | internal/convert | 1 | 42 |
 | internal/render | 2 | 51 |
-| internal/engine | 2 | 8 |
+| internal/engine | 2 | 10 |
 | internal/output | 1 | 16 |
 | internal/tools/vulnjudge | 1 | 11 |
 | internal/examples | 1 | 8 |
-| **Total** | **90** | **1666** |
+| **Total** | **90** | **1670** |
 
 
 ## Coverage
 
-Last recorded run, from `scripts/logs/cov.log` (2026-11-08), total **97.9%**. Re-run `cov`
+Last recorded run, from `scripts/logs/cov.log` (2026-11-10), total **97.9%**. Re-run `cov`
 after any change; these figures go stale the moment tests move, and the previous total is
 the floor the next run has to hold.
+
+**watch.LoopFrames, measured at 97.9%, unchanged.** `watchLoop` now calls the shared
+`watch.LoopFrames` (go-deploy-utility v0.1.2), so a refresh is collected before the screen is
+cleared. `App.collectInto` points the report sink (`App.stdout`), the progress line sink
+(`App.lineSink`) and, through the new `engine.Redirect`, the stdout and stderr of every command
+the report runs at the frame for one refresh; `engine.Run`, `Output`, `RunTee` and `OutputTee`
+ask the runner for those streams instead of naming `os.Stdout` and `os.Stderr`.
+`TestWatchDrawsTheRefreshAsOneFrame`, `TestWatchDrawsNothingForARefreshCutShort`,
+`TestRedirectSendsTheChildsStreamsToItsWriters` and `TestRedirectIsSeenThrough` cover the new
+lines, and the total holds the floor.
 
 **S9, measured at 97.9%, unchanged: kube, rbac and nsgate adopted from the shared module.** Every `apply`,
 `delete -f -`, namespace read and delete, `scale`, `rollout`, `exec`, upload, `logs`, the
@@ -1320,6 +1330,8 @@ The Kubernetes handlers of `ops_k8s.go`, driven directly over `opRunner` rather 
 | `TestWatchAppendsWhenNotATerminal` | Piped or redirected, no escape byte is written; each report is appended under its own timestamped `===` line, at the 5s default |
 | `TestWatchKeepsGoingAfterAFailedRefresh` | A refresh the engine refuses is shown on stderr with the retry, and the next refresh still runs |
 | `TestWatchEndsQuietlyWhenInterrupted` | A read that fails because Ctrl-C cancelled the watch ends it with nil, after one run and with no retry message |
+| `TestWatchDrawsTheRefreshAsOneFrame` | A refresh's report, its warning and the stdout and stderr of the command it runs are collected into one frame and drawn under the header in order, nothing reaches stdout or stderr on the side, and the App's frame sinks and runner are restored afterwards |
+| `TestWatchDrawsNothingForARefreshCutShort` | Ctrl-C while a refresh is collected draws nothing of it, not even the header, and the watch ends with nil |
 | `TestWatchNeverRedrawsIntoAPipe` | With no seam, `canRedraw` falls back to `watch.CanRedraw`, and stdout being a pipe means no redraw, so escape bytes never land in a pipe |
 | `TestWatchIntervalIsValidated` | `--interval` below 1s, above 1h, not a duration, or given without `--watch` is a usage error (exit 2) refused before anything runs; 1s and 1h exactly are accepted |
 | `TestStatusWithoutWatchRunsOnce` | Without `--watch` the report runs exactly once and never waits |
@@ -2938,6 +2950,8 @@ tests that pinned them (listed with their sources in its `docs/test.md`). These 
 | `TestRunStreamsToThisProcess` | `Run` hands the child this process's stdout and stderr, carries `Cmd.Stdin`, and returns the runner's error as it came |
 | `TestOutputCapturesStdoutAndStreamsStderr` | `Output` returns the captured stdout -- the text too when the run failed, since a broker CLI or kubectl says why in that stream -- and leaves stderr live on this process's |
 | `TestTeeKeepsStderrLiveAndReturnsIt` | `RunTee` and `OutputTee` return what the child wrote to stderr, which is also forwarded to this process's stderr as it arrives (a tee, so the writer is no longer `os.Stderr` itself) -- what lets a step tell kubectl's Forbidden refusal from any other failure with `kube.Forbidden` while the operator still sees it; `OutputTee` keeps stdout captured and `RunTee` streams it |
+| `TestRedirectSendsTheChildsStreamsToItsWriters` | Under `Redirect`, inside `NoEnv`, `Run`, `Output`, `RunTee` and `OutputTee` send every streamed byte to the Redirect's writers in order and nothing to this process's stdout, while each helper's own capture still comes back to the caller |
+| `TestRedirectIsSeenThrough` | The outermost of two stacked Redirects wins, no Redirect means this process's streams, and `IsEcho` sees an Echo through `NoEnv` and `Redirect` but not a redirected real runner |
 | `TestInteractiveReturnsTheSessionStatus` | `Interactive` attaches this process's terminal: status 0 is nil, a non-zero status is an `exitcode.Exited` error reading `name: exit status N` that is a plain failure until `ChildExit` marks it and then passes N through, and an `Attach` error (the session never ran) is returned as it is with no status |
 
 ### resolve_test.go

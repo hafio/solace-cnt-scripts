@@ -129,6 +129,12 @@ type App struct {
 	Sleep    func(ctx context.Context, d time.Duration) error
 	Terminal func() bool
 
+	// frameOut and frameLog are where a report and its progress and warning lines go
+	// while a --watch refresh collects them into its frame (watch.go); nil, the rest of
+	// the time, is stdout and stderr. Only watchLoop sets them, one refresh at a time.
+	frameOut io.Writer
+	frameLog func(string, ...any)
+
 	// kubeContext is the kubeconfig context announceKubeContext resolved at load,
 	// repeated by every destructive Kubernetes prompt (k8sWhat). Empty when it
 	// could not be resolved, when the platform is not Kubernetes, or under a
@@ -314,6 +320,24 @@ func progress() *output.Sink { return output.New(os.Stderr) }
 // prefixes there, which is why this deliberately is not `step` -- passing a
 // prefixing function would prefix twice, once here and once in the callee.
 func lineSink() func(string, ...any) { return progress().Line }
+
+// stdout is the report sink the k8s and container entry types are handed: a --watch
+// refresh's frame while one is being collected, stdout otherwise.
+func (a *App) stdout() io.Writer {
+	if a.frameOut != nil {
+		return a.frameOut
+	}
+	return os.Stdout
+}
+
+// lineSink is lineSink for the entry types this App builds: a --watch refresh's frame
+// while one is being collected, so a warning is drawn with the report it belongs to.
+func (a *App) lineSink() func(string, ...any) {
+	if a.frameLog != nil {
+		return a.frameLog
+	}
+	return lineSink()
+}
 
 // warn prints a non-fatal warning to stderr in the house [WARN] style.
 func warn(format string, args ...any) { progress().Warn(format, args...) }

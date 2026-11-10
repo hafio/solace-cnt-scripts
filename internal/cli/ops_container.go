@@ -50,7 +50,7 @@ func ctrOps(a *App) *broker.Ops {
 // tool writes to an env file, now that the redundancy pre-shared key is the operator's
 // to supply rather than something a first deploy invented and wrote back.
 func ctrManager(a *App) *container.Manager {
-	m := container.NewManager(a.Runner, a.Cfg, a.Platform, lineSink(), os.Stdout)
+	m := container.NewManager(a.Runner, a.Cfg, a.Platform, a.lineSink(), a.stdout())
 	m.In = os.Stdin
 	m.RestartApproved = a.restart
 	m.Confirm = func(question string) (bool, error) { return confirmRedeploy(a, question) }

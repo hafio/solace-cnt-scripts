@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"os"
@@ -245,6 +246,69 @@ func TestTeeKeepsStderrLiveAndReturnsIt(t *testing.T) {
 		if call.Stderr == io.Writer(os.Stderr) || call.Stderr == nil {
 			t.Errorf("call %d stderr = %v, want a tee that is not os.Stderr alone", i, call.Stderr)
 		}
+	}
+}
+
+// TestRedirectSendsTheChildsStreamsToItsWriters: under Redirect -- here inside NoEnv, as
+// a holder wraps it -- Run, Output, RunTee and OutputTee send what they would have
+// streamed to this process to the Redirect's writers instead, nothing reaches this
+// process's stdout, and what a helper captures (Output's answer) still comes back to the
+// caller rather than landing in the frame.
+func TestRedirectSendsTheChildsStreamsToItsWriters(t *testing.T) {
+	fake := &runnertest.Fake{Script: runnertest.Seq(
+		runnertest.Reply{Stdout: "run-out\n", Stderr: "run-err\n"},
+		runnertest.Reply{Stdout: "answer", Stderr: "output-err\n"},
+		runnertest.Reply{Stdout: "tee-out\n", Stderr: "tee-err\n"},
+		runnertest.Reply{Stdout: "otee-answer", Stderr: "otee-err\n"},
+	)}
+	var frame bytes.Buffer
+	r := NoEnv(Redirect(fake, &frame, &frame))
+	c := runner.Cmd{Argv: []string{"kubectl", "get", "pods"}}
+
+	var runErr, outErr, teeErr, oteeErr error
+	var out, otee []byte
+	var teeText, oteeText string
+	stdout := captureStdout(t, func() {
+		runErr = Run(t.Context(), r, c)
+		out, outErr = Output(t.Context(), r, c)
+		teeText, teeErr = RunTee(t.Context(), r, c)
+		otee, oteeText, oteeErr = OutputTee(t.Context(), r, c)
+	})
+	if runErr != nil || outErr != nil || teeErr != nil || oteeErr != nil {
+		t.Fatalf("errors = %v, %v, %v, %v; want none", runErr, outErr, teeErr, oteeErr)
+	}
+	if stdout != "" {
+		t.Errorf("this process's stdout got %q, want nothing under a Redirect", stdout)
+	}
+	if want := "run-out\nrun-err\noutput-err\ntee-out\ntee-err\notee-err\n"; frame.String() != want {
+		t.Errorf("frame = %q, want every streamed byte in order:\n%q", frame.String(), want)
+	}
+	if string(out) != "answer" || string(otee) != "otee-answer" || teeText != "tee-err\n" || oteeText != "otee-err\n" {
+		t.Errorf("captured = %q, %q, %q, %q; want each helper's own capture", out, otee, teeText, oteeText)
+	}
+	for i, call := range fake.Calls() {
+		if call.Stderr == io.Writer(os.Stderr) {
+			t.Errorf("call %d streamed stderr to this process, want the Redirect's writer", i)
+		}
+	}
+}
+
+// TestRedirectIsSeenThrough: the outermost Redirect's writers win when two are stacked,
+// and IsEcho looks through Redirect as it does through NoEnv, so a preview inside a
+// `--watch` refresh is still a preview.
+func TestRedirectIsSeenThrough(t *testing.T) {
+	var inner, outer bytes.Buffer
+	if out, errOut := streams(Redirect(Redirect(&runnertest.Fake{}, &inner, &inner), &outer, &outer)); out != &outer || errOut != &outer {
+		t.Errorf("streams = %v, %v; want the outermost Redirect's writers", out, errOut)
+	}
+	if out, errOut := streams(NoEnv(&runnertest.Fake{})); out != io.Writer(os.Stdout) || errOut != io.Writer(os.Stderr) {
+		t.Errorf("streams without a Redirect = %v, %v; want this process's own", out, errOut)
+	}
+	if !IsEcho(NoEnv(Redirect(runner.Echo{}, &outer, &outer))) {
+		t.Error("IsEcho must see an Echo through NoEnv and Redirect")
+	}
+	if IsEcho(Redirect(&runnertest.Fake{}, &outer, &outer)) {
+		t.Error("IsEcho must not call a redirected real runner an echo")
 	}
 }
 

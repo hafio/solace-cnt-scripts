@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -25,7 +24,7 @@ import (
 // k8sCluster builds a Cluster over the app's runner/config, wiring stdout as the report
 // sink. It wires no reader: the package asks two questions, through Confirm and ConfirmScope.
 func k8sCluster(a *App) *k8s.Cluster {
-	c := k8s.NewCluster(a.Runner, a.Cfg, lineSink(), os.Stdout)
+	c := k8s.NewCluster(a.Runner, a.Cfg, a.lineSink(), a.stdout())
 	// Same seam container.Manager carries. The downgrade is answered by --no-prompt on
 	// `operator deploy`; widening the watch to every namespace is NOT -- it has its own
 	// seam, which asks a terminal and nothing else, so no flag can approve it.

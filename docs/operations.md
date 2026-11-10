@@ -63,7 +63,10 @@ other command does this: everything else runs kubectl or a container engine as a
 implementation detail, and leaking those codes would make the table above meaningless.
 
 **A `--watch` ends with 0 on Ctrl-C** -- that is how a watch stops, not a failure -- and a
-refresh that fails mid-watch is shown and retried rather than ending it.
+refresh that fails mid-watch is shown and retried rather than ending it. Each refresh is
+collected before the screen is cleared, so the last report stays on screen while the next
+is gathered; the report, the output of the commands it runs and its warnings are then drawn
+together under the header, and a refresh cut short by Ctrl-C draws nothing.
 
 ## The preflight
 

@@ -114,7 +114,9 @@ Both tools follow every rule in this section today.
     `Every <interval>: <title>   <time>   Ctrl-C to stop`; anywhere else (a pipe, a file, a
     console without escape processing) each refresh is appended under a timestamped section
     line and no escape byte is written. A failed refresh is reported and retried, the loop
-    pauses for the interval after each refresh, and the interval is 1s to 1h.
+    pauses for the interval after each refresh, and the interval is 1s to 1h. Each refresh
+    is collected before the screen is cleared, so the last report stays on screen while the
+    next is collected, and a refresh cut short by Ctrl-C draws nothing.
     `solmq-conn-util`: `cmd/solmq-conn-util/status.go`. `solace-util`:
     `internal/cli/watch.go`.
 
