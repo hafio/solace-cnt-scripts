@@ -3968,7 +3968,9 @@ func TestCtrManagerReadsTheRestartFlag(t *testing.T) {
 
 // TestCtrDeployEchoesTheProjectDirectory: the compose file goes in on stdin, and compose is
 // anchored at the env file's own directory, so relative paths resolve the same wherever
-// the tool is run from. A preview shows it, asks nothing and writes nothing.
+// the tool is run from. A preview shows it, asks nothing and writes nothing. The line is
+// built with runner.Quote, as the echo builds it, because a Windows temp directory holds
+// backslashes and the echo single-quotes it there.
 func TestCtrDeployEchoesTheProjectDirectory(t *testing.T) {
 	path := writeCtrStandaloneEnv(t)
 	out, err := runRootWith(t, []string{"broker", "deploy", "--platform", "docker", "--env", path},
@@ -3976,7 +3978,7 @@ func TestCtrDeployEchoesTheProjectDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deploy over echo: %v", err)
 	}
-	want := "+ docker compose -f - --project-directory " + filepath.Dir(path) + " up -d"
+	want := "+ " + runner.Quote("docker", "compose", "-f", "-", "--project-directory", filepath.Dir(path), "up", "-d")
 	if !strings.Contains(out, want) {
 		t.Errorf("echo should show %q:\n%s", want, out)
 	}
