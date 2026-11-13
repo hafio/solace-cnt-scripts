@@ -1761,7 +1761,7 @@
       "area": "conventions",
       "severity": "minor",
       "confidence": "verified",
-      "status": "open",
+      "status": "accepted",
       "locations": [
         ".gitignore:9-12",
         ".gitignore:25",
@@ -1778,7 +1778,7 @@
       },
       "resolved": null,
       "history": [],
-      "notes": ""
+      "notes": "2026-11-13: accepted by the owner during triage (leave as is)."
     },
     {
       "id": "CR-0064",
@@ -2181,7 +2181,7 @@
       "area": "conventions",
       "severity": "nit",
       "confidence": "verified",
-      "status": "open",
+      "status": "accepted",
       "locations": [
         "README.md:77-79",
         "go.mod:5-9",
@@ -2197,7 +2197,7 @@
       },
       "resolved": null,
       "history": [],
-      "notes": ""
+      "notes": "2026-11-13: accepted by the owner during triage (leave as is)."
     },
     {
       "id": "CR-0080",
