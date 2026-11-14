@@ -6,8 +6,8 @@
     "semantic_hash": ""
   },
   "solace-yaml-generator.html": {
-    "mtime": 1794385053.5531492,
-    "seen": 1794385067.7418306,
+    "mtime": 1794656738.143341,
+    "seen": 1794656775.0170116,
     "ast_hash": "dbe4b37d8dba82c31ff8b4566a33084c",
     "semantic_hash": ""
   },
@@ -24,9 +24,9 @@
     "semantic_hash": ""
   },
   "go.mod": {
-    "mtime": 1794371609.3575962,
-    "seen": 1794377883.5570066,
-    "ast_hash": "b29a8b9da4aeffb66a6ca62f7226ba6e",
+    "mtime": 1794656638.04422,
+    "seen": 1794656775.0166674,
+    "ast_hash": "185dc3157c869c91b035fdf4cb836748",
     "semantic_hash": ""
   },
   "internal/broker/broker.go": {
@@ -336,8 +336,8 @@
     "semantic_hash": ""
   },
   "env/sample.yaml": {
-    "mtime": 1794385051.4371257,
-    "seen": 1794385067.7418242,
+    "mtime": 1794656731.5842676,
+    "seen": 1794656775.0170052,
     "ast_hash": "70c4f1ec4479831942bfd2401a38f493",
     "semantic_hash": ""
   },
@@ -420,8 +420,8 @@
     "semantic_hash": ""
   },
   "docs/commands.md": {
-    "mtime": 1794385052.251698,
-    "seen": 1794385067.7418127,
+    "mtime": 1794656734.921305,
+    "seen": 1794656775.0169926,
     "ast_hash": "c0761bae0e955e126dfe5be7b75c08e0",
     "semantic_hash": ""
   },
@@ -666,8 +666,8 @@
     "semantic_hash": ""
   },
   "docs/abbreviation.md": {
-    "mtime": 1794385051.8521302,
-    "seen": 1794385067.7418096,
+    "mtime": 1794656734.4232996,
+    "seen": 1794656775.0169911,
     "ast_hash": "1bc88364807e7d146275d532299b5d3d",
     "semantic_hash": ""
   },
@@ -936,8 +936,8 @@
     "semantic_hash": ""
   },
   "docs/import.md": {
-    "mtime": 1794385054.1191556,
-    "seen": 1794385067.7418184,
+    "mtime": 1794656740.4833674,
+    "seen": 1794656775.0169976,
     "ast_hash": "e7d46a575b2b5308c35388475a91ebc1",
     "semantic_hash": ""
   },
@@ -1263,6 +1263,24 @@
     "mtime": 1794286762.2141685,
     "seen": 1794369795.8875172,
     "ast_hash": "bfe1faf4d4f5d4a6a889a5fe690ec36a",
+    "semantic_hash": ""
+  },
+  "docs/review/findings.json": {
+    "mtime": 1794553974.2851274,
+    "seen": 1794656775.01666,
+    "ast_hash": "594b891f80d12e8861656d592cec884b",
+    "semantic_hash": ""
+  },
+  "docs/review/2026-11-11-critical-review.md": {
+    "mtime": 1794390729.1687832,
+    "seen": 1794656775.0170014,
+    "ast_hash": "66a8c0687c949e4b3ec7091fe2f25273",
+    "semantic_hash": ""
+  },
+  "docs/review/2026-11-13-decisions.md": {
+    "mtime": 1794567482.8025749,
+    "seen": 1794656775.0170026,
+    "ast_hash": "2baae4bcd8cfcbee0518bf263d269ad9",
     "semantic_hash": ""
   }
 }

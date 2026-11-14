@@ -9,7 +9,7 @@ go 1.27
 toolchain go1.27.4
 
 require (
-	github.com/hafio/go-deploy-utility v0.1.2
+	github.com/hafio/go-deploy-utility v0.1.3
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/pflag v1.0.5
 	gopkg.in/yaml.v3 v3.0.1
